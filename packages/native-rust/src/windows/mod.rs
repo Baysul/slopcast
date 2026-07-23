@@ -1,28 +1,6 @@
-// WASAPI loopback capture of a single target process for Windows.
-//
-// Strategy:
-// 1. On Windows 11 build 22621+, activate a process-scoped loopback client
-//    via `ActivateAudioInterfaceAsync` with
-//    `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` in
-//    `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` mode. This captures
-//    ONLY the target process tree's audio and nothing else (the shared
-//    window's audio exclusively).
-// 2. If process-level capture is unsupported (older build) or activation
-//    fails, fall back to standard system-wide WASAPI loopback
-//    (`AUDCLNT_STREAMFLAGS_LOOPBACK` on the default render endpoint), which
-//    cannot filter per-process.
-//
-// Note: the Windows process-loopback API accepts exactly one target process
-// tree, which matches the single-target capture model of this module.
-
 use crate::AudioApp;
 use napi::{Either, Result as NapiResult};
 
-// ---------------------------------------------------------------------------
-// Windows implementation
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "windows")]
 mod wasapi {
     use super::AudioApp;
     use napi::Result as NapiResult;
@@ -446,23 +424,13 @@ mod wasapi {
             if process_loopback_supported {
                 match activate_process_loopback(target_pid) {
                     Ok(client) => (client, CaptureMode::ProcessLoopback, None),
-                    Err(e) => {
-                        eprintln!(
-                            "[native-rust] Process loopback activation failed ({}); \
-                             falling back to system-wide loopback (no per-process filtering)",
-                            e
-                        );
+                    Err(_) => {
                         let (client, fmt) = activate_system_loopback()
                             .map_err(|e2| format!("System loopback activation failed: {}", e2))?;
                         (client, CaptureMode::SystemLoopback, Some(fmt))
                     }
                 }
             } else {
-                eprintln!(
-                    "[native-rust] OS build < {} does not support per-process capture; \
-                     using system-wide loopback",
-                    PROCESS_LOOPBACK_MIN_BUILD
-                );
                 let (client, fmt) = activate_system_loopback()
                     .map_err(|e| format!("System loopback activation failed: {}", e))?;
                 (client, CaptureMode::SystemLoopback, Some(fmt))
@@ -582,9 +550,7 @@ mod wasapi {
         let join = match std::thread::Builder::new()
             .name("wasapi-loopback-capture".to_string())
             .spawn(move || {
-                if let Err(err) = unsafe { run_capture(target_pid, stop_raw, &tx) } {
-                    eprintln!("[native-rust] WASAPI capture thread exited with error: {}", err);
-                }
+                let _ = unsafe { run_capture(target_pid, stop_raw, &tx) };
             }) {
             Ok(j) => j,
             Err(e) => {
@@ -598,7 +564,6 @@ mod wasapi {
         // Block until the capture thread reports startup success or failure.
         match rx.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok(mode)) => {
-                eprintln!("[native-rust] WASAPI capture started (mode: {:?})", mode);
                 state.is_active = true;
                 state.mode = Some(mode);
                 state.target_pid = Some(target_pid);
@@ -664,103 +629,20 @@ mod wasapi {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Module-level interface (uniform with linux/macos modules)
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "windows")]
 pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
     wasapi::list_audio_applications()
 }
 
-#[cfg(target_os = "windows")]
 pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    // The Windows capture target is a process ID. Numeric strings are parsed
-    // leniently; non-numeric strings (e.g. macOS bundle IDs) are rejected.
     let pid = match target_app_id {
         Either::B(n) if *n > 0 => Some(*n as u32),
         Either::A(s) => s.trim().parse::<u32>().ok().filter(|p| *p > 0),
         _ => None,
     }
-    .ok_or_else(|| {
-        napi::Error::from_reason("A process ID is required as the audio capture target")
-    })?;
+    .ok_or_else(|| napi::Error::from_reason("A process ID is required as the audio capture target"))?;
     wasapi::start_capture(pid)
 }
 
-#[cfg(target_os = "windows")]
-pub fn stop_audio_capture() -> NapiResult<bool> {
-    wasapi::stop_capture()
-}
+pub fn stop_audio_capture() -> NapiResult<bool> { wasapi::stop_capture() }
 
-#[cfg(target_os = "windows")]
-pub fn is_audio_capture_active() -> NapiResult<bool> {
-    wasapi::is_capture_active()
-}
-
-#[cfg(target_os = "windows")]
-pub fn resolve_audio_by_name(label: &str) -> Option<AudioApp> {
-    let apps = list_audio_applications().ok()?;
-    let query_lower = label.to_lowercase();
-
-    if let Some(app) = apps
-        .iter()
-        .find(|a| a.name.to_lowercase() == query_lower)
-    {
-        return Some(app.clone());
-    }
-    if let Some(app) = apps.iter().find(|a| {
-        let name_lower = a.name.to_lowercase();
-        query_lower.contains(&name_lower)
-    }) {
-        return Some(app.clone());
-    }
-    if let Some(app) = apps.iter().find(|a| {
-        let name_lower = a.name.to_lowercase();
-        name_lower.contains(&query_lower)
-    }) {
-        return Some(app.clone());
-    }
-
-    let first_word = query_lower.split_whitespace().next()?;
-    apps.iter()
-        .find(|a| {
-            let name_lower = a.name.to_lowercase();
-            name_lower.contains(first_word) || first_word.contains(&name_lower)
-        })
-        .cloned()
-}
-
-// ---------------------------------------------------------------------------
-// Non-Windows stubs
-// ---------------------------------------------------------------------------
-
-#[cfg(not(target_os = "windows"))]
-fn unsupported() -> napi::Error {
-    napi::Error::from_reason("WASAPI audio capture is only supported on Windows")
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
-    Err(unsupported())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn start_audio_capture(_target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    Err(unsupported())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn stop_audio_capture() -> NapiResult<bool> {
-    Err(unsupported())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn is_audio_capture_active() -> NapiResult<bool> {
-    Ok(false)
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn resolve_audio_by_name(_label: &str) -> Option<AudioApp> {
-    None
-}
+pub fn is_audio_capture_active() -> NapiResult<bool> { wasapi::is_capture_active() }

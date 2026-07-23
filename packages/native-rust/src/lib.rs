@@ -1,38 +1,33 @@
-// Native Rust Screenshare & Audio Filter Module
 #![deny(clippy::all)]
 
 use napi::Either;
 use napi_derive::napi;
 
+#[cfg(target_os = "linux")]
 pub mod linux;
-pub mod macos;
+
+#[cfg(target_os = "windows")]
 pub mod windows;
 
-/// An audio-producing application, exposed to TypeScript.
-///
-/// The meaning of `id` is platform specific:
-/// - Linux: PipeWire node ID
-/// - Windows: process ID (PID)
-/// - macOS: process ID (PID); `bundle_id` carries the bundle identifier used
-///   to resolve the ScreenCaptureKit capture target.
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct AudioApp {
-    pub id: i32,
-    pub name: String,
-    pub process_id: i32,
-    pub bundle_id: Option<String>,
-}
+#[cfg(target_os = "macos")]
+pub mod macos;
 
-// ---------------------------------------------------------------------------
-// Platform routing
-//
-// Each platform module exposes the same internal interface:
-//   list_audio_applications() -> NapiResult<Vec<AudioApp>>
-//   start_audio_capture(&Either<String, i32>) -> NapiResult<bool>
-//   stop_audio_capture() -> NapiResult<bool>
-//   is_audio_capture_active() -> NapiResult<bool>
-// ---------------------------------------------------------------------------
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+mod unsupported_platform {
+    use crate::AudioApp;
+    use napi::{Either, Result as NapiResult};
+
+    pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
+        Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
+    }
+    pub fn start_audio_capture(_: &Either<String, i32>) -> NapiResult<bool> {
+        Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
+    }
+    pub fn stop_audio_capture() -> NapiResult<bool> {
+        Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
+    }
+    pub fn is_audio_capture_active() -> NapiResult<bool> { Ok(false) }
+}
 
 #[cfg(target_os = "linux")]
 use crate::linux as platform;
@@ -44,29 +39,37 @@ use crate::windows as platform;
 use crate::macos as platform;
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-mod platform {
-    use super::AudioApp;
-    use napi::{Either, Error, Result as NapiResult};
+use unsupported_platform as platform;
 
-    fn unsupported() -> Error {
-        Error::from_reason("Native audio capture is not supported on this platform")
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AudioApp {
+    pub id: i32,
+    pub name: String,
+    pub process_id: i32,
+    pub bundle_id: Option<String>,
+}
+
+pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
+    let query_lower = label.to_lowercase();
+
+    if let Some(app) = apps.iter().find(|a| a.name.to_lowercase() == query_lower) {
+        return Some(app.clone());
+    }
+    if let Some(app) = apps.iter().find(|a| query_lower.contains(&a.name.to_lowercase())) {
+        return Some(app.clone());
+    }
+    if let Some(app) = apps.iter().find(|a| a.name.to_lowercase().contains(&query_lower)) {
+        return Some(app.clone());
     }
 
-    pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
-        Err(unsupported())
-    }
-
-    pub fn start_audio_capture(_target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-        Err(unsupported())
-    }
-
-    pub fn stop_audio_capture() -> NapiResult<bool> {
-        Err(unsupported())
-    }
-
-    pub fn is_audio_capture_active() -> NapiResult<bool> {
-        Ok(false)
-    }
+    let first_word = query_lower.split_whitespace().next()?;
+    apps.iter()
+        .find(|a| {
+            let name_lower = a.name.to_lowercase();
+            name_lower.contains(first_word) || first_word.contains(&name_lower)
+        })
+        .cloned()
 }
 
 #[napi]
@@ -74,107 +77,47 @@ pub fn init_engine() -> String {
     "Native engine initialized".to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Unified cross-platform NAPI interface
-// ---------------------------------------------------------------------------
-
-/// Lists applications that currently produce audio on this platform.
 #[napi]
 pub fn list_audio_applications() -> napi::Result<Vec<AudioApp>> {
     platform::list_audio_applications()
 }
 
-/// Starts audio capture of a single target application. ONLY the target
-/// application's audio is captured; everything else is excluded from the
-/// stream (the stream carries the shared window's audio and nothing else).
-///
-/// The target identifier is platform specific:
-/// - Linux: PipeWire node ID (number; numeric strings are also parsed)
-/// - Windows: process ID (number; numeric strings are also parsed)
-/// - macOS: bundle identifier (string; a number is resolved via PID lookup)
 #[napi]
 pub fn start_audio_capture(target_app_id: Either<String, i32>) -> napi::Result<bool> {
     platform::start_audio_capture(&target_app_id)
 }
 
-/// Stops the currently running audio capture, if any.
 #[napi]
 pub fn stop_audio_capture() -> napi::Result<bool> {
     platform::stop_audio_capture()
 }
 
-/// Returns whether audio capture is currently running.
 #[napi]
 pub fn is_audio_capture_active() -> napi::Result<bool> {
     platform::is_audio_capture_active()
 }
 
-// ---------------------------------------------------------------------------
-// Audio-source resolution (auto-detect from window selection)
-// ---------------------------------------------------------------------------
-
-/// Resolves an X11 window ID to its owning application's audio capture
-/// target. Uses `_NET_WM_PID` to find the process ID, then looks up the
-/// matching `AudioApp` in the PipeWire audio application list.
-///
-/// Only meaningful on Linux/X11; returns `None` on other platforms or
-/// when the window has no accessible PID property.
 #[napi]
 pub fn resolve_audio_app_for_x11_window(window_id: i32) -> napi::Result<Option<AudioApp>> {
     #[cfg(target_os = "linux")]
-    {
-        Ok(crate::linux::resolve_audio_by_x11_window(window_id as u32))
-    }
+    { Ok(crate::linux::resolve_audio_by_x11_window(window_id as u32)) }
     #[cfg(not(target_os = "linux"))]
-    {
-        let _ = window_id;
-        Ok(None)
-    }
+    { let _ = window_id; Ok(None) }
 }
 
-/// Scans the PipeWire registry for a screen-capture video node created by
-/// xdg-desktop-portal and extracts the captured window's application name
-/// to auto-detect the correct audio source.  Only meaningful on Wayland;
-/// returns `None` on other platforms.
 #[napi]
 pub fn resolve_audio_app_for_captured_window() -> napi::Result<Option<AudioApp>> {
     #[cfg(target_os = "linux")]
-    {
-        Ok(crate::linux::resolve_audio_by_captured_window())
-    }
+    { Ok(crate::linux::resolve_audio_by_captured_window()) }
     #[cfg(not(target_os = "linux"))]
-    {
-        Ok(None)
-    }
+    { Ok(None) }
 }
 
-/// Finds the audio application whose name best matches the given label
-/// (e.g. a `MediaStreamTrack.label` from `getDisplayMedia` on Wayland).
-/// Works on all platforms by matching against the current audio app list.
 #[napi]
 pub fn resolve_audio_app_by_name(label: String) -> napi::Result<Option<AudioApp>> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(crate::linux::resolve_audio_by_name(&label))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Ok(crate::windows::resolve_audio_by_name(&label))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Ok(crate::macos::resolve_audio_by_name(&label))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    {
-        let _ = label;
-        Ok(None)
-    }
+    let apps = platform::list_audio_applications()?;
+    Ok(find_best_audio_match(&apps, &label))
 }
-
-// ---------------------------------------------------------------------------
-// Legacy bindings (kept for the existing Electron main process call sites)
-// ---------------------------------------------------------------------------
 
 #[napi]
 pub fn get_audio_applications() -> napi::Result<Vec<AudioApp>> {
