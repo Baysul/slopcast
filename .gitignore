@@ -32,6 +32,9 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+# Tool config
+.opencode/
+
 # Misc
 .cache/
 .tmp/

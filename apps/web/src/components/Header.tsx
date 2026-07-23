@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { ScreenShare, Copy, Check, ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Check, Copy, ScreenShare } from 'lucide-react';
+import type React from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge } from './ui/Badge';
 
@@ -10,12 +11,7 @@ interface HeaderProps {
   statusText?: string;
 }
 
-export const Header: React.FC<HeaderProps> = ({
-  roomCode,
-  shareUrl,
-  status = 'connecting',
-  statusText,
-}) => {
+export const Header: React.FC<HeaderProps> = ({ roomCode, shareUrl, status = 'connecting', statusText }) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopyLink = () => {
@@ -57,9 +53,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="p-2 bg-secondary rounded-xl text-body-text group-hover:text-foreground transition-colors">
               <ScreenShare className="w-5 h-5" />
             </div>
-            <span className="font-bold text-base text-foreground tracking-tight">
-              ScreenShare
-            </span>
+            <span className="font-bold text-base text-foreground tracking-tight">ScreenShare</span>
           </Link>
         </div>
 
@@ -68,15 +62,12 @@ export const Header: React.FC<HeaderProps> = ({
             {statusBadge()}
 
             <button
+              type="button"
               onClick={handleCopyLink}
               className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors"
               title="Copy room link"
             >
-              {copied ? (
-                <Check className="w-3.5 h-3.5" />
-              ) : (
-                <Copy className="w-3.5 h-3.5" />
-              )}
+              {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           </div>
         )}

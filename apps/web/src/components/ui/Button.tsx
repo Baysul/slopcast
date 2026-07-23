@@ -1,5 +1,5 @@
-import React from 'react';
 import { clsx } from 'clsx';
+import type React from 'react';
 import { twMerge } from 'tailwind-merge';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -15,7 +15,8 @@ export const Button: React.FC<ButtonProps> = ({
   disabled,
   ...props
 }) => {
-  const baseStyles = 'inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-safelight focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none select-none';
+  const baseStyles =
+    'inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-safelight focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none select-none';
 
   const variants = {
     primary: 'bg-safelight text-safelight-foreground hover:bg-safelight-hover active:bg-[#9C6234]',

@@ -1,7 +1,7 @@
+import assert from 'node:assert';
+import type { WSMessage } from '@screen-share/shared-types';
 import WebSocket from 'ws';
-import assert from 'assert';
 import { createServer } from './server';
-import { WSMessage } from '@screen-share/shared-types';
 
 class TestWebClient {
   private ws: WebSocket;
@@ -50,7 +50,7 @@ class TestWebClient {
           clientOrigin: 'web',
           requestedRole: 'spectator',
         },
-      })
+      }),
     );
   }
 
@@ -79,7 +79,7 @@ async function runWebClientTest() {
       JSON.stringify({
         type: 'CREATE_ROOM',
         payload: { clientOrigin: 'desktop' },
-      })
+      }),
     );
 
     const roomCreatedMsg = await new Promise<any>((resolve) => {
@@ -110,7 +110,7 @@ async function runWebClientTest() {
       JSON.stringify({
         type: 'PUBLISH_STREAM',
         payload: { streamId: 'desktop-screen-1' },
-      })
+      }),
     );
 
     const publishMsg = await webClient.getNextMessage();

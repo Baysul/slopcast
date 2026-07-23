@@ -1,28 +1,29 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import type { Participant, JoinedRoomPayload } from '@screen-share/shared-types';
-import { SignalingClient } from '../services/SignalingClient';
-import { WebRTCReceiver, WebRTCConnectionState } from '../services/WebRTCReceiver';
-import { VideoPlayer } from '../components/VideoPlayer';
-import { Button } from '../components/ui/Button';
+import type { JoinedRoomPayload, Participant } from '@screen-share/shared-types';
+import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
+import type React from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { Badge } from '../components/ui/Badge';
-import { ArrowLeft, Copy, Check, RefreshCw, AlertCircle } from 'lucide-react';
+import { Button } from '../components/ui/Button';
+import { VideoPlayer } from '../components/VideoPlayer';
+import { SignalingClient } from '../services/SignalingClient';
+import { type WebRTCConnectionState, WebRTCReceiver } from '../services/WebRTCReceiver';
 
 export const RoomPage: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
 
-  const [connectionStatus, setConnectionStatus] = useState<
-    'connecting' | 'live' | 'disconnected' | 'closed' | 'error'
-  >('connecting');
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'live' | 'disconnected' | 'closed' | 'error'>(
+    'connecting',
+  );
   const [statusText, setStatusText] = useState('Connecting...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [participants, setParticipants] = useState<Participant[]>([]);
-  const [myUserId, setMyUserId] = useState<string>('');
+  const [_myUserId, setMyUserId] = useState<string>('');
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [copied, setCopied] = useState(false);
-  const [rtcState, setRtcState] = useState<WebRTCConnectionState>('new');
+  const [_rtcState, setRtcState] = useState<WebRTCConnectionState>('new');
 
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcReceiverRef = useRef<WebRTCReceiver | null>(null);
@@ -79,7 +80,7 @@ export const RoomPage: React.FC = () => {
       },
       onError: (err) => {
         if (isStale()) return;
-        setErrorMsg('WebRTC error: ' + err.message);
+        setErrorMsg(`WebRTC error: ${err.message}`);
       },
       onPublishNotice: () => {
         if (isStale()) return;
@@ -148,7 +149,7 @@ export const RoomPage: React.FC = () => {
       setStatusText('Connection lost');
     });
 
-    client.connect().catch((err) => {
+    client.connect().catch((_err) => {
       if (isStale()) return;
       setConnectionStatus('error');
       setErrorMsg('Could not connect to signaling server');
@@ -176,15 +177,15 @@ export const RoomPage: React.FC = () => {
     connectionStatus === 'live'
       ? 'live'
       : connectionStatus === 'disconnected' || connectionStatus === 'closed' || connectionStatus === 'error'
-      ? 'disconnected'
-      : 'info';
+        ? 'disconnected'
+        : 'info';
 
   const statusOverride =
     statusVariant === 'live'
       ? 'bg-safelight/15 border-safelight/25'
       : statusVariant === 'disconnected'
-      ? 'bg-destructive/15 border-destructive/25'
-      : 'bg-white/5 text-gray-400 border-white/10';
+        ? 'bg-destructive/15 border-destructive/25'
+        : 'bg-white/5 text-gray-400 border-white/10';
 
   return (
     <div className="min-h-screen bg-black text-gray-100 relative">
@@ -202,6 +203,7 @@ export const RoomPage: React.FC = () => {
         <div className="flex items-center justify-between pointer-events-auto gap-3">
           <div className="flex items-center gap-2 min-w-0">
             <button
+              type="button"
               onClick={() => navigate('/')}
               aria-label="Leave room"
               title="Leave room"
@@ -230,6 +232,7 @@ export const RoomPage: React.FC = () => {
             )}
           </div>
           <button
+            type="button"
             onClick={copyLink}
             aria-label={copied ? 'Link copied' : 'Copy room link'}
             title="Copy room link"

@@ -1,13 +1,13 @@
-import {
-  WSMessage,
-  JoinRoomPayload,
-  JoinedRoomPayload,
-  RoleAssignmentPayload,
-  WebRTCSignalPayload,
-  PublishStreamPayload,
-  RoomClosedPayload,
+import type {
   ErrorPayload,
+  JoinedRoomPayload,
+  JoinRoomPayload,
   Participant,
+  PublishStreamPayload,
+  RoleAssignmentPayload,
+  RoomClosedPayload,
+  WebRTCSignalPayload,
+  WSMessage,
 } from '@screen-share/shared-types';
 
 export type SignalingEventMap = {
@@ -50,7 +50,7 @@ export class SignalingClient {
     return this.url;
   }
 
-  public connect(customWsClass?: any): Promise<void> {
+  public connect(customWsClass?: typeof WebSocket): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
         this.intentionalClose = false;
@@ -63,9 +63,7 @@ export class SignalingClient {
           else reject(err ?? new Error('WebSocket connection failed'));
         };
 
-        const WSImpl =
-          customWsClass ||
-          (typeof window !== 'undefined' ? window.WebSocket : (globalThis as any).WebSocket);
+        const WSImpl = customWsClass || (typeof window !== 'undefined' ? window.WebSocket : WebSocket);
         const ws = new WSImpl(this.url);
         this.ws = ws;
 
@@ -152,16 +150,16 @@ export class SignalingClient {
         this.emit('role_assignment', msg.payload as RoleAssignmentPayload);
         break;
       case 'USER_JOINED':
-        this.emit('user_joined', (msg.payload as any).participant);
+        this.emit('user_joined', (msg.payload as { participant: Participant }).participant);
         break;
       case 'USER_LEFT':
-        this.emit('user_left', (msg.payload as any).userId);
+        this.emit('user_left', (msg.payload as { userId: string }).userId);
         break;
       case 'PUBLISH_STREAM':
-        this.emit('publish_stream', msg.payload as any);
+        this.emit('publish_stream', msg.payload as PublishStreamPayload & { senderId: string });
         break;
       case 'WEBRTC_SIGNAL':
-        this.emit('webrtc_signal', msg.payload as any);
+        this.emit('webrtc_signal', msg.payload as WebRTCSignalPayload & { senderId: string });
         break;
       case 'ROOM_CLOSED':
         this.emit('room_closed', msg.payload as RoomClosedPayload);
@@ -181,15 +179,15 @@ export class SignalingClient {
 
   public off<K extends keyof SignalingEventMap>(event: K, callback: EventCallback<K>) {
     if (!this.listeners[event]) return;
-    this.listeners[event] = (this.listeners[event] as EventCallback<K>[]).filter(
-      (cb) => cb !== callback
-    ) as any;
+    this.listeners[event] = (this.listeners[event] as EventCallback<K>[]).filter((cb) => cb !== callback);
   }
 
   private emit<K extends keyof SignalingEventMap>(event: K, ...args: Parameters<SignalingEventMap[K]>) {
     const eventListeners = this.listeners[event];
     if (eventListeners) {
-      eventListeners.forEach((cb) => (cb as any)(...args));
+      for (const cb of eventListeners) {
+        cb(...args);
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 const native = require('./index.js');
-const assert = require('assert');
+const assert = require('node:assert');
 
 console.log('🧪 Testing Native Rust Audio Module via NAPI...');
 
@@ -54,7 +54,7 @@ assert.strictEqual(startedUnified, true);
 assert.throws(
   () => native.startAudioCapture('not-a-node-id'),
   /node ID|process ID|bundle identifier/i,
-  'an unparseable target must be rejected'
+  'an unparseable target must be rejected',
 );
 console.log('✅ startAudioCapture("not-a-node-id") correctly rejected');
 

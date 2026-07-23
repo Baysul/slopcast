@@ -1,22 +1,22 @@
-import http from 'http';
-import express, { Request, Response } from 'express';
-import { WebSocketServer, WebSocket } from 'ws';
-import {
-  WSMessage,
+import http from 'node:http';
+import type {
+  ClientOrigin,
+  ClientRole,
   CreateRoomPayload,
-  RoomCreatedPayload,
-  JoinRoomPayload,
+  ErrorPayload,
   JoinedRoomPayload,
-  RoleAssignmentPayload,
-  WebRTCSignalPayload,
-  PublishStreamPayload,
+  JoinRoomPayload,
   PublishAckPayload,
   PublishRejectedPayload,
+  PublishStreamPayload,
+  RoleAssignmentPayload,
   RoomClosedPayload,
-  ErrorPayload,
-  ClientRole,
-  ClientOrigin,
+  RoomCreatedPayload,
+  WebRTCSignalPayload,
+  WSMessage,
 } from '@screen-share/shared-types';
+import express, { type Request, type Response } from 'express';
+import { WebSocket, WebSocketServer } from 'ws';
 import { RoomManager } from './roomManager';
 
 export interface ClientConnection {
@@ -27,7 +27,7 @@ export interface ClientConnection {
   origin: ClientOrigin;
 }
 
-export function createServer(port: number = 3001, baseUrl: string = 'http://localhost:3000') {
+export function createServer(_port: number = 3001, baseUrl: string = 'http://localhost:3000') {
   const app = express();
   app.use(express.json());
 
@@ -71,7 +71,7 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
   // WebSocket Server Handling
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     const clientId = Math.random().toString(36).substring(2, 10);
-    
+
     // Detect origin from user-agent or query param / headers
     let clientOrigin: ClientOrigin = 'web';
     const userAgent = req.headers['user-agent'] || '';
@@ -93,7 +93,7 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
       try {
         const msg: WSMessage = JSON.parse(data.toString());
         handleMessage(conn, msg);
-      } catch (err) {
+      } catch (_err) {
         sendMessage<ErrorPayload>(ws, 'ERROR', {
           message: 'Invalid JSON message format',
         });
@@ -121,12 +121,7 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
         }
 
         const room = roomManager.createRoom(conn.id);
-        const { role, reason } = roomManager.addParticipant(
-          room.code,
-          conn.id,
-          conn.origin,
-          'presenter'
-        );
+        const { role, reason } = roomManager.addParticipant(room.code, conn.id, conn.origin, 'presenter');
 
         conn.roomCode = room.code;
         conn.role = role;
@@ -146,7 +141,7 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
 
       case 'JOIN_ROOM': {
         const p = payload as JoinRoomPayload;
-        if (!p || !p.code) {
+        if (!p?.code) {
           sendMessage<ErrorPayload>(conn.ws, 'ERROR', {
             message: 'Room code is required to join a room',
           });
@@ -165,13 +160,16 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
             roomCode,
             conn.id,
             conn.origin,
-            requestedRole
+            requestedRole,
           );
 
           conn.roomCode = roomCode;
           conn.role = role;
 
-          const room = roomManager.getRoom(roomCode)!;
+          const room = roomManager.getRoom(roomCode);
+          if (!room) {
+            throw new Error(`Room ${roomCode} not found`);
+          }
           const participantList = Object.values(room.participants);
 
           sendMessage<JoinedRoomPayload>(conn.ws, 'JOINED_ROOM', {
@@ -202,9 +200,10 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
               streamId: 'active',
             });
           }
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'Failed to join room';
           sendMessage<ErrorPayload>(conn.ws, 'ERROR', {
-            message: err.message || 'Failed to join room',
+            message,
           });
         }
         break;
@@ -244,7 +243,7 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
           });
 
           console.log(
-            `[PUBLISH_STREAM] room=${conn.roomCode} presenter=${conn.id} spectators=[${spectatorIds.join(',')}]`
+            `[PUBLISH_STREAM] room=${conn.roomCode} presenter=${conn.id} spectators=[${spectatorIds.join(',')}]`,
           );
         }
         break;
@@ -264,7 +263,7 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
         if (
           (conn.origin === 'web' || conn.role === 'spectator') &&
           p.signal &&
-          (p.signal as any).type === 'offer'
+          (p.signal as Record<string, unknown>).type === 'offer'
         ) {
           sendMessage<PublishRejectedPayload>(conn.ws, 'PUBLISH_REJECTED', {
             reason: 'Spectator clients cannot initiate outbound WebRTC screen offers.',
@@ -283,7 +282,7 @@ export function createServer(port: number = 3001, baseUrl: string = 'http://loca
             sendMessage(targetConn.ws, 'WEBRTC_SIGNAL', signalPayload);
           } else {
             console.warn(
-              `[WEBRTC_SIGNAL] target ${p.targetId} not found in room ${conn.roomCode} (from ${conn.id}, type=${(p.signal as any)?.type})`
+              `[WEBRTC_SIGNAL] target ${p.targetId} not found in room ${conn.roomCode} (from ${conn.id}, type=${(p.signal as Record<string, unknown> | null)?.type})`,
             );
           }
         } else {
