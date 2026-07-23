@@ -3,13 +3,10 @@ import { useParams, useNavigate } from 'react-router-dom';
 import type { Participant, JoinedRoomPayload } from '@screen-share/shared-types';
 import { SignalingClient } from '../services/SignalingClient';
 import { WebRTCReceiver, WebRTCConnectionState } from '../services/WebRTCReceiver';
-import { Header } from '../components/Header';
-import { SpectatorBanner } from '../components/SpectatorBanner';
 import { VideoPlayer } from '../components/VideoPlayer';
-import { ParticipantList } from '../components/ParticipantList';
 import { Button } from '../components/ui/Button';
-import { Card } from '../components/ui/Card';
-import { ShieldAlert, RefreshCw, Home, Users, AlertCircle } from 'lucide-react';
+import { Badge } from '../components/ui/Badge';
+import { ArrowLeft, Copy, Check, RefreshCw, AlertCircle } from 'lucide-react';
 
 export const RoomPage: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -18,17 +15,24 @@ export const RoomPage: React.FC = () => {
   const [connectionStatus, setConnectionStatus] = useState<
     'connecting' | 'live' | 'disconnected' | 'closed' | 'error'
   >('connecting');
-  const [statusText, setStatusText] = useState('Connecting to signaling server...');
+  const [statusText, setStatusText] = useState('Connecting...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [myUserId, setMyUserId] = useState<string>('');
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
+  const [copied, setCopied] = useState(false);
   const [rtcState, setRtcState] = useState<WebRTCConnectionState>('new');
 
   const signalingRef = useRef<SignalingClient | null>(null);
   const rtcReceiverRef = useRef<WebRTCReceiver | null>(null);
   const connectGenRef = useRef(0);
+
+  const copyLink = () => {
+    navigator.clipboard.writeText(window.location.href).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   const initializeConnection = useCallback(() => {
     if (!roomId) return;
@@ -36,14 +40,12 @@ export const RoomPage: React.FC = () => {
     const gen = ++connectGenRef.current;
     const isStale = () => connectGenRef.current !== gen;
 
-    // Reset state
     setConnectionStatus('connecting');
-    setStatusText('Connecting to signaling server...');
+    setStatusText('Connecting...');
     setErrorMsg(null);
     setMediaStream(null);
     setParticipants([]);
 
-    // Clean up old references
     if (rtcReceiverRef.current) {
       rtcReceiverRef.current.close();
       rtcReceiverRef.current = null;
@@ -56,79 +58,64 @@ export const RoomPage: React.FC = () => {
     const client = new SignalingClient();
     signalingRef.current = client;
 
-    // Setup WebRTC Receiver
     const receiver = new WebRTCReceiver(client, {
       onStream: (stream) => {
         if (isStale()) return;
-        console.log('[RoomPage] Received MediaStream');
         setMediaStream(stream);
         setConnectionStatus('live');
-        setStatusText('Live Stream Active');
+        setStatusText('Live');
       },
       onStateChange: (state) => {
         if (isStale()) return;
-        console.log('[RoomPage] WebRTC State:', state);
         setRtcState(state);
         if (state === 'connected') {
           setConnectionStatus('live');
-          setStatusText('Live Stream Active');
+          setStatusText('Live');
         } else if (state === 'connecting') {
-          setStatusText('Connecting to presenter stream...');
+          setStatusText('Connecting...');
         } else if (state === 'disconnected' || state === 'failed') {
-          setStatusText('Stream connection dropped');
+          setStatusText('Disconnected');
         }
       },
       onError: (err) => {
         if (isStale()) return;
-        console.error('[RoomPage] WebRTC Receiver Error:', err);
-        setErrorMsg('WebRTC Connection Error: ' + err.message);
+        setErrorMsg('WebRTC error: ' + err.message);
       },
       onPublishNotice: () => {
         if (isStale()) return;
-        setStatusText('Presenter started streaming — connecting...');
+        setStatusText('Presenter streaming — connecting...');
       },
     });
     rtcReceiverRef.current = receiver;
 
-    // Signaling Event Listeners
     client.on('connected', () => {
       if (isStale()) return;
       setErrorMsg(null);
-      setStatusText(`Joining room ${roomId}...`);
+      setStatusText('Joining room...');
       client.joinRoom(roomId);
     });
 
     client.on('joined_room', (payload: JoinedRoomPayload) => {
       if (isStale()) return;
-      console.log('[RoomPage] Joined room:', payload);
       setConnectionStatus('connecting');
       setErrorMsg(null);
       setParticipants(payload.participants);
-      if (payload.assignedId) {
-        setMyUserId(payload.assignedId);
-      }
+      if (payload.assignedId) setMyUserId(payload.assignedId);
 
       if (payload.isStreaming) {
-        setStatusText('Presenter is live — connecting to stream...');
+        setStatusText('Presenter is live — connecting...');
       } else {
         const hasPresenter = payload.participants.some((p) => p.role === 'presenter');
-        setStatusText(
-          hasPresenter
-            ? 'Waiting for presenter stream...'
-            : 'Room connected. Waiting for presenter to start stream...'
-        );
+        setStatusText(hasPresenter ? 'Waiting for stream...' : 'Room connected. Waiting for presenter...');
       }
     });
 
     client.on('role_assignment', (payload) => {
-      if (payload.reason) {
-        console.log('[RoomPage] Role notice:', payload.reason);
-      }
+      if (payload.reason) console.log('[RoomPage] Role notice:', payload.reason);
     });
 
     client.on('user_joined', (participant) => {
       if (isStale()) return;
-      console.log('[RoomPage] User joined:', participant);
       setParticipants((prev) => {
         if (prev.some((p) => p.id === participant.id)) return prev;
         return [...prev, participant];
@@ -137,24 +124,19 @@ export const RoomPage: React.FC = () => {
 
     client.on('user_left', (userId) => {
       if (isStale()) return;
-      console.log('[RoomPage] User left:', userId);
       setParticipants((prev) => prev.filter((p) => p.id !== userId));
     });
 
     client.on('room_closed', (payload) => {
       if (isStale()) return;
-      console.log('[RoomPage] Room closed:', payload.reason);
       setConnectionStatus('closed');
       setStatusText('Room Closed');
       setErrorMsg(payload.reason || 'The presenter closed the session.');
-      if (rtcReceiverRef.current) {
-        rtcReceiverRef.current.close();
-      }
+      if (rtcReceiverRef.current) rtcReceiverRef.current.close();
     });
 
     client.on('error', (payload) => {
       if (isStale()) return;
-      console.error('[RoomPage] Signaling Error:', payload.message);
       setConnectionStatus('error');
       setErrorMsg(payload.message);
     });
@@ -163,20 +145,18 @@ export const RoomPage: React.FC = () => {
       if (isStale()) return;
       console.warn('[RoomPage] Signaling Disconnected:', reason);
       setConnectionStatus('disconnected');
-      setStatusText('Signaling connection lost');
+      setStatusText('Connection lost');
     });
 
     client.connect().catch((err) => {
       if (isStale()) return;
-      console.error('[RoomPage] Failed to connect to signaling server:', err);
       setConnectionStatus('error');
-      setErrorMsg(`Could not connect to signaling server at ${client.getUrl()}`);
+      setErrorMsg('Could not connect to signaling server');
     });
   }, [roomId]);
 
   useEffect(() => {
     initializeConnection();
-
     return () => {
       connectGenRef.current += 1;
       if (rtcReceiverRef.current) {
@@ -190,69 +170,91 @@ export const RoomPage: React.FC = () => {
     };
   }, [initializeConnection]);
 
-  const handleResync = () => {
-    initializeConnection();
-  };
+  const handleResync = () => initializeConnection();
+
+  const statusVariant: 'live' | 'disconnected' | 'info' =
+    connectionStatus === 'live'
+      ? 'live'
+      : connectionStatus === 'disconnected' || connectionStatus === 'closed' || connectionStatus === 'error'
+      ? 'disconnected'
+      : 'info';
+
+  const statusOverride =
+    statusVariant === 'live'
+      ? 'bg-safelight/15 border-safelight/25'
+      : statusVariant === 'disconnected'
+      ? 'bg-destructive/15 border-destructive/25'
+      : 'bg-white/5 text-gray-400 border-white/10';
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#090d16] text-gray-100">
-      <Header
-        roomCode={roomId}
-        status={connectionStatus}
-        statusText={statusText}
-      />
+    <div className="min-h-screen bg-black text-gray-100 relative">
+      <div className="absolute inset-0 z-10">
+        <VideoPlayer
+          mediaStream={mediaStream}
+          isLive={connectionStatus === 'live'}
+          statusText={statusText}
+          onResync={handleResync}
+          fullBleed
+        />
+      </div>
 
-      <SpectatorBanner />
-
-      <main className="flex-1 max-w-7xl mx-auto w-full p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* Main Video View Column */}
-        <div className="lg:col-span-3 space-y-4">
-          {errorMsg && (
-            <div className="bg-rose-950/60 border border-rose-500/30 text-rose-200 p-4 rounded-xl flex items-center justify-between gap-4 backdrop-blur-md">
-              <div className="flex items-center gap-3">
-                <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
-                <span className="text-sm font-medium">{errorMsg}</span>
-              </div>
-              <Button size="sm" variant="outline" onClick={handleResync} className="shrink-0 border-rose-500/30 text-rose-200 hover:bg-rose-900/50">
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Retry</span>
-              </Button>
-            </div>
-          )}
-
-          <VideoPlayer
-            mediaStream={mediaStream}
-            isLive={connectionStatus === 'live'}
-            statusText={statusText}
-            onResync={handleResync}
-          />
+      <div className="fixed top-0 inset-x-0 bg-gradient-to-b from-black/60 to-transparent px-4 pt-3 pb-8 z-30 pointer-events-none">
+        <div className="flex items-center justify-between pointer-events-auto gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              onClick={() => navigate('/')}
+              aria-label="Leave room"
+              title="Leave room"
+              className="p-2 text-gray-400 hover:text-gray-100 hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <span role="status" aria-live="polite" className="min-w-0">
+              <Badge
+                variant={statusVariant}
+                className={`min-w-0 max-w-[60vw] sm:max-w-[320px] shrink transition-colors duration-300 ${statusOverride}`}
+              >
+                {connectionStatus === 'live' && (
+                  <span className="relative w-1.5 h-1.5 shrink-0" aria-hidden="true">
+                    <span className="absolute inset-0 rounded-full bg-safelight animate-ping opacity-75" />
+                    <span className="absolute inset-0 rounded-full bg-safelight" />
+                  </span>
+                )}
+                <span className="truncate min-w-0">{statusText}</span>
+              </Badge>
+            </span>
+            {participants.length > 0 && (
+              <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium text-gray-400 bg-black/40 border border-white/10 backdrop-blur-md shrink-0">
+                {participants.length} spectator{participants.length !== 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+          <button
+            onClick={copyLink}
+            aria-label={copied ? 'Link copied' : 'Copy room link'}
+            title="Copy room link"
+            className="p-2 text-gray-400 hover:text-gray-100 hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+          >
+            {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+          </button>
         </div>
+      </div>
 
-        {/* Sidebar Column */}
-        <div className="space-y-4">
-          <ParticipantList
-            participants={participants}
-            currentUserId={myUserId}
-          />
-
-          {/* Quick Info Card */}
-          <Card className="p-4 space-y-3">
-            <div className="flex items-center gap-2 font-medium text-gray-200 text-xs uppercase tracking-wider">
-              <ShieldAlert className="w-4 h-4 text-indigo-400" />
-              <span>Spectator Mode Rules</span>
-            </div>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              This browser window is connected as a spectator. Screensharing is disabled in web browsers to preserve system resources and enforce PipeWire/WASAPI per-app audio filtering via the native Desktop app.
-            </p>
-            <div className="pt-2 border-t border-gray-800 flex items-center justify-between">
-              <Button size="sm" variant="ghost" onClick={() => navigate('/')} className="w-full justify-center text-xs gap-2">
-                <Home className="w-3.5 h-3.5" />
-                <span>Return to Home</span>
-              </Button>
-            </div>
-          </Card>
+      {errorMsg && (
+        <div className="fixed bottom-6 inset-x-0 flex justify-center px-4 z-30 pointer-events-none">
+          <div
+            role="alert"
+            className="bg-black/80 border border-destructive/25 text-destructive px-4 py-3 rounded-xl flex items-center gap-3 flex-wrap max-w-[90vw] sm:max-w-md backdrop-blur-md pointer-events-auto shadow-lg"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span className="text-xs font-medium min-w-0 flex-1">{errorMsg}</span>
+            <Button size="sm" variant="outline" onClick={handleResync} className="text-xs ml-2 border-destructive/20">
+              <RefreshCw className="w-3 h-3" />
+              <span>Retry</span>
+            </Button>
+          </div>
         </div>
-      </main>
+      )}
     </div>
   );
 };

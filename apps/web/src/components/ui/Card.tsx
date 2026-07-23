@@ -10,7 +10,7 @@ export const Card: React.FC<{ children: React.ReactNode; className?: string }> =
     <div
       className={twMerge(
         clsx(
-          'bg-gray-900/80 border border-gray-800/80 rounded-xl p-6 backdrop-blur-md shadow-xl',
+          'bg-card/80 border border-border/80 rounded-xl p-6',
           className
         )
       )}

@@ -2,16 +2,14 @@ import React, { useEffect, useRef } from 'react';
 
 interface AudioVisualizerProps {
   mediaStream: MediaStream | null;
-  className?: string;
+  showStatus?: boolean;
 }
 
-export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, className }) => {
+export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, showStatus }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    if (!mediaStream || mediaStream.getAudioTracks().length === 0) {
-      return;
-    }
+    if (!mediaStream || mediaStream.getAudioTracks().length === 0) return;
 
     let animationFrameId: number;
     let audioCtx: AudioContext | null = null;
@@ -45,12 +43,8 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, c
         for (let i = 0; i < bufferLength; i++) {
           const barHeight = (dataArray[i] / 255) * canvas.height;
 
-          // Gradient color from indigo to emerald based on intensity
-          const gradient = ctx.createLinearGradient(0, canvas.height, 0, 0);
-          gradient.addColorStop(0, 'rgba(99, 102, 241, 0.4)');
-          gradient.addColorStop(1, 'rgba(16, 185, 129, 0.9)');
-
-          ctx.fillStyle = gradient;
+          const alpha = 0.3 + (dataArray[i] / 255) * 0.7;
+          ctx.fillStyle = `rgba(196, 128, 74, ${alpha})`;
           ctx.fillRect(x, canvas.height - barHeight, barWidth - 2, barHeight);
 
           x += barWidth + 1;
@@ -63,24 +57,21 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, c
     }
 
     return () => {
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-      }
-      if (audioCtx && audioCtx.state !== 'closed') {
-        audioCtx.close().catch(() => {});
-      }
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      if (audioCtx && audioCtx.state !== 'closed') audioCtx.close().catch(() => {});
     };
   }, [mediaStream]);
 
   return (
-    <div className={`flex items-center gap-2 bg-gray-900/80 px-3 py-1.5 rounded-lg border border-gray-800 ${className || ''}`}>
-      <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">Audio</span>
-      <canvas
-        ref={canvasRef}
-        width={80}
-        height={20}
-        className="rounded overflow-hidden"
-      />
+    <div className="flex items-center gap-2 bg-black/30 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-white/10">
+      {showStatus && (
+        <span className="relative w-1.5 h-1.5">
+          <span className="absolute inset-0 rounded-full bg-safelight animate-ping opacity-75" />
+          <span className="absolute inset-0 rounded-full bg-safelight" />
+        </span>
+      )}
+      <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Audio</span>
+      <canvas ref={canvasRef} width={80} height={20} className="rounded overflow-hidden" />
     </div>
   );
 };
