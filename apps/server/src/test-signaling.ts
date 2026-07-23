@@ -1,7 +1,7 @@
+import assert from 'node:assert';
+import type { WSMessage } from '@screen-share/shared-types';
 import WebSocket from 'ws';
-import assert from 'assert';
 import { createServer } from './server';
-import { WSMessage } from '@screen-share/shared-types';
 
 class MessageQueue {
   private queue: WSMessage[] = [];

@@ -1,6 +1,6 @@
-import React from 'react';
-import { Participant } from '@screen-share/shared-types';
-import { Users, Monitor, Globe, Shield } from 'lucide-react';
+import type { Participant } from '@screen-share/shared-types';
+import { Globe, Monitor, Shield, Users } from 'lucide-react';
+import type React from 'react';
 import { Card } from './ui/Card';
 
 interface ParticipantListProps {
@@ -8,10 +8,7 @@ interface ParticipantListProps {
   currentUserId?: string;
 }
 
-export const ParticipantList: React.FC<ParticipantListProps> = ({
-  participants,
-  currentUserId,
-}) => {
+export const ParticipantList: React.FC<ParticipantListProps> = ({ participants, currentUserId }) => {
   return (
     <Card className="p-4">
       <div className="flex items-center justify-between mb-3 border-b border-border pb-3">
@@ -34,17 +31,13 @@ export const ParticipantList: React.FC<ParticipantListProps> = ({
               <div
                 key={p.id}
                 className={`flex items-center justify-between p-2.5 rounded-lg border text-xs ${
-                  isMe
-                    ? 'bg-safelight/5 border-safelight/20'
-                    : 'bg-card/60 border-border/80'
+                  isMe ? 'bg-safelight/5 border-safelight/20' : 'bg-card/60 border-border/80'
                 }`}
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <div
                     className={`p-1.5 rounded-md ${
-                      p.role === 'presenter'
-                        ? 'bg-safelight/15 text-safelight'
-                        : 'bg-secondary text-muted-foreground'
+                      p.role === 'presenter' ? 'bg-safelight/15 text-safelight' : 'bg-secondary text-muted-foreground'
                     }`}
                   >
                     {p.role === 'presenter' ? (

@@ -1,12 +1,6 @@
-import { SignalingClient } from './SignalingClient';
+import type { SignalingClient } from './SignalingClient';
 
-export type WebRTCConnectionState =
-  | 'new'
-  | 'connecting'
-  | 'connected'
-  | 'disconnected'
-  | 'failed'
-  | 'closed';
+export type WebRTCConnectionState = 'new' | 'connecting' | 'connected' | 'disconnected' | 'failed' | 'closed';
 
 export interface WebRTCReceiverCallbacks {
   onStream: (stream: MediaStream) => void;
@@ -33,14 +27,13 @@ export class WebRTCReceiver {
   private setupSignalingListeners() {
     this.signalingClient.on('webrtc_signal', async ({ senderId, signal }) => {
       this.presenterId = senderId;
+      // biome-ignore lint/suspicious/noExplicitAny: WebRTC signal type is dynamic by protocol
       await this.handleSignal(senderId, signal as any);
     });
 
     this.signalingClient.on('publish_stream', ({ senderId }) => {
       this.presenterId = senderId;
-      console.log(
-        `[WebRTCReceiver] Presenter ${senderId} published stream, waiting for offer...`
-      );
+      console.log(`[WebRTCReceiver] Presenter ${senderId} published stream, waiting for offer...`);
       this.callbacks.onStateChange('connecting');
       this.callbacks.onPublishNotice?.(senderId);
     });
@@ -52,18 +45,16 @@ export class WebRTCReceiver {
     }
 
     const config: RTCConfiguration = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-      ],
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }],
     };
 
     this.pc = new RTCPeerConnection(config);
 
+    // (setCodecPreferences is applied per-transceiver after receiving the offer)
+
     this.pc.ontrack = (event) => {
       console.log('[WebRTCReceiver] Received remote track:', event.track.kind, event.track.id);
-      // Prefer stream from the event; fall back to assembling tracks ourselves.
-      if (event.streams && event.streams[0]) {
+      if (event.streams?.[0]) {
         event.streams[0].getTracks().forEach((track) => {
           if (!this.mediaStream.getTracks().some((t) => t.id === track.id)) {
             this.mediaStream.addTrack(track);
@@ -93,17 +84,14 @@ export class WebRTCReceiver {
     this.pc.oniceconnectionstatechange = () => {
       if (!this.pc) return;
       console.log('[WebRTCReceiver] ICE connection state:', this.pc.iceConnectionState);
-      if (
-        this.pc.iceConnectionState === 'failed' ||
-        this.pc.iceConnectionState === 'disconnected'
-      ) {
+      if (this.pc.iceConnectionState === 'failed' || this.pc.iceConnectionState === 'disconnected') {
         this.callbacks.onStateChange(this.pc.iceConnectionState as WebRTCConnectionState);
       }
     };
   }
 
   private async flushPendingCandidates() {
-    if (!this.pc || !this.pc.remoteDescription) return;
+    if (!this.pc?.remoteDescription) return;
     while (this.pendingCandidates.length > 0) {
       const candidate = this.pendingCandidates.shift();
       if (candidate) {
@@ -116,6 +104,7 @@ export class WebRTCReceiver {
     }
   }
 
+  // biome-ignore lint/suspicious/noExplicitAny: WebRTC signal type is dynamic by protocol
   private async handleSignal(senderId: string, signal: any) {
     this.initializePeerConnection();
     if (!this.pc) return;
@@ -143,6 +132,32 @@ export class WebRTCReceiver {
             : (signal as RTCSessionDescriptionInit);
 
         await this.pc.setRemoteDescription(new RTCSessionDescription(desc));
+
+        // ── Set receiver codec preferences to favour H.264 (HW decode) ──
+        try {
+          const transceivers = this.pc.getTransceivers();
+          const videoTransceiver = transceivers.find((t) => t.receiver?.track?.kind === 'video');
+          if (videoTransceiver) {
+            const caps = RTCRtpReceiver.getCapabilities('video');
+            if (caps?.codecs?.length) {
+              const preferred = caps.codecs.filter((c) => {
+                const mt = c.mimeType.toUpperCase();
+                return mt === 'VIDEO/H264' || mt === 'VIDEO/VP9' || mt === 'VIDEO/VP8';
+              });
+              // Sort H.264 first, then VP9, then VP8.
+              preferred.sort((a, b) => {
+                const order = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
+                const ia = order.indexOf(a.mimeType.toUpperCase());
+                const ib = order.indexOf(b.mimeType.toUpperCase());
+                return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+              });
+              videoTransceiver.setCodecPreferences(preferred);
+            }
+          }
+        } catch (err) {
+          console.warn('[WebRTCReceiver] setCodecPreferences:', err);
+        }
+
         await this.flushPendingCandidates();
 
         const answer = await this.pc.createAnswer();
@@ -156,9 +171,7 @@ export class WebRTCReceiver {
         this.handlingOffer = false;
       } else if (signal?.type === 'candidate' || signal?.candidate) {
         const candidateInit: RTCIceCandidateInit =
-          signal.candidate && typeof signal.candidate === 'object'
-            ? signal.candidate
-            : signal;
+          signal.candidate && typeof signal.candidate === 'object' ? signal.candidate : signal;
 
         if (this.pc.remoteDescription) {
           await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
@@ -166,7 +179,7 @@ export class WebRTCReceiver {
           this.pendingCandidates.push(candidateInit);
         }
       }
-    } catch (err: any) {
+    } catch (err) {
       this.handlingOffer = false;
       console.error('[WebRTCReceiver] Error handling signal:', err);
       this.callbacks.onError(err instanceof Error ? err : new Error(String(err)));
@@ -179,7 +192,9 @@ export class WebRTCReceiver {
       this.pc.close();
       this.pc = null;
     }
-    this.mediaStream.getTracks().forEach((track) => track.stop());
+    for (const track of this.mediaStream.getTracks()) {
+      track.stop();
+    }
     this.mediaStream = new MediaStream();
     this.pendingCandidates = [];
     this.presenterId = null;

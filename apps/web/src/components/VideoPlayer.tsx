@@ -1,14 +1,6 @@
-import React, { useRef, useState, useEffect } from 'react';
-import {
-  Play,
-  Pause,
-  Volume2,
-  VolumeX,
-  Maximize,
-  Minimize,
-  RefreshCw,
-  Radio,
-} from 'lucide-react';
+import { Maximize, Minimize, Pause, Play, Radio, RefreshCw, Volume2, VolumeX } from 'lucide-react';
+import type React from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AudioVisualizer } from './AudioVisualizer';
 import { Button } from './ui/Button';
 
@@ -20,13 +12,7 @@ interface VideoPlayerProps {
   fullBleed?: boolean;
 }
 
-export const VideoPlayer: React.FC<VideoPlayerProps> = ({
-  mediaStream,
-  isLive,
-  statusText,
-  onResync,
-  fullBleed,
-}) => {
+export const VideoPlayer: React.FC<VideoPlayerProps> = ({ mediaStream, isLive, statusText, onResync, fullBleed }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -52,7 +38,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           console.warn('[VideoPlayer] Autoplay prevented, muting to retry:', err);
           video.muted = true;
           setIsMuted(true);
-          video.play().then(() => setIsPlaying(true)).catch(console.error);
+          video
+            .play()
+            .then(() => setIsPlaying(true))
+            .catch(console.error);
         });
     } else {
       video.srcObject = null;
@@ -68,7 +57,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.pause();
       setIsPlaying(false);
     } else {
-      video.play().then(() => setIsPlaying(true)).catch(console.error);
+      video
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch(console.error);
     }
   };
 
@@ -95,9 +87,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!containerRef.current) return;
 
     if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(console.error);
+      containerRef.current
+        .requestFullscreen()
+        .then(() => setIsFullscreen(true))
+        .catch(console.error);
     } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(console.error);
+      document
+        .exitFullscreen()
+        .then(() => setIsFullscreen(false))
+        .catch(console.error);
     }
   };
 
@@ -108,6 +106,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         fullBleed ? 'h-screen max-h-screen' : 'aspect-video rounded-2xl overflow-hidden border border-border'
       }`}
     >
+      {/* biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
       <video
         ref={videoRef}
         playsInline
@@ -117,11 +116,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {(!isLive || !hasVideoTrack) && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-10">
           <Radio className="w-8 h-8 text-white/20 mb-3" />
-          <p className="text-sm text-white/40 max-w-xs">
-            {statusText || 'Waiting for presenter...'}
-          </p>
+          <p className="text-sm text-white/40 max-w-xs">{statusText || 'Waiting for presenter...'}</p>
           {onResync && (
-            <Button variant="outline" size="sm" onClick={onResync} className="gap-2 mt-6 border-white/10 text-white/50 hover:text-white/80 hover:bg-white/5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onResync}
+              className="gap-2 mt-6 border-white/10 text-white/50 hover:text-white/80 hover:bg-white/5"
+            >
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Reconnect</span>
             </Button>
@@ -130,15 +132,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       )}
 
       <div className="absolute top-4 right-16 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto">
-        {isLive && mediaStream && (
-          <AudioVisualizer mediaStream={mediaStream} showStatus />
-        )}
+        {isLive && mediaStream && <AudioVisualizer mediaStream={mediaStream} showStatus />}
       </div>
 
       {isLive && (
         <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto flex items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={togglePlay}
               className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
               title={isPlaying ? 'Pause' : 'Play'}
@@ -148,15 +149,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
             <div className="flex items-center gap-2 bg-black/30 px-3 py-1.5 rounded-xl backdrop-blur-sm">
               <button
+                type="button"
                 onClick={toggleMute}
                 className="text-white/60 hover:text-white transition-colors"
                 title={isMuted ? 'Unmute' : 'Mute'}
               >
-                {isMuted || volume === 0 ? (
-                  <VolumeX className="w-4 h-4" />
-                ) : (
-                  <Volume2 className="w-4 h-4" />
-                )}
+                {isMuted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </button>
               <input
                 type="range"
@@ -173,6 +171,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           <div className="flex items-center gap-2">
             {onResync && (
               <button
+                type="button"
                 onClick={onResync}
                 className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
                 title="Reconnect stream"
@@ -183,6 +182,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
             {!fullBleed && (
               <button
+                type="button"
                 onClick={toggleFullscreen}
                 className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
                 title="Toggle fullscreen"

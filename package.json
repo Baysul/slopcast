@@ -6,16 +6,27 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
+    "check": "biome ci",
+    "check:fix": "biome check --write",
+    "lint": "biome lint",
+    "lint:fix": "biome lint --write",
+    "format": "biome format --write",
     "dev": "pnpm --parallel --recursive dev",
     "dev:desktop": "pnpm --filter desktop dev",
     "dev:web": "pnpm --filter web dev",
     "dev:server": "pnpm --filter server dev",
-    "build": "pnpm --recursive build",
-    "build:desktop": "pnpm --filter desktop build",
-    "package:desktop": "pnpm --filter desktop package",
-    "dist:desktop": "pnpm --filter desktop dist",
-    "dist:desktop:linux": "pnpm --filter desktop dist:linux",
-    "dist:desktop:mac": "pnpm --filter desktop dist:mac",
-    "dist:desktop:win": "pnpm --filter desktop dist:win"
+    "build": "pnpm check && pnpm --recursive build",
+    "build:desktop": "pnpm check && pnpm --filter desktop build",
+    "package:desktop": "pnpm check && pnpm --filter desktop package",
+    "dist:desktop": "pnpm check && pnpm --filter desktop dist",
+    "dist:desktop:linux": "pnpm check && pnpm --filter desktop dist:linux",
+    "dist:desktop:mac": "pnpm check && pnpm --filter desktop dist:mac",
+    "dist:desktop:win": "pnpm check && pnpm --filter desktop dist:win"
+  },
+  "dependencies": {
+    "opencode-goal-plugin": "^0.6.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.5"
   }
 }

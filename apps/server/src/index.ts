@@ -11,4 +11,3 @@ server.listen(PORT, () => {
   console.log(`WebSocket: ws://localhost:${PORT}`);
   console.log(`Room share base URL: ${BASE_URL}`);
 });
-

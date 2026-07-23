@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Loader2 } from 'lucide-react';
-import { Button } from '../components/ui/Button';
-import { Input } from '../components/ui/Input';
-import { Card } from '../components/ui/Card';
+import type React from 'react';
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
+import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
+import { Input } from '../components/ui/Input';
 
 export const HomePage: React.FC = () => {
   const [roomInput, setRoomInput] = useState('');
@@ -49,9 +50,7 @@ export const HomePage: React.FC = () => {
 
       <main className="flex-1 flex flex-col items-center justify-center px-6">
         <div className="w-full max-w-md text-center mb-8">
-          <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-foreground mb-3">
-            Join a live room
-          </h1>
+          <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-foreground mb-3">Join a live room</h1>
           <p className="text-sm text-muted-foreground leading-relaxed">
             Enter a room code or share link to spectate a screen share stream in your browser.
           </p>
@@ -60,7 +59,10 @@ export const HomePage: React.FC = () => {
         <Card className="w-full max-w-md p-6">
           <form onSubmit={handleJoin} className="space-y-4">
             <div>
-              <label htmlFor="roomCode" className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+              <label
+                htmlFor="roomCode"
+                className="block text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2"
+              >
                 Room code or link
               </label>
               <Input
@@ -75,11 +77,7 @@ export const HomePage: React.FC = () => {
             </div>
 
             <Button type="submit" size="lg" className="w-full gap-2" disabled={joining}>
-              {joining ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <ArrowRight className="w-4 h-4" />
-              )}
+              {joining ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
               <span>{joining ? 'Joining...' : 'Spectate Room'}</span>
             </Button>
           </form>

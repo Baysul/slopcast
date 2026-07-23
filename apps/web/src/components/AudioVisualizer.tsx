@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import type React from 'react';
+import { useEffect, useRef } from 'react';
 
 interface AudioVisualizerProps {
   mediaStream: MediaStream | null;
@@ -15,6 +16,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
     let audioCtx: AudioContext | null = null;
 
     try {
+      // biome-ignore lint/suspicious/noExplicitAny: legacy webkitAudioContext requires window cast
       audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 64;

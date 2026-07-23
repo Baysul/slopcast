@@ -1,4 +1,4 @@
-import { Participant, RoomState, ClientRole, ClientOrigin } from '@screen-share/shared-types';
+import type { ClientOrigin, ClientRole, Participant, RoomState } from '@screen-share/shared-types';
 
 export class RoomManager {
   private rooms: Map<string, RoomState> = new Map();
@@ -55,7 +55,7 @@ export class RoomManager {
     code: string,
     participantId: string,
     origin: ClientOrigin,
-    requestedRole?: ClientRole
+    requestedRole?: ClientRole,
   ): { participant: Participant; role: ClientRole; reason?: string } {
     let room = this.rooms.get(code);
     if (!room) {
@@ -98,7 +98,7 @@ export class RoomManager {
 
   public removeParticipant(
     code: string,
-    participantId: string
+    participantId: string,
   ): { isPresenter: boolean; remainingParticipants: number } {
     const room = this.rooms.get(code);
     if (!room) {
