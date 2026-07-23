@@ -1,21 +1,5 @@
-// ScreenCaptureKit audio capture of a single target application for macOS.
-//
-// Uses `SCShareableContent` to enumerate running applications, resolves the
-// capture target to an `SCRunningApplication`, and builds an
-// `SCContentFilter` (`initWithDisplay:includingApplications:exceptingWindows:`)
-// whose inclusion set limits the captured stream to ONLY the target
-// application's audio — the shared window's audio and nothing else. Audio is
-// captured through `SCStream` configured with audio capture enabled
-// (48 kHz stereo).
-
 use crate::AudioApp;
-use napi::{Either, Result as NapiResult};
 
-// ---------------------------------------------------------------------------
-// macOS implementation
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "macos")]
 mod sck {
     use super::AudioApp;
     use napi::Result as NapiResult;
@@ -31,9 +15,6 @@ mod sck {
         napi::Error::from_reason(format!("{}: {}", context, e))
     }
 
-    /// Receives captured audio sample buffers. This is the handoff point for
-    /// the WebRTC/Opus encoding pipeline; buffers are currently counted and
-    /// released (mirroring the topology-only Linux filter).
     struct AudioOutputHandler {
         buffers_received: Arc<AtomicU64>,
     }
@@ -94,9 +75,6 @@ mod sck {
         Ok(apps)
     }
 
-    /// Resolves the unified capture target to a bundle identifier. A string
-    /// is treated as a bundle identifier directly; a number is resolved to
-    /// the bundle identifier of the running app with that PID.
     fn resolve_target_bundle_id(
         target_app_id: &napi::Either<String, i32>,
         applications: &[SCRunningApplication],
@@ -109,8 +87,7 @@ mod sck {
                 .map(|a| a.bundle_identifier())
                 .ok_or_else(|| {
                     napi::Error::from_reason(format!(
-                        "No running application found for target PID {}",
-                        pid
+                        "No running application found for target PID {}", pid
                     ))
                 }),
             _ => Err(napi::Error::from_reason(
@@ -125,7 +102,6 @@ mod sck {
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let state = guard.get_or_insert_with(MacCaptureState::new);
 
-        // Restart semantics: stop any running capture first.
         if let Some(old_stream) = state.stream.take() {
             let _ = old_stream.stop_capture();
         }
@@ -135,8 +111,6 @@ mod sck {
         let applications = content.applications();
         let target_bundle_id = resolve_target_bundle_id(target_app_id, &applications)?;
 
-        // Build the inclusion set for the content filter so that ONLY the
-        // target application's audio is captured.
         let target_app = applications
             .iter()
             .find(|a| a.bundle_identifier() == target_bundle_id)
@@ -165,7 +139,6 @@ mod sck {
             .with_sample_rate(48_000)
             .with_channel_count(2)
             .with_excludes_current_process_audio(true)
-            // Keep the (unused) video pipeline as cheap as possible.
             .with_width(64)
             .with_height(64)
             .with_shows_cursor(false);
@@ -207,101 +180,8 @@ mod sck {
         let guard = MAC_STATE
             .lock()
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        if let Some(state) = guard.as_ref() {
-            Ok(state.is_active)
-        } else {
-            Ok(false)
-        }
+        Ok(guard.as_ref().map(|s| s.is_active).unwrap_or(false))
     }
 }
 
-// ---------------------------------------------------------------------------
-// Module-level interface (uniform with linux/windows modules)
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "macos")]
-pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
-    sck::list_audio_applications()
-}
-
-#[cfg(target_os = "macos")]
-pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    sck::start_audio_capture(target_app_id)
-}
-
-#[cfg(target_os = "macos")]
-pub fn stop_audio_capture() -> NapiResult<bool> {
-    sck::stop_audio_capture()
-}
-
-#[cfg(target_os = "macos")]
-pub fn is_audio_capture_active() -> NapiResult<bool> {
-    sck::is_audio_capture_active()
-}
-
-#[cfg(target_os = "macos")]
-pub fn resolve_audio_by_name(label: &str) -> Option<AudioApp> {
-    let apps = list_audio_applications().ok()?;
-    let query_lower = label.to_lowercase();
-
-    if let Some(app) = apps
-        .iter()
-        .find(|a| a.name.to_lowercase() == query_lower)
-    {
-        return Some(app.clone());
-    }
-    if let Some(app) = apps.iter().find(|a| {
-        let name_lower = a.name.to_lowercase();
-        query_lower.contains(&name_lower)
-    }) {
-        return Some(app.clone());
-    }
-    if let Some(app) = apps.iter().find(|a| {
-        let name_lower = a.name.to_lowercase();
-        name_lower.contains(&query_lower)
-    }) {
-        return Some(app.clone());
-    }
-
-    let first_word = query_lower.split_whitespace().next()?;
-    apps.iter()
-        .find(|a| {
-            let name_lower = a.name.to_lowercase();
-            name_lower.contains(first_word) || first_word.contains(&name_lower)
-        })
-        .cloned()
-}
-
-// ---------------------------------------------------------------------------
-// Non-macOS stubs
-// ---------------------------------------------------------------------------
-
-#[cfg(not(target_os = "macos"))]
-fn unsupported() -> napi::Error {
-    napi::Error::from_reason("ScreenCaptureKit audio capture is only supported on macOS")
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
-    Err(unsupported())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn start_audio_capture(_target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    Err(unsupported())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn stop_audio_capture() -> NapiResult<bool> {
-    Err(unsupported())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn is_audio_capture_active() -> NapiResult<bool> {
-    Ok(false)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn resolve_audio_by_name(_label: &str) -> Option<AudioApp> {
-    None
-}
+pub use sck::*;
