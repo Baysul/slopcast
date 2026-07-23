@@ -10,16 +10,14 @@ mod wasapi {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
-    use windows::core::{
-        implement, Error, HRESULT, IUnknown, Interface, Ref, PCSTR,
-    };
+    use windows::core::{implement, Error, IUnknown, Interface, Ref, HRESULT, PCSTR};
     use windows::Wdk::System::SystemServices::RtlGetVersion;
     use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, S_OK, WAIT_OBJECT_0};
     use windows::Win32::Media::Audio::{
-        ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
+        eConsole, eRender, ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
         IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
         IAudioCaptureClient, IAudioClient, IAudioSessionControl2, IAudioSessionManager2,
-        IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender, AUDCLNT_SHAREMODE_SHARED,
+        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
         AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
         AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
@@ -155,8 +153,9 @@ mod wasapi {
     unsafe fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
         let names = snapshot_process_names();
 
-        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            .map_err(|e| napi_err("CoCreateInstance(MMDeviceEnumerator) failed", e))?;
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| napi_err("CoCreateInstance(MMDeviceEnumerator) failed", e))?;
         let device = enumerator
             .GetDefaultAudioEndpoint(eRender, eConsole)
             .map_err(|e| napi_err("GetDefaultAudioEndpoint failed", e))?;
@@ -189,16 +188,8 @@ mod wasapi {
             if pid == 0 || !seen.insert(pid) {
                 continue;
             }
-            let name = names
-                .get(&pid)
-                .cloned()
-                .unwrap_or_else(|| format!("Process {}", pid));
-            apps.push(AudioApp {
-                id: pid as i32,
-                name,
-                process_id: pid as i32,
-                bundle_id: None,
-            });
+            let name = names.get(&pid).cloned().unwrap_or_else(|| format!("Process {}", pid));
+            apps.push(AudioApp { id: pid as i32, name, process_id: pid as i32, bundle_id: None });
         }
         Ok(apps)
     }
@@ -262,10 +253,8 @@ mod wasapi {
         let activation_params_ptr: *const PROPVARIANT = &raw_prop;
 
         let setup = Arc::new((Mutex::new(false), Condvar::new()));
-        let callback: IActivateAudioInterfaceCompletionHandler = ActivationHandler {
-            state: setup.clone(),
-        }
-        .into();
+        let callback: IActivateAudioInterfaceCompletionHandler =
+            ActivationHandler { state: setup.clone() }.into();
 
         let operation = ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -286,9 +275,8 @@ mod wasapi {
                     "Timed out waiting for process loopback activation",
                 ));
             }
-            let (guard, _) = cvar
-                .wait_timeout(completed, remaining)
-                .unwrap_or_else(|e| e.into_inner());
+            let (guard, _) =
+                cvar.wait_timeout(completed, remaining).unwrap_or_else(|e| e.into_inner());
             completed = guard;
         }
         drop(completed);
@@ -297,8 +285,9 @@ mod wasapi {
         let mut result = HRESULT(0);
         operation.GetActivateResult(&mut result, &mut audio_client)?;
         result.ok()?;
-        let unknown = audio_client
-            .ok_or_else(|| Error::new(E_FAIL, "Process loopback activation returned no interface"))?;
+        let unknown = audio_client.ok_or_else(|| {
+            Error::new(E_FAIL, "Process loopback activation returned no interface")
+        })?;
         unknown.cast::<IAudioClient>()
     }
 
@@ -309,7 +298,8 @@ mod wasapi {
     /// Activates a regular `IAudioClient` on the default render endpoint and
     /// returns it together with the mix format (caller frees with
     /// `CoTaskMemFree` after `Initialize`).
-    unsafe fn activate_system_loopback() -> windows::core::Result<(IAudioClient, *mut WAVEFORMATEX)> {
+    unsafe fn activate_system_loopback() -> windows::core::Result<(IAudioClient, *mut WAVEFORMATEX)>
+    {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
@@ -334,9 +324,7 @@ mod wasapi {
                 wBitsPerSample: BITS_PER_SAMPLE,
                 cbSize: (size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>()) as u16,
             },
-            Samples: WAVEFORMATEXTENSIBLE_0 {
-                wValidBitsPerSample: BITS_PER_SAMPLE,
-            },
+            Samples: WAVEFORMATEXTENSIBLE_0 { wValidBitsPerSample: BITS_PER_SAMPLE },
             SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
             dwChannelMask: 0x3, // front left + front right
         }
@@ -416,9 +404,8 @@ mod wasapi {
     /// process-scoped loopback when supported and falling back to system-wide
     /// loopback otherwise.
     unsafe fn build_capture_session(target_pid: u32) -> Result<CaptureSession, String> {
-        let process_loopback_supported = os_build_number()
-            .map(|build| build >= PROCESS_LOOPBACK_MIN_BUILD)
-            .unwrap_or(false);
+        let process_loopback_supported =
+            os_build_number().map(|build| build >= PROCESS_LOOPBACK_MIN_BUILD).unwrap_or(false);
 
         let (client, mode, mix_format_ptr): (IAudioClient, CaptureMode, Option<*mut WAVEFORMATEX>) =
             if process_loopback_supported {
@@ -461,19 +448,10 @@ mod wasapi {
             .map_err(|e| format!("GetService(IAudioCaptureClient) failed: {}", e))?;
         let audio_event = CreateEventA(None, false, false, PCSTR::null())
             .map_err(|e| format!("CreateEventA failed: {}", e))?;
-        client
-            .SetEventHandle(audio_event)
-            .map_err(|e| format!("SetEventHandle failed: {}", e))?;
-        client
-            .Start()
-            .map_err(|e| format!("IAudioClient::Start failed: {}", e))?;
+        client.SetEventHandle(audio_event).map_err(|e| format!("SetEventHandle failed: {}", e))?;
+        client.Start().map_err(|e| format!("IAudioClient::Start failed: {}", e))?;
 
-        Ok(CaptureSession {
-            client,
-            capture_client,
-            audio_event,
-            mode,
-        })
+        Ok(CaptureSession { client, capture_client, audio_event, mode })
     }
 
     /// Entry point of the capture thread. Owns all COM objects; reports
@@ -534,9 +512,7 @@ mod wasapi {
     // -----------------------------------------------------------------------
 
     pub fn start_capture(target_pid: u32) -> NapiResult<bool> {
-        let mut guard = WASAPI_STATE
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let mut guard = WASAPI_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let state = guard.get_or_insert_with(WasapiState::new);
 
         // Restart semantics: stop any running capture first.
@@ -576,10 +552,7 @@ mod wasapi {
                 unsafe {
                     let _ = CloseHandle(stop_event);
                 }
-                Err(napi::Error::from_reason(format!(
-                    "WASAPI capture startup failed: {}",
-                    e
-                )))
+                Err(napi::Error::from_reason(format!("WASAPI capture startup failed: {}", e)))
             }
             Err(_) => {
                 unsafe {
@@ -589,17 +562,13 @@ mod wasapi {
                 unsafe {
                     let _ = CloseHandle(stop_event);
                 }
-                Err(napi::Error::from_reason(
-                    "WASAPI capture startup timed out".to_string(),
-                ))
+                Err(napi::Error::from_reason("WASAPI capture startup timed out".to_string()))
             }
         }
     }
 
     pub fn stop_capture() -> NapiResult<bool> {
-        let mut guard = WASAPI_STATE
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let mut guard = WASAPI_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
         if let Some(state) = guard.as_mut() {
             stop_capture_locked(state);
         }
@@ -607,15 +576,10 @@ mod wasapi {
     }
 
     pub fn is_capture_active() -> NapiResult<bool> {
-        let mut guard = WASAPI_STATE
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let mut guard = WASAPI_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
         if let Some(state) = guard.as_mut() {
-            let thread_alive = state
-                .capture_thread
-                .as_ref()
-                .map(|t| !t.is_finished())
-                .unwrap_or(false);
+            let thread_alive =
+                state.capture_thread.as_ref().map(|t| !t.is_finished()).unwrap_or(false);
             if state.is_active && !thread_alive {
                 // The capture thread died (e.g. audio device unplugged);
                 // clean up its remains before reporting inactive.
@@ -639,10 +603,16 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
         Either::A(s) => s.trim().parse::<u32>().ok().filter(|p| *p > 0),
         _ => None,
     }
-    .ok_or_else(|| napi::Error::from_reason("A process ID is required as the audio capture target"))?;
+    .ok_or_else(|| {
+        napi::Error::from_reason("A process ID is required as the audio capture target")
+    })?;
     wasapi::start_capture(pid)
 }
 
-pub fn stop_audio_capture() -> NapiResult<bool> { wasapi::stop_capture() }
+pub fn stop_audio_capture() -> NapiResult<bool> {
+    wasapi::stop_capture()
+}
 
-pub fn is_audio_capture_active() -> NapiResult<bool> { wasapi::is_capture_active() }
+pub fn is_audio_capture_active() -> NapiResult<bool> {
+    wasapi::is_capture_active()
+}

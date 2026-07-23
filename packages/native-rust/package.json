@@ -7,7 +7,9 @@
     "prepare": "napi build --platform --release",
     "dev": "napi build --platform",
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform"
+    "build:debug": "napi build --platform",
+    "rust:fmt": "cargo fmt",
+    "rust:check": "cargo fmt --check"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.2"

@@ -49,10 +49,7 @@ mod sck {
 
     fn shareable_content() -> NapiResult<SCShareableContent> {
         SCShareableContent::get().map_err(|e| {
-            napi_err(
-                "SCShareableContent::get failed (is screen recording permission granted?)",
-                e,
-            )
+            napi_err("SCShareableContent::get failed (is screen recording permission granted?)", e)
         })
     }
 
@@ -87,7 +84,8 @@ mod sck {
                 .map(|a| a.bundle_identifier())
                 .ok_or_else(|| {
                     napi::Error::from_reason(format!(
-                        "No running application found for target PID {}", pid
+                        "No running application found for target PID {}",
+                        pid
                     ))
                 }),
             _ => Err(napi::Error::from_reason(
@@ -97,9 +95,7 @@ mod sck {
     }
 
     pub fn start_audio_capture(target_app_id: &napi::Either<String, i32>) -> NapiResult<bool> {
-        let mut guard = MAC_STATE
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let mut guard = MAC_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
         let state = guard.get_or_insert_with(MacCaptureState::new);
 
         if let Some(old_stream) = state.stream.take() {
@@ -145,14 +141,10 @@ mod sck {
 
         let mut stream = SCStream::new(&filter, &config);
         stream.add_output_handler(
-            AudioOutputHandler {
-                buffers_received: state.buffers_received.clone(),
-            },
+            AudioOutputHandler { buffers_received: state.buffers_received.clone() },
             SCStreamOutputType::Audio,
         );
-        stream
-            .start_capture()
-            .map_err(|e| napi_err("SCStream::start_capture failed", e))?;
+        stream.start_capture().map_err(|e| napi_err("SCStream::start_capture failed", e))?;
 
         state.stream = Some(stream);
         state.target_bundle_id = Some(target_bundle_id);
@@ -161,14 +153,10 @@ mod sck {
     }
 
     pub fn stop_audio_capture() -> NapiResult<bool> {
-        let mut guard = MAC_STATE
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let mut guard = MAC_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
         if let Some(state) = guard.as_mut() {
             if let Some(stream) = state.stream.take() {
-                stream
-                    .stop_capture()
-                    .map_err(|e| napi_err("SCStream::stop_capture failed", e))?;
+                stream.stop_capture().map_err(|e| napi_err("SCStream::stop_capture failed", e))?;
             }
             state.is_active = false;
             state.target_bundle_id = None;
@@ -177,9 +165,7 @@ mod sck {
     }
 
     pub fn is_audio_capture_active() -> NapiResult<bool> {
-        let guard = MAC_STATE
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let guard = MAC_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
         Ok(guard.as_ref().map(|s| s.is_active).unwrap_or(false))
     }
 }

@@ -26,7 +26,9 @@ mod unsupported_platform {
     pub fn stop_audio_capture() -> NapiResult<bool> {
         Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
     }
-    pub fn is_audio_capture_active() -> NapiResult<bool> { Ok(false) }
+    pub fn is_audio_capture_active() -> NapiResult<bool> {
+        Ok(false)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -100,17 +102,26 @@ pub fn is_audio_capture_active() -> napi::Result<bool> {
 #[napi]
 pub fn resolve_audio_app_for_x11_window(window_id: i32) -> napi::Result<Option<AudioApp>> {
     #[cfg(target_os = "linux")]
-    { Ok(crate::linux::resolve_audio_by_x11_window(window_id as u32)) }
+    {
+        Ok(crate::linux::resolve_audio_by_x11_window(window_id as u32))
+    }
     #[cfg(not(target_os = "linux"))]
-    { let _ = window_id; Ok(None) }
+    {
+        let _ = window_id;
+        Ok(None)
+    }
 }
 
 #[napi]
 pub fn resolve_audio_app_for_captured_window() -> napi::Result<Option<AudioApp>> {
     #[cfg(target_os = "linux")]
-    { Ok(crate::linux::resolve_audio_by_captured_window()) }
+    {
+        Ok(crate::linux::resolve_audio_by_captured_window())
+    }
     #[cfg(not(target_os = "linux"))]
-    { Ok(None) }
+    {
+        Ok(None)
+    }
 }
 
 #[napi]
