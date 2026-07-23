@@ -111,6 +111,10 @@ struct TargetSpec {
     node_id: Option<u32>,
     pid: Option<u32>,
     binary: Option<String>,
+    /// When true, every `Stream/Output/Audio` node is linked into the capture
+    /// sink (system-wide audio capture). Individual `node_id`/`pid`/`binary`
+    /// matching is skipped.
+    system_audio: bool,
 }
 
 impl TargetSpec {
@@ -156,12 +160,22 @@ impl AppNodeInfo {
         let pid = props
             .get("application.process.id")
             .and_then(|v| v.parse::<u32>().ok())
-            .filter(|p| *p > 0);
+            .filter(|p| *p > 0 && is_valid_pid(*p as i32));
         let binary = props
             .get("application.process.binary")
             .map(str::to_string)
             .filter(|b| !b.is_empty());
         Self { pid, binary }
+    }
+
+    /// Resolve PID using the last-resort `/proc` binary scan when the
+    /// primary methods (node property, client ID mapping) all failed.
+    fn fallback_pid(&self) -> Option<u32> {
+        self.binary
+            .as_deref()
+            .and_then(resolve_pid_by_binary)
+            .map(|p| p as u32)
+            .filter(|p| *p > 0)
     }
 }
 
@@ -268,6 +282,8 @@ struct GraphTracker {
     default_sink_name: Option<String>,
     /// The "default" metadata global, waiting to be bound by the main loop.
     pending_metadata: Option<GlobalObject<PropertiesBox>>,
+    /// PipeWire client ID -> process PID (resolved from Client globals).
+    client_pids: HashMap<u32, u32>,
 }
 
 impl GraphTracker {
@@ -290,6 +306,7 @@ impl GraphTracker {
             system_sinks: HashMap::new(),
             default_sink_name: None,
             pending_metadata: None,
+            client_pids: HashMap::new(),
         }
     }
 
@@ -304,6 +321,7 @@ impl GraphTracker {
             ObjectType::Link => self.add_link(global.id, props, shared),
             ObjectType::Factory => self.track_link_factory(props),
             ObjectType::Metadata => self.track_metadata(global, props),
+            ObjectType::Client => self.add_client(global, props),
             _ => {}
         }
     }
@@ -347,11 +365,59 @@ impl GraphTracker {
                     .insert(global.id, (node_name.to_string(), global.to_owned()));
             }
             "Stream/Output/Audio" => {
-                let info = AppNodeInfo::from_props(props);
+                let mut info = AppNodeInfo::from_props(props);
+                // Fallback: resolve via client.id -> client_pids for direct
+                // PipeWire clients where the node does not carry the PID.
+                if info.pid.is_none() || info.pid == Some(0) {
+                    if let Some(cid) = props.get("client.id").and_then(|v| v.parse::<u32>().ok()) {
+                        let p = self.client_pids.get(&cid).copied();
+                        if p.is_some_and(|pid| is_valid_pid(pid as i32)) {
+                            info.pid = p;
+                        }
+                    }
+                }
+                // Last resort: scan /proc by binary name (bridges cases
+                // where PipeWire runs under systemd and the node's client.id
+                // points to pipewire-pulse rather than the app).
+                if info.pid.is_none() || info.pid == Some(0) {
+                    info.pid = info.fallback_pid();
+                }
+                // Absolute last resort: match the node's application.name
+                // via /proc (works when PipeWire omits both
+                // application.process.id and application.process.binary
+                // but DOES set application.name on the stream node).
+                if info.pid.is_none() || info.pid == Some(0) {
+                    let name = props.get("application.name").unwrap_or("");
+                    if !name.is_empty() {
+                        info.pid = resolve_pid_by_name(name).map(|p| p as u32);
+                    }
+                }
                 self.target.learn(global.id, &info);
                 self.app_nodes.insert(global.id, info);
             }
             _ => {}
+        }
+    }
+
+    fn add_client(&mut self, _global: &GlobalObject<&DictRef>, props: &DictRef) {
+        let mut pid: Option<u32> = None;
+        if let Some(pid_str) = props.get("application.process.id") {
+            if let Ok(p) = pid_str.parse::<u32>() {
+                if p > 0 && is_valid_pid(p as i32) {
+                    pid = Some(p);
+                }
+            }
+        }
+        // When PipeWire does not set application.process.id on Client
+        // objects (e.g. KDE Plasma / Wayland), resolve via /proc name match.
+        if pid.is_none() {
+            let client_name = props.get("application.name").unwrap_or("");
+            if !client_name.is_empty() {
+                pid = resolve_pid_by_name(client_name).map(|p| p as u32);
+            }
+        }
+        if let Some(pid) = pid {
+            self.client_pids.insert(_global.id, pid);
         }
     }
 
@@ -439,6 +505,9 @@ impl GraphTracker {
     }
 
     fn is_linkable_app(&self, node: u32) -> bool {
+        if self.target.system_audio {
+            return true;
+        }
         self.app_nodes
             .get(&node)
             .is_some_and(|info| self.target.matches(node, info))
@@ -953,6 +1022,154 @@ fn stop_session(state: &mut CaptureState) {
 // Public module interface
 // ---------------------------------------------------------------------------
 
+/// Validates that a PID is a real running process by checking /proc/<pid>/comm.
+fn is_valid_pid(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    std::path::Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+/// Scans /proc for a running process whose `comm` or first `cmdline` token
+/// contains the given binary name.  Returns the PID when exactly one matching
+/// process is found.  This serves as a last-resort fallback when PipeWire
+/// properties do not carry an `application.process.id`.
+///
+/// On Flatpak/Snap the `application.process.id` on PipeWire objects may be
+/// the PID from an inner (namespace) PID namespace rather than the host PID.
+/// This function returns only processes visible in the caller's /proc, so it
+/// can bridge such cases when the outer PID is needed.
+fn resolve_pid_by_binary(binary: &str) -> Option<i32> {
+    if binary.is_empty() {
+        return None;
+    }
+    let binary_lower = binary.to_lowercase();
+    let mut candidates = Vec::new();
+    let dir = std::fs::read_dir("/proc").ok()?;
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let pid: i32 = match name_str.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if pid <= 0 {
+            continue;
+        }
+        // Check /proc/<pid>/comm for exact binary name
+        let comm_path = format!("/proc/{}/comm", pid);
+        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+            if comm.trim().to_lowercase() == binary_lower {
+                candidates.push(pid);
+                continue;
+            }
+        }
+        // Fallback: /proc/<pid>/cmdline first token
+        let cmdline_path = format!("/proc/{}/cmdline", pid);
+        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+            if let Some(first) = cmdline.split('\0').next() {
+                if let Some(base) = std::path::Path::new(first)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                {
+                    if base.to_lowercase() == binary_lower {
+                        candidates.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    if candidates.len() == 1 {
+        Some(candidates[0])
+    } else {
+        None
+    }
+}
+
+/// Scans /proc for a running process whose `comm` or `cmdline` matches the
+/// given application name (case-insensitive prefix match on the first word).
+///
+/// This is a fallback for PipeWire setups (e.g. KDE Plasma on Wayland) that
+/// do not set `application.process.id` on Client or Node objects.  Since
+/// `application.name` IS available on clients, we match it against /proc.
+///
+/// The first word of the name is used for matching (e.g. "Brave input" -> "Brave",
+/// "Chromium input" -> "Chromium", "WEBRTC VoiceEngine" -> "WEBRTC").
+fn resolve_pid_by_name(name: &str) -> Option<i32> {
+    if name.is_empty() {
+        return None;
+    }
+    // Use the first word of the application name as the search key.
+    // This handles cases like "Brave input", "Chromium input", etc.
+    // where the first word is the actual executable identity.
+    let search_key = name.split_whitespace().next()?;
+    if search_key.len() < 2 {
+        return None;
+    }
+    let search_lower = search_key.to_lowercase();
+
+    let mut candidates = Vec::new();
+    let dir = std::fs::read_dir("/proc").ok()?;
+    for entry in dir.flatten() {
+        let name_str = entry.file_name();
+        let name_str = match name_str.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let pid: i32 = match name_str.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if pid <= 0 {
+            continue;
+        }
+        // Check /proc/<pid>/comm for prefix match (case-insensitive)
+        let comm_path = format!("/proc/{}/comm", pid);
+        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+            let comm = comm.trim().to_lowercase();
+            if comm == search_lower || comm.starts_with(search_lower.as_str()) {
+                candidates.push(pid);
+                continue;
+            }
+        }
+        // Fallback: /proc/<pid>/cmdline first token
+        let cmdline_path = format!("/proc/{}/cmdline", pid);
+        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+            if let Some(first) = cmdline.split('\0').next() {
+                if let Some(base) = std::path::Path::new(first)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                {
+                    let base = base.to_lowercase();
+                    if base == search_lower
+                        || base.starts_with(&search_lower)
+                        || search_lower.starts_with(&base)
+                    {
+                        candidates.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    // Debug log to diagnose multi-match or no-match situations.
+    // Many apps (Brave, Spotify, Steam) spawn child processes with the
+    // same `comm` name, leading to multiple candidates.  In that case we
+    // accept the first (any) match — the PID is needed only for cgroup /
+    // session identification, and any process from the same app tree will
+    // belong to the same systemd user slice.
+    eprintln!(
+        "[resolve_pid_by_name] name=\"{}\" search_key=\"{}\" candidates={} -> {:?}",
+        name,
+        search_key,
+        candidates.len(),
+        candidates.first().copied()
+    );
+    candidates.into_iter().next()
+}
+
 pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
     pipewire::init();
 
@@ -971,18 +1188,145 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
     let apps = Rc::new(RefCell::new(Vec::<AudioApp>::new()));
     let apps_clone = apps.clone();
 
+    let client_pids = Rc::new(RefCell::new(HashMap::<u32, i32>::new()));
+    let client_pids_clone = client_pids.clone();
+
     let _reg_listener = registry.add_listener_local()
         .global(move |global| {
             if let Some(props) = global.props {
+                eprintln!(
+                    "[list-audio-apps] global id={} type={} media.class=\"{}\" app.process.id=\"{}\" client.id=\"{}\" app.name=\"{}\"",
+                    global.id,
+                    global.type_,
+                    props.get("media.class").unwrap_or("(none)"),
+                    props.get("application.process.id").unwrap_or("(none)"),
+                    props.get("client.id").unwrap_or("(none)"),
+                    props.get("application.name").unwrap_or("(none)"),
+                );
+
+                // Track PipeWire client PIDs. The registry emits Client
+                // globals before the Node globals that reference them, so by
+                // the time we see an audio node its owning client is known.
+                if global.type_ == ObjectType::Client {
+                    let client_name = props.get("application.name").unwrap_or("");
+
+                    if let Some(pid_str) = props.get("application.process.id") {
+                        if let Ok(pid) = pid_str.parse::<i32>() {
+                            if pid > 0 && is_valid_pid(pid) {
+                                eprintln!("[list-audio-apps]   -> client id={} name=\"{}\" has app.process.id={}, tracking", global.id, client_name, pid);
+                                client_pids_clone.borrow_mut().insert(global.id, pid);
+                            } else if pid > 0 {
+                                eprintln!("[list-audio-apps]   -> client id={} name=\"{}\" has app.process.id={} but PID invalid, will try name match", global.id, client_name, pid);
+                            } else {
+                                eprintln!("[list-audio-apps]   -> client id={} name=\"{}\" has pid=0, will try name match", global.id, client_name);
+                            }
+                        } else {
+                            eprintln!("[list-audio-apps]   -> client id={}: failed to parse pid=\"{}\", will try name match", global.id, pid_str);
+                        }
+                    } else {
+                        eprintln!("[list-audio-apps]   -> client id={} name=\"{}\": no app.process.id, will try name match", global.id, client_name);
+                    }
+                    // When PipeWire does not provide `application.process.id`
+                    // on Client objects (e.g. KDE Plasma / some Wayland setups),
+                    // resolve the PID by matching the client's `application.name`
+                    // against running processes via /proc.
+                    let already_mapped = client_pids_clone.borrow().contains_key(&global.id);
+                    if !already_mapped && !client_name.is_empty() {
+                        let pid = resolve_pid_by_name(client_name);
+                        eprintln!("[list-audio-apps]   -> resolved client id={} name=\"{}\" via /proc -> pid={:?}", global.id, client_name, pid);
+                        if let Some(pid) = pid {
+                            client_pids_clone.borrow_mut().insert(global.id, pid);
+                        }
+                    }
+                }
+
                 let media_class = props.get("media.class").unwrap_or("");
                 let app_name = props
                     .get("application.name")
                     .or_else(|| props.get("node.name"))
                     .or_else(|| props.get("media.name"))
                     .unwrap_or("");
+                let app_binary = props.get("application.process.binary").unwrap_or("");
 
-                let proc_id_str = props.get("application.process.id").unwrap_or("0");
-                let proc_id: i32 = proc_id_str.parse().unwrap_or(0);
+                let proc_id = if media_class == "Stream/Output/Audio" {
+                    eprintln!("[list-audio-apps]   -> processing Stream/Output/Audio node id={}, name=\"{}\", binary=\"{}\"", global.id, app_name, app_binary);
+                    let node_pid = props
+                        .get("application.process.id")
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .filter(|pid| *pid > 0);
+                    eprintln!(
+                        "[list-audio-apps]     tier1 (node app.process.id): {:?}",
+                        node_pid
+                    );
+                    // Accept it only if it passes /proc validation
+                    let mut pid = node_pid;
+                    if pid.is_some_and(|p| !is_valid_pid(p)) {
+                        eprintln!(
+                            "[list-audio-apps]     tier1 PID {} not in /proc, discarding",
+                            pid.unwrap()
+                        );
+                        pid = None;
+                    }
+                    // Fallback: resolve via client.id -> client_pids for
+                    // direct PipeWire clients.
+                    let pid = pid.or_else(|| {
+                        let cid = props
+                            .get("client.id")
+                            .and_then(|cid| cid.parse::<u32>().ok())?;
+                        eprintln!(
+                            "[list-audio-apps]     tier2: look up client.id={} in client_pids (size={})",
+                            cid,
+                            client_pids_clone.borrow().len()
+                        );
+                        let p = client_pids_clone.borrow().get(&cid).copied()?;
+                        eprintln!(
+                            "[list-audio-apps]     tier2: client.id={} -> pid={}, valid={}",
+                            cid,
+                            p,
+                            is_valid_pid(p)
+                        );
+                        if is_valid_pid(p) { Some(p) } else { None }
+                    });
+                    // Last resort: scan /proc by binary name.
+                    let pid = pid.or_else(|| {
+                        eprintln!(
+                            "[list-audio-apps]     tier3: /proc binary scan for \"{}\"",
+                            app_binary
+                        );
+                        let r = resolve_pid_by_binary(app_binary);
+                        eprintln!(
+                            "[list-audio-apps]     tier3: result={:?}",
+                            r
+                        );
+                        r
+                    });
+                    // Absolute last resort: match node's application.name
+                    // via /proc (works when PipeWire omits both
+                    // application.process.id and application.process.binary
+                    // but DOES set application.name on the stream node).
+                    let pid = pid.or_else(|| {
+                        eprintln!(
+                            "[list-audio-apps]     tier4: /proc name scan for \"{}\"",
+                            app_name
+                        );
+                        let r = resolve_pid_by_name(app_name);
+                        eprintln!(
+                            "[list-audio-apps]     tier4: result={:?}",
+                            r
+                        );
+                        r
+                    });
+                    eprintln!(
+                        "[list-audio-apps]     final pid={}",
+                        pid.unwrap_or(0)
+                    );
+                    pid.unwrap_or(0)
+                } else {
+                    props
+                        .get("application.process.id")
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .unwrap_or(0)
+                };
 
                 if media_class == "Stream/Output/Audio"
                     && !app_name.is_empty()
@@ -1025,22 +1369,42 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
     }
 
     let result = apps.borrow().clone();
+    eprintln!("[list-audio-apps] returning {} audio app(s):", result.len());
+    for app in &result {
+        eprintln!("[list-audio-apps]   id={} name=\"{}\" pid={}", app.id, app.name, app.process_id);
+    }
+    eprintln!("[list-audio-apps] client_pids map ({}/{} entries):", client_pids.borrow().len(), client_pids.borrow().len());
+    for (cid, pid) in client_pids.borrow().iter() {
+        eprintln!("[list-audio-apps]   client {} -> pid {}", cid, pid);
+    }
     Ok(result)
 }
 
-/// Starts exclusive audio capture of the target application: only the
-/// streams of the app identified by `target_app_id` (a PipeWire node ID, as
-/// reported by `list_audio_applications`) are linked into the virtual
-/// capture sink.
+/// Starts audio capture.
+///
+/// When `target_app_id` is a positive PipeWire node ID, only that
+/// application's audio is captured (exclusive-per-app).  When `target_app_id`
+/// is `-1`, every active `Stream/Output/Audio` node is linked into the virtual
+/// capture sink — i.e. system-wide audio (all applications the user hears).
 pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    let node_id = match target_app_id {
-        Either::B(n) if *n >= 0 => Some(*n as u32),
-        Either::A(s) => s.trim().parse::<u32>().ok(),
-        _ => None,
-    }
-    .ok_or_else(|| {
-        napi::Error::from_reason("A PipeWire node ID is required as the audio capture target")
-    })?;
+    let (node_id, system_audio) = match target_app_id {
+        Either::B(-1) => (None, true),
+        Either::B(n) if *n >= 0 => (Some(*n as u32), false),
+        Either::A(s) if s.trim() == "__system_audio__" => (None, true),
+        Either::A(s) => {
+            let n = s.trim().parse::<u32>().ok().ok_or_else(|| {
+                napi::Error::from_reason(
+                    "A PipeWire node ID or -1 (system audio) is required",
+                )
+            })?;
+            (Some(n), false)
+        }
+        _ => {
+            return Err(napi::Error::from_reason(
+                "A PipeWire node ID or -1 (system audio) is required",
+            ));
+        }
+    };
 
     let mut state_guard = CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
     let state = state_guard.get_or_insert_with(CaptureState::new);
@@ -1050,7 +1414,8 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
     stop_session(state);
 
     let target = TargetSpec {
-        node_id: Some(node_id),
+        node_id,
+        system_audio,
         ..TargetSpec::default()
     };
     let session = spawn_capture_session(target)?;
@@ -1060,7 +1425,7 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
         .ok()
         .and_then(|s| s.sink_id)
         .map(|id| id as i32);
-    state.target_app_id = Some(node_id as i32);
+    state.target_app_id = node_id.map(|id| id as i32);
     state.active_links.clear();
     state.is_active = true;
     state.session = Some(session);
@@ -1162,8 +1527,19 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
 /// a `MediaStreamTrack.label` from `getDisplayMedia` on Wayland). Returns
 /// `None` when no reasonable match is found.
 pub fn resolve_audio_by_name(label: &str) -> Option<AudioApp> {
+    eprintln!("[resolve-by-name] label=\"{}\"", label);
     let apps = list_audio_applications().ok()?;
-    find_best_audio_match(&apps, label)
+    eprintln!("[resolve-by-name] audio apps ({}):", apps.len());
+    for app in &apps {
+        eprintln!("[resolve-by-name]   name=\"{}\" id={} pid={}", app.name, app.id, app.process_id);
+    }
+    let result = find_best_audio_match(&apps, label);
+    if let Some(ref app) = result {
+        eprintln!("[resolve-by-name]   MATCHED -> \"{}\" (id={}, pid={})", app.name, app.id, app.process_id);
+    } else {
+        eprintln!("[resolve-by-name]   no match for \"{}\"", label);
+    }
+    result
 }
 
 fn find_best_audio_match(apps: &[AudioApp], query: &str) -> Option<AudioApp> {
@@ -1204,4 +1580,156 @@ fn find_best_audio_match(apps: &[AudioApp], query: &str) -> Option<AudioApp> {
                 || first_word.contains(&name_lower)
         })
         .cloned()
+}
+
+/// Extracts a potential application-name string from a PipeWire node's
+/// properties.  Checks several property keys that xdg-desktop-portal
+/// implementations (GNOME, KDE, …) may set on the screencast stream.
+fn portal_window_name(props: &DictRef) -> Option<String> {
+    // Primary: well-known portal screencast metadata keys
+    for key in &[
+        "portal.screencast.application",
+        "portal.screencast.title",
+        "window.name",
+    ] {
+        if let Some(v) = props.get(key).filter(|v| !v.is_empty()) {
+            return Some(v.to_string());
+        }
+    }
+
+    // Secondary: PipeWire-standard node metadata (may be the portal's own
+    // name or the captured application's name, depending on the DE).
+    for key in &["application.name", "node.name", "media.name"] {
+        if let Some(v) = props.get(key).filter(|v| !v.is_empty()) {
+            // Skip the portal's own identity – it does not identify the
+            // captured window.
+            if v != "xdg-desktop-portal" && !v.contains("pipewire") {
+                return Some(v.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Scans the PipeWire registry for a video/screen-capture node that was
+/// created by xdg-desktop-portal and extracts the captured window's
+/// application name, then matches it against the active audio application
+/// list.  Returns `None` when no capture node is found, its properties
+/// carry no meaningful name, or no audio app matches.
+///
+/// Called **after** `getDisplayMedia()` (Wayland portal) so the portal's
+/// PipeWire stream node should be present in the registry.
+pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
+    pipewire::init();
+
+    let main_loop = pipewire::main_loop::MainLoopRc::new(None).ok()?;
+    let context = pipewire::context::ContextRc::new(&main_loop, None).ok()?;
+    let core = context.connect(None).ok()?;
+    let registry = core.get_registry().ok()?;
+
+    eprintln!("[pw-introspect] scanning PipeWire registry for portal capture nodes");
+
+    let capture_names = Rc::new(RefCell::new(Vec::<String>::new()));
+    let capture_names_clone = capture_names.clone();
+
+    let all_globals = Rc::new(RefCell::new(Vec::<String>::new()));
+    let all_globals_clone = all_globals.clone();
+
+    let _reg_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            let props = match global.props {
+                Some(props) => props,
+                None => {
+                    eprintln!("[pw-introspect]   global id={} type={}: NO PROPS", global.id, global.type_);
+                    return;
+                },
+            };
+            let media_class = props.get("media.class").unwrap_or("(none)");
+            let pid = props.get("application.process.id").unwrap_or("(none)");
+            let node_name = props.get("node.name").unwrap_or("(none)");
+            let app_name = props.get("application.name").unwrap_or("(none)");
+
+            eprintln!(
+                "[pw-introspect]   global id={} type={} media.class=\"{}\" node.name=\"{}\" application.name=\"{}\" app.pid={}",
+                global.id, global.type_, media_class, node_name, app_name, pid
+            );
+
+            // Log ALL properties for video/screencast nodes
+            if media_class.starts_with("Video/") || media_class.starts_with("Stream/Output/Video") {
+                let mut log = format!("[pw-introspect]   -> ALL PROPS for id={}:", global.id);
+                for (k, v) in props.iter() {
+                    log.push_str(&format!(" {}={}", k, v));
+                }
+                eprintln!("{}", log);
+
+                if let Some(name) = portal_window_name(props) {
+                    let mut list = capture_names_clone.borrow_mut();
+                    if !list.contains(&name) {
+                        eprintln!("[pw-introspect]   -> extracted name: \"{}\"", name);
+                        list.push(name);
+                    }
+                } else {
+                    eprintln!("[pw-introspect]   -> portal_window_name returned None for this video node");
+                }
+            }
+
+            let mut gl = all_globals_clone.borrow_mut();
+            gl.push(format!("id={} type={} class={}", global.id, global.type_, media_class));
+        })
+        .register();
+
+    // Pump the loop briefly so the registry listener fires.
+    let done = Rc::new(RefCell::new(false));
+    let done_clone = done.clone();
+    let pending = core.sync(0).ok()?;
+
+    let main_loop_weak = main_loop.downgrade();
+    let _core_listener = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == pipewire::core::PW_ID_CORE && seq == pending {
+                *done_clone.borrow_mut() = true;
+                if let Some(ml) = main_loop_weak.upgrade() {
+                    ml.quit();
+                }
+            }
+        })
+        .register();
+
+    let mut iterations = 0;
+    while !*done.borrow() && iterations < 100 {
+        main_loop
+            .loop_()
+            .iterate(pipewire::loop_::Timeout::Finite(std::time::Duration::from_millis(10)));
+        iterations += 1;
+    }
+
+    let global_list = all_globals.borrow();
+    eprintln!("[pw-introspect] registry scan complete ({} global(s))", global_list.len());
+    for g in global_list.iter() {
+        eprintln!("[pw-introspect]   found: {}", g);
+    }
+
+    let names = capture_names.borrow().clone();
+    eprintln!("[pw-introspect] extracted capture names: {:?}", names);
+
+    let apps = list_audio_applications().ok()?;
+    eprintln!("[pw-introspect] audio apps ({}):", apps.len());
+    for app in &apps {
+        eprintln!("[pw-introspect]   name=\"{}\" id={} pid={}", app.name, app.id, app.process_id);
+    }
+
+    for name in &names {
+        eprintln!("[pw-introspect] trying to match name=\"{}\" against audio apps...", name);
+        if let Some(app) = find_best_audio_match(&apps, name) {
+            eprintln!("[pw-introspect]   MATCHED -> \"{}\" (id={}, pid={})", app.name, app.id, app.process_id);
+            return Some(app);
+        }
+        eprintln!("[pw-introspect]   no match for \"{}\"", name);
+    }
+
+    eprintln!("[pw-introspect] all names exhausted, returning None");
+    None
 }

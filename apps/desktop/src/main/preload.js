@@ -8,4 +8,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
   clipboardWriteText: (text) => ipcRenderer.invoke('clipboard-write-text', text),
   resolveAudioSource: (opts) => ipcRenderer.invoke('resolve-audio-source', opts),
+  getCaptureContext: () => ipcRenderer.invoke('get-capture-context'),
 });

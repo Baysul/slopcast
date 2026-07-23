@@ -1,8 +1,19 @@
-import { app, BrowserWindow, ipcMain, desktopCapturer, session, clipboard } from 'electron';
+import { app, BrowserWindow, ipcMain, desktopCapturer, session, clipboard, Menu } from 'electron';
+import { execFileSync } from 'child_process';
 import path from 'path';
 import * as native from '@screen-share/native-rust';
 
 let mainWindow: BrowserWindow | null = null;
+let lastCapturedSourceName: string | null = null;
+
+interface CaptureContext {
+  de: 'unknown' | 'kde' | 'gnome';
+  mediaName: string | null;
+  sourceType: 'monitor' | 'window' | 'unknown';
+  videoNodeCount: number;
+}
+
+let lastCaptureContext: CaptureContext | null = null;
 
 const isLinux = process.platform === 'linux';
 // Wayland sessions must capture through xdg-desktop-portal: Chromium's own
@@ -29,6 +40,9 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+
+  Menu.setApplicationMenu(null);
+  mainWindow.maximize();
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
@@ -100,6 +114,8 @@ app.whenReady().then(() => {
         }
         // Prefer a window source: this app shares windows, not full screens.
         const source = sources.find((s) => s.id.startsWith('window')) ?? sources[0];
+        lastCapturedSourceName = source.name;
+        console.log(`[setDisplayMediaRequestHandler] storing source name="${source.name}" (id=${source.id})`);
         callback({ video: source });
       })
       .catch((err) => {
@@ -155,68 +171,174 @@ app.whenReady().then(() => {
   /**
    * Auto-detects the audio source for a given window selection.
    *
-   * Two resolution strategies:
-   * - `sourceId` (X11):  Extract the X11 window ID from `"window:12345"`,
-   *   then use Rust's `resolveAudioAppForX11Window` to map it to a PID via
-   *   `_NET_WM_PID` and find the matching PipeWire audio application.
-   * - `trackLabel` (Wayland):  Pass the `MediaStreamTrack.label` from
-   *   `getDisplayMedia` to Rust's `resolveAudioAppByName` for fuzzy matching
-   *   against active audio application names.
+   * Resolution strategies by platform (each falls through to the next):
+   *
+   * **Wayland:**
+   *   1. PipeWire introspection — scan the registry for the portal's
+   *      Video/Source node and extract the captured window's identity
+   *      from its `portal.screencast.*` / `window.name` properties.
+   *   2. Name hint — fuzzy-match `opts.nameHint` (the track label from
+   *      `getDisplayMedia`) against active audio app names via Rust.
+   *
+   * **X11:**
+   *   1. `_NET_WM_PID` — map the X11 window ID (from `opts.sourceId`)
+   *      to a PID and find the matching PipeWire audio application.
+   *   2. Name hint — fuzzy-match `opts.nameHint` (the source name from
+   *      `desktopCapturer`) against active audio app names via Rust.
    */
   ipcMain.handle(
     'resolve-audio-source',
     async (
       _event,
-      opts: { sourceId?: string; trackLabel?: string }
+      opts: { sourceId?: string; nameHint?: string }
     ): Promise<native.AudioApp | null> => {
-      // --- X11: window ID → PID → audio app ---
-      if (opts.sourceId && opts.sourceId.startsWith('window:')) {
+      let app: native.AudioApp | null = null;
+
+      if (isWayland) {
+        // ---- Layer 1: PipeWire introspection ----
+        try {
+          app = native.resolveAudioAppForCapturedWindow();
+          if (app) {
+            console.log(
+              `[resolve-audio-source] Wayland PW-introspect → "${app.name}" (PID ${app.processId})`
+            );
+            return app;
+          }
+        } catch (err) {
+          console.error('resolve-audio-source Wayland introspection error:', err);
+        }
+
+        // ---- Layer 2: Name matching via Rust ----
+        const nameHint = opts.nameHint || lastCapturedSourceName;
+        if (nameHint) {
+          try {
+            app = native.resolveAudioAppByName(nameHint);
+            if (app) {
+              console.log(
+                `[resolve-audio-source] Wayland name-match "${nameHint}" → "${app.name}"`
+              );
+              return app;
+            }
+          } catch (err) {
+            console.error('resolve-audio-source Wayland name-match error:', err);
+          }
+        }
+
+        // ---- Layer 3: pw-dump subprocess (get full node properties) ----
+        try {
+          const output = execFileSync('pw-dump', [], {
+            timeout: 2000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          const state = JSON.parse(output.toString());
+          let matchApp: native.AudioApp | null = null;
+          const ctx: CaptureContext = {
+            de: 'unknown',
+            mediaName: null,
+            sourceType: 'unknown',
+            videoNodeCount: 0,
+          };
+
+          for (const obj of state) {
+            const info = obj.info;
+            const props: Record<string, string> = info?.props ?? {};
+            const mc: string = props['media.class'] ?? '';
+            if (mc.startsWith('Stream/Output/Video')) {
+              ctx.videoNodeCount++;
+              const mn: string = props['media.name'] ?? '';
+              ctx.mediaName = mn;
+              console.log(
+                `[resolve-audio-source] pw-dump vid node id=${obj.id}: media.name="${mn}"`
+              );
+
+              if (mn.startsWith('kwin-screencast-')) {
+                ctx.de = 'kde';
+                const suffix = mn.slice('kwin-screencast-'.length);
+                // Monitor identifiers look like "DP-3", "HDMI-1", "eDP-1", etc.
+                ctx.sourceType = /^[A-Z]+-\d+$/.test(suffix) ? 'monitor' : 'window';
+
+                // On KDE window capture, try matching the suffix (window hex id)
+                // as a last resort — it likely won't match, but no harm trying.
+                if (ctx.sourceType === 'window' && suffix) {
+                  try {
+                    matchApp = native.resolveAudioAppByName(suffix);
+                  } catch (_) {}
+                }
+              } else if (props['portal.screencast.application']) {
+                ctx.de = 'gnome';
+              }
+            }
+          }
+
+          lastCaptureContext = ctx;
+          console.log(
+            `[resolve-audio-source] Wayland pw-dump: de=${ctx.de} sourceType=${ctx.sourceType} mediaName="${ctx.mediaName}" videoNodes=${ctx.videoNodeCount}`
+          );
+
+          if (matchApp) {
+            console.log(
+              `[resolve-audio-source] pw-dump name-match → "${matchApp.name}"`
+            );
+            return matchApp;
+          }
+        } catch (err) {
+          console.error('[resolve-audio-source] pw-dump fallback error:', err);
+          lastCaptureContext = {
+            de: 'unknown',
+            mediaName: null,
+            sourceType: 'unknown',
+            videoNodeCount: 0,
+          };
+        }
+
+        console.log(
+          `[resolve-audio-source] Wayland: no match (introspect=null, nameHint="${opts.nameHint ?? ''}", lastSource="${lastCapturedSourceName ?? ''}")`
+        );
+        return null;
+      }
+
+      // ---- X11 Layer 1: _NET_WM_PID ----
+      if (opts.sourceId?.startsWith('window:')) {
         const windowIdStr = opts.sourceId.split(':')[1];
         const windowId = parseInt(windowIdStr, 10);
-        if (isNaN(windowId)) {
-          console.warn('resolve-audio-source: invalid window ID:', opts.sourceId);
-          return null;
+        if (!isNaN(windowId)) {
+          try {
+            app = native.resolveAudioAppForX11Window(windowId);
+            if (app) {
+              console.log(
+                `[resolve-audio-source] X11 PID-match: window ${windowId} → "${app.name}"`
+              );
+              return app;
+            }
+          } catch (err) {
+            console.error('resolve-audio-source X11 error:', err);
+          }
         }
+      }
+
+      // ---- X11 Layer 2: Name matching via Rust ----
+      if (opts.nameHint) {
         try {
-          const app = native.resolveAudioAppForX11Window(windowId);
+          app = native.resolveAudioAppByName(opts.nameHint);
           if (app) {
             console.log(
-              `[resolve-audio-source] X11 match: window ${windowId} → PID ${app.processId} → "${app.name}"`
+              `[resolve-audio-source] X11 name-match "${opts.nameHint}" → "${app.name}"`
             );
             return app;
           }
-          console.log(
-            `[resolve-audio-source] X11 window ${windowId}: no audio app found for PID`
-          );
         } catch (err) {
-          console.error('resolve-audio-source X11 error:', err);
+          console.error('resolve-audio-source X11 name-match error:', err);
         }
-        return null;
       }
 
-      // --- Wayland: track label → name matching → audio app ---
-      if (opts.trackLabel) {
-        try {
-          const app = native.resolveAudioAppByName(opts.trackLabel);
-          if (app) {
-            console.log(
-              `[resolve-audio-source] Wayland match: label "${opts.trackLabel}" → "${app.name}"`
-            );
-            return app;
-          }
-          console.log(
-            `[resolve-audio-source] Wayland: no match for label "${opts.trackLabel}"`
-          );
-        } catch (err) {
-          console.error('resolve-audio-source Wayland error:', err);
-        }
-        return null;
-      }
-
-      console.warn('resolve-audio-source: no sourceId or trackLabel provided');
+      console.log(
+        `[resolve-audio-source] X11: no match (sourceId="${opts.sourceId ?? ''}", nameHint="${opts.nameHint ?? ''}")`
+      );
       return null;
     }
   );
+
+  ipcMain.handle('get-capture-context', () => lastCaptureContext);
 
   // navigator.clipboard is unreliable in Electron without a secure context +
   // user gesture; write through the main-process clipboard instead.

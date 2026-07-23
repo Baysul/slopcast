@@ -4,7 +4,8 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "dev": "napi build --platform --watch",
+    "prepare": "napi build --platform --release",
+    "dev": "napi build --platform",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform"
   },

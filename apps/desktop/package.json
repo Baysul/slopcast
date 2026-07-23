@@ -7,7 +7,7 @@
   "private": true,
   "main": "dist/main/index.js",
   "scripts": {
-    "predev": "pnpm --filter @screen-share/native-rust build",
+    "predev": "pnpm --filter @screen-share/native-rust build:debug",
     "prebuild": "pnpm --filter @screen-share/native-rust build",
     "dev": "pnpm build && electron .",
     "build": "tsc -p tsconfig.json && cp src/main/preload.js dist/main/preload.js && vite build",

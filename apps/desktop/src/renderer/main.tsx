@@ -11,12 +11,19 @@ declare global {
       stopAudioCapture: () => Promise<boolean>;
       getDesktopSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
       clipboardWriteText: (text: string) => Promise<boolean>;
-      resolveAudioSource: (opts: {
+      resolveAudioSource: (opts?: {
         sourceId?: string;
-        trackLabel?: string;
       }) => Promise<{ id: number; name: string; processId: number } | null>;
+      getCaptureContext: () => Promise<CaptureContext | null>;
     };
   }
+}
+
+interface CaptureContext {
+  de: 'unknown' | 'kde' | 'gnome';
+  mediaName: string | null;
+  sourceType: 'monitor' | 'window' | 'unknown';
+  videoNodeCount: number;
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -69,31 +76,6 @@ const findCaptureAudioDevice = async (): Promise<MediaDeviceInfo | null> => {
   );
 };
 
-/**
- * Fuzzy-matches an audio app name against a query string (e.g. a window
- * title or track label). Returns the best match or null.
- */
-const findBestAudioMatch = (apps: AudioApp[], query: string): AudioApp | null => {
-  const q = query.toLowerCase();
-
-  let best = apps.find((a) => a.name.toLowerCase() === q);
-  if (best) return best;
-
-  best = apps.find((a) => q.includes(a.name.toLowerCase()));
-  if (best) return best;
-
-  best = apps.find((a) => a.name.toLowerCase().includes(q));
-  if (best) return best;
-
-  const firstWord = q.split(/\s+/)[0];
-  if (firstWord) {
-    best = apps.find((a) => a.name.toLowerCase().includes(firstWord) || firstWord.includes(a.name.toLowerCase()));
-    if (best) return best;
-  }
-
-  return null;
-};
-
 export const PresenterApp: React.FC = () => {
   const [roomCode, setRoomCode] = useState<string>('');
   const [shareUrl, setShareUrl] = useState<string>('');
@@ -108,6 +90,8 @@ export const PresenterApp: React.FC = () => {
   const [statusMsg, setStatusMsg] = useState<string>('Ready to create room');
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
   const [spectatorCount, setSpectatorCount] = useState(0);
+  const [captureContext, setCaptureContext] = useState<CaptureContext | null>(null);
+  const [autoDetectFailed, setAutoDetectFailed] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -175,16 +159,25 @@ export const PresenterApp: React.FC = () => {
     }
   };
 
-  const attemptAutoResolve = async (opts: {
+  const attemptAutoResolve = async (opts?: {
     sourceId?: string;
-    trackLabel?: string;
+    nameHint?: string;
   }): Promise<AudioApp | null> => {
     if (!window.electronAPI) return null;
 
-    let app = await window.electronAPI.resolveAudioSource(opts);
+    // Layer 1: IPC (Rust — PID match / PW introspect / Rust name match)
+    let app = await window.electronAPI.resolveAudioSource(opts ?? {});
 
-    if (!app && opts.trackLabel && audioApps.length > 0) {
-      app = findBestAudioMatch(audioApps, opts.trackLabel);
+    // Layer 2: renderer-side name matching on the cached audio apps list.
+    // Fast fallback when PipeWire is slow to enumerate or the PID/introspect
+    // layers returned nothing but we have a credible window-title hint.
+    if (!app && opts?.nameHint && audioApps.length > 0) {
+      app = findBestAudioMatch(audioApps, opts.nameHint);
+    }
+
+    // Layer 3: single audio app — safe to assume it's the target.
+    if (!app && audioApps.length === 1) {
+      app = audioApps[0];
     }
 
     if (app) {
@@ -193,6 +186,31 @@ export const PresenterApp: React.FC = () => {
       setStatusMsg(`Auto-detected audio source: ${app.name}`);
       return app;
     }
+    return null;
+  };
+
+  const findBestAudioMatch = (apps: AudioApp[], query: string): AudioApp | null => {
+    const q = query.toLowerCase();
+
+    let best = apps.find((a) => a.name.toLowerCase() === q);
+    if (best) return best;
+
+    best = apps.find((a) => q.includes(a.name.toLowerCase()));
+    if (best) return best;
+
+    best = apps.find((a) => a.name.toLowerCase().includes(q));
+    if (best) return best;
+
+    const firstWord = q.split(/\s+/)[0];
+    if (firstWord) {
+      best = apps.find(
+        (a) =>
+          a.name.toLowerCase().includes(firstWord) ||
+          firstWord.includes(a.name.toLowerCase())
+      );
+      if (best) return best;
+    }
+
     return null;
   };
 
@@ -541,20 +559,62 @@ export const PresenterApp: React.FC = () => {
       let targetAudioId: number | null = selectedAudioAppId;
 
       if (targetAudioId === null) {
-        const opts = isWayland
-          ? { trackLabel: videoTrack.label }
-          : { sourceId: selectedSourceId };
-        const app = await attemptAutoResolve(opts);
+        const app = await attemptAutoResolve(
+          isWayland
+            ? { nameHint: videoTrack.label }
+            : { sourceId: selectedSourceId, nameHint: videoTrack.label }
+        );
         targetAudioId = app?.id ?? null;
       }
 
       if (targetAudioId === null) {
-        setStatusMsg('Could not detect audio source. Select one manually.');
-        videoTrack.stop();
-        return;
+        setAutoDetectFailed(true);
+        // Query capture context from main process (populated by pw-dump)
+        let ctx: CaptureContext | null = null;
+        if (isWayland && window.electronAPI?.getCaptureContext) {
+          ctx = await window.electronAPI.getCaptureContext();
+          setCaptureContext(ctx);
+        }
+
+        if (isWayland && ctx?.de === 'kde') {
+          // On KDE, fall back to system-wide audio capture (link all audio
+          // output nodes to the virtual sink) since window identity is not
+          // available in PipeWire streams.
+          setStatusMsg('Auto-detected system audio (KDE mode)');
+          setAutoDetectFailed(false);
+          targetAudioId = -1;
+        } else if (isWayland) {
+          setStatusMsg(
+            'No audio source detected — sharing video only. Select an audio app below and ' +
+              'restart the screenshare to include audio.'
+          );
+        } else {
+          setStatusMsg(
+            'No audio source detected — sharing video only. Select an audio source from the panel and restart to add audio.'
+          );
+        }
+      } else {
+        setAutoDetectFailed(false);
       }
 
-      const audioTrack = await captureAudioTrack(targetAudioId);
+      let audioTrack: MediaStreamTrack | null = null;
+      if (targetAudioId !== null) {
+        try {
+          audioTrack = await captureAudioTrack(targetAudioId);
+          if (targetAudioId === -1) {
+            setStatusMsg('System audio capture started (KDE fallback)');
+          }
+        } catch (err) {
+          console.error('Audio capture failed (continuing video-only):', err);
+          if (targetAudioId === -1) {
+            setStatusMsg('System audio unavailable — sharing video only');
+          } else {
+            setStatusMsg(
+              'Selected audio source unavailable — sharing video only'
+            );
+          }
+        }
+      }
 
       const tracks = audioTrack ? [videoTrack, audioTrack] : [videoTrack];
       const stream = new MediaStream(tracks);
@@ -832,13 +892,21 @@ export const PresenterApp: React.FC = () => {
           </h2>
 
           {isWayland ? (
-            <div className="text-xs text-gray-400 space-y-2 py-2">
-              <p>
+            <div className="text-xs space-y-2 py-2">
+              <p className="text-gray-400">
                 Your desktop is running Wayland. When you start the screenshare, the system's own
                 dialog (xdg-desktop-portal) will let you pick the window to share.
               </p>
+              {captureContext?.de === 'kde' && (
+                <p className="text-amber-300/80 bg-amber-950/30 border border-amber-700/30 rounded p-2">
+                  KDE Plasma detected — window identity is not available in PipeWire streams,
+                  so audio auto-detection is limited. If auto-detection fails, select an audio
+                  app manually from the panel above.
+                </p>
+              )}
               <p className="text-gray-500">
-                Only the window you pick there is streamed — nothing else on your screen.
+                Only the window you pick there is streamed — the correct audio source is
+                auto-detected (PipeWire introspection + name matching).
               </p>
             </div>
           ) : (
@@ -850,7 +918,7 @@ export const PresenterApp: React.FC = () => {
                     key={source.id}
                     onClick={() => {
                       setSelectedSourceId(source.id);
-                      void attemptAutoResolve({ sourceId: source.id });
+                      void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
                     }}
                     className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-2 ${
                       isSelected
@@ -867,6 +935,19 @@ export const PresenterApp: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {autoDetectFailed && captureContext?.de === 'kde' && (
+            <div className="bg-amber-950/40 border border-amber-600/30 rounded-lg p-3 space-y-1">
+              <p className="text-xs font-semibold text-amber-300">
+                ⚠ KDE Audio Auto-Detection Failed
+              </p>
+              <p className="text-[11px] text-amber-400/70">
+                KDE Plasma does not include window identity in PipeWire screencast streams.
+                Select an audio app from the panel above, then stop and restart the screenshare
+                to include audio.
+              </p>
             </div>
           )}
 

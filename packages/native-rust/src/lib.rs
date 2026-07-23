@@ -132,6 +132,22 @@ pub fn resolve_audio_app_for_x11_window(window_id: i32) -> napi::Result<Option<A
     }
 }
 
+/// Scans the PipeWire registry for a screen-capture video node created by
+/// xdg-desktop-portal and extracts the captured window's application name
+/// to auto-detect the correct audio source.  Only meaningful on Wayland;
+/// returns `None` on other platforms.
+#[napi]
+pub fn resolve_audio_app_for_captured_window() -> napi::Result<Option<AudioApp>> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(crate::linux::resolve_audio_by_captured_window())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(None)
+    }
+}
+
 /// Finds the audio application whose name best matches the given label
 /// (e.g. a `MediaStreamTrack.label` from `getDisplayMedia` on Wayland).
 /// Works on all platforms by matching against the current audio app list.
