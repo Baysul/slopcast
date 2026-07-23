@@ -1,0 +1,24 @@
+appId: com.screenshare.desktop
+productName: ScreenShare
+directories:
+  buildResources: resources
+  output: release
+files:
+  - dist/**/*
+  - package.json
+  - "!node_modules/.bin"
+  - "!node_modules/.cache"
+mac:
+  category: public.app-category.utilities
+  target:
+    - dmg
+  extendInfo:
+    NSAudioCaptureUsageDescription: "ScreenShare needs to capture system audio for screensharing."
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Utility

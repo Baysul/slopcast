@@ -1,0 +1,11 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  getPlatformInfo: () => ipcRenderer.invoke('get-platform-info'),
+  getAudioApps: () => ipcRenderer.invoke('get-audio-apps'),
+  startAudioCapture: (targetId) => ipcRenderer.invoke('start-audio-capture', targetId),
+  stopAudioCapture: () => ipcRenderer.invoke('stop-audio-capture'),
+  getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
+  clipboardWriteText: (text) => ipcRenderer.invoke('clipboard-write-text', text),
+  resolveAudioSource: (opts) => ipcRenderer.invoke('resolve-audio-source', opts),
+});

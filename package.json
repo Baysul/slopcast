@@ -1,0 +1,21 @@
+{
+  "name": "screen-share-monorepo",
+  "desktopName": "screen-share-app",
+  "author": "Basil <parsley@duck.com>",
+  "homepage": "https://github.com/npm/example#readme",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "pnpm --parallel --recursive dev",
+    "dev:desktop": "pnpm --filter desktop dev",
+    "dev:web": "pnpm --filter web dev",
+    "dev:server": "pnpm --filter server dev",
+    "build": "pnpm --recursive build",
+    "build:desktop": "pnpm --filter desktop build",
+    "package:desktop": "pnpm --filter desktop package",
+    "dist:desktop": "pnpm --filter desktop dist",
+    "dist:desktop:linux": "pnpm --filter desktop dist:linux",
+    "dist:desktop:mac": "pnpm --filter desktop dist:mac",
+    "dist:desktop:win": "pnpm --filter desktop dist:win"
+  }
+}
