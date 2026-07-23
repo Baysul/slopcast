@@ -292,10 +292,14 @@ impl GraphTracker {
     }
 
     fn add_client(&mut self, _global: &GlobalObject<&DictRef>, props: &DictRef) {
-        let pid = props
-            .get("application.process.id")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|p| *p > 0 && is_valid_pid(*p as i32))
+        let pid = client_sec_pid(props)
+            .map(|p| p as u32)
+            .or_else(|| {
+                props
+                    .get("application.process.id")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|p| *p > 0 && is_valid_pid(*p as i32))
+            })
             .or_else(|| {
                 let name = props.get("application.name").unwrap_or("");
                 if !name.is_empty() {
@@ -711,12 +715,9 @@ fn run_capture_session(
         let layout = desired_layout.borrow().clone();
         if layout != sink_layout {
             destroy_capture_sink(&core, &tracker, &mut sink_proxy, &shared);
-            match create_capture_sink(&core, &layout) {
-                Ok(node) => {
-                    sink_proxy = Some(node);
-                    sink_layout = layout;
-                }
-                Err(_) => {}
+            if let Ok(node) = create_capture_sink(&core, &layout) {
+                sink_proxy = Some(node);
+                sink_layout = layout;
             }
         }
     }
@@ -826,6 +827,38 @@ fn stop_session(state: &mut CaptureState) {
 
 fn is_valid_pid(pid: i32) -> bool {
     pid > 0 && std::path::Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+/// Returns true when the process is one of the PipeWire daemons and
+/// therefore never a capturable application.
+fn is_pipewire_daemon(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{}/comm", pid))
+        .map(|c| matches!(c.trim(), "pipewire" | "pipewire-pulse" | "wireplumber"))
+        .unwrap_or(false)
+}
+
+/// Resolve the process ID of a PipeWire client from its registry
+/// properties using the server-authenticated `pipewire.sec.pid` key.
+///
+/// `pipewire.sec.pid` is set by the server from the client's socket
+/// credentials, so it is always present in registry `global` events
+/// (unlike `application.process.id`, which is only visible on a bound
+/// Client proxy) and is already translated into the host PID namespace.
+///
+/// PulseAudio-protocol clients are proxied by the `pipewire-pulse`
+/// server, so their `pipewire.sec.pid` points at the daemon rather than
+/// the application; those are rejected here and resolved through the
+/// stream node's own properties instead.
+fn client_sec_pid(props: &DictRef) -> Option<i32> {
+    let pid = props
+        .get("pipewire.sec.pid")
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|pid| is_valid_pid(*pid))?;
+    if is_pipewire_daemon(pid) {
+        None
+    } else {
+        Some(pid)
+    }
 }
 
 fn resolve_pid_by_binary(binary: &str) -> Option<i32> {
@@ -955,10 +988,13 @@ fn collect_client_pids(
             if global.type_ == ObjectType::Client {
                 let name = props.get("application.name").unwrap_or("");
                 let client_name = name;
-                let pid = props
-                    .get("application.process.id")
-                    .and_then(|v| v.parse::<i32>().ok())
-                    .filter(|pid| *pid > 0 && is_valid_pid(*pid))
+                let pid = client_sec_pid(props)
+                    .or_else(|| {
+                        props
+                            .get("application.process.id")
+                            .and_then(|v| v.parse::<i32>().ok())
+                            .filter(|pid| *pid > 0 && is_valid_pid(*pid))
+                    })
                     .or_else(|| {
                         if !client_name.is_empty() {
                             resolve_pid_by_name(client_name)
