@@ -10,10 +10,11 @@ export default {
         'card-foreground': '#f9fafb',
         popover: '#111827',
         'popover-foreground': '#f9fafb',
-        primary: {
-          DEFAULT: '#6366f1',
-          foreground: '#ffffff',
-          hover: '#4f46e5',
+        safelight: {
+          DEFAULT: '#C4804A',
+          hover: '#B0703E',
+          foreground: '#090D16',
+          glow: 'rgba(196, 128, 74, 0.15)',
         },
         secondary: {
           DEFAULT: '#1f2937',
@@ -28,12 +29,16 @@ export default {
           foreground: '#f3f4f6',
         },
         destructive: {
-          DEFAULT: '#ef4444',
+          DEFAULT: '#e11d48',
           foreground: '#ffffff',
         },
         border: '#1f2937',
         input: '#374151',
-        ring: '#6366f1',
+        ring: '#C4804A',
+        'body-text': '#d1d5db',
+      },
+      fontFamily: {
+        display: ['system-ui', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'sans-serif'],
       },
     },
   },

@@ -7,7 +7,6 @@ import {
   Maximize,
   Minimize,
   RefreshCw,
-  VideoOff,
   Radio,
 } from 'lucide-react';
 import { AudioVisualizer } from './AudioVisualizer';
@@ -18,6 +17,7 @@ interface VideoPlayerProps {
   isLive: boolean;
   statusText?: string;
   onResync?: () => void;
+  fullBleed?: boolean;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -25,6 +25,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   isLive,
   statusText,
   onResync,
+  fullBleed,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -34,9 +35,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [volume, setVolume] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hasVideoTrack, setHasVideoTrack] = useState(false);
-  const [showControls, setShowControls] = useState(true);
-
-  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -103,103 +101,59 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
-  const handleMouseMove = () => {
-    setShowControls(true);
-    if (controlsTimeoutRef.current) {
-      clearTimeout(controlsTimeoutRef.current);
-    }
-    controlsTimeoutRef.current = setTimeout(() => {
-      if (isPlaying && isLive) {
-        setShowControls(false);
-      }
-    }, 3000);
-  };
-
   return (
     <div
       ref={containerRef}
-      onMouseMove={handleMouseMove}
-      onMouseLeave={() => isPlaying && isLive && setShowControls(false)}
-      className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden border border-gray-800 shadow-2xl group select-none flex items-center justify-center"
+      className={`relative w-full bg-black select-none flex items-center justify-center group ${
+        fullBleed ? 'h-screen max-h-screen' : 'aspect-video rounded-2xl overflow-hidden border border-border'
+      }`}
     >
-      {/* HTML5 Video Element */}
       <video
         ref={videoRef}
         playsInline
         className={`w-full h-full object-contain ${hasVideoTrack && isLive ? 'block' : 'hidden'}`}
       />
 
-      {/* Overlay when stream is inactive or loading */}
       {(!isLive || !hasVideoTrack) && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-gray-950/90 to-gray-900 p-6 text-center z-10">
-          <div className="p-4 bg-gray-800/80 rounded-2xl mb-4 border border-gray-700/50 shadow-inner">
-            <Radio className="w-10 h-10 text-indigo-400 animate-pulse" />
-          </div>
-          <h3 className="text-xl font-semibold text-gray-100 mb-2">
-            {statusText || 'Waiting for Presenter Stream'}
-          </h3>
-          <p className="text-sm text-gray-400 max-w-md mb-6">
-            When the presenter starts screensharing from the Desktop App, the video stream will appear here automatically.
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-10">
+          <Radio className="w-8 h-8 text-white/20 mb-3" />
+          <p className="text-sm text-white/40 max-w-xs">
+            {statusText || 'Waiting for presenter...'}
           </p>
           {onResync && (
-            <Button variant="outline" size="sm" onClick={onResync} className="gap-2">
-              <RefreshCw className="w-4 h-4" />
-              <span>Re-sync Stream</span>
+            <Button variant="outline" size="sm" onClick={onResync} className="gap-2 mt-6 border-white/10 text-white/50 hover:text-white/80 hover:bg-white/5">
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Reconnect</span>
             </Button>
           )}
         </div>
       )}
 
-      {/* Top Overlay Badge */}
-      <div
-        className={`absolute top-4 left-4 right-4 flex items-center justify-between z-20 transition-opacity duration-300 ${
-          showControls || !isLive ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        }`}
-      >
-        <div className="flex items-center gap-2">
-          {isLive ? (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-semibold uppercase tracking-wider backdrop-blur-md">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              Live Stream
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/20 border border-amber-500/30 text-amber-400 text-xs font-semibold uppercase tracking-wider backdrop-blur-md">
-              Standby
-            </span>
-          )}
-        </div>
-
-        {/* Audio Visualizer */}
+      <div className="absolute top-4 right-16 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto">
         {isLive && mediaStream && (
-          <AudioVisualizer mediaStream={mediaStream} className="backdrop-blur-md" />
+          <AudioVisualizer mediaStream={mediaStream} showStatus />
         )}
       </div>
 
-      {/* Bottom Controls Bar */}
       {isLive && (
-        <div
-          className={`absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-4 z-20 transition-opacity duration-300 flex items-center justify-between gap-4 ${
-            showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
-          }`}
-        >
-          <div className="flex items-center gap-3">
+        <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
             <button
               onClick={togglePlay}
-              className="p-2 text-gray-200 hover:text-white bg-gray-800/80 hover:bg-gray-700/80 rounded-xl transition-all border border-gray-700/50"
+              className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
               title={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
             </button>
 
-            {/* Volume Control */}
-            <div className="flex items-center gap-2 bg-gray-800/80 px-3 py-1.5 rounded-xl border border-gray-700/50">
+            <div className="flex items-center gap-2 bg-black/30 px-3 py-1.5 rounded-xl backdrop-blur-sm">
               <button
                 onClick={toggleMute}
-                className="text-gray-300 hover:text-white transition-colors"
+                className="text-white/60 hover:text-white transition-colors"
                 title={isMuted ? 'Unmute' : 'Mute'}
               >
                 {isMuted || volume === 0 ? (
-                  <VolumeX className="w-4 h-4 text-rose-400" />
+                  <VolumeX className="w-4 h-4" />
                 ) : (
                   <Volume2 className="w-4 h-4" />
                 )}
@@ -211,7 +165,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 step="0.05"
                 value={isMuted ? 0 : volume}
                 onChange={handleVolumeChange}
-                className="w-20 accent-indigo-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer"
+                className="w-14 accent-safelight h-1 bg-white/20 rounded-full cursor-pointer"
               />
             </div>
           </div>
@@ -220,20 +174,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             {onResync && (
               <button
                 onClick={onResync}
-                className="p-2 text-gray-300 hover:text-white bg-gray-800/80 hover:bg-gray-700/80 rounded-xl transition-all border border-gray-700/50"
-                title="Re-sync WebRTC stream"
+                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
+                title="Reconnect stream"
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
             )}
 
-            <button
-              onClick={toggleFullscreen}
-              className="p-2 text-gray-300 hover:text-white bg-gray-800/80 hover:bg-gray-700/80 rounded-xl transition-all border border-gray-700/50"
-              title="Toggle Fullscreen"
-            >
-              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-            </button>
+            {!fullBleed && (
+              <button
+                onClick={toggleFullscreen}
+                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
+                title="Toggle fullscreen"
+              >
+                {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+              </button>
+            )}
           </div>
         </div>
       )}
