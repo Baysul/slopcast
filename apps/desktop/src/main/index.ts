@@ -79,27 +79,12 @@ switch (process.platform) {
 
 // ── GPU & Ozone platform ──────────────────────────────────────────
 // Electron 43 (Chromium 150) auto-selects the Wayland Ozone platform
-// when WAYLAND_DISPLAY is set.  We use the OpenGL/EGL ANGLE backend
-// instead of Vulkan — the officially documented path for VAAPI HW
-// video encoding on Linux per chromium/docs/gpu/vaapi.md.
-//
-// --no-zygote is required on Electron to propagate GPU flags to the
-// GPU child process (see electron/electron#50462).  Without it the
-// GPU process spawns as a zygote fork losing --ozone-platform and
-// --enable-features, which prevents VAAPI initialisation and forces
-// WebRTC to fall back to software VP9.
+// when WAYLAND_DISPLAY is set.  We let Chromium auto-select its
+// preferred ANGLE backend — overriding it with --use-angle=gl causes
+// EGL/Dawn context creation failures on Mesa/RADV.
 //
 // PipeWire screen capture works through xdg-desktop-portal regardless
 // of the Ozone platform.
-
-// Force non-zygote process spawning so GPU flags reach the GPU process.
-app.commandLine.appendSwitch('no-zygote');
-
-// Use ANGLE with the OpenGL/EGL backend (avoids Vulkan/Wayland incompat).
-if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('use-gl', 'angle');
-  app.commandLine.appendSwitch('use-angle', 'gl');
-}
 
 // Enable GPU rasterization on all platforms for smoother compositing.
 app.commandLine.appendSwitch('enable-gpu-rasterization');

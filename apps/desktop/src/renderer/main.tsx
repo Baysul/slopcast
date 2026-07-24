@@ -565,6 +565,15 @@ export const PresenterApp: React.FC = () => {
     if (caps?.codecs?.length) {
       const codecOrder = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
 
+      console.log(
+        '[Presenter] H.264 profiles in getCapabilities:',
+        caps.codecs
+          .filter((c) => c.mimeType.toUpperCase() === 'VIDEO/H264')
+          .map((c) => c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1])
+          .filter(Boolean)
+          .join(', '),
+      );
+
       const H264_HIGH = 0x64;
       const H264_MAIN = 0x4d;
       const H264_BASELINE = 0x42;
