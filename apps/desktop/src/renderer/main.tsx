@@ -582,7 +582,7 @@ export const PresenterApp: React.FC = () => {
     // Hardware-accelerated encode: H.264 (HW) > VP9 (HW/SW) > VP8 (SW).
     const caps = RTCRtpSender.getCapabilities('video');
     if (caps?.codecs?.length) {
-      const codecOrder = ['VIDEO/H264'];
+      const codecOrder = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
 
       console.log(
         '[Presenter] H.264 profiles in getCapabilities:',
