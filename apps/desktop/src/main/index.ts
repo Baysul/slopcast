@@ -130,6 +130,11 @@ function createWindow() {
     },
   });
 
+  // Forward renderer console output to the terminal so diagnostics are visible.
+  mainWindow.webContents.on('console-message', (_e, _level, message) => {
+    console.log(`[renderer] ${message}`);
+  });
+
   // Minimal application menu whose accelerators (including Ctrl+Shift+I for
   // DevTools) are active even though the menu bar is auto-hidden.
   Menu.setApplicationMenu(
