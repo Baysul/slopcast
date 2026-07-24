@@ -147,18 +147,63 @@ export class WebRTCReceiver {
           if (videoTransceiver) {
             const caps = RTCRtpReceiver.getCapabilities('video');
             if (caps?.codecs?.length) {
-              const preferred = caps.codecs.filter((c) => {
-                const mt = c.mimeType.toUpperCase();
-                return mt === 'VIDEO/H264' || mt === 'VIDEO/VP9' || mt === 'VIDEO/VP8';
+              const codecOrder = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
+
+              const H264_HIGH = 0x64;
+              const H264_MAIN = 0x4d;
+              const H264_BASELINE = 0x42;
+              const h264ProfileRank = (fmtp?: string): number => {
+                if (!fmtp) return 99;
+                const m = fmtp.match(/profile-level-id=([0-9a-fA-F]{6})/);
+                if (!m) return 99;
+                const profile = parseInt(m[1].slice(0, 2), 16);
+                switch (profile) {
+                  case H264_HIGH:
+                    return 0;
+                  case H264_MAIN:
+                    return 1;
+                  case H264_BASELINE:
+                    return 2;
+                  default:
+                    return 3;
+                }
+              };
+
+              const preferred = caps.codecs
+                .filter((c) => codecOrder.includes(c.mimeType.toUpperCase()))
+                .sort((a, b) => {
+                  const ia = codecOrder.indexOf(a.mimeType.toUpperCase());
+                  const ib = codecOrder.indexOf(b.mimeType.toUpperCase());
+                  const da = ia === -1 ? 99 : ia;
+                  const db = ib === -1 ? 99 : ib;
+                  if (da !== db) return da - db;
+                  if (a.mimeType.toUpperCase() === 'VIDEO/H264') {
+                    return h264ProfileRank(a.sdpFmtpLine) - h264ProfileRank(b.sdpFmtpLine);
+                  }
+                  return 0;
+                });
+
+              // Deduplicate by MIME type so only one variant per codec
+              // is passed — setCodecPreferences rejects entries that
+              // don't match the offer's negotiated PTs.
+              const seen = new Set<string>();
+              const deduped = preferred.filter((c) => {
+                const key = c.mimeType.toUpperCase();
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
               });
-              // Sort H.264 first, then VP9, then VP8.
-              preferred.sort((a, b) => {
-                const order = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
-                const ia = order.indexOf(a.mimeType.toUpperCase());
-                const ib = order.indexOf(b.mimeType.toUpperCase());
-                return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-              });
-              videoTransceiver.setCodecPreferences(preferred);
+
+              videoTransceiver.setCodecPreferences(deduped);
+              console.log(
+                '[WebRTCReceiver] codec prefs:',
+                deduped
+                  .map((c) => {
+                    const plid = c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
+                    return plid ? `${c.mimeType}(${plid})` : c.mimeType;
+                  })
+                  .join(' > '),
+              );
             }
           }
         } catch (err) {
