@@ -152,28 +152,56 @@ export class WebRTCReceiver {
 
         const answer = await this.pc.createAnswer();
 
-        // Move the H.264 payload type to the front of the m=video line
-        // so H.264 becomes the negotiated codec.
-        const lines = (answer.sdp ?? '').split(/\r?\n/);
-        const mVideoIdx = lines.findIndex((l) => l.startsWith('m=video'));
-        console.log('[WebRTCReceiver] answer m=video line:', lines[mVideoIdx] ?? 'NOT FOUND');
-        const videoRtpmaps = lines.filter((l) => /^a=rtpmap:\d+/.test(l));
-        console.log('[WebRTCReceiver] all rtpmap entries:', videoRtpmaps.join(' | '));
+        // Chromium's answerer drops H.264 from the answer entirely when
+        // VP9/VP8 are also offered — even though the offer includes H.264
+        // first and the receiver supports it.  We inject H.264's PT,
+        // rtpmap, and fmtp lines from the OFFER into the ANSWER so the
+        // negotiated codec becomes H.264 (RFC 3264: first PT in the
+        // answer wins).
+        const offerSdp = this.pc.remoteDescription?.sdp ?? '';
+        const offerLines = offerSdp.split(/\r?\n/);
 
-        let mungedSdp = answer.sdp ?? '';
-        if (mVideoIdx !== -1) {
-          const mParts = lines[mVideoIdx].split(' ');
-          const pts = mParts.slice(3);
-          const rtpmaps = lines.filter((l) => /^a=rtpmap:\d+ H264\//.test(l));
-          const h264Pt = rtpmaps.map((l) => l.match(/^a=rtpmap:(\d+)/)?.[1]).find(Boolean);
-          if (h264Pt) {
+        // Find H.264 PT and its attribute lines in the offer's video section.
+        const offerVideoStart = offerLines.findIndex((l) => l.startsWith('m=video'));
+        let offerVideoEnd = offerLines.findIndex((l, i) => i > offerVideoStart && l.startsWith('m='));
+        if (offerVideoEnd === -1) offerVideoEnd = offerLines.length;
+
+        const offerVideoLines = offerLines.slice(offerVideoStart, offerVideoEnd);
+        const h264Rtpmap = offerVideoLines.find((l) => /^a=rtpmap:\d+ H264\//.test(l));
+        const h264Pt = h264Rtpmap?.match(/^a=rtpmap:(\d+)/)?.[1];
+
+        const aLines = answer.sdp ?? '';
+        let mungedSdp = aLines;
+        if (h264Pt) {
+          const ansLines = aLines.split(/\r?\n/);
+          const ansMVideoIdx = ansLines.findIndex((l) => l.startsWith('m=video'));
+          if (ansMVideoIdx !== -1) {
+            // Find where to inject H.264's a= lines: after the last a=rtpmap in the video section.
+            const ansVideoStart = ansMVideoIdx;
+            let ansVideoEnd = ansLines.findIndex((l, i) => i > ansVideoStart && l.startsWith('m='));
+            if (ansVideoEnd === -1) ansVideoEnd = ansLines.length;
+
+            // Copy H.264's a=rtpmap, a=fmtp, a=rtcp-fb lines from the offer.
+            const h264AttrLines = offerVideoLines.filter((l) =>
+              new RegExp(`^a=(rtpmap|fmtp|rtcp-fb):${h264Pt}[ ]`).test(l),
+            );
+
+            // Inject H.264 PT at front of m=video line.
+            const mParts = ansLines[ansMVideoIdx].split(' ');
+            const pts = mParts.slice(3);
             const reordered = [h264Pt, ...pts.filter((p) => p !== h264Pt)];
-            lines[mVideoIdx] = [...mParts.slice(0, 3), ...reordered].join(' ');
-            mungedSdp = lines.join('\r\n');
-            console.log(`[WebRTCReceiver] munged answer: H.264 PT ${h264Pt} moved to front`);
-          } else {
-            console.log('[WebRTCReceiver] no H.264 PT found in answer rtpmaps');
+            ansLines[ansMVideoIdx] = [...mParts.slice(0, 3), ...reordered].join(' ');
+
+            // Inject a=rtpmap/a=fmtp/a=rtcp-fb before the next m= line.
+            ansLines.splice(ansVideoEnd, 0, ...h264AttrLines);
+
+            mungedSdp = ansLines.join('\r\n');
+            console.log(
+              `[WebRTCReceiver] injected H.264 PT ${h264Pt} into answer, attrs: ${h264AttrLines.length} lines`,
+            );
           }
+        } else {
+          console.log('[WebRTCReceiver] no H.264 PT found in offer');
         }
 
         await this.pc.setLocalDescription({ type: 'answer', sdp: mungedSdp });
