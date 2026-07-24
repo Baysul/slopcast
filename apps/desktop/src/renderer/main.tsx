@@ -1,4 +1,4 @@
-import { ScreenShare } from 'lucide-react';
+import { Check, ScreenShare } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
@@ -1327,6 +1327,12 @@ export const PresenterApp: React.FC = () => {
   };
 
   const canStartShare = !!roomCode && !isSharing && (isWayland || !!selectedSourceId);
+  const startDisabledReason =
+    isSharing || canStartShare
+      ? null
+      : !roomCode
+        ? 'Create a live room to start sharing.'
+        : 'Select a window above to start sharing.';
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -1365,6 +1371,11 @@ export const PresenterApp: React.FC = () => {
               </button>
             ) : (
               <div className="flex items-center gap-2">
+                {spectatorCount > 0 && (
+                  <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium text-gray-400 bg-gray-900/80 border border-gray-800 shrink-0 tabular-nums">
+                    {spectatorCount} spectator{spectatorCount === 1 ? '' : 's'}
+                  </span>
+                )}
                 <button
                   type="button"
                   onClick={handleCopyCode}
@@ -1399,18 +1410,6 @@ export const PresenterApp: React.FC = () => {
       <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
         {/* Screenshare Preview */}
         <div className="bg-gray-900/80 border border-gray-800 rounded-xl overflow-hidden shadow-2xl">
-          <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Screenshare Preview</h2>
-            <div className="flex items-center gap-4 text-xs">
-              <span className="text-gray-500">
-                Spectators: <span className="text-gray-200 font-semibold">{spectatorCount}</span>
-              </span>
-              <span className={`inline-flex items-center gap-1.5 ${isSharing ? 'text-safelight' : 'text-gray-600'}`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${isSharing ? 'bg-safelight' : 'bg-gray-600'}`} />
-                {isSharing ? 'Broadcasting' : 'Idle'}
-              </span>
-            </div>
-          </div>
           <div className="relative bg-black aspect-video flex items-center justify-center">
             <video
               ref={previewVideoRef}
@@ -1427,14 +1426,7 @@ export const PresenterApp: React.FC = () => {
                 </p>
               </div>
             )}
-            {isSharing && (
-              <>
-                <div className="absolute top-3 left-3 pointer-events-none select-none text-[9px] font-semibold uppercase tracking-[0.14em] bg-black/60 text-gray-400 px-2 py-1 rounded-md border border-white/10 backdrop-blur-sm">
-                  Local Preview · Muted
-                </div>
-                <StreamTelemetryBar telemetry={telemetry} />
-              </>
-            )}
+            {isSharing && <StreamTelemetryBar telemetry={telemetry} />}
           </div>
         </div>
 
@@ -1465,16 +1457,6 @@ export const PresenterApp: React.FC = () => {
               streamed.
             </p>
 
-            {selectedAudioAppId === null && audioApps.length > 0 && !autoDetectedApp && (
-              <div className="bg-background/60 border border-gray-800/60 rounded-lg p-2.5 flex items-center justify-between">
-                <span className="text-xs text-gray-500">
-                  No audio source selected — click an app below to add audio
-                </span>
-                <span className="shrink-0 px-2.5 py-1 rounded text-[10px] font-semibold bg-gray-800 text-gray-500">
-                  None
-                </span>
-              </div>
-            )}
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
               {audioApps.length === 0 ? (
                 <p className="text-xs text-gray-600 text-center py-6">No active audio applications detected</p>
@@ -1503,7 +1485,7 @@ export const PresenterApp: React.FC = () => {
                           : 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300'
                       }`}
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <span className="font-semibold block truncate">{app.name}</span>
                         <div className="flex items-center gap-2 mt-0.5">
                           <span className="text-[10px] opacity-60">
@@ -1517,15 +1499,7 @@ export const PresenterApp: React.FC = () => {
                         </div>
                       </div>
 
-                      {isSelected ? (
-                        <span className="shrink-0 px-2.5 py-1 rounded text-[10px] font-semibold bg-emerald-600 text-white">
-                          {isAutoDetected ? 'Auto' : 'Selected'}
-                        </span>
-                      ) : (
-                        <span className="shrink-0 px-2.5 py-1 rounded text-[10px] font-semibold bg-gray-800 text-gray-500">
-                          Select
-                        </span>
-                      )}
+                      {isSelected && <Check className="w-4 h-4 shrink-0 text-emerald-300" aria-hidden="true" />}
                     </button>
                   );
                 })
@@ -1543,7 +1517,7 @@ export const PresenterApp: React.FC = () => {
                   The system dialog (xdg-desktop-portal) will let you pick the window to share. Audio is auto-detected
                   via PipeWire introspection.
                 </p>
-                {captureContext?.de === 'kde' && (
+                {captureContext?.de === 'kde' && !autoDetectFailed && (
                   <p className="text-amber-300/80 bg-amber-950/30 border border-amber-700/30 rounded-lg p-2.5 leading-relaxed">
                     KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection fails,
                     select an audio app manually.
@@ -1589,6 +1563,8 @@ export const PresenterApp: React.FC = () => {
               type="button"
               onClick={isSharing ? handleStopShare : handleStartShare}
               disabled={!isSharing && !canStartShare}
+              title={isSharing ? 'Stop the broadcast and disconnect all spectators.' : undefined}
+              aria-describedby={startDisabledReason ? 'start-screenshare-hint' : undefined}
               className={`w-full py-3 text-sm font-bold rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                 isSharing
                   ? 'bg-destructive/90 hover:bg-destructive text-white'
@@ -1597,6 +1573,11 @@ export const PresenterApp: React.FC = () => {
             >
               {isSharing ? 'Stop Screenshare' : 'Start Screenshare'}
             </button>
+            {startDisabledReason && (
+              <p id="start-screenshare-hint" className="text-[11px] text-gray-500 leading-relaxed">
+                {startDisabledReason}
+              </p>
+            )}
           </div>
         </div>
       </main>
