@@ -12,6 +12,7 @@ import type {
   RoleAssignmentPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  StopStreamPayload,
   WebRTCSignalPayload,
   WSMessage,
 } from '@screen-share/shared-types';
@@ -301,6 +302,24 @@ export function createServer(_port: number = 3001, baseUrl: string = 'http://loc
             }
           }
         }
+        break;
+      }
+
+      case 'STOP_STREAM': {
+        if (!conn.roomCode || conn.role !== 'presenter') {
+          sendMessage<ErrorPayload>(conn.ws, 'ERROR', {
+            message: 'Only presenters can stop a stream.',
+          });
+          return;
+        }
+
+        roomManager.setStreaming(conn.roomCode, false);
+
+        broadcastToRoomExcept<StopStreamPayload>(conn.roomCode, conn.id, 'STOP_STREAM', {
+          senderId: conn.id,
+        });
+
+        console.log(`[STOP_STREAM] room=${conn.roomCode} presenter=${conn.id}`);
         break;
       }
 
