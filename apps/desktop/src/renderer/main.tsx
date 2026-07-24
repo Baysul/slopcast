@@ -483,6 +483,15 @@ export const PresenterApp: React.FC = () => {
         }
       }
       loadAudioApps();
+
+      console.log(
+        '[Presenter] App start — H.264 profiles in getCapabilities:',
+        RTCRtpSender.getCapabilities('video')
+          ?.codecs?.filter((c) => c.mimeType.toUpperCase() === 'VIDEO/H264')
+          .map((c) => c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1])
+          .filter(Boolean)
+          .join(', ') || 'none',
+      );
     })();
 
     return () => {
