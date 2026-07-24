@@ -1155,8 +1155,8 @@ export const PresenterApp: React.FC = () => {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           frameRate: { ideal: fps, max: fps },
-          width: { max: 1920 },
-          height: { max: 1080 },
+          width: { ideal: 1920, max: 1920 },
+          height: { ideal: 1080, max: 1080 },
         },
         audio: false,
       });
@@ -1188,6 +1188,8 @@ export const PresenterApp: React.FC = () => {
           chromeMediaSourceId: selectedSourceId,
           minFrameRate: streamFpsRef.current,
           maxFrameRate: streamFpsRef.current,
+          maxWidth: 1920,
+          maxHeight: 1080,
         },
       },
     });
@@ -1661,7 +1663,7 @@ export const PresenterApp: React.FC = () => {
               >
                 <option value={1.0}>1080p (Full HD)</option>
                 <option value={1.5}>720p (HD)</option>
-                <option value={2.25}>480p (SD)</option>
+                <option value={2.0}>540p</option>
               </select>
             </div>
 
