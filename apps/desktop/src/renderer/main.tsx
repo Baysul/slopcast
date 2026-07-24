@@ -172,6 +172,8 @@ interface RTCStatLike {
   currentRoundTripTime?: number;
   mimeType?: string;
   implementation?: string;
+  frameWidth?: number;
+  frameHeight?: number;
 }
 
 const fmtBitrate = (bps: number | null): string => {
@@ -728,6 +730,8 @@ export const PresenterApp: React.FC = () => {
         let packetsSent = 0;
         let packetsLost = 0;
         let rttMs: number | null = null;
+        let encWidth: number | null = null;
+        let encHeight: number | null = null;
 
         stats.forEach((reportRaw) => {
           const report = reportRaw as RTCStatLike;
@@ -738,6 +742,8 @@ export const PresenterApp: React.FC = () => {
             if (report.kind === 'video') {
               videoMime = codecReport?.mimeType ?? null;
               videoEnc = codecReport?.implementation ?? null;
+              encWidth = report.frameWidth ?? null;
+              encHeight = report.frameHeight ?? null;
               packetsSent += report.packetsSent || 0;
               packetsLost += report.packetsLost || 0;
               if (prev.vInit && ts > prev.vTs) {
@@ -792,8 +798,8 @@ export const PresenterApp: React.FC = () => {
           updatedAt: Date.now(),
           videoCodec: videoMime ? codecLabel(videoMime) : p.videoCodec,
           videoEncoder: videoEnc ?? p.videoEncoder,
-          width,
-          height,
+          width: encWidth ?? width,
+          height: encHeight ?? height,
           targetFrameRate,
           frameRate: sFps ?? p.frameRate,
           videoBitrate: sBr ?? p.videoBitrate,
@@ -809,7 +815,7 @@ export const PresenterApp: React.FC = () => {
 
         if (tick % 5 === 0) {
           console.log(
-            `[Telemetry] ${videoMime ?? '?'} ${width ?? '?'}×${height ?? '?'} ${
+            `[Telemetry] ${videoMime ?? '?'} ${encWidth ?? width ?? '?'}×${encHeight ?? height ?? '?'} ${
               sFps != null ? Math.round(sFps) : '–'
             }/${targetFrameRate ?? '–'}fps ${sBr != null ? (sBr / 1_000_000).toFixed(1) : '–'}Mbps loss ${lossPct.toFixed(2)}% rtt ${
               rttMs != null ? Math.round(rttMs) : '–'
