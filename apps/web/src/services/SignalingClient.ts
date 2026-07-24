@@ -183,15 +183,18 @@ export class SignalingClient {
   }
 
   public off<K extends keyof SignalingEventMap>(event: K, callback: EventCallback<K>) {
-    if (!this.listeners[event]) return;
-    this.listeners[event] = (this.listeners[event] as EventCallback<K>[]).filter((cb) => cb !== callback);
+    const arr = this.listeners[event] as EventCallback<K>[] | undefined;
+    if (!arr) return;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i] === callback) arr.splice(i, 1);
+    }
   }
 
   private emit<K extends keyof SignalingEventMap>(event: K, ...args: Parameters<SignalingEventMap[K]>) {
     const eventListeners = this.listeners[event];
     if (eventListeners) {
       for (const cb of eventListeners) {
-        cb(...args);
+        (cb as (...a: Parameters<SignalingEventMap[K]>) => void)(...args);
       }
     }
   }
