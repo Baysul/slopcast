@@ -40,6 +40,15 @@ export default {
       fontFamily: {
         display: ['system-ui', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'sans-serif'],
       },
+      keyframes: {
+        'toast-in': {
+          '0%': { opacity: '0', transform: 'translateX(1rem) scale(0.96)' },
+          '100%': { opacity: '1', transform: 'translateX(0) scale(1)' },
+        },
+      },
+      animation: {
+        'toast-in': 'toast-in 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
+      },
     },
   },
   plugins: [],

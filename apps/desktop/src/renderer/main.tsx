@@ -1,8 +1,9 @@
-import { Check, ScreenShare } from 'lucide-react';
+import { Check, ScreenShare, Users } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { Badge } from './components/ui/Badge';
+import { primeAudioContext, ToastViewport, useToasts } from './components/ui/Toast';
 import './index.css';
 
 declare global {
@@ -351,12 +352,12 @@ export const PresenterApp: React.FC = () => {
   const [selectedSourceId, setSelectedSourceId] = useState<string>('');
   const [isSharing, setIsSharing] = useState<boolean>(false);
   const [copied, setCopied] = useState<'link' | 'code' | null>(null);
-  const [statusMsg, setStatusMsg] = useState<string>('Ready to create room');
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
   const [spectatorCount, setSpectatorCount] = useState(0);
   const [captureContext, setCaptureContext] = useState<CaptureContext | null>(null);
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
   const [telemetry, setTelemetry] = useState<StreamTelemetry>(idleTelemetry());
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -371,6 +372,7 @@ export const PresenterApp: React.FC = () => {
   const broadcastStartRef = useRef<number | null>(null);
   const statsPrevRef = useRef(new WeakMap<RTCPeerConnection, StatsPrev>());
   const bitrateHistoryRef = useRef<number[]>([]);
+  const prevConnectedRef = useRef(0);
 
   useEffect(() => {
     isSharingRef.current = isSharing;
@@ -455,7 +457,6 @@ export const PresenterApp: React.FC = () => {
     if (app) {
       setAutoDetectedApp(app);
       setSelectedAudioAppId(app.id);
-      setStatusMsg(`Auto-detected audio source: ${app.name}`);
       return app;
     }
     return null;
@@ -898,10 +899,8 @@ export const PresenterApp: React.FC = () => {
     const ids = await resolveSpectatorIds(hintIds);
     console.log(`[Presenter] Offering stream to ${ids.length} spectator(s):`, ids);
     if (ids.length === 0) {
-      setStatusMsg('Streaming live — waiting for spectators to join...');
       return;
     }
-    setStatusMsg(`Streaming live — connecting ${ids.length} spectator(s)...`);
     await Promise.all(ids.map((id) => createOfferForSpectator(id)));
   };
 
@@ -911,9 +910,17 @@ export const PresenterApp: React.FC = () => {
     const connected = Array.from(peerConnectionsRef.current.values()).filter(
       (pc) => pc.iceConnectionState === 'connected' || pc.connectionState === 'connected',
     ).length;
-    if (connected > 0) {
-      setStatusMsg(`Streaming live — connected to ${connected} of ${total} spectator(s)`);
+    // Surface a new spectator connection as a transient toast with a chime
+    // instead of a persistent line in the status bar.
+    if (connected > prevConnectedRef.current) {
+      pushToast({
+        title: 'Spectator Connected',
+        description: `Streaming live — connected to ${connected} of ${total} spectator(s)`,
+        variant: 'success',
+        icon: <Users className="h-5 w-5" aria-hidden="true" />,
+      });
     }
+    prevConnectedRef.current = connected;
   };
 
   const handleSignalingMessage = async (msg: unknown) => {
@@ -926,15 +933,14 @@ export const PresenterApp: React.FC = () => {
       roomCodeRef.current = code;
       setRoomCode(code);
       setShareUrl(url);
-      setStatusMsg(`Room active: ${code}`);
       spectatorIdsRef.current.clear();
       setSpectatorCount(0);
+      prevConnectedRef.current = 0;
 
       // Auto-copy the join link as soon as the room exists.
       void copyText(url).then((ok) => {
         if (ok) {
           setCopied('link');
-          setStatusMsg(`Room active: ${code} — link copied to clipboard`);
           setTimeout(() => setCopied(null), 2500);
         }
       });
@@ -944,7 +950,6 @@ export const PresenterApp: React.FC = () => {
 
       spectatorIdsRef.current.add(spectatorId);
       setSpectatorCount(spectatorIdsRef.current.size);
-      setStatusMsg(`Spectator ${spectatorId} joined room`);
 
       // Offer immediately if already streaming (refs avoid stale React state).
       if (isSharingRef.current && localStreamRef.current) {
@@ -973,7 +978,6 @@ export const PresenterApp: React.FC = () => {
       }
     } else if (type === 'PUBLISH_REJECTED') {
       console.error('[Presenter] PUBLISH_REJECTED:', payload?.reason);
-      setStatusMsg(`Publish rejected: ${payload?.reason || 'unknown'}`);
     } else if (type === 'WEBRTC_SIGNAL') {
       const sp = payload as { senderId?: string; signal?: Record<string, unknown> };
       const { senderId, signal } = sp;
@@ -1026,6 +1030,7 @@ export const PresenterApp: React.FC = () => {
   handleSignalingMessageRef.current = handleSignalingMessage;
 
   const handleCreateRoom = () => {
+    primeAudioContext();
     if (wsRef.current) {
       wsRef.current.close();
     }
@@ -1039,7 +1044,6 @@ export const PresenterApp: React.FC = () => {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setStatusMsg('Connected to signaling server');
       ws.send(
         JSON.stringify({
           type: 'CREATE_ROOM',
@@ -1058,16 +1062,20 @@ export const PresenterApp: React.FC = () => {
     };
 
     ws.onclose = () => {
-      setStatusMsg('Disconnected from signaling server');
       setRoomCode('');
       setShareUrl('');
       spectatorIdsRef.current.clear();
       setSpectatorCount(0);
+      prevConnectedRef.current = 0;
     };
 
     ws.onerror = (err) => {
       console.error('WebSocket error:', err);
-      setStatusMsg('Connection error');
+      pushToast({
+        title: 'Connection error',
+        description: 'Lost contact with the signaling server.',
+        variant: 'error',
+      });
     };
   };
 
@@ -1159,8 +1167,8 @@ export const PresenterApp: React.FC = () => {
   };
 
   const handleStartShare = async () => {
+    primeAudioContext();
     try {
-      setStatusMsg('Starting capture...');
       const videoTrack = await captureVideoTrack();
 
       // Auto-detect audio source.  Uses a local variable to avoid the
@@ -1194,18 +1202,14 @@ export const PresenterApp: React.FC = () => {
           // On KDE, fall back to system-wide audio capture (link all audio
           // output nodes to the virtual sink) since window identity is not
           // available in PipeWire streams.
-          setStatusMsg('Auto-detected system audio (KDE mode)');
           setAutoDetectFailed(false);
           targetAudioId = -1;
-        } else if (isWayland) {
-          setStatusMsg(
-            'No audio source detected — sharing video only. Select an audio app below and ' +
-              'restart the screenshare to include audio.',
-          );
         } else {
-          setStatusMsg(
-            'No audio source detected — sharing video only. Select an audio source from the panel and restart to add audio.',
-          );
+          pushToast({
+            title: 'No audio detected',
+            description: 'Sharing video only. Select an audio app and restart to include audio.',
+            variant: 'info',
+          });
         }
       } else {
         setAutoDetectFailed(false);
@@ -1215,16 +1219,13 @@ export const PresenterApp: React.FC = () => {
       if (targetAudioId !== null) {
         try {
           audioTrack = await captureAudioTrack(targetAudioId);
-          if (targetAudioId === -1) {
-            setStatusMsg('System audio capture started (KDE fallback)');
-          }
         } catch (err) {
           console.error('Audio capture failed (continuing video-only):', err);
-          if (targetAudioId === -1) {
-            setStatusMsg('System audio unavailable — sharing video only');
-          } else {
-            setStatusMsg('Selected audio source unavailable — sharing video only');
-          }
+          pushToast({
+            title: 'Audio unavailable',
+            description: 'Sharing video only — the selected audio source could not be captured.',
+            variant: 'info',
+          });
         }
       }
 
@@ -1239,7 +1240,6 @@ export const PresenterApp: React.FC = () => {
 
       setIsSharing(true);
       isSharingRef.current = true;
-      setStatusMsg('Screenshare streaming live (window audio only)!');
 
       // Begin the unified telemetry poll (codec/res/fps/bitrate/loss/audio + sparkline).
       setTelemetry({ ...idleTelemetry(), live: true });
@@ -1256,7 +1256,7 @@ export const PresenterApp: React.FC = () => {
     } catch (err: unknown) {
       console.error('Failed to capture screen:', err);
       const message = err instanceof Error ? err.message : 'Unknown capture error';
-      setStatusMsg(`Capture error: ${message}`);
+      pushToast({ title: 'Screenshare failed to start', description: message, variant: 'error' });
       if (window.electronAPI) {
         await window.electronAPI.stopAudioCapture();
       }
@@ -1288,6 +1288,7 @@ export const PresenterApp: React.FC = () => {
     setTelemetry(idleTelemetry());
     pendingCandidatesRef.current.clear();
     isSharingRef.current = false;
+    prevConnectedRef.current = 0;
     if (window.electronAPI) {
       await window.electronAPI.stopAudioCapture();
     }
@@ -1295,7 +1296,6 @@ export const PresenterApp: React.FC = () => {
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
     setAutoDetectFailed(false);
-    setStatusMsg('Screenshare stopped');
   };
 
   const flashCopied = (kind: 'link' | 'code') => {
@@ -1309,9 +1309,8 @@ export const PresenterApp: React.FC = () => {
     const ok = await copyText(url);
     if (ok) {
       flashCopied('link');
-      setStatusMsg('Room link copied to clipboard');
     } else {
-      setStatusMsg('Failed to copy room link');
+      pushToast({ title: 'Copy failed', description: 'Room link could not be copied.', variant: 'error' });
     }
   };
 
@@ -1320,9 +1319,8 @@ export const PresenterApp: React.FC = () => {
     const ok = await copyText(roomCode);
     if (ok) {
       flashCopied('code');
-      setStatusMsg('Room code copied to clipboard');
     } else {
-      setStatusMsg('Failed to copy room code');
+      pushToast({ title: 'Copy failed', description: 'Room code could not be copied.', variant: 'error' });
     }
   };
 
@@ -1398,13 +1396,6 @@ export const PresenterApp: React.FC = () => {
           </div>
         </div>
       </header>
-
-      {/* ===== Status Bar ===== */}
-      <div className="border-b border-gray-800/50 bg-card/30">
-        <div className="max-w-5xl mx-auto px-6 py-1.5">
-          <p className="text-xs text-gray-500 truncate">{statusMsg}</p>
-        </div>
-      </div>
 
       {/* ===== Main Content ===== */}
       <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
@@ -1581,6 +1572,8 @@ export const PresenterApp: React.FC = () => {
           </div>
         </div>
       </main>
+
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 };
