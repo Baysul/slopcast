@@ -64,6 +64,10 @@ switch (process.platform) {
 
     // OOP rasterisation reduces main-thread load.
     features.push('CanvasOopRasterization');
+
+    // Keep Vulkan available on Wayland ozone so VAAPI can use the
+    // Vulkan ANGLE backend (the GLES path works only on Intel GPUs).
+    features.push('Vulkan', 'VulkanFromANGLE', 'DefaultANGLEVulkan');
     break;
 
   case 'win32':
@@ -78,18 +82,12 @@ switch (process.platform) {
 }
 
 // ── Ozone platform ────────────────────────────────────────────────
-// Force X11/XWayland on Linux so Vulkan stays available for VAAPI HW
-// video encoding.  Electron 43 (Chromium 150) auto-selects the Wayland
-// Ozone platform when WAYLAND_DISPLAY is set, but the Wayland surface
-// factory is incompatible with Vulkan (error in
-// wayland_surface_factory.cc:249).  On AMD (Mesa/RADV) the VAAPI encoder
-// requires the Vulkan ANGLE backend — without it the encoder falls back
-// to software VP9, defeating the High Profile H.264 codec preference.
-// PipeWire screen capture works through xdg-desktop-portal regardless
-// of the Ozone platform, so forcing X11 does not affect capture.
-if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('ozone-platform', 'x11');
-}
+// Electron 43 auto-selects the Wayland Ozone platform when
+// WAYLAND_DISPLAY is set.  The Wayland surface factory normally blocks
+// Vulkan, but the Vulkan / VulkanFromANGLE / DefaultANGLEVulkan feature
+// flags (added in the Linux case above) make it work — the same flags
+// Brave uses to run Vulkan on Wayland.  PipeWire screen capture works
+// through xdg-desktop-portal regardless of the Ozone platform.
 
 // ── Cross-platform quality and rendering features ─────────────────────
 // Use Vulkan as ANGLE's backend — required on AMD/Mesa for VA-API
