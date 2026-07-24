@@ -194,7 +194,16 @@ export class WebRTCReceiver {
                 return true;
               });
 
-              videoTransceiver.setCodecPreferences(deduped);
+              // Strip profile-level-id so the preference matches ANY
+              // H.264 variant the presenter offers — otherwise an
+              // exact fmtp mismatch (e.g. prefer 4d001f / offered
+              // 640033) silently drops H.264 and VP9 wins.
+              const generic = deduped.map((c) => ({
+                mimeType: c.mimeType,
+                clockRate: c.clockRate,
+              }));
+
+              videoTransceiver.setCodecPreferences(generic);
               console.log(
                 '[WebRTCReceiver] codec prefs:',
                 deduped
