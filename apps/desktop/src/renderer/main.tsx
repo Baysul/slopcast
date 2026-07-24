@@ -565,6 +565,26 @@ export const PresenterApp: React.FC = () => {
     if (caps?.codecs?.length) {
       const codecOrder = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
 
+      const H264_HIGH = 0x64;
+      const H264_MAIN = 0x4d;
+      const H264_BASELINE = 0x42;
+      const h264ProfileRank = (fmtp?: string): number => {
+        if (!fmtp) return 99;
+        const m = fmtp.match(/profile-level-id=([0-9a-fA-F]{6})/);
+        if (!m) return 99;
+        const profile = parseInt(m[1].slice(0, 2), 16);
+        switch (profile) {
+          case H264_HIGH:
+            return 0;
+          case H264_MAIN:
+            return 1;
+          case H264_BASELINE:
+            return 2;
+          default:
+            return 3;
+        }
+      };
+
       const preferred = caps.codecs
         .filter((c) => {
           const mt = c.mimeType.toUpperCase();
@@ -573,7 +593,13 @@ export const PresenterApp: React.FC = () => {
         .sort((a, b) => {
           const ia = codecOrder.indexOf(a.mimeType.toUpperCase());
           const ib = codecOrder.indexOf(b.mimeType.toUpperCase());
-          return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+          const da = ia === -1 ? 99 : ia;
+          const db = ib === -1 ? 99 : ib;
+          if (da !== db) return da - db;
+          if (a.mimeType.toUpperCase() === 'VIDEO/H264') {
+            return h264ProfileRank(a.sdpFmtpLine) - h264ProfileRank(b.sdpFmtpLine);
+          }
+          return 0;
         });
 
       // Deduplicate by MIME type — the browser exposes many profile/level
@@ -590,7 +616,13 @@ export const PresenterApp: React.FC = () => {
 
       try {
         videoTransceiver.setCodecPreferences(deduped);
-        console.log('[Presenter] Video codec preference set:', deduped.map((c) => c.mimeType).join(' > '));
+        const summary = deduped
+          .map((c) => {
+            const plid = c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
+            return plid ? `${c.mimeType}(${plid})` : c.mimeType;
+          })
+          .join(' > ');
+        console.log('[Presenter] Video codec preference set:', summary);
       } catch (err) {
         console.warn('[Presenter] setCodecPreferences failed:', err);
       }
@@ -612,6 +644,8 @@ export const PresenterApp: React.FC = () => {
         params.encodings = [{}];
       }
 
+      params.degradationPreference = 'maintain-resolution';
+
       for (const enc of params.encodings) {
         enc.maxBitrate = bitrateLimitRef.current;
         enc.scaleResolutionDownBy = scaleRef.current;
@@ -624,6 +658,7 @@ export const PresenterApp: React.FC = () => {
       await sender.setParameters(params);
       console.log(
         '[Presenter] Video encoder params:',
+        `degradationPreference=${params.degradationPreference}`,
         params.encodings.map(
           (e) => `maxBitrate=${e.maxBitrate} fps=${e.maxFramerate} scale=${e.scaleResolutionDownBy}`,
         ),
@@ -1170,9 +1205,9 @@ export const PresenterApp: React.FC = () => {
       if (!track) {
         throw new Error('xdg-desktop-portal granted no video track');
       }
-      // 'motion' content hint tells the encoder to prioritise frame-rate
-      // over per-frame perfection — ideal for screenshare.
-      track.contentHint = 'motion';
+      // 'detail' content hint tells the encoder to prioritise resolution
+      // over frame-rate under bandwidth pressure — ideal for screenshare.
+      track.contentHint = 'detail';
       return track;
     }
 
@@ -1200,7 +1235,7 @@ export const PresenterApp: React.FC = () => {
       },
     });
     const track = stream.getVideoTracks()[0];
-    track.contentHint = 'motion';
+    track.contentHint = 'detail';
     return track;
   };
 
