@@ -21,22 +21,15 @@ const isLinux = process.platform === 'linux';
 // window/screen picker of the desktop environment instead.
 const isWayland = isLinux && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY);
 
-// Route WebRTC desktop capture through PipeWire/xdg-desktop-portal on
-// Wayland. Must be set before the app is ready.
-if (isWayland) {
-  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
-}
-
 // ── Hardware-Accelerated Video Encoding ─────────────────────────────────
 // These flags must be set before app.whenReady() — they are consumed by
-// Chromium's GPU process during early initialisation.
-//
-// IMPORTANT: Electron/Chromium's appendSwitch stores the *last* value for
-// the same switch name, so we must build ONE combined enable-features list.
+// Chromium's GPU process during early initialisation.  We build ONE combined
+// enable-features list because appendSwitch stores only the *last* value for
+// the same switch name.
 const features: string[] = [];
 
-// WebRTC PipeWire capturer (Wayland only).  Included in both the early
-// switch above (so it's seen immediately) and the combined list below.
+// WebRTC PipeWire capturer — required on Wayland for
+// xdg-desktop-portal-backed getDisplayMedia.
 if (isWayland) {
   features.push('WebRTCPipeWireCapturer');
 }
@@ -92,8 +85,7 @@ app.commandLine.appendSwitch('enable-gpu-rasterization');
 // enabled by default, which disables all GPU acceleration.
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
-// Commit the combined feature list.  This overrides the earlier
-// WebRTCPipeWireCapturer-only call above.
+// Commit the combined feature list.
 app.commandLine.appendSwitch('enable-features', features.join(','));
 
 // Low-latency GPU video decoding pipeline (VP9 / AV1).
@@ -134,6 +126,23 @@ function createWindow() {
             label: 'Toggle Developer Tools',
             accelerator: 'CmdOrCtrl+Shift+I',
             click: () => mainWindow?.webContents.toggleDevTools(),
+          },
+          { type: 'separator' },
+          {
+            label: 'GPU Internals',
+            accelerator: 'CmdOrCtrl+Shift+G',
+            click: () => {
+              const win = new BrowserWindow({ width: 960, height: 800, title: 'chrome://gpu' });
+              win.loadURL('chrome://gpu');
+            },
+          },
+          {
+            label: 'WebRTC Internals',
+            accelerator: 'CmdOrCtrl+Shift+W',
+            click: () => {
+              const win = new BrowserWindow({ width: 960, height: 800, title: 'chrome://webrtc-internals' });
+              win.loadURL('chrome://webrtc-internals');
+            },
           },
         ],
       },
@@ -231,7 +240,16 @@ app.whenReady().then(() => {
 
   ipcMain.handle('get-audio-apps', () => {
     try {
-      return native.getAudioApplications();
+      const apps = native.getAudioApplications();
+      for (const a of apps) {
+        if (a.processId <= 0) {
+          console.warn(
+            `[get-audio-apps] Cannot resolve PID for "${a.name}" (id=${a.id}). ` +
+              'The app may run under WINE/Proton, Flatpak, or another PID namespace.',
+          );
+        }
+      }
+      return apps;
     } catch (err) {
       console.error('get-audio-apps IPC error:', err);
       return [];
@@ -292,14 +310,22 @@ app.whenReady().then(() => {
 
       if (isWayland) {
         // ---- Layer 1: PipeWire introspection ----
-        try {
-          app = native.resolveAudioAppForCapturedWindow();
-          if (app) {
-            console.log(`[resolve-audio-source] Wayland PW-introspect → "${app.name}" (PID ${app.processId})`);
-            return app;
+        // Retry up to 3 times with a short delay — xdg-desktop-portal may
+        // take a moment to register the video capture node in the PipeWire
+        // graph after getDisplayMedia resolves.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            app = native.resolveAudioAppForCapturedWindow();
+            if (app) {
+              console.log(`[resolve-audio-source] Wayland PW-introspect → "${app.name}" (PID ${app.processId})`);
+              return app;
+            }
+          } catch (err) {
+            console.error('resolve-audio-source Wayland introspection error:', err);
           }
-        } catch (err) {
-          console.error('resolve-audio-source Wayland introspection error:', err);
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
         }
 
         // ---- Layer 2: Name matching via Rust ----

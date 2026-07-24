@@ -999,6 +999,11 @@ export const PresenterApp: React.FC = () => {
       wsRef.current.close();
     }
 
+    setAudioAppExplicitlySet(false);
+    setAutoDetectedApp(null);
+    setSelectedAudioAppId(null);
+    setAutoDetectFailed(false);
+
     const ws = new WebSocket('ws://localhost:3001');
     wsRef.current = ws;
 
@@ -1133,8 +1138,14 @@ export const PresenterApp: React.FC = () => {
       let targetAudioId: number | null = selectedAudioAppId;
 
       if (targetAudioId === null && !audioAppExplicitlySet) {
+        // Refresh audio app list so auto-resolve has the freshest PipeWire state.
+        await loadAudioApps();
+
+        // On Wayland the video track label is a generic portal identifier, not
+        // a window title that can be matched.  Pass no hint so the main process
+        // falls through to lastCapturedSourceName (set by displayMediaRequestHandler).
         const app = await attemptAutoResolve(
-          isWayland ? { nameHint: videoTrack.label } : { sourceId: selectedSourceId, nameHint: videoTrack.label },
+          isWayland ? {} : { sourceId: selectedSourceId, nameHint: videoTrack.label },
         );
         targetAudioId = app?.id ?? null;
       }
@@ -1247,6 +1258,9 @@ export const PresenterApp: React.FC = () => {
       await window.electronAPI.stopAudioCapture();
     }
     setIsSharing(false);
+    setAudioAppExplicitlySet(false);
+    setAutoDetectedApp(null);
+    setAutoDetectFailed(false);
     setStatusMsg('Screenshare stopped');
   };
 
@@ -1431,11 +1445,12 @@ export const PresenterApp: React.FC = () => {
                       key={app.id}
                       type="button"
                       onClick={() => {
-                        setAudioAppExplicitlySet(true);
                         if (app.id === selectedAudioAppId) {
+                          setAudioAppExplicitlySet(false);
                           setSelectedAudioAppId(null);
                           setAutoDetectedApp(null);
                         } else {
+                          setAudioAppExplicitlySet(true);
                           setSelectedAudioAppId(app.id);
                           setAutoDetectedApp(null);
                         }
@@ -1449,7 +1464,9 @@ export const PresenterApp: React.FC = () => {
                       <div className="min-w-0">
                         <span className="font-semibold block truncate">{app.name}</span>
                         <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-[10px] opacity-60">PID: {app.processId}</span>
+                          <span className="text-[10px] opacity-60">
+                            {app.processId > 0 ? `PID: ${app.processId}` : 'PID: unknown'}
+                          </span>
                           {isAutoDetected && (
                             <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
                               auto
