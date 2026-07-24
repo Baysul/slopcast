@@ -343,6 +343,7 @@ export const PresenterApp: React.FC = () => {
   const [isWayland, setIsWayland] = useState<boolean>(false);
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
   const [selectedAudioAppId, setSelectedAudioAppId] = useState<number | null>(null);
+  const [audioAppExplicitlySet, setAudioAppExplicitlySet] = useState(false);
   const [autoDetectedApp, setAutoDetectedApp] = useState<AudioApp | null>(null);
   const [desktopSources, setDesktopSources] = useState<DesktopSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>('');
@@ -1120,7 +1121,7 @@ export const PresenterApp: React.FC = () => {
       // we need the resolved ID synchronously right here.
       let targetAudioId: number | null = selectedAudioAppId;
 
-      if (targetAudioId === null) {
+      if (targetAudioId === null && !audioAppExplicitlySet) {
         const app = await attemptAutoResolve(
           isWayland ? { nameHint: videoTrack.label } : { sourceId: selectedSourceId, nameHint: videoTrack.label },
         );
@@ -1266,7 +1267,7 @@ export const PresenterApp: React.FC = () => {
     }
   };
 
-  const canStartShare = !!roomCode && !isSharing && (isWayland || (!!selectedSourceId && selectedAudioAppId !== null));
+  const canStartShare = !!roomCode && !isSharing && (isWayland || !!selectedSourceId);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -1397,6 +1398,16 @@ export const PresenterApp: React.FC = () => {
               streamed.
             </p>
 
+            {selectedAudioAppId === null && audioApps.length > 0 && !autoDetectedApp && (
+              <div className="bg-gray-950/60 border border-gray-800/60 rounded-lg p-2.5 flex items-center justify-between">
+                <span className="text-xs text-gray-500">
+                  No audio source selected — click an app below to add audio
+                </span>
+                <span className="shrink-0 px-2.5 py-1 rounded text-[10px] font-semibold bg-gray-800 text-gray-500">
+                  None
+                </span>
+              </div>
+            )}
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
               {audioApps.length === 0 ? (
                 <p className="text-xs text-gray-600 text-center py-6">No active audio applications detected</p>
@@ -1409,8 +1420,14 @@ export const PresenterApp: React.FC = () => {
                       key={app.id}
                       type="button"
                       onClick={() => {
-                        setSelectedAudioAppId(app.id);
-                        setAutoDetectedApp(null);
+                        setAudioAppExplicitlySet(true);
+                        if (app.id === selectedAudioAppId) {
+                          setSelectedAudioAppId(null);
+                          setAutoDetectedApp(null);
+                        } else {
+                          setSelectedAudioAppId(app.id);
+                          setAutoDetectedApp(null);
+                        }
                       }}
                       className={`flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full ${
                         isSelected

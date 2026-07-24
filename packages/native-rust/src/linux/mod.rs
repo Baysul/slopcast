@@ -1213,19 +1213,90 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
 }
 
 fn portal_window_name(props: &DictRef) -> Option<String> {
-    for key in &["portal.screencast.application", "portal.screencast.title", "window.name"] {
+    for key in &[
+        "portal.screencast.application",
+        "portal.screencast.title",
+        "window.name",
+        "pipewire.access.portal.app_id",
+    ] {
         if let Some(v) = props.get(key).filter(|v| !v.is_empty()) {
             return Some(v.to_string());
         }
     }
-    for key in &["application.name", "node.name", "media.name"] {
-        if let Some(v) = props.get(key).filter(|v| !v.is_empty()) {
-            if v != "xdg-desktop-portal" && !v.contains("pipewire") {
-                return Some(v.to_string());
-            }
+
+    if let Some(v) = props.get("media.name").filter(|v| !v.is_empty()) {
+        if !v.contains("pipewire") && v != "kwin_wayland" {
+            return Some(v.to_string());
         }
     }
+
+    if let Some(v) = props.get("node.name").filter(|v| !v.is_empty()) {
+        let lower = v.to_lowercase();
+        if lower != "kwin_wayland" && lower != "gnome-shell" && !lower.contains("pipewire") {
+            return Some(v.to_string());
+        }
+    }
+
+    if let Some(v) = props.get("application.name").filter(|v| !v.is_empty()) {
+        let lower = v.to_lowercase();
+        if lower != "xdg-desktop-portal"
+            && lower != "kwin_wayland"
+            && lower != "gnome-shell"
+            && !lower.contains("pipewire")
+        {
+            return Some(v.to_string());
+        }
+    }
+
     None
+}
+
+fn is_kde_screencast_window(suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return false;
+    }
+    let monitor_pattern = |s: &str| -> bool {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() < 2 {
+            return false;
+        }
+        parts[0].chars().all(|c| c.is_ascii_uppercase())
+            && parts[1].chars().all(|c| c.is_ascii_digit())
+    };
+    !monitor_pattern(suffix)
+}
+
+fn kde_window_uuid_to_pid(uuid: &str) -> Option<u32> {
+    use std::process::Command;
+
+    let output = Command::new("kdotool").args(["getwindowpid", uuid]).output().ok()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return stdout.trim().parse::<u32>().ok();
+    }
+
+    None
+}
+
+fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
+    if !media_name.starts_with("kwin-screencast-") {
+        return None;
+    }
+
+    let suffix = media_name.strip_prefix("kwin-screencast-")?;
+
+    if !is_kde_screencast_window(suffix) {
+        return None;
+    }
+
+    let pid = kde_window_uuid_to_pid(suffix)?;
+    if pid == 0 {
+        return None;
+    }
+
+    let apps = list_audio_applications().ok()?;
+    apps.into_iter().find(|app| app.process_id == pid as i32)
 }
 
 pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
@@ -1237,7 +1308,9 @@ pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
     let registry = core.get_registry().ok()?;
 
     let capture_names = Rc::new(RefCell::new(Vec::<String>::new()));
+    let kde_media_names = Rc::new(RefCell::new(Vec::<String>::new()));
     let capture_names_clone = capture_names.clone();
+    let kde_media_names_clone = kde_media_names.clone();
 
     let _reg_listener = registry
         .add_listener_local()
@@ -1247,12 +1320,22 @@ pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
                 None => return,
             };
             let media_class = props.get("media.class").unwrap_or("");
-            if media_class.starts_with("Video/") || media_class.starts_with("Stream/Output/Video") {
-                if let Some(name) = portal_window_name(props) {
-                    let mut list = capture_names_clone.borrow_mut();
-                    if !list.contains(&name) {
-                        list.push(name);
-                    }
+            if !media_class.starts_with("Video/") && !media_class.starts_with("Stream/Output/Video")
+            {
+                return;
+            }
+            let mn = props.get("media.name").unwrap_or("");
+            if mn.starts_with("kwin-screencast-") {
+                let mut list = kde_media_names_clone.borrow_mut();
+                if !list.contains(&mn.to_string()) {
+                    list.push(mn.to_string());
+                }
+                return;
+            }
+            if let Some(name) = portal_window_name(props) {
+                let mut list = capture_names_clone.borrow_mut();
+                if !list.contains(&name) {
+                    list.push(name);
                 }
             }
         })
@@ -1280,6 +1363,12 @@ pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
             break;
         }
         main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+    }
+
+    for mn in kde_media_names.take().iter() {
+        if let Some(app) = resolve_kde_screencast_audio(mn) {
+            return Some(app);
+        }
     }
 
     let names = capture_names.take();
