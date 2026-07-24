@@ -488,30 +488,41 @@ export const PresenterApp: React.FC = () => {
   //
   const configureVideoTransceiver = (pc: RTCPeerConnection) => {
     const transceivers = pc.getTransceivers();
-    const videoTransceiver = transceivers.find((t) => t.receiver?.track && t.receiver.track.kind === 'video');
+    const videoTransceiver = transceivers.find((t) => t.sender?.track?.kind === 'video');
     if (!videoTransceiver) return;
 
     // ── Codec preference ──────────────────────────────────────────────
     // Hardware-accelerated encode: H.264 (HW) > VP9 (HW/SW) > VP8 (SW).
     const caps = RTCRtpSender.getCapabilities('video');
     if (caps?.codecs?.length) {
-      // RTCRtpCodecCapability is available in browsers but may not be in TS
-      // DOM types; use the returned type directly.
-      const preferred = caps.codecs.filter((c) => {
-        const mt = c.mimeType.toUpperCase();
-        return mt === 'VIDEO/H264' || mt === 'VIDEO/VP9' || mt === 'VIDEO/VP8';
-      });
-      // Re-order: H.264 first (hardware-friendly), then VP9, then VP8.
-      const order = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
-      preferred.sort((a, b) => {
-        const ia = order.indexOf(a.mimeType.toUpperCase());
-        const ib = order.indexOf(b.mimeType.toUpperCase());
-        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      const codecOrder = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
+
+      const preferred = caps.codecs
+        .filter((c) => {
+          const mt = c.mimeType.toUpperCase();
+          return codecOrder.includes(mt);
+        })
+        .sort((a, b) => {
+          const ia = codecOrder.indexOf(a.mimeType.toUpperCase());
+          const ib = codecOrder.indexOf(b.mimeType.toUpperCase());
+          return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        });
+
+      // Deduplicate by MIME type — the browser exposes many profile/level
+      // variants of the same codec. Keep only the first (highest-priority)
+      // entry for each, so the preference list can actually influence the
+      // negotiated codec instead of being flooded with duplicates.
+      const seen = new Set<string>();
+      const deduped = preferred.filter((c) => {
+        const key = c.mimeType.toUpperCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
       });
 
       try {
-        videoTransceiver.setCodecPreferences(preferred);
-        console.log('[Presenter] Video codec preference set:', preferred.map((c) => c.mimeType).join(' > '));
+        videoTransceiver.setCodecPreferences(deduped);
+        console.log('[Presenter] Video codec preference set:', deduped.map((c) => c.mimeType).join(' > '));
       } catch (err) {
         console.warn('[Presenter] setCodecPreferences failed:', err);
       }
@@ -898,7 +909,7 @@ export const PresenterApp: React.FC = () => {
         }
       });
     } else if (type === 'USER_JOINED') {
-      const spectatorId = payload.participant?.id as string | undefined;
+      const spectatorId = (payload.participant as { id?: string } | undefined)?.id;
       if (!spectatorId) return;
 
       spectatorIdsRef.current.add(spectatorId);
@@ -942,7 +953,7 @@ export const PresenterApp: React.FC = () => {
         // Queue ICE until offer path creates the PC (should be rare).
         if (signal.candidate || signal.type === 'candidate') {
           const list = pendingCandidatesRef.current.get(senderId) || [];
-          list.push((signal.candidate || signal) as RTCIceCandidateInit);
+          list.push((signal.candidate || signal) as unknown as RTCIceCandidateInit);
           pendingCandidatesRef.current.set(senderId, list);
         }
         return;
@@ -951,7 +962,7 @@ export const PresenterApp: React.FC = () => {
       try {
         if (signal.type === 'answer') {
           if (pc.signalingState === 'have-local-offer') {
-            await pc.setRemoteDescription(new RTCSessionDescription(signal as RTCSessionDescriptionInit));
+            await pc.setRemoteDescription(new RTCSessionDescription(signal as unknown as RTCSessionDescriptionInit));
             // Re-apply encoder params now that remote answer is known —
             // the negotiated codec may affect encoder configuration.
             await configureVideoEncoderParams(pc);
@@ -965,7 +976,7 @@ export const PresenterApp: React.FC = () => {
             console.warn(`[Presenter] Ignoring answer from ${senderId}; signalingState=${pc.signalingState}`);
           }
         } else if (signal.candidate || signal.type === 'candidate') {
-          const candidateInit = (signal.candidate || signal) as RTCIceCandidateInit;
+          const candidateInit = (signal.candidate || signal) as unknown as RTCIceCandidateInit;
           if (pc.remoteDescription) {
             await pc.addIceCandidate(new RTCIceCandidate(candidateInit));
           } else {
