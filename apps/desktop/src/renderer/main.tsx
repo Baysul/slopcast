@@ -814,10 +814,12 @@ export const PresenterApp: React.FC = () => {
       // Telemetry polling is unified across all connected peers — see startTelemetryPolling.
     };
 
-    // Optional: log the negotiated codec once ICE/connection is established.
     pc.oniceconnectionstatechange = () => {
       if (pc.iceConnectionState === 'connected') {
         logNegotiatedCodec(pc, spectatorId);
+        updateConnectedStatus();
+      } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        updateConnectedStatus();
       }
     };
 
@@ -886,6 +888,17 @@ export const PresenterApp: React.FC = () => {
     await Promise.all(ids.map((id) => createOfferForSpectator(id)));
   };
 
+  const updateConnectedStatus = () => {
+    const total = spectatorIdsRef.current.size;
+    if (total === 0) return;
+    const connected = Array.from(peerConnectionsRef.current.values()).filter(
+      (pc) => pc.iceConnectionState === 'connected' || pc.connectionState === 'connected',
+    ).length;
+    if (connected > 0) {
+      setStatusMsg(`Streaming live — connected to ${connected} of ${total} spectator(s)`);
+    }
+  };
+
   const handleSignalingMessage = async (msg: unknown) => {
     const { type, payload } = msg as { type: string; payload: Record<string, unknown> };
     console.log('[Presenter] signaling message:', type, payload);
@@ -931,6 +944,7 @@ export const PresenterApp: React.FC = () => {
         peerConnectionsRef.current.delete(userId);
       }
       pendingCandidatesRef.current.delete(userId);
+      updateConnectedStatus();
     } else if (type === 'PUBLISH_ACK') {
       // Server-authoritative list of spectators currently in the room.
       const spectatorIds = (payload?.spectatorIds as string[] | undefined) || [];
