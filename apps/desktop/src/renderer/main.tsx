@@ -1,6 +1,8 @@
+import { ScreenShare } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
+import { Badge } from './components/ui/Badge';
 import './index.css';
 
 declare global {
@@ -214,7 +216,7 @@ const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> =
       width={width}
       height={height}
       viewBox={`0 0 ${width} ${height}`}
-      className="block"
+      className="block text-safelight"
       aria-hidden="true"
       preserveAspectRatio="none"
     >
@@ -222,7 +224,7 @@ const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> =
         <polyline
           points={pts}
           fill="none"
-          stroke="#e8883a"
+          stroke="currentColor"
           strokeWidth={1.5}
           strokeLinejoin="round"
           strokeLinecap="round"
@@ -1311,17 +1313,25 @@ export const PresenterApp: React.FC = () => {
   return (
     <div className="min-h-screen flex flex-col">
       {/* ===== Sticky Header ===== */}
-      <header className="sticky top-0 z-10 border-b border-gray-800 bg-[#090d16]/80 backdrop-blur-md">
+      <header className="sticky top-0 z-10 border-b border-gray-800 bg-background/80 backdrop-blur-md">
         <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
+            <span className="p-2 bg-secondary rounded-xl text-body-text shrink-0">
+              <ScreenShare className="w-5 h-5" aria-hidden="true" />
+            </span>
             <h1 className="text-lg font-bold text-gray-100 shrink-0 tracking-tight">ScreenShare</h1>
             <span className="hidden sm:inline-flex text-[10px] bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded-full border border-indigo-500/30">
               {isWayland ? 'Wayland' : 'X11'}
             </span>
             {isSharing && (
-              <span className="inline-flex items-center gap-1.5 text-xs bg-safelight-glow text-safelight px-2.5 py-0.5 rounded-full border border-safelight/30">
-                <span className="w-1.5 h-1.5 rounded-full bg-safelight animate-pulse" />
-                LIVE
+              <span role="status" aria-live="polite">
+                <Badge variant="live">
+                  <span className="relative w-1.5 h-1.5 shrink-0" aria-hidden="true">
+                    <span className="absolute inset-0 rounded-full bg-safelight animate-ping opacity-75" />
+                    <span className="absolute inset-0 rounded-full bg-safelight" />
+                  </span>
+                  LIVE
+                </Badge>
               </span>
             )}
           </div>
@@ -1331,7 +1341,7 @@ export const PresenterApp: React.FC = () => {
               <button
                 type="button"
                 onClick={handleCreateRoom}
-                className="px-5 py-2 bg-safelight text-[#090d16] rounded-lg font-semibold text-sm hover:bg-safelight-hover transition-colors"
+                className="px-5 py-2 bg-safelight text-safelight-foreground rounded-lg font-semibold text-sm hover:bg-safelight-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               >
                 Create Live Room
               </button>
@@ -1340,7 +1350,7 @@ export const PresenterApp: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleCopyCode}
-                  className="flex items-center gap-2 bg-gray-900/80 border border-gray-800 px-3 py-1.5 rounded-lg text-xs"
+                  className="flex items-center gap-2 bg-gray-900/80 border border-gray-800 px-3 py-1.5 rounded-lg text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                 >
                   <span className="text-gray-400 font-mono">{roomCode}</span>
                   <span className="bg-gray-800 hover:bg-gray-700 text-gray-200 px-2 py-0.5 rounded border border-gray-700 transition-colors">
@@ -1350,7 +1360,7 @@ export const PresenterApp: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleCopyLink}
-                  className="bg-safelight text-[#090d16] px-3 py-1.5 rounded-lg text-xs font-semibold hover:bg-safelight-hover transition-colors"
+                  className="bg-safelight text-safelight-foreground px-3 py-1.5 rounded-lg text-xs font-semibold hover:bg-safelight-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                 >
                   {copied === 'link' ? 'Link Copied!' : 'Copy Link'}
                 </button>
@@ -1361,7 +1371,7 @@ export const PresenterApp: React.FC = () => {
       </header>
 
       {/* ===== Status Bar ===== */}
-      <div className="border-b border-gray-800/50 bg-gray-950/40">
+      <div className="border-b border-gray-800/50 bg-card/30">
         <div className="max-w-5xl mx-auto px-6 py-1.5">
           <p className="text-xs text-gray-500 truncate">{statusMsg}</p>
         </div>
@@ -1426,7 +1436,7 @@ export const PresenterApp: React.FC = () => {
               <button
                 type="button"
                 onClick={loadAudioApps}
-                className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                className="text-xs text-gray-500 hover:text-gray-300 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
               >
                 Refresh
               </button>
@@ -1438,7 +1448,7 @@ export const PresenterApp: React.FC = () => {
             </p>
 
             {selectedAudioAppId === null && audioApps.length > 0 && !autoDetectedApp && (
-              <div className="bg-gray-950/60 border border-gray-800/60 rounded-lg p-2.5 flex items-center justify-between">
+              <div className="bg-background/60 border border-gray-800/60 rounded-lg p-2.5 flex items-center justify-between">
                 <span className="text-xs text-gray-500">
                   No audio source selected — click an app below to add audio
                 </span>
@@ -1469,10 +1479,10 @@ export const PresenterApp: React.FC = () => {
                           setAutoDetectedApp(null);
                         }
                       }}
-                      className={`flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full ${
+                      className={`flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                         isSelected
                           ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
-                          : 'bg-gray-950/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300'
+                          : 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300'
                       }`}
                     >
                       <div className="min-w-0">
@@ -1489,13 +1499,15 @@ export const PresenterApp: React.FC = () => {
                         </div>
                       </div>
 
-                      <span
-                        className={`shrink-0 px-2.5 py-1 rounded text-[10px] font-semibold ${
-                          isSelected ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-500'
-                        }`}
-                      >
-                        {isSelected ? (isAutoDetected ? 'Auto' : 'Selected') : 'Select'}
-                      </span>
+                      {isSelected ? (
+                        <span className="shrink-0 px-2.5 py-1 rounded text-[10px] font-semibold bg-emerald-600 text-white">
+                          {isAutoDetected ? 'Auto' : 'Selected'}
+                        </span>
+                      ) : (
+                        <span className="shrink-0 px-2.5 py-1 rounded text-[10px] font-semibold bg-gray-800 text-gray-500">
+                          Select
+                        </span>
+                      )}
                     </button>
                   );
                 })
@@ -1532,10 +1544,10 @@ export const PresenterApp: React.FC = () => {
                         setSelectedSourceId(source.id);
                         void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
                       }}
-                      className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full ${
+                      className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                         isSelected
                           ? 'bg-gray-800/50 border-gray-600 ring-1 ring-gray-600/30'
-                          : 'bg-gray-950/60 border-gray-800/60 hover:border-gray-700'
+                          : 'bg-background/60 border-gray-800/60 hover:border-gray-700'
                       }`}
                     >
                       <img src={source.thumbnail} alt={source.name} className="w-full h-20 object-cover rounded" />
@@ -1559,10 +1571,10 @@ export const PresenterApp: React.FC = () => {
               type="button"
               onClick={isSharing ? handleStopShare : handleStartShare}
               disabled={!isSharing && !canStartShare}
-              className={`w-full py-3 text-sm font-bold rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+              className={`w-full py-3 text-sm font-bold rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                 isSharing
                   ? 'bg-destructive/90 hover:bg-destructive text-white'
-                  : 'bg-safelight hover:bg-safelight-hover text-[#090d16]'
+                  : 'bg-safelight hover:bg-safelight-hover text-safelight-foreground'
               }`}
             >
               {isSharing ? 'Stop Screenshare' : 'Start Screenshare'}
