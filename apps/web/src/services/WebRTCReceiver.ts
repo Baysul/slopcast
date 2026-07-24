@@ -154,7 +154,7 @@ export class WebRTCReceiver {
 
         // Move the H.264 payload type to the front of the m=video line
         // so H.264 becomes the negotiated codec.
-        const lines = answer.sdp!.split(/\r?\n/);
+        const lines = (answer.sdp ?? '').split(/\r?\n/);
         const mVideoIdx = lines.findIndex((l) => l.startsWith('m=video'));
         if (mVideoIdx !== -1) {
           const mParts = lines[mVideoIdx].split(' ');
