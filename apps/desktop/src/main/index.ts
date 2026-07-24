@@ -77,13 +77,36 @@ switch (process.platform) {
   // and needs no extra feature flag.
 }
 
+// ── Ozone platform hint ───────────────────────────────────────────
+// AMD GPUs require the Vulkan ANGLE backend for VA-API hardware encoding
+// (the GLES path works for Intel but not for Mesa/RADV). On Wayland,
+// Chromium's Ozone surface factory blocks Vulkan (error in
+// wayland_surface_factory.cc:249), so we stay on the X11/XWayland
+// default to keep Vulkan available. PipeWire capture works through
+// xdg-desktop-portal regardless of the Ozone platform.
+
 // ── Cross-platform quality and rendering features ─────────────────────
+// Use Vulkan as ANGLE's backend — required on AMD/Mesa for VA-API
+// hardware encoding (the GLES path only works for Intel GPUs).
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('use-angle', 'vulkan');
+}
+
 // Enable GPU rasterization on all platforms for smoother compositing.
 app.commandLine.appendSwitch('enable-gpu-rasterization');
+
+// Use GPU memory buffers for video frames — enables DMA-BUF sharing
+// between the compositor (PipeWire capture) and the VA-API hardware
+// encoder, avoiding CPU round-trips for format conversion (BGRA→NV12).
+app.commandLine.appendSwitch('enable-gpu-memory-buffer-video-frames');
 
 // Bypass the GPU blocklist — some systems (e.g. VMs, older GPUs) have it
 // enabled by default, which disables all GPU acceleration.
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
+
+// Bypass GPU driver bug workarounds that may disable hardware encoding
+// on Mesa/RADV (AMD Linux) drivers.
+app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
 
 // Commit the combined feature list.
 app.commandLine.appendSwitch('enable-features', features.join(','));
