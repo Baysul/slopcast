@@ -6,6 +6,16 @@ import { Badge } from './components/ui/Badge';
 import { primeAudioContext, ToastViewport, useToasts } from './components/ui/Toast';
 import './index.css';
 
+// Module-level VAAPI diagnostic — runs before React mounts, no IPC needed.
+console.log(
+  '[Presenter] Module load — H.264 profiles:',
+  RTCRtpSender.getCapabilities('video')
+    ?.codecs?.filter((c) => c.mimeType.toUpperCase() === 'VIDEO/H264')
+    .map((c) => c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1])
+    .filter(Boolean)
+    .join(', ') || 'NONE',
+);
+
 declare global {
   interface Window {
     electronAPI?: {
