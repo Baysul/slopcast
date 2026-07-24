@@ -156,6 +156,11 @@ export class WebRTCReceiver {
         // so H.264 becomes the negotiated codec.
         const lines = (answer.sdp ?? '').split(/\r?\n/);
         const mVideoIdx = lines.findIndex((l) => l.startsWith('m=video'));
+        console.log('[WebRTCReceiver] answer m=video line:', lines[mVideoIdx] ?? 'NOT FOUND');
+        const videoRtpmaps = lines.filter((l) => /^a=rtpmap:\d+/.test(l));
+        console.log('[WebRTCReceiver] all rtpmap entries:', videoRtpmaps.join(' | '));
+
+        let mungedSdp = answer.sdp ?? '';
         if (mVideoIdx !== -1) {
           const mParts = lines[mVideoIdx].split(' ');
           const pts = mParts.slice(3);
@@ -164,16 +169,18 @@ export class WebRTCReceiver {
           if (h264Pt) {
             const reordered = [h264Pt, ...pts.filter((p) => p !== h264Pt)];
             lines[mVideoIdx] = [...mParts.slice(0, 3), ...reordered].join(' ');
+            mungedSdp = lines.join('\r\n');
             console.log(`[WebRTCReceiver] munged answer: H.264 PT ${h264Pt} moved to front`);
+          } else {
+            console.log('[WebRTCReceiver] no H.264 PT found in answer rtpmaps');
           }
         }
-        const mungedSdp = lines.join('\r\n');
 
         await this.pc.setLocalDescription({ type: 'answer', sdp: mungedSdp });
 
         this.signalingClient.sendSignal(senderId, {
           type: 'answer',
-          sdp: answer.sdp,
+          sdp: mungedSdp,
         });
         console.log('[WebRTCReceiver] Sent answer to presenter');
         this.handlingOffer = false;
