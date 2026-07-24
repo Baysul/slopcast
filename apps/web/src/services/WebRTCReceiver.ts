@@ -140,89 +140,36 @@ export class WebRTCReceiver {
 
         await this.pc.setRemoteDescription(new RTCSessionDescription(desc));
 
-        // ── Set receiver codec preferences to favour H.264 (HW decode) ──
-        try {
-          const transceivers = this.pc.getTransceivers();
-          const videoTransceiver = transceivers.find((t) => t.receiver?.track?.kind === 'video');
-          if (videoTransceiver) {
-            const caps = RTCRtpReceiver.getCapabilities('video');
-            if (caps?.codecs?.length) {
-              const codecOrder = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
-
-              const H264_HIGH = 0x64;
-              const H264_MAIN = 0x4d;
-              const H264_BASELINE = 0x42;
-              const h264ProfileRank = (fmtp?: string): number => {
-                if (!fmtp) return 99;
-                const m = fmtp.match(/profile-level-id=([0-9a-fA-F]{6})/);
-                if (!m) return 99;
-                const profile = parseInt(m[1].slice(0, 2), 16);
-                switch (profile) {
-                  case H264_HIGH:
-                    return 0;
-                  case H264_MAIN:
-                    return 1;
-                  case H264_BASELINE:
-                    return 2;
-                  default:
-                    return 3;
-                }
-              };
-
-              const preferred = caps.codecs
-                .filter((c) => codecOrder.includes(c.mimeType.toUpperCase()))
-                .sort((a, b) => {
-                  const ia = codecOrder.indexOf(a.mimeType.toUpperCase());
-                  const ib = codecOrder.indexOf(b.mimeType.toUpperCase());
-                  const da = ia === -1 ? 99 : ia;
-                  const db = ib === -1 ? 99 : ib;
-                  if (da !== db) return da - db;
-                  if (a.mimeType.toUpperCase() === 'VIDEO/H264') {
-                    return h264ProfileRank(a.sdpFmtpLine) - h264ProfileRank(b.sdpFmtpLine);
-                  }
-                  return 0;
-                });
-
-              // Deduplicate by MIME type so only one variant per codec
-              // is passed — setCodecPreferences rejects entries that
-              // don't match the offer's negotiated PTs.
-              const seen = new Set<string>();
-              const deduped = preferred.filter((c) => {
-                const key = c.mimeType.toUpperCase();
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return true;
-              });
-
-              // Strip profile-level-id so the preference matches ANY
-              // H.264 variant the presenter offers — otherwise an
-              // exact fmtp mismatch (e.g. prefer 4d001f / offered
-              // 640033) silently drops H.264 and VP9 wins.
-              const generic = deduped.map((c) => ({
-                mimeType: c.mimeType,
-                clockRate: c.clockRate,
-              }));
-
-              videoTransceiver.setCodecPreferences(generic);
-              console.log(
-                '[WebRTCReceiver] codec prefs:',
-                deduped
-                  .map((c) => {
-                    const plid = c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
-                    return plid ? `${c.mimeType}(${plid})` : c.mimeType;
-                  })
-                  .join(' > '),
-              );
-            }
-          }
-        } catch (err) {
-          console.warn('[WebRTCReceiver] setCodecPreferences:', err);
-        }
+        // ── Original codec preference attempt (see SDP munging below) ──
+        // setCodecPreferences on the answerer doesn't reliably select H.264:
+        // Chromium requires exact codec object matches (including
+        // sdpFmtpLine) and the spectator's preferred variant may not match
+        // the presenter's offered variant.  We instead munge the answer
+        // SDP to put H.264's payload type first in the m=video line (RFC
+        // 3264: the first PT in the answer is the negotiated codec).
 
         await this.flushPendingCandidates();
 
         const answer = await this.pc.createAnswer();
-        await this.pc.setLocalDescription(answer);
+
+        // Move the H.264 payload type to the front of the m=video line
+        // so H.264 becomes the negotiated codec.
+        const lines = answer.sdp!.split(/\r?\n/);
+        const mVideoIdx = lines.findIndex((l) => l.startsWith('m=video'));
+        if (mVideoIdx !== -1) {
+          const mParts = lines[mVideoIdx].split(' ');
+          const pts = mParts.slice(3);
+          const rtpmaps = lines.filter((l) => /^a=rtpmap:\d+ H264\//.test(l));
+          const h264Pt = rtpmaps.map((l) => l.match(/^a=rtpmap:(\d+)/)?.[1]).find(Boolean);
+          if (h264Pt) {
+            const reordered = [h264Pt, ...pts.filter((p) => p !== h264Pt)];
+            lines[mVideoIdx] = [...mParts.slice(0, 3), ...reordered].join(' ');
+            console.log(`[WebRTCReceiver] munged answer: H.264 PT ${h264Pt} moved to front`);
+          }
+        }
+        const mungedSdp = lines.join('\r\n');
+
+        await this.pc.setLocalDescription({ type: 'answer', sdp: mungedSdp });
 
         this.signalingClient.sendSignal(senderId, {
           type: 'answer',
