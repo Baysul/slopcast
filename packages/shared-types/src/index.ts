@@ -28,6 +28,7 @@ export type MessageType =
   | 'PUBLISH_STREAM'
   | 'PUBLISH_ACK'
   | 'PUBLISH_REJECTED'
+  | 'STOP_STREAM'
   | 'USER_JOINED'
   | 'USER_LEFT'
   | 'ROOM_CLOSED'
@@ -86,6 +87,11 @@ export interface PublishRejectedPayload {
 
 export interface RoomClosedPayload {
   reason: string;
+}
+
+/** Presenter → server when stopping a live stream. Server → spectators after the fact. */
+export interface StopStreamPayload {
+  senderId?: string;
 }
 
 export interface ErrorPayload {

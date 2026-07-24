@@ -7,6 +7,7 @@ export interface WebRTCReceiverCallbacks {
   onStateChange: (state: WebRTCConnectionState) => void;
   onError: (error: Error) => void;
   onPublishNotice?: (presenterId: string) => void;
+  onStreamEnd?: () => void;
 }
 
 export class WebRTCReceiver {
@@ -36,6 +37,12 @@ export class WebRTCReceiver {
       console.log(`[WebRTCReceiver] Presenter ${senderId} published stream, waiting for offer...`);
       this.callbacks.onStateChange('connecting');
       this.callbacks.onPublishNotice?.(senderId);
+    });
+
+    this.signalingClient.on('stop_stream', () => {
+      console.log('[WebRTCReceiver] Stream stopped by presenter');
+      this.close();
+      this.callbacks.onStreamEnd?.();
     });
   }
 

@@ -118,6 +118,18 @@ async function runWebClientTest() {
     assert.strictEqual(publishMsg.payload.streamId, 'desktop-screen-1');
     console.log('✅ Web Spectator received PUBLISH_STREAM notice');
 
+    // 3a. Desktop Presenter stops streaming — spectator must be notified
+    desktopWs.send(
+      JSON.stringify({
+        type: 'STOP_STREAM',
+        payload: {},
+      }),
+    );
+
+    const stopStreamMsg = await webClient.getNextMessage();
+    assert.strictEqual(stopStreamMsg.type, 'STOP_STREAM');
+    console.log('✅ Web Spectator received STOP_STREAM notice');
+
     // 4. Desktop Presenter leaves -> Room Closed
     desktopWs.close();
 

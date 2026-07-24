@@ -156,6 +156,21 @@ async function runVerification() {
     assert.strictEqual(spectatorSignalRecv.payload.signal.type, 'offer');
     console.log('✅ Presenter WEBRTC_SIGNAL (offer) relayed to spectator');
 
+    // 5a. Presenter stops streaming — spectator must be notified
+    desktopClient.send({
+      type: 'STOP_STREAM',
+      payload: {},
+    });
+
+    const stopStreamMsg = await webClient.getNextMessage();
+    assert.strictEqual(stopStreamMsg.type, 'STOP_STREAM');
+    console.log('✅ STOP_STREAM relayed to spectator');
+
+    // Consume PUBLISH_ACK that was sent to presenter when PUBLISH_STREAM was published
+    const publishAckMsg = await desktopClient.getNextMessage();
+    assert.strictEqual(publishAckMsg.type, 'PUBLISH_ACK');
+    console.log('✅ Presenter received PUBLISH_ACK');
+
     // 6. Spectator sends Answer signal
     webClient.send({
       type: 'WEBRTC_SIGNAL',

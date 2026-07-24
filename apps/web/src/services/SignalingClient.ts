@@ -6,6 +6,7 @@ import type {
   PublishStreamPayload,
   RoleAssignmentPayload,
   RoomClosedPayload,
+  StopStreamPayload,
   WebRTCSignalPayload,
   WSMessage,
 } from '@screen-share/shared-types';
@@ -18,6 +19,7 @@ export type SignalingEventMap = {
   user_joined: (participant: Participant) => void;
   user_left: (userId: string) => void;
   publish_stream: (payload: PublishStreamPayload & { senderId: string }) => void;
+  stop_stream: (payload: StopStreamPayload) => void;
   webrtc_signal: (payload: WebRTCSignalPayload & { senderId: string }) => void;
   room_closed: (payload: RoomClosedPayload) => void;
   error: (payload: ErrorPayload) => void;
@@ -157,6 +159,9 @@ export class SignalingClient {
         break;
       case 'PUBLISH_STREAM':
         this.emit('publish_stream', msg.payload as PublishStreamPayload & { senderId: string });
+        break;
+      case 'STOP_STREAM':
+        this.emit('stop_stream', msg.payload as StopStreamPayload);
         break;
       case 'WEBRTC_SIGNAL':
         this.emit('webrtc_signal', msg.payload as WebRTCSignalPayload & { senderId: string });

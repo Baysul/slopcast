@@ -1261,6 +1261,9 @@ export const PresenterApp: React.FC = () => {
       pc.close();
     }
     peerConnectionsRef.current.clear();
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'STOP_STREAM', payload: {} }));
+    }
     if (telemetryPollRef.current) {
       clearInterval(telemetryPollRef.current);
       telemetryPollRef.current = null;

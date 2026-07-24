@@ -86,6 +86,12 @@ export const RoomPage: React.FC = () => {
         if (isStale()) return;
         setStatusText('Presenter streaming — connecting...');
       },
+      onStreamEnd: () => {
+        if (isStale()) return;
+        setMediaStream(null);
+        setConnectionStatus('connecting');
+        setStatusText('Stream ended — waiting for presenter...');
+      },
     });
     rtcReceiverRef.current = receiver;
 
@@ -133,6 +139,14 @@ export const RoomPage: React.FC = () => {
       setConnectionStatus('closed');
       setStatusText('Room Closed');
       setErrorMsg(payload.reason || 'The presenter closed the session.');
+      if (rtcReceiverRef.current) rtcReceiverRef.current.close();
+    });
+
+    client.on('stop_stream', () => {
+      if (isStale()) return;
+      setMediaStream(null);
+      setConnectionStatus('connecting');
+      setStatusText('Stream ended — waiting for presenter...');
       if (rtcReceiverRef.current) rtcReceiverRef.current.close();
     });
 
