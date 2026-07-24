@@ -1,7 +1,7 @@
 import { Check, ScreenShare, Users } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import ReactDOM from 'react-dom/client';
+import { createRoot } from 'react-dom/client';
 import { Badge } from './components/ui/Badge';
 import { primeAudioContext, ToastViewport, useToasts } from './components/ui/Toast';
 import './index.css';
@@ -359,6 +359,11 @@ export const PresenterApp: React.FC = () => {
   const [telemetry, setTelemetry] = useState<StreamTelemetry>(idleTelemetry());
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
+  // ── Stream Settings (user-configurable encoder parameters) ───────────
+  const [streamFps, setStreamFps] = useState(60);
+  const [bitrateLimit, setBitrateLimit] = useState(20_000_000);
+  const [scaleResolutionDownBy, setScaleResolutionDownBy] = useState(1.0);
+
   const wsRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -373,6 +378,9 @@ export const PresenterApp: React.FC = () => {
   const statsPrevRef = useRef(new WeakMap<RTCPeerConnection, StatsPrev>());
   const bitrateHistoryRef = useRef<number[]>([]);
   const prevConnectedRef = useRef(0);
+  const streamFpsRef = useRef(60);
+  const bitrateLimitRef = useRef(20_000_000);
+  const scaleRef = useRef(1.0);
 
   useEffect(() => {
     isSharingRef.current = isSharing;
@@ -381,6 +389,61 @@ export const PresenterApp: React.FC = () => {
   useEffect(() => {
     roomCodeRef.current = roomCode;
   }, [roomCode]);
+
+  useEffect(() => {
+    streamFpsRef.current = streamFps;
+  }, [streamFps]);
+
+  useEffect(() => {
+    bitrateLimitRef.current = bitrateLimit;
+  }, [bitrateLimit]);
+
+  useEffect(() => {
+    scaleRef.current = scaleResolutionDownBy;
+  }, [scaleResolutionDownBy]);
+
+  // Push live encoder parameter updates when settings change during an active stream.
+  useEffect(() => {
+    if (!isSharing) return;
+    const fps = streamFps;
+    const br = bitrateLimit;
+    const scale = scaleResolutionDownBy;
+    let cancelled = false;
+    const apply = async () => {
+      let updated = 0;
+      for (const pc of peerConnectionsRef.current.values()) {
+        if (cancelled) return;
+        if (pc.connectionState !== 'connected') continue;
+        const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+        if (!sender) continue;
+        try {
+          const params = sender.getParameters();
+          if (!params.encodings?.length) params.encodings = [{}];
+          for (const enc of params.encodings) {
+            enc.maxBitrate = br;
+            enc.maxFramerate = fps;
+            enc.scaleResolutionDownBy = scale;
+            enc.priority = 'high';
+            enc.networkPriority = 'high';
+            enc.active = true;
+          }
+          await sender.setParameters(params);
+          updated++;
+        } catch (err) {
+          console.warn('[Presenter] live encoder update failed for peer:', err);
+        }
+      }
+      if (updated > 0) {
+        console.log(
+          `[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps scale=${scale} → ${updated} peer(s)`,
+        );
+      }
+    };
+    void apply();
+    return () => {
+      cancelled = true;
+    };
+  }, [streamFps, scaleResolutionDownBy, bitrateLimit, isSharing]);
 
   // Bind the live capture stream to the local preview <video>.
   useEffect(() => {
@@ -548,9 +611,9 @@ export const PresenterApp: React.FC = () => {
       }
 
       for (const enc of params.encodings) {
-        enc.maxBitrate = 20_000_000;
-        enc.scaleResolutionDownBy = 1.0;
-        enc.maxFramerate = 60;
+        enc.maxBitrate = bitrateLimitRef.current;
+        enc.scaleResolutionDownBy = scaleRef.current;
+        enc.maxFramerate = streamFpsRef.current;
         enc.priority = 'high';
         enc.networkPriority = 'high';
         enc.active = true;
@@ -792,9 +855,9 @@ export const PresenterApp: React.FC = () => {
           streams: [stream],
           sendEncodings: [
             {
-              maxBitrate: 20_000_000,
-              maxFramerate: 60,
-              scaleResolutionDownBy: 1.0,
+              maxBitrate: bitrateLimitRef.current,
+              maxFramerate: streamFpsRef.current,
+              scaleResolutionDownBy: scaleRef.current,
               priority: 'high',
               networkPriority: 'high',
               active: true,
@@ -1088,9 +1151,10 @@ export const PresenterApp: React.FC = () => {
     if (isWayland) {
       // The main-process displayMediaRequestHandler answers this request;
       // xdg-desktop-portal shows the desktop environment's own window picker.
+      const fps = streamFpsRef.current;
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          frameRate: { ideal: 60, max: 60 },
+          frameRate: { ideal: fps, max: fps },
           width: { max: 1920 },
           height: { max: 1080 },
         },
@@ -1122,8 +1186,8 @@ export const PresenterApp: React.FC = () => {
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: selectedSourceId,
-          minFrameRate: 30,
-          maxFrameRate: 60,
+          minFrameRate: streamFpsRef.current,
+          maxFrameRate: streamFpsRef.current,
         },
       },
     });
@@ -1571,6 +1635,81 @@ export const PresenterApp: React.FC = () => {
             )}
           </div>
         </div>
+
+        {/* Stream Settings */}
+        <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-6 space-y-5">
+          <div>
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Stream Settings</h2>
+            <p className="text-xs text-gray-500 leading-relaxed mt-1">
+              Changes apply in real time — no restart needed.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {/* Resolution */}
+            <div className="space-y-1.5">
+              <label
+                htmlFor="stream-resolution"
+                className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+              >
+                Resolution
+              </label>
+              <select
+                id="stream-resolution"
+                value={scaleResolutionDownBy}
+                onChange={(e) => setScaleResolutionDownBy(Number(e.target.value))}
+                className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 cursor-pointer"
+              >
+                <option value={1.0}>1080p (Full HD)</option>
+                <option value={1.5}>720p (HD)</option>
+                <option value={2.25}>480p (SD)</option>
+              </select>
+            </div>
+
+            {/* Frame Rate */}
+            <div className="space-y-1.5">
+              <label
+                htmlFor="stream-fps"
+                className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+              >
+                Frame Rate
+              </label>
+              <select
+                id="stream-fps"
+                value={streamFps}
+                onChange={(e) => setStreamFps(Number(e.target.value))}
+                className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 cursor-pointer"
+              >
+                <option value={15}>15 fps</option>
+                <option value={24}>24 fps</option>
+                <option value={30}>30 fps</option>
+                <option value={60}>60 fps</option>
+              </select>
+            </div>
+
+            {/* Bitrate Limit */}
+            <div className="space-y-1.5">
+              <label
+                htmlFor="stream-bitrate"
+                className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+              >
+                Bitrate Limit
+              </label>
+              <select
+                id="stream-bitrate"
+                value={bitrateLimit}
+                onChange={(e) => setBitrateLimit(Number(e.target.value))}
+                className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 cursor-pointer"
+              >
+                <option value={1_000_000}>1 Mbps</option>
+                <option value={2_000_000}>2 Mbps</option>
+                <option value={4_000_000}>4 Mbps</option>
+                <option value={6_000_000}>6 Mbps</option>
+                <option value={10_000_000}>10 Mbps</option>
+                <option value={20_000_000}>20 Mbps</option>
+              </select>
+            </div>
+          </div>
+        </div>
       </main>
 
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
@@ -1580,5 +1719,5 @@ export const PresenterApp: React.FC = () => {
 
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('Missing #root element');
-const root = ReactDOM.createRoot(rootEl);
+const root = createRoot(rootEl);
 root.render(<PresenterApp />);
