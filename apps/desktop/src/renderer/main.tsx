@@ -547,22 +547,20 @@ export const PresenterApp: React.FC = () => {
       }
 
       for (const enc of params.encodings) {
-        // 1080p60 screenshare ~ 8-15 Mbps; we set a generous cap so the
-        // encoder can use a high ceiling on a LAN link.
-        enc.maxBitrate = 20_000_000; // 20 Mbps
-        // No downscaling — send at native capture resolution.
+        enc.maxBitrate = 20_000_000;
         enc.scaleResolutionDownBy = 1.0;
-        // High-priority for real-time screenshare.
+        enc.maxFramerate = 60;
         enc.priority = 'high';
         enc.networkPriority = 'high';
-        // Active immediately.
         enc.active = true;
       }
 
       await sender.setParameters(params);
       console.log(
         '[Presenter] Video encoder params:',
-        params.encodings.map((e) => `maxBitrate=${e.maxBitrate} scale=${e.scaleResolutionDownBy}`),
+        params.encodings.map(
+          (e) => `maxBitrate=${e.maxBitrate} fps=${e.maxFramerate} scale=${e.scaleResolutionDownBy}`,
+        ),
       );
     } catch (err) {
       console.warn('[Presenter] setParameters failed:', err);
@@ -787,7 +785,24 @@ export const PresenterApp: React.FC = () => {
     const stream = localStreamRef.current;
     for (const track of stream.getTracks()) {
       console.log(`[Presenter] addTrack ${track.kind} readyState=${track.readyState} to ${spectatorId}`);
-      pc.addTrack(track, stream);
+      if (track.kind === 'video') {
+        pc.addTransceiver(track, {
+          direction: 'sendonly',
+          streams: [stream],
+          sendEncodings: [
+            {
+              maxBitrate: 20_000_000,
+              maxFramerate: 60,
+              scaleResolutionDownBy: 1.0,
+              priority: 'high',
+              networkPriority: 'high',
+              active: true,
+            },
+          ],
+        });
+      } else {
+        pc.addTrack(track, stream);
+      }
     }
 
     // ── Prefer hardware-accelerated video codec (H.264 > VP9 > VP8) ──
