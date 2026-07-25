@@ -19,20 +19,15 @@
  */
 
 import { type ChildProcess, execSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+
+import { loadConfig } from '@slopcast/shared-types/config';
 
 import type { Page } from 'playwright';
 
 // ── Configuration Types ────────────────────────────────────────────────
-
-interface AppConfig {
-  serverPort: number;
-  webPort: number;
-  apiEndpoint: string;
-  websiteUrl: string;
-}
 
 interface GpuFeatureStatus {
   name: string;
@@ -72,7 +67,6 @@ interface TestResult {
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'test-output');
-const CONFIG_PATH = path.join(REPO_ROOT, 'slopcast.config.json');
 const DESKTOP_CONSOLE_LOG = path.join(OUTPUT_DIR, 'desktop-console.log');
 const WEB_CONSOLE_LOG = path.join(OUTPUT_DIR, 'web-console.log');
 const GPU_REPORT_PATH = path.join(OUTPUT_DIR, 'desktop-gpu-report.json');
@@ -104,28 +98,6 @@ const FATAL_PATTERNS = [
 function log(prefix: string, msg: string): void {
   const ts = new Date().toISOString().slice(11, 23);
   process.stdout.write(`[${ts}] [${prefix}] ${msg}\n`);
-}
-
-function loadConfig(): AppConfig {
-  const defaults: AppConfig = {
-    serverPort: 3001,
-    webPort: 3000,
-    apiEndpoint: 'http://localhost:3001',
-    websiteUrl: 'http://localhost:3000',
-  };
-
-  if (!existsSync(CONFIG_PATH)) {
-    log('CONFIG', `No config at ${CONFIG_PATH}, using defaults`);
-    return defaults;
-  }
-
-  try {
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
-    return { ...defaults, ...raw };
-  } catch (err) {
-    log('CONFIG', `Failed to parse config: ${err}`);
-    return defaults;
-  }
 }
 
 function killPort(port: number): void {

@@ -4,10 +4,21 @@
   "private": true,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    }
+  },
   "scripts": {
     "build": "tsc"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
     "typescript": "^7.0.0"
   }
 }
