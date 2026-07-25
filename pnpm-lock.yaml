@@ -21,10 +21,10 @@ importers:
 
   apps/desktop:
     dependencies:
-      '@screen-share/native-rust':
+      '@slopcast/native-rust':
         specifier: workspace:*
         version: link:../../packages/native-rust
-      '@screen-share/shared-types':
+      '@slopcast/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       clsx:
@@ -85,7 +85,7 @@ importers:
 
   apps/server:
     dependencies:
-      '@screen-share/shared-types':
+      '@slopcast/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       express:
@@ -113,7 +113,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@screen-share/shared-types':
+      '@slopcast/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
       clsx:
