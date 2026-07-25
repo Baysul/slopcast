@@ -187,6 +187,8 @@ export const RoomPage: React.FC = () => {
 
   const handleResync = () => initializeConnection();
 
+  const getStatsFn = useCallback(async () => rtcReceiverRef.current?.getStats() ?? null, []);
+
   const statusVariant: 'live' | 'disconnected' | 'info' =
     connectionStatus === 'live'
       ? 'live'
@@ -210,6 +212,7 @@ export const RoomPage: React.FC = () => {
           statusText={statusText}
           onResync={handleResync}
           fullBleed
+          getStatsFn={getStatsFn}
         />
       </div>
 

@@ -2,6 +2,12 @@ import { Maximize, Minimize, Pause, Play, Radio, RefreshCw, Volume2, VolumeX } f
 import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { AudioVisualizer } from './AudioVisualizer';
+import {
+  computeTelemetry,
+  createStatsPrev,
+  type SpectatorTelemetry,
+  SpectatorTelemetryBar,
+} from './SpectatorTelemetryBar';
 import { Button } from './ui/Button';
 
 interface VideoPlayerProps {
@@ -10,9 +16,19 @@ interface VideoPlayerProps {
   statusText?: string;
   onResync?: () => void;
   fullBleed?: boolean;
+  getStatsFn?: () => Promise<RTCStatsReport | null>;
 }
 
-export const VideoPlayer: React.FC<VideoPlayerProps> = ({ mediaStream, isLive, statusText, onResync, fullBleed }) => {
+const STATS_POLL_MS = 2000;
+
+export const VideoPlayer: React.FC<VideoPlayerProps> = ({
+  mediaStream,
+  isLive,
+  statusText,
+  onResync,
+  fullBleed,
+  getStatsFn,
+}) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -21,6 +37,38 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ mediaStream, isLive, s
   const [volume, setVolume] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hasVideoTrack, setHasVideoTrack] = useState(false);
+
+  const [telemetry, setTelemetry] = useState<SpectatorTelemetry | null>(null);
+  const statsPrevRef = useRef<ReturnType<typeof createStatsPrev>>(null);
+  const telemetryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (telemetryPollRef.current) {
+      clearInterval(telemetryPollRef.current);
+      telemetryPollRef.current = null;
+    }
+    statsPrevRef.current = null;
+    setTelemetry(null);
+
+    if (!isLive || !getStatsFn) return;
+
+    telemetryPollRef.current = setInterval(async () => {
+      const report = await getStatsFn();
+      if (!report) return;
+
+      const hasAudio = mediaStream?.getAudioTracks().some((t) => t.enabled) ?? false;
+      const t = computeTelemetry(report, statsPrevRef.current, hasAudio);
+      statsPrevRef.current = createStatsPrev(report) ?? statsPrevRef.current;
+      setTelemetry(t);
+    }, STATS_POLL_MS);
+
+    return () => {
+      if (telemetryPollRef.current) {
+        clearInterval(telemetryPollRef.current);
+        telemetryPollRef.current = null;
+      }
+    };
+  }, [isLive, getStatsFn, mediaStream]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -136,8 +184,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ mediaStream, isLive, s
       </div>
 
       {isLive && (
-        <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
+        <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto flex items-end justify-between gap-4">
+          {telemetry?.hasVideo && <SpectatorTelemetryBar telemetry={telemetry} />}
+
+          <div className="flex items-center gap-2 shrink-0 ml-auto">
             <button
               type="button"
               onClick={togglePlay}
@@ -166,9 +216,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ mediaStream, isLive, s
                 className="w-14 accent-safelight h-1 bg-white/20 rounded-full cursor-pointer"
               />
             </div>
-          </div>
 
-          <div className="flex items-center gap-2">
             {onResync && (
               <button
                 type="button"
