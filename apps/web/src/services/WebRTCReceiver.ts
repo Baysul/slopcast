@@ -140,75 +140,30 @@ export class WebRTCReceiver {
 
         await this.pc.setRemoteDescription(new RTCSessionDescription(desc));
 
-        // ── Original codec preference attempt (see SDP munging below) ──
-        // setCodecPreferences on the answerer doesn't reliably select H.264:
-        // Chromium requires exact codec object matches (including
-        // sdpFmtpLine) and the spectator's preferred variant may not match
-        // the presenter's offered variant.  We instead munge the answer
-        // SDP to put H.264's payload type first in the m=video line (RFC
-        // 3264: the first PT in the answer is the negotiated codec).
-
         await this.flushPendingCandidates();
 
         const answer = await this.pc.createAnswer();
 
-        // Chromium's answerer drops H.264 from the answer entirely when
-        // VP9/VP8 are also offered — even though the offer includes H.264
-        // first and the receiver supports it.  We inject H.264's PT,
-        // rtpmap, and fmtp lines from the OFFER into the ANSWER so the
-        // negotiated codec becomes H.264 (RFC 3264: first PT in the
-        // answer wins).
-        const offerSdp = this.pc.remoteDescription?.sdp ?? '';
-        const offerLines = offerSdp.split(/\r?\n/);
-
-        // Find H.264 PT and its attribute lines in the offer's video section.
-        const offerVideoStart = offerLines.findIndex((l) => l.startsWith('m=video'));
-        let offerVideoEnd = offerLines.findIndex((l, i) => i > offerVideoStart && l.startsWith('m='));
-        if (offerVideoEnd === -1) offerVideoEnd = offerLines.length;
-
-        const offerVideoLines = offerLines.slice(offerVideoStart, offerVideoEnd);
-        const h264Rtpmap = offerVideoLines.find((l) => /^a=rtpmap:\d+ H264\//.test(l));
-        const h264Pt = h264Rtpmap?.match(/^a=rtpmap:(\d+)/)?.[1];
-
-        const aLines = answer.sdp ?? '';
-        let mungedSdp = aLines;
-        if (h264Pt) {
-          const ansLines = aLines.split(/\r?\n/);
-          const ansMVideoIdx = ansLines.findIndex((l) => l.startsWith('m=video'));
-          if (ansMVideoIdx !== -1) {
-            // Find where to inject H.264's a= lines: after the last a=rtpmap in the video section.
-            const ansVideoStart = ansMVideoIdx;
-            let ansVideoEnd = ansLines.findIndex((l, i) => i > ansVideoStart && l.startsWith('m='));
-            if (ansVideoEnd === -1) ansVideoEnd = ansLines.length;
-
-            // Copy H.264's a=rtpmap, a=fmtp, a=rtcp-fb lines from the offer.
-            const h264AttrLines = offerVideoLines.filter((l) =>
-              new RegExp(`^a=(rtpmap|fmtp|rtcp-fb):${h264Pt}[ ]`).test(l),
-            );
-
-            // Inject H.264 PT at front of m=video line.
-            const mParts = ansLines[ansMVideoIdx].split(' ');
-            const pts = mParts.slice(3);
-            const reordered = [h264Pt, ...pts.filter((p) => p !== h264Pt)];
-            ansLines[ansMVideoIdx] = [...mParts.slice(0, 3), ...reordered].join(' ');
-
-            // Inject a=rtpmap/a=fmtp/a=rtcp-fb before the next m= line.
-            ansLines.splice(ansVideoEnd, 0, ...h264AttrLines);
-
-            mungedSdp = ansLines.join('\r\n');
-            console.log(
-              `[WebRTCReceiver] injected H.264 PT ${h264Pt} into answer, attrs: ${h264AttrLines.length} lines`,
-            );
-          }
-        } else {
-          console.log('[WebRTCReceiver] no H.264 PT found in offer');
-        }
-
-        await this.pc.setLocalDescription({ type: 'answer', sdp: mungedSdp });
+        // Codec negotiation is answerer-driven (RFC 3264): the presenter
+        // sends the first codec from its own offer that also appears in
+        // our answer.  The desktop offer already lists H.264 first
+        // (setCodecPreferences on the presenter), so spectators that can
+        // decode H.264 automatically receive H.264.
+        //
+        // We deliberately do NOT inject H.264 into the answer here.  A
+        // browser omits H.264 from its answer precisely because its engine
+        // cannot decode it (e.g. Chromium builds without proprietary
+        // codecs); Chromium's answerer never drops a decodable codec.
+        // Forcing H.264's PT into the answer makes setLocalDescription
+        // fail with "Failed to set local video description recv
+        // parameters" — and even if it succeeded, the spectator would be
+        // unable to decode the stream.  Answering naturally lets such
+        // browsers fall back to VP9/VP8, which the presenter then encodes.
+        await this.pc.setLocalDescription(answer);
 
         this.signalingClient.sendSignal(senderId, {
           type: 'answer',
-          sdp: mungedSdp,
+          sdp: answer.sdp,
         });
         console.log('[WebRTCReceiver] Sent answer to presenter');
         this.handlingOffer = false;
