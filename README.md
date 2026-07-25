@@ -2,7 +2,9 @@
 
 Room-based screen and audio sharing — present from the desktop app, spectate from any browser.
 
-![Slopcast screenshot](screenshot.png)
+<p align="center">
+  <img src="screenshot.png" alt="Slopcast screenshot" width="720">
+</p>
 
 ## How it works
 
