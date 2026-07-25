@@ -90,8 +90,7 @@ mod wasapi {
     // OS version / process enumeration helpers
     // -----------------------------------------------------------------------
 
-    /// Returns the host OS build number via `RtlGetVersion` (unlike
-    /// `GetVersionExW`, this is not subject to manifest-based lying).
+    /// `RtlGetVersion` is not subject to manifest-based lying unlike `GetVersionExW`.
     fn os_build_number() -> Option<u32> {
         unsafe {
             let mut info: OSVERSIONINFOW = std::mem::zeroed();
@@ -217,8 +216,6 @@ mod wasapi {
         }
     }
 
-    /// Activates an `IAudioClient` in process-loopback mode which captures
-    /// ONLY the audio of the tree of `target_pid` and nothing else.
     unsafe fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IAudioClient> {
         let mut activation_params = AUDIOCLIENT_ACTIVATION_PARAMS {
             ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -230,7 +227,6 @@ mod wasapi {
             },
         };
 
-        // Pack the activation params into a VT_BLOB PROPVARIANT.
         let raw_prop = PROPVARIANT {
             Anonymous: PROPVARIANT_0 {
                 Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
@@ -263,7 +259,6 @@ mod wasapi {
             &callback,
         )?;
 
-        // Wait (with deadline) for the async activation to complete.
         let deadline = Instant::now() + Duration::from_secs(10);
         let (lock, cvar) = &*setup;
         let mut completed = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,8 +303,7 @@ mod wasapi {
         Ok((client, mix_format))
     }
 
-    /// Explicit 48 kHz stereo float32 format. Process loopback clients do not
-    /// support `GetMixFormat`, so an explicit format must be supplied.
+    /// Process loopback clients do not support `GetMixFormat`, so an explicit format is required.
     fn make_loopback_format() -> WAVEFORMATEXTENSIBLE {
         const CHANNELS: u16 = 2;
         const SAMPLE_RATE: u32 = 48_000;
@@ -342,8 +336,6 @@ mod wasapi {
     }
 
     impl CaptureSession {
-        /// Drains all pending capture packets. The PCM frames are the handoff
-        /// point for the WebRTC/Opus encoding pipeline.
         fn drain_packets(&self) -> Result<(), String> {
             unsafe {
                 loop {
@@ -360,11 +352,6 @@ mod wasapi {
                     self.capture_client
                         .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
                         .map_err(|e| format!("GetBuffer failed: {}", e))?;
-                    // PCM handoff point: `data` holds `frames` frames of
-                    // interleaved float32 stereo PCM
-                    // (`frames * BLOCK_ALIGN` bytes). Forward into the
-                    // WebRTC audio pipeline here.
-                    let _pcm_byte_len = frames as usize * BLOCK_ALIGN as usize;
                     self.capture_client
                         .ReleaseBuffer(frames)
                         .map_err(|e| format!("ReleaseBuffer failed: {}", e))?;
@@ -372,8 +359,6 @@ mod wasapi {
             }
         }
 
-        /// Event-driven capture loop: waits for either the stop event or the
-        /// audio-ready event and drains capture packets until stopped.
         fn run(&self, stop_event: HANDLE) -> Result<(), String> {
             let handles = [stop_event, self.audio_event];
             loop {
@@ -400,9 +385,6 @@ mod wasapi {
         }
     }
 
-    /// Builds and starts a capture session for `target_pid`, selecting
-    /// process-scoped loopback when supported and falling back to system-wide
-    /// loopback otherwise.
     unsafe fn build_capture_session(target_pid: u32) -> Result<CaptureSession, String> {
         let process_loopback_supported =
             os_build_number().map(|build| build >= PROCESS_LOOPBACK_MIN_BUILD).unwrap_or(false);
@@ -454,8 +436,7 @@ mod wasapi {
         Ok(CaptureSession { client, capture_client, audio_event, mode })
     }
 
-    /// Entry point of the capture thread. Owns all COM objects; reports
-    /// startup success/failure through `startup_tx`.
+    /// Reports startup success/failure through `startup_tx`.
     unsafe fn run_capture(
         target_pid: u32,
         stop_event_raw: usize,
@@ -537,7 +518,6 @@ mod wasapi {
             }
         };
 
-        // Block until the capture thread reports startup success or failure.
         match rx.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok(mode)) => {
                 state.is_active = true;

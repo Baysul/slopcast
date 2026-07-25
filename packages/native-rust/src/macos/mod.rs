@@ -3,7 +3,6 @@ use crate::AudioApp;
 mod sck {
     use super::AudioApp;
     use napi::Result as NapiResult;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     use screencapturekit::prelude::{
@@ -15,33 +14,21 @@ mod sck {
         napi::Error::from_reason(format!("{}: {}", context, e))
     }
 
-    struct AudioOutputHandler {
-        buffers_received: Arc<AtomicU64>,
-    }
+    struct AudioOutputHandler;
 
     impl SCStreamOutputTrait for AudioOutputHandler {
-        fn did_output_sample_buffer(&self, _sample: CMSampleBuffer, of_type: SCStreamOutputType) {
-            if matches!(of_type, SCStreamOutputType::Audio) {
-                self.buffers_received.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        fn did_output_sample_buffer(&self, _sample: CMSampleBuffer, _of_type: SCStreamOutputType) {}
     }
 
     struct MacCaptureState {
         is_active: bool,
         stream: Option<SCStream>,
         target_bundle_id: Option<String>,
-        buffers_received: Arc<AtomicU64>,
     }
 
     impl MacCaptureState {
         fn new() -> Self {
-            Self {
-                is_active: false,
-                stream: None,
-                target_bundle_id: None,
-                buffers_received: Arc::new(AtomicU64::new(0)),
-            }
+            Self { is_active: false, stream: None, target_bundle_id: None }
         }
     }
 
@@ -140,10 +127,7 @@ mod sck {
             .with_shows_cursor(false);
 
         let mut stream = SCStream::new(&filter, &config);
-        stream.add_output_handler(
-            AudioOutputHandler { buffers_received: state.buffers_received.clone() },
-            SCStreamOutputType::Audio,
-        );
+        stream.add_output_handler(AudioOutputHandler, SCStreamOutputType::Audio);
         stream.start_capture().map_err(|e| napi_err("SCStream::start_capture failed", e))?;
 
         state.stream = Some(stream);
