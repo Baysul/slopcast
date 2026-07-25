@@ -1,3 +1,10 @@
+export interface AppConfig {
+  serverPort: number;
+  webPort: number;
+  apiEndpoint: string;
+  websiteUrl: string;
+}
+
 export type ClientRole = 'presenter' | 'spectator';
 export type ClientOrigin = 'desktop' | 'web';
 

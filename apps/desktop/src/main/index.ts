@@ -1,44 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import * as native from '@slopcast/native-rust';
+import { loadConfig } from '@slopcast/shared-types/config';
 import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, nativeImage, session } from 'electron';
 
-interface AppConfig {
-  serverPort: number;
-  webPort: number;
-  apiEndpoint: string;
-  websiteUrl: string;
-}
-
-function loadAppConfig(): AppConfig {
-  const defaults: AppConfig = {
-    serverPort: 3001,
-    webPort: 3000,
-    apiEndpoint: 'http://localhost:3001',
-    websiteUrl: 'http://localhost:3000',
-  };
-
-  const candidates = [
-    path.resolve(process.cwd(), 'slopcast.config.json'),
-    path.resolve(__dirname, '../../../../slopcast.config.json'),
-  ];
-
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      try {
-        return { ...defaults, ...JSON.parse(readFileSync(p, 'utf-8')) };
-      } catch {
-        console.warn(`[main] Failed to parse config at ${p}, using defaults`);
-      }
-    }
-  }
-
-  console.warn('[main] No slopcast.config.json found, using defaults');
-  return defaults;
-}
-
-const appConfig = loadAppConfig();
+const appConfig = loadConfig();
 
 let mainWindow: BrowserWindow | null = null;
 let lastCapturedSourceName: string | null = null;

@@ -27,6 +27,14 @@ export type SignalingEventMap = {
 
 type EventCallback<T extends keyof SignalingEventMap> = SignalingEventMap[T];
 
+declare global {
+  interface Window {
+    __SLOPCAST_CONFIG__?: {
+      apiEndpoint?: string;
+    };
+  }
+}
+
 export class SignalingClient {
   private ws: WebSocket | null = null;
   private url: string;
@@ -38,11 +46,13 @@ export class SignalingClient {
   constructor(url?: string) {
     if (url) {
       this.url = url;
+    } else if (typeof window !== 'undefined' && window.__SLOPCAST_CONFIG__?.apiEndpoint) {
+      this.url = window.__SLOPCAST_CONFIG__.apiEndpoint.replace(/^http/, 'ws');
     } else if (typeof window !== 'undefined') {
-      // Signaling server runs on :3001; web UI is on :3000.
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.hostname || 'localhost';
-      this.url = `${protocol}//${host}:3001`;
+      const port = window.location.port || '3001';
+      this.url = `${protocol}//${host}:${port}`;
     } else {
       this.url = 'ws://localhost:3001';
     }
