@@ -1,4 +1,4 @@
-import type { ClientOrigin, ClientRole, Participant, RoomState } from '@screen-share/shared-types';
+import type { ClientOrigin, ClientRole, Participant, RoomState } from '@slopcast/shared-types';
 
 export class RoomManager {
   private rooms: Map<string, RoomState> = new Map();

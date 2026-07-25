@@ -15,8 +15,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const CAPTURE_NODE_NAME: &str = "Screenshare-Window-Audio";
-const CAPTURE_NODE_DESCRIPTION: &str = "Screenshare Window Audio";
+const CAPTURE_NODE_NAME: &str = "Slopcast-Window-Audio";
+const CAPTURE_NODE_DESCRIPTION: &str = "Slopcast Window Audio";
 const ADAPTER_FACTORY: &str = "adapter";
 const NULL_SINK_FACTORY: &str = "support.null-audio-sink";
 const CAPTURE_MEDIA_CLASS: &str = "Audio/Source/Virtual";

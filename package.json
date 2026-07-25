@@ -1,6 +1,6 @@
 {
-  "name": "screen-share-monorepo",
-  "desktopName": "screen-share-app",
+  "name": "slopcast-monorepo",
+  "desktopName": "slopcast-app",
   "author": "Basil <parsley@duck.com>",
   "homepage": "https://github.com/npm/example#readme",
   "private": true,
@@ -9,13 +9,13 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "check": "biome ci && pnpm --filter @screen-share/native-rust rust:check",
+    "check": "biome ci && pnpm --filter @slopcast/native-rust rust:check",
     "check:fix": "biome check --write",
     "lint": "biome lint",
     "lint:fix": "biome lint --write",
-    "format": "biome format --write && pnpm --filter @screen-share/native-rust rust:fmt",
-    "rust:fmt": "pnpm --filter @screen-share/native-rust rust:fmt",
-    "rust:check": "pnpm --filter @screen-share/native-rust rust:check",
+    "format": "biome format --write && pnpm --filter @slopcast/native-rust rust:fmt",
+    "rust:fmt": "pnpm --filter @slopcast/native-rust rust:fmt",
+    "rust:check": "pnpm --filter @slopcast/native-rust rust:check",
     "dev": "pnpm --parallel --recursive dev",
     "dev:desktop": "pnpm --filter desktop dev",
     "dev:web": "pnpm --filter web dev",

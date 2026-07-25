@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import * as native from '@screen-share/native-rust';
-import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, session } from 'electron';
+import * as native from '@slopcast/native-rust';
+import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, nativeImage, session } from 'electron';
 
 interface AppConfig {
   serverPort: number;
@@ -20,8 +20,8 @@ function loadAppConfig(): AppConfig {
   };
 
   const candidates = [
-    path.resolve(process.cwd(), 'screen-share.config.json'),
-    path.resolve(__dirname, '../../../../screen-share.config.json'),
+    path.resolve(process.cwd(), 'slopcast.config.json'),
+    path.resolve(__dirname, '../../../../slopcast.config.json'),
   ];
 
   for (const p of candidates) {
@@ -34,7 +34,7 @@ function loadAppConfig(): AppConfig {
     }
   }
 
-  console.warn('[main] No screen-share.config.json found, using defaults');
+  console.warn('[main] No slopcast.config.json found, using defaults');
   return defaults;
 }
 
@@ -153,12 +153,23 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 // window is hidden/minimized.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
+function resolveIconPath(): string | null {
+  const candidates = [
+    path.join(app.getAppPath(), 'resources', 'icon.png'),
+    path.join(__dirname, '../../resources/icon.png'),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? null;
+}
+
 function createWindow() {
+  const iconPath = resolveIconPath();
+
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 900,
-    title: 'ScreenShare Desktop Presenter',
+    title: 'Slopcast Desktop Presenter',
     backgroundColor: '#090d16',
+    icon: iconPath ? nativeImage.createFromPath(iconPath) : undefined,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -234,6 +245,7 @@ function stopNativeCapture() {
 }
 
 app.whenReady().then(() => {
+  app.setName('slopcast');
   console.log('====================================================');
   console.log('🚀 Launching Desktop Presenter Application');
   console.log(`   Platform: ${process.platform} (${isWayland ? 'Wayland - xdg-desktop-portal' : 'X11/native'})`);

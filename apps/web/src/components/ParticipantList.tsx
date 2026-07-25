@@ -1,4 +1,4 @@
-import type { Participant } from '@screen-share/shared-types';
+import type { Participant } from '@slopcast/shared-types';
 import { Globe, Monitor, Shield, Users } from 'lucide-react';
 import type React from 'react';
 import { Card } from './ui/Card';

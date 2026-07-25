@@ -10,7 +10,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@screen-share/shared-types": "workspace:*",
+    "@slopcast/shared-types": "workspace:*",
     "express": "5.2.1",
     "ws": "^8.18.0"
   },

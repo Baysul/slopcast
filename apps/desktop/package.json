@@ -1,14 +1,15 @@
 {
   "name": "desktop",
   "author": "Basil <parsley@duck.com>",
-  "desktopName": "screen-share-app",
+  "desktopName": "slopcast-app",
+  "icon": "resources/icon.png",
   "homepage": "https://github.com/npm/example#readme",
   "version": "0.1.0",
   "private": true,
   "main": "dist/main/index.js",
   "scripts": {
-    "predev": "pnpm --filter @screen-share/native-rust build:debug",
-    "prebuild": "pnpm --filter @screen-share/native-rust build",
+    "predev": "pnpm --filter @slopcast/native-rust build:debug",
+    "prebuild": "pnpm --filter @slopcast/native-rust build",
     "dev": "pnpm build && electron .",
     "build": "tsc -p tsconfig.json && cp src/main/preload.js dist/main/preload.js && vite build",
     "build:main": "tsc -p tsconfig.json && cp src/main/preload.js dist/main/preload.js",
@@ -21,8 +22,8 @@
     "dist:win": "pnpm build && electron-builder build --win"
   },
   "dependencies": {
-    "@screen-share/native-rust": "workspace:*",
-    "@screen-share/shared-types": "workspace:*",
+    "@slopcast/native-rust": "workspace:*",
+    "@slopcast/shared-types": "workspace:*",
     "clsx": "^2.1.1",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",

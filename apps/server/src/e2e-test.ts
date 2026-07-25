@@ -3,7 +3,7 @@
  * End-to-End Test: Presenter -> Spectator Video Sharing Flow
  *
  * Validates the complete room-based screen sharing ecosystem:
- *   1. Parse screen-share.config.json for ports and endpoints
+ *   1. Parse slopcast.config.json for ports and endpoints
  *   2. Kill conflicting processes, spawn server + web dev servers
  *   3. Launch Electron presenter: create room, share screen
  *   4. Launch Chromium spectator: join room, verify video stream
@@ -72,7 +72,7 @@ interface TestResult {
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'test-output');
-const CONFIG_PATH = path.join(REPO_ROOT, 'screen-share.config.json');
+const CONFIG_PATH = path.join(REPO_ROOT, 'slopcast.config.json');
 const DESKTOP_CONSOLE_LOG = path.join(OUTPUT_DIR, 'desktop-console.log');
 const WEB_CONSOLE_LOG = path.join(OUTPUT_DIR, 'web-console.log');
 const GPU_REPORT_PATH = path.join(OUTPUT_DIR, 'desktop-gpu-report.json');

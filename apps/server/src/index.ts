@@ -18,8 +18,8 @@ function loadConfig(): AppConfig {
   };
 
   const candidates = [
-    path.resolve(process.cwd(), 'screen-share.config.json'),
-    path.resolve(__dirname, '../../../../screen-share.config.json'),
+    path.resolve(process.cwd(), 'slopcast.config.json'),
+    path.resolve(__dirname, '../../../../slopcast.config.json'),
   ];
 
   for (const p of candidates) {
@@ -32,7 +32,7 @@ function loadConfig(): AppConfig {
     }
   }
 
-  console.warn('[server] No screen-share.config.json found, using defaults');
+  console.warn('[server] No slopcast.config.json found, using defaults');
   return defaults;
 }
 

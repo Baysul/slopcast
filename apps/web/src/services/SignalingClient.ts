@@ -9,7 +9,7 @@ import type {
   StopStreamPayload,
   WebRTCSignalPayload,
   WSMessage,
-} from '@screen-share/shared-types';
+} from '@slopcast/shared-types';
 
 export type SignalingEventMap = {
   connected: () => void;
