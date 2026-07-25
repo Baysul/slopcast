@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "test": "tsx src/test-signaling.ts",
+    "test:e2e": "tsx src/e2e-test.ts",
     "build": "tsc"
   },
   "dependencies": {

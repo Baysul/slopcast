@@ -17,6 +17,7 @@
     "dev:desktop": "pnpm --filter desktop dev",
     "dev:web": "pnpm --filter web dev",
     "dev:server": "pnpm --filter server dev",
+    "test:e2e": "pnpm --filter server test:e2e",
     "build": "pnpm check && pnpm --recursive build",
     "build:desktop": "pnpm check && pnpm --filter desktop build",
     "package:desktop": "pnpm check && pnpm --filter desktop package",
@@ -29,6 +30,7 @@
     "opencode-goal-plugin": "^0.6.5"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.5"
+    "@biomejs/biome": "2.5.5",
+    "playwright": "^1.55.0"
   }
 }
