@@ -293,23 +293,22 @@ impl GraphTracker {
 
     fn add_client(&mut self, _global: &GlobalObject<&DictRef>, props: &DictRef) {
         let pid = client_sec_pid(props)
-            .map(|p| p as u32)
             .or_else(|| {
                 props
                     .get("application.process.id")
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .filter(|p| *p > 0 && is_valid_pid(*p as i32))
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .filter(|p| is_valid_pid(*p))
             })
             .or_else(|| {
                 let name = props.get("application.name").unwrap_or("");
                 if !name.is_empty() {
-                    resolve_pid_by_name(name).map(|p| p as u32)
+                    resolve_pid_by_name(name)
                 } else {
                     None
                 }
             });
         if let Some(pid) = pid {
-            self.client_pids.insert(_global.id, pid);
+            self.client_pids.insert(_global.id, pid as u32);
         }
     }
 
@@ -501,8 +500,9 @@ impl GraphTracker {
 
 fn port_channel_from_name(port_name: Option<&str>) -> Option<String> {
     let name = port_name?;
-    let suffix = name.rsplit('_').next()?;
-    if suffix.is_empty() || suffix == name {
+    let underscore = name.rfind('_')?;
+    let suffix = &name[underscore + 1..];
+    if suffix.is_empty() {
         None
     } else {
         Some(suffix.to_string())
@@ -829,26 +829,16 @@ fn is_valid_pid(pid: i32) -> bool {
     pid > 0 && std::path::Path::new(&format!("/proc/{}", pid)).exists()
 }
 
-/// Returns true when the process is one of the PipeWire daemons and
-/// therefore never a capturable application.
 fn is_pipewire_daemon(pid: i32) -> bool {
     std::fs::read_to_string(format!("/proc/{}/comm", pid))
         .map(|c| matches!(c.trim(), "pipewire" | "pipewire-pulse" | "wireplumber"))
         .unwrap_or(false)
 }
 
-/// Resolve the process ID of a PipeWire client from its registry
-/// properties using the server-authenticated `pipewire.sec.pid` key.
-///
-/// `pipewire.sec.pid` is set by the server from the client's socket
-/// credentials, so it is always present in registry `global` events
-/// (unlike `application.process.id`, which is only visible on a bound
-/// Client proxy) and is already translated into the host PID namespace.
-///
-/// PulseAudio-protocol clients are proxied by the `pipewire-pulse`
-/// server, so their `pipewire.sec.pid` points at the daemon rather than
-/// the application; those are rejected here and resolved through the
-/// stream node's own properties instead.
+/// `pipewire.sec.pid` is authenticated by the server from socket credentials,
+/// so it's always present in registry globals (unlike `application.process.id`).
+/// PipeWire-pulse proxied clients point at the daemon PID; reject those so the
+/// caller resolves through stream properties instead.
 fn client_sec_pid(props: &DictRef) -> Option<i32> {
     let pid = props
         .get("pipewire.sec.pid")
@@ -986,18 +976,17 @@ fn collect_client_pids(
             };
 
             if global.type_ == ObjectType::Client {
-                let name = props.get("application.name").unwrap_or("");
-                let client_name = name;
+                let app_name = props.get("application.name").unwrap_or("").to_string();
                 let pid = client_sec_pid(props)
                     .or_else(|| {
                         props
                             .get("application.process.id")
                             .and_then(|v| v.parse::<i32>().ok())
-                            .filter(|pid| *pid > 0 && is_valid_pid(*pid))
+                            .filter(|pid| is_valid_pid(*pid))
                     })
                     .or_else(|| {
-                        if !client_name.is_empty() {
-                            resolve_pid_by_name(client_name)
+                        if !app_name.is_empty() {
+                            resolve_pid_by_name(&app_name)
                         } else {
                             None
                         }
@@ -1008,29 +997,29 @@ fn collect_client_pids(
             }
 
             let media_class = props.get("media.class").unwrap_or("");
-            let app_name = props
+            let stream_name = props
                 .get("application.name")
                 .or_else(|| props.get("node.name"))
                 .or_else(|| props.get("media.name"))
                 .unwrap_or("");
 
             if media_class == "Stream/Output/Audio"
-                && !app_name.is_empty()
-                && !app_name.contains(CAPTURE_NODE_NAME)
+                && !stream_name.is_empty()
+                && !stream_name.contains(CAPTURE_NODE_NAME)
             {
                 let pid = node_pid(props)
                     .or_else(|| client_pid(props, &client_pids_clone.borrow()))
                     .or_else(|| {
                         resolve_pid_by_binary(props.get("application.process.binary").unwrap_or(""))
                     })
-                    .or_else(|| resolve_pid_by_name(app_name))
+                    .or_else(|| resolve_pid_by_name(stream_name))
                     .unwrap_or(0);
 
                 let mut list = apps_clone.borrow_mut();
                 if !list.iter().any(|a| a.id == global.id as i32) {
                     list.push(AudioApp {
                         id: global.id as i32,
-                        name: app_name.to_string(),
+                        name: stream_name.to_string(),
                         process_id: pid,
                         bundle_id: None,
                     });
@@ -1255,15 +1244,13 @@ fn is_kde_screencast_window(suffix: &str) -> bool {
     if suffix.is_empty() {
         return false;
     }
-    let monitor_pattern = |s: &str| -> bool {
-        let parts: Vec<&str> = s.split('-').collect();
-        if parts.len() < 2 {
-            return false;
-        }
-        parts[0].chars().all(|c| c.is_ascii_uppercase())
-            && parts[1].chars().all(|c| c.is_ascii_digit())
-    };
-    !monitor_pattern(suffix)
+    let parts: Vec<&str> = suffix.split('-').collect();
+    if parts.len() < 2 {
+        return true;
+    }
+    let is_monitor = parts[0].chars().all(|c| c.is_ascii_uppercase())
+        && parts[1].chars().all(|c| c.is_ascii_digit());
+    !is_monitor
 }
 
 fn kde_window_uuid_to_pid(uuid: &str) -> Option<u32> {

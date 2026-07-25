@@ -129,8 +129,3 @@ pub fn resolve_audio_app_by_name(label: String) -> napi::Result<Option<AudioApp>
     let apps = platform::list_audio_applications()?;
     Ok(find_best_audio_match(&apps, &label))
 }
-
-#[napi]
-pub fn get_audio_applications() -> napi::Result<Vec<AudioApp>> {
-    platform::list_audio_applications()
-}
