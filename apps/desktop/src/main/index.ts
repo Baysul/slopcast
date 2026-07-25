@@ -235,7 +235,7 @@ app.whenReady().then(() => {
     const initMsg = native.initEngine();
     console.log(`[Native Rust] ${initMsg}`);
 
-    const audioApps = native.getAudioApplications();
+    const audioApps = native.listAudioApplications();
     console.log(`🔊 Detected ${audioApps.length} active audio applications:`);
     for (const app of audioApps) {
       console.log(`  - [ID: ${app.id}] ${app.name} (Process ID: ${app.processId})`);
@@ -282,7 +282,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('get-audio-apps', () => {
     try {
-      const apps = native.getAudioApplications();
+      const apps = native.listAudioApplications();
       for (const a of apps) {
         if (a.processId <= 0) {
           console.warn(
