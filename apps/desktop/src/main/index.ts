@@ -1,7 +1,44 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import * as native from '@screen-share/native-rust';
 import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, session } from 'electron';
+
+interface AppConfig {
+  serverPort: number;
+  webPort: number;
+  apiEndpoint: string;
+  websiteUrl: string;
+}
+
+function loadAppConfig(): AppConfig {
+  const defaults: AppConfig = {
+    serverPort: 3001,
+    webPort: 3000,
+    apiEndpoint: 'http://localhost:3001',
+    websiteUrl: 'http://localhost:3000',
+  };
+
+  const candidates = [
+    path.resolve(process.cwd(), 'screen-share.config.json'),
+    path.resolve(__dirname, '../../../../screen-share.config.json'),
+  ];
+
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      try {
+        return { ...defaults, ...JSON.parse(readFileSync(p, 'utf-8')) };
+      } catch {
+        console.warn(`[main] Failed to parse config at ${p}, using defaults`);
+      }
+    }
+  }
+
+  console.warn('[main] No screen-share.config.json found, using defaults');
+  return defaults;
+}
+
+const appConfig = loadAppConfig();
 
 let mainWindow: BrowserWindow | null = null;
 let lastCapturedSourceName: string | null = null;
@@ -255,6 +292,10 @@ app.whenReady().then(() => {
   });
 
   // IPC Handlers
+  ipcMain.handle('get-app-config', () => ({
+    apiEndpoint: appConfig.apiEndpoint,
+  }));
+
   ipcMain.handle('get-platform-info', () => ({
     platform: process.platform,
     isWayland,
