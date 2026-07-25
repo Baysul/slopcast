@@ -43,10 +43,11 @@ export const Header: React.FC<HeaderProps> = ({ roomCode, shareUrl, status = 'co
           {roomCode && (
             <Link
               to="/"
-              className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors mr-1"
+              className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors mr-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               title="Return to Home"
+              aria-label="Return to Home"
             >
-              <ArrowLeft className="w-5 h-5" />
+              <ArrowLeft className="w-5 h-5" aria-hidden="true" />
             </Link>
           )}
           <Link to="/" className="flex items-center gap-2.5 group">
@@ -64,8 +65,9 @@ export const Header: React.FC<HeaderProps> = ({ roomCode, shareUrl, status = 'co
             <button
               type="button"
               onClick={handleCopyLink}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               title="Copy room link"
+              aria-label={copied ? 'Link copied' : 'Copy room link'}
             >
               {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
             </button>

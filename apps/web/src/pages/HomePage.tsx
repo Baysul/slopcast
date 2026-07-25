@@ -56,7 +56,7 @@ export const HomePage: React.FC = () => {
           </p>
         </div>
 
-        <Card className="w-full max-w-md p-6">
+        <Card className="w-full max-w-2xl p-6">
           <form onSubmit={handleJoin} className="space-y-4">
             <div>
               <label
