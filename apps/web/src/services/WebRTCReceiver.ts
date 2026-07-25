@@ -184,6 +184,15 @@ export class WebRTCReceiver {
     }
   }
 
+  public async getStats(): Promise<RTCStatsReport | null> {
+    if (!this.pc) return null;
+    try {
+      return await this.pc.getStats();
+    } catch {
+      return null;
+    }
+  }
+
   public close() {
     this.handlingOffer = false;
     if (this.pc) {
