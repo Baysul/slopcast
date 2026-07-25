@@ -1,3 +1,5 @@
+// @deprecated — Participant panel is deferred per DESIGN.md ("spectator count is summarised in the header cluster instead").
+// This component has no current importers and is retained for a future sidebar participant view.
 import type { Participant } from '@slopcast/shared-types';
 import { Globe, Monitor, Shield, Users } from 'lucide-react';
 import type React from 'react';

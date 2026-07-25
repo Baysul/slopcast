@@ -262,8 +262,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <button
               type="button"
               onClick={togglePlay}
-              className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
+              className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
               title={isPlaying ? 'Pause' : 'Play'}
+              aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
             </button>
@@ -272,8 +273,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={toggleMute}
-                className="text-white/60 hover:text-white transition-colors"
+                className="text-white/60 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded"
                 title={isMuted ? 'Unmute' : 'Mute'}
+                aria-label={isMuted ? 'Unmute' : 'Mute'}
               >
                 {isMuted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </button>
@@ -284,6 +286,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 step="0.05"
                 value={isMuted ? 0 : volume}
                 onChange={handleVolumeChange}
+                aria-label="Volume"
                 className="w-14 accent-safelight h-1 bg-white/20 rounded-full cursor-pointer"
               />
             </div>
@@ -292,8 +295,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={onResync}
-                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
+                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                 title="Reconnect stream"
+                aria-label="Reconnect stream"
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
@@ -303,8 +307,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={toggleFullscreen}
-                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm"
+                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                 title="Toggle fullscreen"
+                aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
               >
                 {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
               </button>

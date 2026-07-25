@@ -18,9 +18,15 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(({ className
             className,
           ),
         )}
+        aria-invalid={!!error}
+        aria-describedby={error ? `${props.id}-error` : undefined}
         {...props}
       />
-      {error && <p className="mt-1.5 text-xs text-destructive">{error}</p>}
+      {error && (
+        <p id={`${props.id}-error`} className="mt-1.5 text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 });

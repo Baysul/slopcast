@@ -1658,6 +1658,7 @@ export const PresenterApp: React.FC = () => {
               autoPlay
               playsInline
               muted
+              aria-label="Screen share preview"
               className={`w-full h-full object-contain ${isSharing ? 'block' : 'hidden'}`}
             />
             {!isSharing && (
@@ -1778,13 +1779,19 @@ export const PresenterApp: React.FC = () => {
                         setSelectedSourceId(source.id);
                         void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
                       }}
+                      aria-label={source.name}
                       className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                         isSelected
                           ? 'bg-gray-800/50 border-gray-600 ring-1 ring-gray-600/30'
                           : 'bg-background/60 border-gray-800/60 hover:border-gray-700'
                       }`}
                     >
-                      <img src={source.thumbnail} alt={source.name} className="w-full h-20 object-cover rounded" />
+                      <img
+                        src={source.thumbnail}
+                        alt=""
+                        className="w-full h-20 object-cover rounded"
+                        aria-hidden="true"
+                      />
                       <span className="block font-medium truncate text-gray-300">{source.name}</span>
                     </button>
                   );
