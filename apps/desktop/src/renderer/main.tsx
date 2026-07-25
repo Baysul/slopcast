@@ -764,7 +764,7 @@ export const PresenterApp: React.FC = () => {
   const logNegotiatedCodec = async (pc: RTCPeerConnection, label: string) => {
     try {
       const stats = await pc.getStats();
-      stats.forEach((report) => {
+      for (const report of stats.values()) {
         if (report.type === 'outbound-rtp') {
           const out = report as { kind?: string; codecId?: string };
           if (out.kind === 'video' && out.codecId) {
@@ -779,7 +779,7 @@ export const PresenterApp: React.FC = () => {
             }
           }
         }
-      });
+      }
     } catch (_err) {
       // getStats may fail early — ignore.
     }
@@ -860,7 +860,7 @@ export const PresenterApp: React.FC = () => {
         let encWidth: number | null = null;
         let encHeight: number | null = null;
 
-        stats.forEach((reportRaw) => {
+        for (const reportRaw of stats.values()) {
           const report = reportRaw as RTCStatLike;
           if (report.type === 'outbound-rtp') {
             const ts = report.timestamp ?? 0;
@@ -904,7 +904,7 @@ export const PresenterApp: React.FC = () => {
               rttMs = report.currentRoundTripTime * 1000;
             }
           }
-        });
+        }
 
         if (fps != null) {
           fpsBuf.push(fps);

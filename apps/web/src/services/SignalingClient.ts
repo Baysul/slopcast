@@ -255,5 +255,3 @@ export class SignalingClient {
     this.settleConnect?.(true);
   }
 }
-
-export default SignalingClient;

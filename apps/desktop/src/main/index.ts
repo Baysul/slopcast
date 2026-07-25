@@ -237,9 +237,9 @@ app.whenReady().then(() => {
 
     const audioApps = native.getAudioApplications();
     console.log(`🔊 Detected ${audioApps.length} active audio applications:`);
-    audioApps.forEach((app: native.AudioApp) => {
+    for (const app of audioApps) {
       console.log(`  - [ID: ${app.id}] ${app.name} (Process ID: ${app.processId})`);
-    });
+    }
   } catch (err) {
     console.error('❌ Native audio engine error:', err);
   }
