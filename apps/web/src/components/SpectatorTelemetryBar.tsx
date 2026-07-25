@@ -98,7 +98,7 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
   let freezeCount = 0;
   let hasVideo = false;
 
-  stats.forEach((reportRaw) => {
+  for (const reportRaw of stats.values()) {
     const report = reportRaw as RTCStatLike;
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
       hasVideo = true;
@@ -127,7 +127,7 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
 
       freezeCount = report.freezeCount ?? 0;
     }
-  });
+  }
 
   const quality = computeQuality(videoBitrate, frameRate, packetLossPct, freezeCount);
 
@@ -146,19 +146,18 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
 }
 
 export function createStatsPrev(stats: RTCStatsReport): StatsPrev | null {
-  let prev: StatsPrev | null = null;
-  stats.forEach((reportRaw) => {
+  for (const reportRaw of stats.values()) {
     const report = reportRaw as RTCStatLike;
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
-      prev = {
+      return {
         bytesReceived: report.bytesReceived ?? 0,
         framesReceived: report.framesReceived ?? 0,
         ts: report.timestamp ?? 0,
         init: true,
       };
     }
-  });
-  return prev;
+  }
+  return null;
 }
 
 function computeQuality(

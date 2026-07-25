@@ -2,11 +2,8 @@ import type { ClientOrigin, ClientRole, Participant, RoomState } from '@slopcast
 
 export class RoomManager {
   private rooms: Map<string, RoomState> = new Map();
-  private baseUrl: string;
 
-  constructor(baseUrl: string = 'http://localhost:3000') {
-    this.baseUrl = baseUrl;
-  }
+  constructor(private readonly baseUrl: string = 'http://localhost:3000') {}
 
   public generateRoomCode(): string {
     const chars = 'abcdefghijklmnopqrstuvwxyz';

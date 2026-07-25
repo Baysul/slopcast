@@ -32,7 +32,7 @@ class TestWebClient {
     });
   }
 
-  public getNextMessage<T = any>(): Promise<WSMessage<T>> {
+  public getNextMessage<T>(): Promise<WSMessage<T>> {
     if (this.messageQueue.length > 0) {
       return Promise.resolve(this.messageQueue.shift()! as WSMessage<T>);
     }
@@ -82,7 +82,7 @@ async function runWebClientTest() {
       }),
     );
 
-    const roomCreatedMsg = await new Promise<any>((resolve) => {
+    const roomCreatedMsg = await new Promise<WSMessage>((resolve) => {
       desktopWs.once('message', (data) => resolve(JSON.parse(data.toString())));
     });
     const roomCode = roomCreatedMsg.payload.code;

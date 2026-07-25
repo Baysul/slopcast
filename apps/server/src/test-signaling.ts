@@ -23,7 +23,7 @@ class MessageQueue {
     });
   }
 
-  public getNextMessage<T = any>(): Promise<WSMessage<T>> {
+  public getNextMessage<T>(): Promise<WSMessage<T>> {
     if (this.queue.length > 0) {
       return Promise.resolve(this.queue.shift()! as WSMessage<T>);
     }

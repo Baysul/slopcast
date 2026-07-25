@@ -1,5 +1,13 @@
 import type { SignalingClient } from './SignalingClient';
 
+function getSignalType(signal: unknown): string | null {
+  if (signal && typeof signal === 'object' && 'type' in signal) {
+    const t = (signal as Record<string, unknown>).type;
+    return typeof t === 'string' ? t : null;
+  }
+  return null;
+}
+
 export type WebRTCConnectionState = 'new' | 'connecting' | 'connected' | 'disconnected' | 'failed' | 'closed';
 
 export interface WebRTCReceiverCallbacks {
@@ -12,8 +20,8 @@ export interface WebRTCReceiverCallbacks {
 
 export class WebRTCReceiver {
   private pc: RTCPeerConnection | null = null;
-  private signalingClient: SignalingClient;
-  private callbacks: WebRTCReceiverCallbacks;
+  private readonly signalingClient: SignalingClient;
+  private readonly callbacks: WebRTCReceiverCallbacks;
   private presenterId: string | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private mediaStream: MediaStream = new MediaStream();
@@ -28,8 +36,7 @@ export class WebRTCReceiver {
   private setupSignalingListeners() {
     this.signalingClient.on('webrtc_signal', async ({ senderId, signal }) => {
       this.presenterId = senderId;
-      // biome-ignore lint/suspicious/noExplicitAny: WebRTC signal type is dynamic by protocol
-      await this.handleSignal(senderId, signal as any);
+      await this.handleSignal(senderId, signal);
     });
 
     this.signalingClient.on('publish_stream', ({ senderId }) => {
@@ -62,11 +69,11 @@ export class WebRTCReceiver {
     this.pc.ontrack = (event) => {
       console.log('[WebRTCReceiver] Received remote track:', event.track.kind, event.track.id);
       if (event.streams?.[0]) {
-        event.streams[0].getTracks().forEach((track) => {
+        for (const track of event.streams[0].getTracks()) {
           if (!this.mediaStream.getTracks().some((t) => t.id === track.id)) {
             this.mediaStream.addTrack(track);
           }
-        });
+        }
       } else if (!this.mediaStream.getTracks().some((t) => t.id === event.track.id)) {
         this.mediaStream.addTrack(event.track);
       }
@@ -111,13 +118,12 @@ export class WebRTCReceiver {
     }
   }
 
-  // biome-ignore lint/suspicious/noExplicitAny: WebRTC signal type is dynamic by protocol
-  private async handleSignal(senderId: string, signal: any) {
+  private async handleSignal(senderId: string, signal: unknown) {
     this.initializePeerConnection();
     if (!this.pc) return;
 
     try {
-      if (signal?.type === 'offer') {
+      if (getSignalType(signal) === 'offer') {
         if (this.handlingOffer) return;
         this.handlingOffer = true;
         console.log('[WebRTCReceiver] Received offer from presenter', senderId);
@@ -167,9 +173,15 @@ export class WebRTCReceiver {
         });
         console.log('[WebRTCReceiver] Sent answer to presenter');
         this.handlingOffer = false;
-      } else if (signal?.type === 'candidate' || signal?.candidate) {
+      } else if (
+        getSignalType(signal) === 'candidate' ||
+        (signal && typeof signal === 'object' && 'candidate' in signal)
+      ) {
+        const signalObj = signal as Record<string, unknown>;
         const candidateInit: RTCIceCandidateInit =
-          signal.candidate && typeof signal.candidate === 'object' ? signal.candidate : signal;
+          signalObj.candidate && typeof signalObj.candidate === 'object'
+            ? (signalObj.candidate as RTCIceCandidateInit)
+            : (signal as RTCIceCandidateInit);
 
         if (this.pc.remoteDescription) {
           await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));

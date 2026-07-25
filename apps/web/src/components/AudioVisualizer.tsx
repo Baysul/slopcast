@@ -27,8 +27,10 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
       started = true;
 
       try {
-        // biome-ignore lint/suspicious/noExplicitAny: legacy webkitAudioContext requires window cast
-        audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const ACtor =
+          window.AudioContext ?? (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!ACtor) return;
+        audioCtx = new ACtor();
         if (audioCtx.state === 'suspended') {
           audioCtx.resume().catch(() => {});
         }
