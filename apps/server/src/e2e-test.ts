@@ -22,6 +22,7 @@ import { type ChildProcess, execSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Page } from 'playwright';
 
 // ── Configuration Types ────────────────────────────────────────────────
@@ -69,7 +70,8 @@ interface TestResult {
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const REPO_ROOT = process.cwd();
+const __DIRNAME = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__DIRNAME, '..', '..', '..');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'test-output');
 const CONFIG_PATH = path.join(REPO_ROOT, 'screen-share.config.json');
 const DESKTOP_CONSOLE_LOG = path.join(OUTPUT_DIR, 'desktop-console.log');
@@ -288,16 +290,19 @@ function validateGpuReport(report: GpuInfo | null): string[] {
     return issues;
   }
 
+  const featureStatus = report.featureStatus ?? [];
+  const problems: string[] = report.problems ?? [];
+
   const hasSoftwareRenderer =
-    report.featureStatus.some(
+    featureStatus.some(
       (f) => f.name === 'gpu_compositing' && (f.status.includes('Software') || f.status.includes('disabled')),
-    ) || report.problems.some((p) => p.toLowerCase().includes('software'));
+    ) || problems.some((p) => p.toLowerCase().includes('software'));
 
   if (hasSoftwareRenderer) {
     issues.push('GPU acceleration appears disabled or software-rendered');
   }
 
-  const criticalDisabled = report.featureStatus.filter(
+  const criticalDisabled = featureStatus.filter(
     (f) =>
       (f.name === 'webgl' || f.name === 'webgl2' || f.name === 'video_encode') &&
       !f.status.toLowerCase().includes('enabled') &&
@@ -311,8 +316,8 @@ function validateGpuReport(report: GpuInfo | null): string[] {
     }
   }
 
-  if (report.problems.length > 0) {
-    for (const p of report.problems) {
+  if (problems.length > 0) {
+    for (const p of problems) {
       issues.push(`GPU problem: ${p.slice(0, 200)}`);
     }
   }
@@ -502,13 +507,23 @@ async function runTest(): Promise<TestResult> {
     log('ELECTRON', '"Start Screenshare" button not found or not available');
   }
 
-  // Give stream time to start.
-  await new Promise((r) => setTimeout(r, 2000));
-
-  // Check for "LIVE" badge to confirm streaming started.
-  const liveBadge = page.locator('text=LIVE');
-  const isLive = (await liveBadge.count()) > 0;
-  log('ELECTRON', `Streaming live: ${isLive}`);
+  // Give stream time to start.  On X11 the thumbnail picker is instant;
+  // on Wayland the xdg-desktop-portal dialog requires manual interaction.
+  // Poll the LIVE badge for up to STREAM_TIMEOUT_MS.
+  {
+    const deadline = Date.now() + STREAM_TIMEOUT_MS;
+    let isLive = false;
+    log('ELECTRON', `Waiting for streaming to start (timeout ${STREAM_TIMEOUT_MS}ms)...`);
+    while (Date.now() < deadline) {
+      const liveBadge = page.locator('text=LIVE');
+      if ((await liveBadge.count()) > 0) {
+        isLive = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    log('ELECTRON', `Streaming live: ${isLive}`);
+  }
 
   // ── GPU Diagnostic Data ──────────────────────────────────────────
   log('ELECTRON', 'Retrieving GPU diagnostic data...');
@@ -538,6 +553,7 @@ async function runTest(): Promise<TestResult> {
     args: [
       '--use-fake-ui-for-media-stream',
       '--use-fake-device-for-media-stream',
+      '--autoplay-policy=no-user-gesture-required',
       '--no-sandbox',
       '--disable-setuid-sandbox',
     ],
@@ -593,11 +609,24 @@ async function runTest(): Promise<TestResult> {
   try {
     await spectatorPage.waitForSelector('video', { state: 'attached', timeout: STREAM_TIMEOUT_MS });
 
-    // Verify video has non-zero dimensions and is playing.
+    // Poll for video frames — the element may appear before frames decode.
+    await spectatorPage.waitForFunction(
+      () => {
+        const videos = document.querySelectorAll('video');
+        for (const video of videos) {
+          if (video.videoWidth > 0 && video.videoHeight > 0 && !video.paused && video.readyState >= 2) {
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeout: STREAM_TIMEOUT_MS },
+    );
+
     const videoState = await spectatorPage.evaluate(() => {
       const videos = document.querySelectorAll('video');
       for (const video of videos) {
-        if (video.videoWidth > 0 && video.videoHeight > 0 && !video.paused && video.readyState >= 2) {
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
           return {
             found: true,
             width: video.videoWidth,

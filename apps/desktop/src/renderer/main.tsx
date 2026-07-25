@@ -19,6 +19,7 @@ console.log(
 declare global {
   interface Window {
     electronAPI?: {
+      getAppConfig: () => Promise<{ apiEndpoint: string }>;
       getPlatformInfo: () => Promise<{ platform: string; isWayland: boolean }>;
       getAudioApps: () => Promise<Array<{ id: number; name: string; processId: number }>>;
       startAudioCapture: (targetId: number) => Promise<boolean>;
@@ -116,6 +117,77 @@ const codecLabel = (mime: string | null | undefined): string | null => {
   if (!mime) return null;
   const up = mime.toUpperCase();
   return VIDEO_CODEC_LABEL[up] ?? up.replace(/^(VIDEO|AUDIO)\//i, '');
+};
+
+const H264_CODEC_ORDER = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'] as const;
+
+const reorderSdpVideoCodecs = (sdp: string): string => {
+  const lines = sdp.split('\r\n');
+
+  const mVideoIdx = lines.findIndex((l) => l.startsWith('m=video'));
+  if (mVideoIdx === -1) return sdp;
+
+  const mParts = lines[mVideoIdx].split(' ');
+  const ptList = mParts.slice(3);
+  if (ptList.length <= 1) return sdp;
+
+  const ptCodec = new Map<string, string>();
+  const rtxToPrimary = new Map<string, string>();
+
+  for (const line of lines) {
+    const rm = line.match(/^a=rtpmap:(\d+)\s+(\S+)/);
+    if (rm) {
+      ptCodec.set(rm[1], rm[2].split('/')[0].toLowerCase());
+    }
+    const fm = line.match(/^a=fmtp:(\d+)\s+.*apt=(\d+)/);
+    if (fm) {
+      rtxToPrimary.set(fm[1], fm[2]);
+    }
+  }
+
+  const codecRank = (codec: string): number => {
+    const upper = codec.toUpperCase();
+    const idx = H264_CODEC_ORDER.indexOf(upper as (typeof H264_CODEC_ORDER)[number]);
+    return idx === -1 ? 99 : idx;
+  };
+
+  const groups: Array<{ primary: string; rtx: string | null; rank: number }> = [];
+  const consumedRtx = new Set<string>();
+
+  for (const pt of ptList) {
+    if (consumedRtx.has(pt)) continue;
+    if (rtxToPrimary.has(pt)) {
+      continue;
+    }
+
+    let rtxPt: string | null = null;
+    for (const [rtx, apt] of rtxToPrimary) {
+      if (apt === pt) {
+        rtxPt = rtx;
+        consumedRtx.add(rtx);
+        break;
+      }
+    }
+
+    const codec = ptCodec.get(pt) ?? '';
+    groups.push({ primary: pt, rtx: rtxPt, rank: codecRank(codec) });
+  }
+
+  groups.sort((a, b) => {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    return ptList.indexOf(a.primary) - ptList.indexOf(b.primary);
+  });
+
+  const newPtList: string[] = [];
+  for (const { primary, rtx } of groups) {
+    newPtList.push(primary);
+    if (rtx) newPtList.push(rtx);
+  }
+
+  const newLine = `${mParts.slice(0, 3).join(' ')} ${newPtList.join(' ')}`;
+  const newLines = [...lines];
+  newLines[mVideoIdx] = newLine;
+  return newLines.join('\r\n');
 };
 
 interface StreamTelemetry {
@@ -355,6 +427,7 @@ const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetr
 export const PresenterApp: React.FC = () => {
   const [roomCode, setRoomCode] = useState<string>('');
   const [shareUrl, setShareUrl] = useState<string>('');
+  const [apiEndpoint, setApiEndpoint] = useState<string>('http://localhost:3001');
   const [isWayland, setIsWayland] = useState<boolean>(false);
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
   const [selectedAudioAppId, setSelectedAudioAppId] = useState<number | null>(null);
@@ -491,6 +564,9 @@ export const PresenterApp: React.FC = () => {
         if (!info.isWayland) {
           loadDesktopSources();
         }
+
+        const config = await window.electronAPI.getAppConfig();
+        if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
       }
       loadAudioApps();
 
@@ -630,27 +706,15 @@ export const PresenterApp: React.FC = () => {
           return 0;
         });
 
-      // Deduplicate by MIME type — the browser exposes many profile/level
-      // variants of the same codec. Keep only the first (highest-priority)
-      // entry for each, so the preference list can actually influence the
-      // negotiated codec instead of being flooded with duplicates.
-      const seen = new Set<string>();
-      const deduped = preferred.filter((c) => {
-        const key = c.mimeType.toUpperCase();
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-
       try {
-        videoTransceiver.setCodecPreferences(deduped);
-        const summary = deduped
+        videoTransceiver.setCodecPreferences(preferred);
+        const summary = preferred
           .map((c) => {
             const plid = c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
             return plid ? `${c.mimeType}(${plid})` : c.mimeType;
           })
           .join(' > ');
-        console.log('[Presenter] Video codec preference set:', summary);
+        console.log('[Presenter] Video codec preference set (all profiles):', summary);
       } catch (err) {
         console.warn('[Presenter] setCodecPreferences failed:', err);
       }
@@ -975,6 +1039,14 @@ export const PresenterApp: React.FC = () => {
 
     try {
       const offer = await pc.createOffer({ offerToReceiveVideo: false, offerToReceiveAudio: false });
+
+      // Ensure H.264 payload types appear first in the SDP video line so the
+      // spectator's answerer-driven negotiation (RFC 3264) picks H.264 rather
+      // than falling back to VP9/VP8 when both sides support H.264.
+      if (offer.sdp) {
+        offer.sdp = reorderSdpVideoCodecs(offer.sdp);
+      }
+
       await pc.setLocalDescription(offer);
 
       // ── Set sender encoding parameters (bitrate, priority) now that the
@@ -1007,7 +1079,7 @@ export const PresenterApp: React.FC = () => {
     const code = roomCodeRef.current;
     if (code) {
       try {
-        const res = await fetch(`http://localhost:3001/api/rooms/${encodeURIComponent(code)}`);
+        const res = await fetch(`${apiEndpoint}/api/rooms/${encodeURIComponent(code)}`);
         if (res.ok) {
           const room = await res.json();
           const participants = room.participants || {};
@@ -1061,7 +1133,7 @@ export const PresenterApp: React.FC = () => {
 
     if (type === 'ROOM_CREATED') {
       const code = payload.code as string;
-      const url = (payload.shareUrl as string | undefined) || `http://localhost:3000/room/${code}`;
+      const url = (payload.shareUrl as string) || '';
       roomCodeRef.current = code;
       setRoomCode(code);
       setShareUrl(url);
@@ -1069,13 +1141,20 @@ export const PresenterApp: React.FC = () => {
       setSpectatorCount(0);
       prevConnectedRef.current = 0;
 
-      // Auto-copy the join link as soon as the room exists.
-      void copyText(url).then((ok) => {
-        if (ok) {
-          setCopied('link');
-          setTimeout(() => setCopied(null), 2500);
-        }
-      });
+      if (url) {
+        void copyText(url).then((ok) => {
+          if (ok) {
+            setCopied('link');
+            setTimeout(() => setCopied(null), 2500);
+          }
+        });
+      }
+    } else if (type === 'JOINED_ROOM') {
+      const code = payload.code as string;
+      setRoomCode(code);
+      spectatorIdsRef.current.clear();
+      setSpectatorCount(0);
+      prevConnectedRef.current = 0;
     } else if (type === 'USER_JOINED') {
       const spectatorId = (payload.participant as { id?: string } | undefined)?.id;
       if (!spectatorId) return;
@@ -1161,10 +1240,11 @@ export const PresenterApp: React.FC = () => {
   // Keep WS handler pointed at the latest closure without re-binding the socket.
   handleSignalingMessageRef.current = handleSignalingMessage;
 
-  const handleCreateRoom = () => {
+  const handleCreateRoom = async () => {
     primeAudioContext();
     if (wsRef.current) {
       wsRef.current.close();
+      wsRef.current = null;
     }
 
     setAudioAppExplicitlySet(false);
@@ -1172,43 +1252,79 @@ export const PresenterApp: React.FC = () => {
     setSelectedAudioAppId(null);
     setAutoDetectFailed(false);
 
-    const ws = new WebSocket('ws://localhost:3001');
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'CREATE_ROOM',
-          payload: { clientOrigin: 'desktop' },
-        }),
-      );
-    };
-
-    ws.onmessage = async (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        await handleSignalingMessageRef.current(msg);
-      } catch (err) {
-        console.error('Signaling message parse error:', err);
+    try {
+      const res = await fetch(`${apiEndpoint}/api/rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Unknown server error' }));
+        throw new Error(err.error || `Server returned ${res.status}`);
       }
-    };
+      const room = await res.json();
+      const code = room.code as string;
+      const url = room.shareUrl as string;
 
-    ws.onclose = () => {
-      setRoomCode('');
-      setShareUrl('');
+      roomCodeRef.current = code;
+      setRoomCode(code);
+      setShareUrl(url);
       spectatorIdsRef.current.clear();
       setSpectatorCount(0);
       prevConnectedRef.current = 0;
-    };
 
-    ws.onerror = (err) => {
-      console.error('WebSocket error:', err);
-      pushToast({
-        title: 'Connection error',
-        description: 'Lost contact with the signaling server.',
-        variant: 'error',
+      void copyText(url).then((ok) => {
+        if (ok) {
+          setCopied('link');
+          setTimeout(() => setCopied(null), 2500);
+        }
       });
-    };
+
+      const wsProtocol = apiEndpoint.startsWith('https') ? 'wss' : 'ws';
+      const wsHost = apiEndpoint.replace(/^https?:\/\//, '');
+      const wsUrl = `${wsProtocol}://${wsHost}`;
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(
+          JSON.stringify({
+            type: 'JOIN_ROOM',
+            payload: { code, clientOrigin: 'desktop', requestedRole: 'presenter' },
+          }),
+        );
+      };
+
+      ws.onmessage = async (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          await handleSignalingMessageRef.current(msg);
+        } catch (err) {
+          console.error('Signaling message parse error:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        setRoomCode('');
+        setShareUrl('');
+        spectatorIdsRef.current.clear();
+        setSpectatorCount(0);
+        prevConnectedRef.current = 0;
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        pushToast({
+          title: 'Connection error',
+          description: 'Lost contact with the signaling server.',
+          variant: 'error',
+        });
+      };
+    } catch (err) {
+      console.error('Failed to create room:', err);
+      const message = err instanceof Error ? err.message : 'Failed to create room';
+      pushToast({ title: 'Room creation failed', description: message, variant: 'error' });
+    }
   };
 
   /**
@@ -1439,7 +1555,7 @@ export const PresenterApp: React.FC = () => {
   };
 
   const handleCopyLink = async () => {
-    const url = shareUrl || (roomCode ? `http://localhost:3000/room/${roomCode}` : '');
+    const url = shareUrl;
     if (!url) return;
     const ok = await copyText(url);
     if (ok) {
@@ -1779,6 +1895,23 @@ export const PresenterApp: React.FC = () => {
                 <option value={20_000_000}>20 Mbps</option>
               </select>
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label
+              htmlFor="api-endpoint"
+              className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+            >
+              API Endpoint
+            </label>
+            <input
+              id="api-endpoint"
+              type="text"
+              value={apiEndpoint}
+              onChange={(e) => setApiEndpoint(e.target.value)}
+              placeholder="http://localhost:3001"
+              className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 font-mono"
+            />
           </div>
         </div>
       </main>
