@@ -1,6 +1,42 @@
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+
+interface AppConfig {
+  serverPort: number;
+  webPort: number;
+  apiEndpoint: string;
+  websiteUrl: string;
+}
+
+function loadConfig(): AppConfig {
+  const defaults: AppConfig = {
+    serverPort: 3001,
+    webPort: 3000,
+    apiEndpoint: 'http://localhost:3001',
+    websiteUrl: 'http://localhost:3000',
+  };
+
+  const candidates = [
+    path.resolve(__dirname, '../../../screen-share.config.json'),
+    path.resolve(process.cwd(), 'screen-share.config.json'),
+  ];
+
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      try {
+        return { ...defaults, ...JSON.parse(readFileSync(p, 'utf-8')) };
+      } catch {
+        /* use defaults */
+      }
+    }
+  }
+
+  return defaults;
+}
+
+const config = loadConfig();
 
 export default defineConfig({
   plugins: [react()],
@@ -10,21 +46,19 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    port: config.webPort,
     proxy: {
-      // Tunnel WebSocket + REST to the signaling server so the browser
-      // stays on a single origin (avoids cross-port / private-network blocks).
       '/ws': {
-        target: 'http://localhost:3001',
+        target: config.apiEndpoint,
         ws: true,
         rewrite: () => '/',
       },
       '/api': {
-        target: 'http://localhost:3001',
+        target: config.apiEndpoint,
         changeOrigin: true,
       },
       '/health': {
-        target: 'http://localhost:3001',
+        target: config.apiEndpoint,
         changeOrigin: true,
       },
     },
