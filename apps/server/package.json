@@ -5,19 +5,17 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "test": "tsx src/test-signaling.ts",
     "test:e2e": "tsx src/e2e-test.ts",
     "build": "tsc"
   },
   "dependencies": {
     "@slopcast/shared-types": "workspace:*",
     "express": "5.2.1",
-    "ws": "^8.18.0"
+    "livekit-server-sdk": "^2.17.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
-    "@types/ws": "^8.5.13",
     "tsx": "^4.19.0",
     "typescript": "^7.0.0"
   }

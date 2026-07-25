@@ -101,16 +101,14 @@ function log(prefix: string, msg: string): void {
 }
 
 function killPort(port: number): void {
-  const platform = process.platform;
   try {
-    if (platform === 'linux' || platform === 'darwin') {
+    if (process.platform === 'linux' || process.platform === 'darwin') {
       execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'pipe' });
-    } else if (platform === 'win32') {
+    } else if (process.platform === 'win32') {
       execSync(`netstat -ano | findstr :${port}`, { stdio: 'pipe' });
     }
-    log('CLEANUP', `Killed processes on port ${port}`);
   } catch {
-    // Port was free — no-op.
+    log('CLEANUP', `Port ${port} was free`);
   }
 }
 
@@ -140,7 +138,7 @@ async function pollHealth(url: string, timeoutMs: number, label: string): Promis
         return;
       }
     } catch {
-      // Not ready yet.
+      log('HEALTH', `${label} not ready yet`);
     }
     await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
   }
@@ -183,74 +181,67 @@ function spawnLogging(command: string, args: string[], label: string, logEntries
 // ── Spotify Detection ──────────────────────────────────────────────────
 
 function findSpotifyProcess(): boolean {
-  const platform = process.platform;
   try {
-    if (platform === 'linux') {
+    if (process.platform === 'linux') {
       const out = execSync('pgrep -x spotify 2>/dev/null || true', { encoding: 'utf-8' }).trim();
       return out.length > 0;
     }
-    if (platform === 'darwin') {
+    if (process.platform === 'darwin') {
       const out = execSync('pgrep -x Spotify 2>/dev/null || true', { encoding: 'utf-8' }).trim();
       return out.length > 0;
     }
-    if (platform === 'win32') {
+    if (process.platform === 'win32') {
       const out = execSync('tasklist /FI "IMAGENAME eq Spotify.exe" 2>nul', { encoding: 'utf-8' });
       return out.includes('Spotify.exe');
     }
-  } catch {
-    // pgrep/tasklist not available.
+  } catch (err) {
+    log('SPOTIFY', `Process detection failed: ${err}`);
   }
   return false;
 }
 
 function launchSpotify(): boolean {
-  const platform = process.platform;
   try {
-    if (platform === 'linux') {
+    if (process.platform === 'linux') {
       execSync('nohup spotify >/dev/null 2>&1 &', { stdio: 'ignore', timeout: 3000 });
       return true;
     }
-    if (platform === 'darwin') {
+    if (process.platform === 'darwin') {
       execSync('open -a Spotify', { stdio: 'ignore', timeout: 3000 });
       return true;
     }
-    if (platform === 'win32') {
+    if (process.platform === 'win32') {
       execSync('start "" "spotify:"', { stdio: 'ignore', timeout: 3000 });
       return true;
     }
-  } catch {
-    // Spotify not installed or failed to launch.
+  } catch (err) {
+    log('SPOTIFY', `Failed to launch Spotify: ${err}`);
   }
   return false;
 }
 
 // ── Log Validation ─────────────────────────────────────────────────────
 
-function parseAndValidateLogs(entries: LogEntry[], label: string): { errors: LogEntry[]; fatals: LogEntry[] } {
-  const errors: LogEntry[] = [];
-  const fatals: LogEntry[] = [];
+function validateLogs(entries: LogEntry[], label: string): LogEntry[] {
+  const matched: LogEntry[] = [];
 
   for (const entry of entries) {
     for (const pattern of FATAL_PATTERNS) {
       if (pattern.test(entry.message)) {
-        if (entry.message.toLowerCase().includes('error') || entry.message.toLowerCase().includes('fatal')) {
-          fatals.push(entry);
-        } else {
-          errors.push(entry);
-        }
+        matched.push(entry);
         break;
       }
     }
   }
 
-  if (fatals.length > 0) {
-    log('DIAGNOSTIC', `${label}: ${fatals.length} fatal error(s) detected`);
-    for (const f of fatals) {
-      log('DIAGNOSTIC', `  [${f.source}] ${f.message.slice(0, 200)}`);
+  if (matched.length > 0) {
+    log('DIAGNOSTIC', `${label}: ${matched.length} suspicious log entry(s) detected`);
+    for (const m of matched) {
+      log('DIAGNOSTIC', `  [${m.source}] ${m.message.slice(0, 200)}`);
     }
   }
 
-  return { errors, fatals };
+  return matched;
 }
 
 function validateGpuReport(report: GpuInfo | null): string[] {
@@ -500,13 +491,14 @@ async function runTest(): Promise<TestResult> {
   log('ELECTRON', 'Retrieving GPU diagnostic data...');
   let gpuInfo: GpuInfo | null = null;
   try {
-    gpuInfo = (await electronApp.evaluate(async ({ app }) => {
+    gpuInfo = await electronApp.evaluate(async ({ app }) => {
       try {
-        return await app.getGPUInfo('complete');
-      } catch {
+        return (await app.getGPUInfo('complete')) as GpuInfo | null;
+      } catch (err) {
+        log('ELECTRON', `GPU info retrieval failed: ${err}`);
         return null;
       }
-    })) as GpuInfo | null;
+    });
 
     if (gpuInfo) {
       writeFileSync(GPU_REPORT_PATH, JSON.stringify(gpuInfo, null, 2));
@@ -571,8 +563,8 @@ async function runTest(): Promise<TestResult> {
     );
     log('SPECTATOR', 'Connection status badge visible');
     result.spectatorConnected = true;
-  } catch {
-    log('SPECTATOR', 'Connection status badge never appeared');
+  } catch (err) {
+    log('SPECTATOR', `Connection status badge never appeared: ${err}`);
     result.errors.push('Spectator never reached connecting/live state');
   }
 
@@ -623,8 +615,8 @@ async function runTest(): Promise<TestResult> {
       log('SPECTATOR', 'Video element present but no video track data');
       result.errors.push('Video element found but no video frames received');
     }
-  } catch {
-    log('SPECTATOR', 'Video element never appeared');
+  } catch (err) {
+    log('SPECTATOR', `Video element never appeared: ${err}`);
     result.errors.push('Spectator video element never appeared');
   }
 
@@ -646,22 +638,20 @@ async function runTest(): Promise<TestResult> {
   writeFileSync(WEB_CONSOLE_LOG, webLogEntries.map((e) => e.message).join('\n'));
   log('DIAGNOSTIC', `Web console log written (${webLogEntries.length} entries)`);
 
-  // Parse desktop logs for fatal errors.
+  // Validate desktop logs.
   const desktopLogs = logEntries.filter((e) => e.source === 'desktop-main' || e.source === 'desktop-renderer');
-  const desktopValidation = parseAndValidateLogs(desktopLogs, 'Desktop');
-  result.consoleErrors = [...desktopValidation.fatals, ...desktopValidation.errors];
-
-  if (desktopValidation.fatals.length > 0) {
-    result.errors.push(`${desktopValidation.fatals.length} fatal desktop console error(s)`);
+  const desktopErrors = validateLogs(desktopLogs, 'Desktop');
+  result.consoleErrors = desktopErrors;
+  if (desktopErrors.length > 0) {
+    result.errors.push(`${desktopErrors.length} suspicious desktop console log entry(s)`);
   }
 
-  // Parse spectator logs.
+  // Validate spectator logs.
   const spectatorLogs = logEntries.filter((e) => e.source === 'spectator');
-  const spectatorValidation = parseAndValidateLogs(spectatorLogs, 'Spectator');
-  result.consoleErrors.push(...spectatorValidation.fatals, ...spectatorValidation.errors);
-
-  if (spectatorValidation.fatals.length > 0) {
-    result.errors.push(`${spectatorValidation.fatals.length} fatal spectator console error(s)`);
+  const spectatorErrors = validateLogs(spectatorLogs, 'Spectator');
+  result.consoleErrors.push(...spectatorErrors);
+  if (spectatorErrors.length > 0) {
+    result.errors.push(`${spectatorErrors.length} suspicious spectator console log entry(s)`);
   }
 
   // Validate GPU report.
@@ -680,29 +670,15 @@ async function runTest(): Promise<TestResult> {
   // ── Cleanup ───────────────────────────────────────────────────────
   log('CLEANUP', 'Shutting down...');
 
-  // Close spectator browser.
-  try {
-    await context.close();
-    await browser.close();
-    log('CLEANUP', 'Spectator browser closed');
-  } catch {
-    // Already closed.
-  }
+  await context.close().catch(() => log('CLEANUP', 'Spectator context already closed'));
+  await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
+  await electronApp.close().catch(() => log('CLEANUP', 'Electron app already closed'));
 
-  // Close Electron app.
-  try {
-    await electronApp.close();
-    log('CLEANUP', 'Electron app closed');
-  } catch {
-    // Already closed.
-  }
-
-  // Kill spawned processes.
   for (const proc of [serverProc, webProc]) {
     try {
       proc.kill('SIGTERM');
-    } catch {
-      // Already dead.
+    } catch (err) {
+      log('CLEANUP', `Process kill failed: ${err}`);
     }
   }
 

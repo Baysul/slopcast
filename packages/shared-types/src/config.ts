@@ -9,12 +9,18 @@ export function loadConfig(): AppConfig {
   const webPort = parseInt(process.env.WEB_PORT || '', 10) || 0;
   const apiEndpoint = process.env.API_ENDPOINT || '';
   const websiteUrl = process.env.WEBSITE_URL || '';
+  const livekitUrl = process.env.LIVEKIT_URL || '';
+  const livekitApiKey = process.env.LIVEKIT_API_KEY || '';
+  const livekitApiSecret = process.env.LIVEKIT_API_SECRET || '';
 
   const defaults: AppConfig = {
     serverPort: serverPort || 3001,
     webPort: webPort || 3000,
     apiEndpoint: apiEndpoint || `http://localhost:${serverPort || 3001}`,
     websiteUrl: websiteUrl || `http://localhost:${webPort || 3000}`,
+    livekitUrl: livekitUrl || 'ws://localhost:7880',
+    livekitApiKey: livekitApiKey || 'devkey',
+    livekitApiSecret: livekitApiSecret || 'secret',
   };
 
   const configPath = path.resolve(process.cwd(), 'slopcast.config.json');
@@ -28,9 +34,12 @@ export function loadConfig(): AppConfig {
         apiEndpoint:
           apiEndpoint || fileConfig.apiEndpoint || `http://localhost:${serverPort || fileConfig.serverPort || 3001}`,
         websiteUrl: websiteUrl || fileConfig.websiteUrl || `http://localhost:${webPort || fileConfig.webPort || 3000}`,
+        livekitUrl: livekitUrl || fileConfig.livekitUrl || defaults.livekitUrl,
+        livekitApiKey: livekitApiKey || fileConfig.livekitApiKey || defaults.livekitApiKey,
+        livekitApiSecret: livekitApiSecret || fileConfig.livekitApiSecret || defaults.livekitApiSecret,
       };
     } catch {
-      // use env/defaults
+      console.error('Failed to parse slopcast.config.json, using env/defaults');
     }
   }
 

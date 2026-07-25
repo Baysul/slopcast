@@ -19,105 +19,40 @@ interface CaptureContext {
 
 let lastCaptureContext: CaptureContext | null = null;
 
-const isLinux = process.platform === 'linux';
-// Wayland sessions must capture through xdg-desktop-portal: Chromium's own
-// window enumeration does not work there, the portal presents the native
-// window/screen picker of the desktop environment instead.
-const isWayland = isLinux && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY);
+const isWayland =
+  process.platform === 'linux' && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY);
 
 // ── Hardware-Accelerated Video Encoding ─────────────────────────────────
-// These flags must be set before app.whenReady() — they are consumed by
-// Chromium's GPU process during early initialisation.  We build ONE combined
-// enable-features list because appendSwitch stores only the *last* value for
-// the same switch name.
+// Flags must be set before app.whenReady(). Build one combined list because
+// appendSwitch stores only the *last* value for the same switch name.
 const features: string[] = [];
 
-// WebRTC PipeWire capturer — required on Wayland for
-// xdg-desktop-portal-backed getDisplayMedia.
 if (isWayland) {
   features.push('WebRTCPipeWireCapturer');
 }
 
-// ── Platform-specific hardware acceleration features ──────────────────
-//
-// Chromium 131+ renamed VAAPI feature flags from "VaapiVideo*" to
-// "AcceleratedVideo*".  Electron 43 ships Chromium ~150, so we MUST use
-// the new names.  See:
-//   https://issues.chromium.org/40225939
-//   https://dev.to/archerallstars/chrome-flags-latest-2024-update-34k1
-//
 switch (process.platform) {
   case 'linux':
-    // VAAPI-based accelerated video encode (Intel / AMD / nouveau).
-    // Feature name: kAcceleratedVideoEncodeLinux → "AcceleratedVideoEncoder"
-    // (base::FEATURE_DISABLED_BY_DEFAULT, must be opted in).
     features.push('AcceleratedVideoEncoder');
-
-    // VAAPI decode via GL interop.
     features.push('AcceleratedVideoDecodeLinuxGL');
-
-    // On Wayland, zero-copy image import from VAAPI to GL gives a
-    // significant memory/throughput improvement.
     if (isWayland) {
       features.push('AcceleratedVideoDecodeLinuxZeroCopyGL');
     }
-
-    // Bypass the GPU driver allow-list — required for AMD Mesa/RADV
-    // and some Intel GEN7+ setups.
     features.push('VaapiIgnoreDriverChecks');
-
-    // OOP rasterisation reduces main-thread load.
     features.push('CanvasOopRasterization');
     break;
-
   case 'win32':
-    // D3D11 Video encode → NVENC / AMD AMF / Intel QSV depending on GPU.
-    // These features are enabled by default on Chromium 130+ but we list
-    // them explicitly for defence in depth.
     features.push('D3D11VideoEncoder', 'D3D11VideoDecoder');
     break;
-
-  // macOS: VideoToolbox HW encode is enabled by default in Chromium 130+
-  // and needs no extra feature flag.
 }
 
-// ── GPU & Ozone platform ──────────────────────────────────────────
-// Electron 43 (Chromium 150) auto-selects the Wayland Ozone platform
-// when WAYLAND_DISPLAY is set.  We let Chromium auto-select its
-// preferred ANGLE backend — overriding it with --use-angle=gl causes
-// EGL/Dawn context creation failures on Mesa/RADV.
-//
-// PipeWire screen capture works through xdg-desktop-portal regardless
-// of the Ozone platform.
-
-// Enable GPU rasterization on all platforms for smoother compositing.
 app.commandLine.appendSwitch('enable-gpu-rasterization');
-
-// Use GPU memory buffers for video frames — enables DMA-BUF sharing
-// between the compositor (PipeWire capture) and the VA-API hardware
-// encoder, avoiding CPU round-trips for format conversion (BGRA→NV12).
 app.commandLine.appendSwitch('enable-gpu-memory-buffer-video-frames');
-
-// Bypass the GPU blocklist — some systems (e.g. VMs, older GPUs) have it
-// enabled by default, which disables all GPU acceleration.
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
-
-// Bypass GPU driver bug workarounds that may disable hardware encoding
-// on Mesa/RADV (AMD Linux) drivers.
 app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
-
-// Commit the combined feature list.
 app.commandLine.appendSwitch('enable-features', features.join(','));
-
-// Low-latency GPU video decoding pipeline (VP9 / AV1).
 app.commandLine.appendSwitch('enable-low-latency-video-decoder');
-
-// Never throttle timers when the window is in the background — essential for
-// stable screenshare encoding when the presenter navigates to another window.
 app.commandLine.appendSwitch('disable-background-timer-throttling');
-
-// Prevent Chromium from lowering the renderer process priority when the
-// window is hidden/minimized.
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
 function resolveIconPath(): string | null {
@@ -145,13 +80,10 @@ function createWindow() {
     },
   });
 
-  // Forward renderer console output to the terminal so diagnostics are visible.
   mainWindow.webContents.on('console-message', (_e, _level, message) => {
     console.log(`[renderer] ${message}`);
   });
 
-  // Minimal application menu whose accelerators (including Ctrl+Shift+I for
-  // DevTools) are active even though the menu bar is auto-hidden.
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       {
@@ -244,11 +176,6 @@ app.whenReady().then(() => {
     console.error('❌ Native audio engine error:', err);
   }
 
-  // Display media requests (`navigator.mediaDevices.getDisplayMedia`) are
-  // answered here. On Wayland the actual window/screen selection happens in
-  // the xdg-desktop-portal dialog of the desktop environment — the source
-  // handed to Chromium only selects the portal-backed capturer, the portal
-  // itself decides which window the user picks.
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer
       .getSources({ types: ['window', 'screen'] })
@@ -273,6 +200,7 @@ app.whenReady().then(() => {
   // IPC Handlers
   ipcMain.handle('get-app-config', () => ({
     apiEndpoint: appConfig.apiEndpoint,
+    livekitUrl: appConfig.livekitUrl,
   }));
 
   ipcMain.handle('get-platform-info', () => ({
@@ -282,16 +210,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('get-audio-apps', () => {
     try {
-      const apps = native.listAudioApplications();
-      for (const a of apps) {
-        if (a.processId <= 0) {
-          console.warn(
-            `[get-audio-apps] Cannot resolve PID for "${a.name}" (id=${a.id}). ` +
-              'The app may run under WINE/Proton, Flatpak, or another PID namespace.',
-          );
-        }
-      }
-      return apps;
+      return native.listAudioApplications();
     } catch (err) {
       console.error('get-audio-apps IPC error:', err);
       return [];
@@ -327,173 +246,133 @@ app.whenReady().then(() => {
     }));
   });
 
-  /**
-   * Auto-detects the audio source for a given window selection.
-   *
-   * Resolution strategies by platform (each falls through to the next):
-   *
-   * **Wayland:**
-   *   1. PipeWire introspection — scan the registry for the portal's
-   *      Video/Source node and extract the captured window's identity
-   *      from its `portal.screencast.*` / `window.name` properties.
-   *   2. Name hint — fuzzy-match `opts.nameHint` (the track label from
-   *      `getDisplayMedia`) against active audio app names via Rust.
-   *
-   * **X11:**
-   *   1. `_NET_WM_PID` — map the X11 window ID (from `opts.sourceId`)
-   *      to a PID and find the matching PipeWire audio application.
-   *   2. Name hint — fuzzy-match `opts.nameHint` (the source name from
-   *      `desktopCapturer`) against active audio app names via Rust.
-   */
-  ipcMain.handle(
-    'resolve-audio-source',
-    async (_event, opts: { sourceId?: string; nameHint?: string }): Promise<native.AudioApp | null> => {
-      let app: native.AudioApp | null = null;
-
-      if (isWayland) {
-        // ---- Layer 1: PipeWire introspection ----
-        // Retry up to 3 times with a short delay — xdg-desktop-portal may
-        // take a moment to register the video capture node in the PipeWire
-        // graph after getDisplayMedia resolves.
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            app = native.resolveAudioAppForCapturedWindow();
-            if (app) {
-              console.log(`[resolve-audio-source] Wayland PW-introspect → "${app.name}" (PID ${app.processId})`);
-              return app;
-            }
-          } catch (err) {
-            console.error('resolve-audio-source Wayland introspection error:', err);
-          }
-          if (attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 200));
-          }
+  const resolveAudioForWayland = async (nameHint: string | undefined): Promise<native.AudioApp | null> => {
+    // Layer 1: PipeWire introspection — retry as xdg-desktop-portal may lag.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const app = native.resolveAudioAppForCapturedWindow();
+        if (app) {
+          console.log(`[resolve-audio-source] Wayland PW-introspect → "${app.name}" (PID ${app.processId})`);
+          return app;
         }
-
-        // ---- Layer 2: Name matching via Rust ----
-        const nameHint = opts.nameHint || lastCapturedSourceName;
-        if (nameHint) {
-          try {
-            app = native.resolveAudioAppByName(nameHint);
-            if (app) {
-              console.log(`[resolve-audio-source] Wayland name-match "${nameHint}" → "${app.name}"`);
-              return app;
-            }
-          } catch (err) {
-            console.error('resolve-audio-source Wayland name-match error:', err);
-          }
-        }
-
-        // ---- Layer 3: pw-dump subprocess (get full node properties) ----
-        try {
-          const output = execFileSync('pw-dump', [], {
-            timeout: 2000,
-            stdio: ['ignore', 'pipe', 'pipe'],
-          });
-          const state = JSON.parse(output.toString());
-          let matchApp: native.AudioApp | null = null;
-          const ctx: CaptureContext = {
-            de: 'unknown',
-            mediaName: null,
-            sourceType: 'unknown',
-            videoNodeCount: 0,
-          };
-
-          for (const obj of state) {
-            const info = obj.info;
-            const props: Record<string, string> = info?.props ?? {};
-            const mc: string = props['media.class'] ?? '';
-            if (mc.startsWith('Stream/Output/Video')) {
-              ctx.videoNodeCount++;
-              const mn: string = props['media.name'] ?? '';
-              ctx.mediaName = mn;
-              console.log(`[resolve-audio-source] pw-dump vid node id=${obj.id}: media.name="${mn}"`);
-
-              if (mn.startsWith('kwin-screencast-')) {
-                ctx.de = 'kde';
-                const suffix = mn.slice('kwin-screencast-'.length);
-                // Monitor identifiers look like "DP-3", "HDMI-1", "eDP-1", etc.
-                ctx.sourceType = /^[A-Z]+-\d+$/.test(suffix) ? 'monitor' : 'window';
-
-                // On KDE window capture, try matching the suffix (window hex id)
-                // as a last resort — it likely won't match, but no harm trying.
-                if (ctx.sourceType === 'window' && suffix) {
-                  try {
-                    matchApp = native.resolveAudioAppByName(suffix);
-                  } catch (_) {}
-                }
-              } else if (props['portal.screencast.application']) {
-                ctx.de = 'gnome';
-              }
-            }
-          }
-
-          lastCaptureContext = ctx;
-          console.log(
-            `[resolve-audio-source] Wayland pw-dump: de=${ctx.de} sourceType=${ctx.sourceType} mediaName="${ctx.mediaName}" videoNodes=${ctx.videoNodeCount}`,
-          );
-
-          if (matchApp) {
-            console.log(`[resolve-audio-source] pw-dump name-match → "${matchApp.name}"`);
-            return matchApp;
-          }
-        } catch (err) {
-          console.error('[resolve-audio-source] pw-dump fallback error:', err);
-          lastCaptureContext = {
-            de: 'unknown',
-            mediaName: null,
-            sourceType: 'unknown',
-            videoNodeCount: 0,
-          };
-        }
-
-        console.log(
-          `[resolve-audio-source] Wayland: no match (introspect=null, nameHint="${opts.nameHint ?? ''}", lastSource="${lastCapturedSourceName ?? ''}")`,
-        );
-        return null;
+      } catch (err) {
+        console.error('resolve-audio-source Wayland introspection error:', err);
       }
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
 
-      // ---- X11 Layer 1: _NET_WM_PID ----
-      if (opts.sourceId?.startsWith('window:')) {
-        const windowIdStr = opts.sourceId.split(':')[1];
-        const windowId = parseInt(windowIdStr, 10);
-        if (!Number.isNaN(windowId)) {
-          try {
-            app = native.resolveAudioAppForX11Window(windowId);
-            if (app) {
-              console.log(`[resolve-audio-source] X11 PID-match: window ${windowId} → "${app.name}"`);
-              return app;
+    // Layer 2: Name matching via Rust.
+    const hint = nameHint ?? lastCapturedSourceName;
+    if (hint) {
+      try {
+        const app = native.resolveAudioAppByName(hint);
+        if (app) {
+          console.log(`[resolve-audio-source] Wayland name-match "${hint}" → "${app.name}"`);
+          return app;
+        }
+      } catch (err) {
+        console.error('resolve-audio-source Wayland name-match error:', err);
+      }
+    }
+
+    // Layer 3: pw-dump subprocess to inspect the PipeWire graph.
+    try {
+      const output = execFileSync('pw-dump', [], { timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'] });
+      const state = JSON.parse(output.toString());
+      let matchApp: native.AudioApp | null = null;
+      const ctx: CaptureContext = { de: 'unknown', mediaName: null, sourceType: 'unknown', videoNodeCount: 0 };
+
+      for (const obj of state) {
+        const props: Record<string, string> = obj.info?.props ?? {};
+        const mc: string = props['media.class'] ?? '';
+        if (!mc.startsWith('Stream/Output/Video')) continue;
+
+        ctx.videoNodeCount++;
+        const mn: string = props['media.name'] ?? '';
+        ctx.mediaName = mn;
+        console.log(`[resolve-audio-source] pw-dump vid node id=${obj.id}: media.name="${mn}"`);
+
+        if (mn.startsWith('kwin-screencast-')) {
+          ctx.de = 'kde';
+          const suffix = mn.slice('kwin-screencast-'.length);
+          ctx.sourceType = /^[A-Z]+-\d+$/.test(suffix) ? 'monitor' : 'window';
+          if (ctx.sourceType === 'window' && suffix) {
+            try {
+              matchApp = native.resolveAudioAppByName(suffix);
+            } catch (err) {
+              console.warn('pw-dump KDE suffix match failed:', err);
             }
-          } catch (err) {
-            console.error('resolve-audio-source X11 error:', err);
           }
+        } else if (props['portal.screencast.application']) {
+          ctx.de = 'gnome';
         }
       }
 
-      // ---- X11 Layer 2: Name matching via Rust ----
-      if (opts.nameHint) {
+      lastCaptureContext = ctx;
+      console.log(
+        `[resolve-audio-source] Wayland pw-dump: de=${ctx.de} sourceType=${ctx.sourceType} mediaName="${ctx.mediaName}" videoNodes=${ctx.videoNodeCount}`,
+      );
+
+      if (matchApp) {
+        console.log(`[resolve-audio-source] pw-dump name-match → "${matchApp.name}"`);
+        return matchApp;
+      }
+    } catch (err) {
+      console.error('[resolve-audio-source] pw-dump fallback error:', err);
+      lastCaptureContext = { de: 'unknown', mediaName: null, sourceType: 'unknown', videoNodeCount: 0 };
+    }
+
+    console.log(
+      `[resolve-audio-source] Wayland: no match (introspect=null, nameHint="${nameHint ?? ''}", lastSource="${lastCapturedSourceName ?? ''}")`,
+    );
+    return null;
+  };
+
+  const resolveAudioForX11 = (sourceId: string | undefined, nameHint: string | undefined): native.AudioApp | null => {
+    // Layer 1: _NET_WM_PID via X11 window ID.
+    if (sourceId?.startsWith('window:')) {
+      const windowId = parseInt(sourceId.split(':')[1], 10);
+      if (!Number.isNaN(windowId)) {
         try {
-          app = native.resolveAudioAppByName(opts.nameHint);
+          const app = native.resolveAudioAppForX11Window(windowId);
           if (app) {
-            console.log(`[resolve-audio-source] X11 name-match "${opts.nameHint}" → "${app.name}"`);
+            console.log(`[resolve-audio-source] X11 PID-match: window ${windowId} → "${app.name}"`);
             return app;
           }
         } catch (err) {
-          console.error('resolve-audio-source X11 name-match error:', err);
+          console.error('resolve-audio-source X11 error:', err);
         }
       }
+    }
 
-      console.log(
-        `[resolve-audio-source] X11: no match (sourceId="${opts.sourceId ?? ''}", nameHint="${opts.nameHint ?? ''}")`,
-      );
-      return null;
+    // Layer 2: Name matching via Rust.
+    if (nameHint) {
+      try {
+        const app = native.resolveAudioAppByName(nameHint);
+        if (app) {
+          console.log(`[resolve-audio-source] X11 name-match "${nameHint}" → "${app.name}"`);
+          return app;
+        }
+      } catch (err) {
+        console.error('resolve-audio-source X11 name-match error:', err);
+      }
+    }
+
+    console.log(`[resolve-audio-source] X11: no match (sourceId="${sourceId ?? ''}", nameHint="${nameHint ?? ''}")`);
+    return null;
+  };
+
+  ipcMain.handle(
+    'resolve-audio-source',
+    async (_event, opts: { sourceId?: string; nameHint?: string }): Promise<native.AudioApp | null> => {
+      return isWayland ? await resolveAudioForWayland(opts.nameHint) : resolveAudioForX11(opts.sourceId, opts.nameHint);
     },
   );
 
   ipcMain.handle('get-capture-context', () => lastCaptureContext);
 
-  // navigator.clipboard is unreliable in Electron without a secure context +
-  // user gesture; write through the main-process clipboard instead.
   ipcMain.handle('clipboard-write-text', (_event, text: string) => {
     try {
       clipboard.writeText(String(text ?? ''));
@@ -508,7 +387,6 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
-  // Destroy the PipeWire virtual sink and its links before the process exits.
   stopNativeCapture();
 });
 

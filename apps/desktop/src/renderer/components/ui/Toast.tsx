@@ -36,14 +36,15 @@ let audioCtx: AudioContext | null = null;
 
 const getAudioCtx = (): AudioContext | null => {
   if (typeof window === 'undefined') return null;
+  const Ctor =
+    window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctor) return null;
   try {
-    const Ctor =
-      window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!Ctor) return null;
     if (!audioCtx) audioCtx = new Ctor();
     if (audioCtx.state === 'suspended') void audioCtx.resume();
     return audioCtx;
-  } catch {
+  } catch (err) {
+    console.warn('AudioContext creation failed:', err);
     return null;
   }
 };
@@ -90,7 +91,7 @@ const playChime = (tones: ToneSpec[]): void => {
       try {
         master.disconnect();
       } catch {
-        /* already disconnected */
+        console.warn('Audio master gain already disconnected');
       }
     };
   }
@@ -100,7 +101,6 @@ export const playNotificationSound = (variant: ToastVariant = 'success'): void =
   try {
     switch (variant) {
       case 'success':
-        // Rising perfect fifth (E5 -> B5): bright, consonant "connected" chime.
         playChime([
           { freq: 659.25, start: 0, dur: 0.15 },
           { freq: 987.77, start: 0.075, dur: 0.22 },
@@ -110,15 +110,14 @@ export const playNotificationSound = (variant: ToastVariant = 'success'): void =
         playChime([{ freq: 880, start: 0, dur: 0.16, peak: 0.5, type: 'triangle' }]);
         break;
       case 'error':
-        // Descending minor third (A4 -> F4).
         playChime([
           { freq: 440, start: 0, dur: 0.16, type: 'triangle' },
           { freq: 349.23, start: 0.09, dur: 0.24, type: 'triangle' },
         ]);
         break;
     }
-  } catch {
-    // Audio is best-effort — never let a toast throw.
+  } catch (err) {
+    console.warn('Notification sound failed:', err);
   }
 };
 
