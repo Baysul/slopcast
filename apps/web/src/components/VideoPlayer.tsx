@@ -1,7 +1,7 @@
 import { Maximize, Minimize, Pause, Play, Radio, RefreshCw, Volume2, VolumeX } from 'lucide-react';
 import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
-import { AudioVisualizer } from './AudioVisualizer';
+import { AudioVisualizer, unlockAudioContexts } from './AudioVisualizer';
 import {
   computeTelemetry,
   createStatsPrev,
@@ -37,6 +37,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [volume, setVolume] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hasVideoTrack, setHasVideoTrack] = useState(false);
+  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
 
   const [telemetry, setTelemetry] = useState<SpectatorTelemetry | null>(null);
   const statsPrevRef = useRef<ReturnType<typeof createStatsPrev>>(null);
@@ -78,24 +79,45 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.srcObject = mediaStream;
       const videoTracks = mediaStream.getVideoTracks();
       setHasVideoTrack(videoTracks.length > 0 && videoTracks[0].enabled);
+      setNeedsAudioUnlock(false);
+
+      const hasAudioTrack = mediaStream.getAudioTracks().length > 0;
 
       video
         .play()
-        .then(() => setIsPlaying(true))
+        .then(() => {
+          setIsPlaying(true);
+        })
         .catch((err) => {
           console.warn('[VideoPlayer] Autoplay prevented, muting to retry:', err);
           video.muted = true;
           setIsMuted(true);
           video
             .play()
-            .then(() => setIsPlaying(true))
+            .then(() => {
+              setIsPlaying(true);
+              if (hasAudioTrack) {
+                setNeedsAudioUnlock(true);
+              }
+            })
             .catch(console.error);
         });
     } else {
       video.srcObject = null;
       setHasVideoTrack(false);
+      setNeedsAudioUnlock(false);
     }
   }, [mediaStream]);
+
+  const handleUnlockAudio = () => {
+    const video = videoRef.current;
+    if (video) {
+      video.muted = false;
+      setIsMuted(false);
+      unlockAudioContexts();
+    }
+    setNeedsAudioUnlock(false);
+  };
 
   const togglePlay = () => {
     const video = videoRef.current;
@@ -115,7 +137,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const toggleMute = () => {
     const video = videoRef.current;
     if (!video) return;
-
+    if (needsAudioUnlock) {
+      handleUnlockAudio();
+      return;
+    }
     video.muted = !isMuted;
     setIsMuted(!isMuted);
   };
@@ -179,6 +204,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
+      {needsAudioUnlock && isLive && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-20">
+          <button
+            type="button"
+            onClick={handleUnlockAudio}
+            className="flex items-center gap-3 px-6 py-4 bg-safelight/20 border border-safelight/40 rounded-2xl
+                       text-white hover:bg-safelight/30 transition-all backdrop-blur-md cursor-pointer"
+          >
+            <Volume2 className="w-6 h-6 text-safelight" />
+            <span className="font-semibold text-base">Click to enable audio</span>
+          </button>
+        </div>
+      )}
+
       <div className="absolute top-4 right-16 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto">
         {isLive && mediaStream && <AudioVisualizer mediaStream={mediaStream} showStatus />}
       </div>
@@ -202,7 +241,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 type="button"
                 onClick={toggleMute}
                 className="text-white/60 hover:text-white transition-colors"
-                title={isMuted ? 'Unmute' : 'Mute'}
+                title={isMuted || needsAudioUnlock ? 'Unmute' : 'Mute'}
               >
                 {isMuted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </button>
