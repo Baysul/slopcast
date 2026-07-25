@@ -1,6 +1,10 @@
 # Slopcast
 
-Room-based screen and audio sharing — present from the desktop app, spectate from any browser.
+<p align="center">
+  <img src="apps/desktop/resources/icon.svg" alt="Slopcast" width="128">
+</p>
+
+Room-based screen and audio sharing — present from the desktop app, spectate from any browser<sup><a href="#fn1" id="ref1">1</a></sup>.
 
 <p align="center">
   <img src="screenshot.png" alt="Slopcast screenshot" width="720">
@@ -44,3 +48,7 @@ packages/
 ```
 
 For full architecture details see [AGENTS.md](AGENTS.md).
+
+---
+
+<sup id="fn1">1</sup> Currently tested on Chromium-based browsers (Chrome, Edge, Brave, Opera). Firefox and Safari support is planned. [↩](#ref1)
