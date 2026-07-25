@@ -87,7 +87,7 @@ const findCaptureAudioDevice = async (): Promise<MediaDeviceInfo | null> => {
     devices.find(
       (d) =>
         d.kind === 'audioinput' &&
-        (d.label.toLowerCase().includes('screenshare') || d.label.toLowerCase().includes('screenshare-window-audio')),
+        (d.label.toLowerCase().includes('slopcast') || d.label.toLowerCase().includes('slopcast-window-audio')),
     ) ?? null
   );
 };
@@ -1592,7 +1592,7 @@ export const PresenterApp: React.FC = () => {
             <span className="p-2 bg-secondary rounded-xl text-body-text shrink-0">
               <ScreenShare className="w-5 h-5" aria-hidden="true" />
             </span>
-            <h1 className="text-lg font-bold text-gray-100 shrink-0 tracking-tight">ScreenShare</h1>
+            <h1 className="text-lg font-bold text-gray-100 shrink-0 tracking-tight">Slopcast</h1>
             <span className="hidden sm:inline-flex text-[10px] bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded-full border border-indigo-500/30">
               {isWayland ? 'Wayland' : 'X11'}
             </span>

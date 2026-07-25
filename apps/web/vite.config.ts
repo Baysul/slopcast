@@ -19,8 +19,8 @@ function loadConfig(): AppConfig {
   };
 
   const candidates = [
-    path.resolve(__dirname, '../../../screen-share.config.json'),
-    path.resolve(process.cwd(), 'screen-share.config.json'),
+    path.resolve(__dirname, '../../../slopcast.config.json'),
+    path.resolve(process.cwd(), 'slopcast.config.json'),
   ];
 
   for (const p of candidates) {

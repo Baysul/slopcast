@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import type { WSMessage } from '@screen-share/shared-types';
+import type { WSMessage } from '@slopcast/shared-types';
 import WebSocket from 'ws';
 import { createServer } from './server';
 

@@ -53,7 +53,7 @@ export const Header: React.FC<HeaderProps> = ({ roomCode, shareUrl, status = 'co
             <div className="p-2 bg-secondary rounded-xl text-body-text group-hover:text-foreground transition-colors">
               <ScreenShare className="w-5 h-5" />
             </div>
-            <span className="font-bold text-base text-foreground tracking-tight">ScreenShare</span>
+            <span className="font-bold text-base text-foreground tracking-tight">Slopcast</span>
           </Link>
         </div>
 

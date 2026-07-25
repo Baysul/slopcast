@@ -15,7 +15,7 @@ import type {
   StopStreamPayload,
   WebRTCSignalPayload,
   WSMessage,
-} from '@screen-share/shared-types';
+} from '@slopcast/shared-types';
 import express, { type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { RoomManager } from './roomManager';

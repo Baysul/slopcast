@@ -1,4 +1,4 @@
-import type { JoinedRoomPayload, Participant } from '@screen-share/shared-types';
+import type { JoinedRoomPayload, Participant } from '@slopcast/shared-types';
 import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
