@@ -32,12 +32,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  const [isPlaying, setIsPlaying] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hasVideoTrack, setHasVideoTrack] = useState(false);
-  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
+  const [needsUserGesture, setNeedsUserGesture] = useState(false);
 
   const [telemetry, setTelemetry] = useState<SpectatorTelemetry | null>(null);
   const statsPrevRef = useRef<ReturnType<typeof createStatsPrev>>(null);
@@ -79,49 +79,55 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.srcObject = mediaStream;
       const videoTracks = mediaStream.getVideoTracks();
       setHasVideoTrack(videoTracks.length > 0 && videoTracks[0].enabled);
-      setNeedsAudioUnlock(false);
-
-      const hasAudioTrack = mediaStream.getAudioTracks().length > 0;
-
-      video
-        .play()
-        .then(() => {
-          setIsPlaying(true);
-        })
-        .catch((err) => {
-          console.warn('[VideoPlayer] Autoplay prevented, muting to retry:', err);
-          video.muted = true;
-          setIsMuted(true);
-          video
-            .play()
-            .then(() => {
-              setIsPlaying(true);
-              if (hasAudioTrack) {
-                setNeedsAudioUnlock(true);
-              }
-            })
-            .catch(console.error);
-        });
+      setNeedsUserGesture(true);
+      setIsPlaying(false);
+      setIsMuted(false);
     } else {
       video.srcObject = null;
       setHasVideoTrack(false);
-      setNeedsAudioUnlock(false);
+      setNeedsUserGesture(false);
+      setIsPlaying(false);
+      setIsMuted(false);
     }
   }, [mediaStream]);
 
-  const handleUnlockAudio = () => {
+  const handleUserGesture = () => {
     const video = videoRef.current;
-    if (video) {
-      video.muted = false;
-      setIsMuted(false);
-      unlockAudioContexts();
-    }
-    setNeedsAudioUnlock(false);
+    if (!video) return;
+
+    video.muted = false;
+    setIsMuted(false);
+
+    video
+      .play()
+      .then(() => {
+        setIsPlaying(true);
+        unlockAudioContexts();
+      })
+      .catch((err) => {
+        console.warn('[VideoPlayer] Play still blocked after user gesture:', err);
+        video.muted = true;
+        setIsMuted(true);
+        video
+          .play()
+          .then(() => {
+            setIsPlaying(true);
+            unlockAudioContexts();
+          })
+          .catch(console.error);
+      });
+
+    setNeedsUserGesture(false);
   };
 
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
+
+    if (needsUserGesture) {
+      handleUserGesture();
+      return;
+    }
 
     if (isPlaying) {
       video.pause();
@@ -137,10 +143,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const toggleMute = () => {
     const video = videoRef.current;
     if (!video) return;
-    if (needsAudioUnlock) {
-      handleUnlockAudio();
-      return;
-    }
+
     video.muted = !isMuted;
     setIsMuted(!isMuted);
   };
@@ -204,16 +207,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {needsAudioUnlock && isLive && (
+      {needsUserGesture && isLive && hasVideoTrack && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-20">
           <button
             type="button"
-            onClick={handleUnlockAudio}
-            className="flex items-center gap-3 px-6 py-4 bg-safelight/20 border border-safelight/40 rounded-2xl
+            onClick={handleUserGesture}
+            className="flex flex-col items-center gap-4 px-8 py-6 bg-safelight/20 border border-safelight/40 rounded-2xl
                        text-white hover:bg-safelight/30 transition-all backdrop-blur-md cursor-pointer"
           >
-            <Volume2 className="w-6 h-6 text-safelight" />
-            <span className="font-semibold text-base">Click to enable audio</span>
+            <Play className="w-10 h-10 text-safelight" />
+            <span className="font-semibold text-base">Click to watch</span>
+            {mediaStream?.getAudioTracks().length ? (
+              <span className="text-xs text-white/40">Video and audio will play after click</span>
+            ) : null}
           </button>
         </div>
       )}
@@ -241,7 +247,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 type="button"
                 onClick={toggleMute}
                 className="text-white/60 hover:text-white transition-colors"
-                title={isMuted || needsAudioUnlock ? 'Unmute' : 'Mute'}
+                title={isMuted ? 'Unmute' : 'Mute'}
               >
                 {isMuted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </button>
