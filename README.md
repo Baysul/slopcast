@@ -12,11 +12,11 @@ Cross-platform room-based screen and audio sharing — present from the desktop 
 
 ## Heads-up
 
-This a personal project of mine that I plan to maintain until the day *an actually good app* for sharing your screen on Linux/Wayland appears.
+This a vibe-coded, personal project of mine that I plan to maintain until the day *an actually good app* for sharing your screen on Linux/Wayland appears.
 
 ### Why not user other apps?
 - **Discord:** A Nitro subscription is required for high-bitrate video, and a frame-rate higher than 30fps. Not to mention that on my system it captures my entire desktop's audio instead of solely the audio from the window I selected. Streams were often super pixel-y also, especially when there was a lot going on.
-- **Vesktop:** Streams just wouldn't start for me, and the app in general seemed buggy. I also don't know how I feel about using a third-party Discord client. It violates Discord's terms of service and has direct access to sensitive conversations.
+- **Vesktop:** Streams just wouldn't start for me, and the app in general was buggy. I also don't like the idea of using a third-party Discord client. It violates Discord's terms of service and has direct access to sensitive conversations.
 - **Element:** As of now has no support for screen sharing with audio, and lacks settings to adjust the bitrate, resolution and framerate of the stream. [There's a pending pull request that was made in February of this year](https://github.com/element-hq/element-call/pull/3736#issuecomment-4845070478), but a merge is nowhere in sight. That's not to mention the possible overhead investment of [setting up a homeserver](https://element-hq.github.io/synapse/latest/welcome_and_overview.html) with Element Call - which means a well-configured, resource-hungry Synapse server (+ web server, + PostgreSQL server), a TURN server and LiveKit deployment .. that you then have to convince your friends to register on and use.
 - **Jitsi Meet:** Honestly, it's not terrible. The bitrate is good and it's fairly straightforward to create a room and have your friends join. I don't remember what exactly issue I had, but I think it could only share tabs or something, and the audio and latency weren't in general weren't great.
 
@@ -34,6 +34,7 @@ Well first of all, native Linux desktop support is a must. The app should:
 - Not require registration or a download for people who just need to watch.[^2]
 - A cross-platform desktop app
   - This is still a work in progress! Windows and Mac builds haven't been tested yet, but a functioning Windows build will be coming soon.
+
 ### 
 
 
