@@ -5,12 +5,10 @@ use napi_derive::napi;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
-
-#[cfg(target_os = "windows")]
-pub mod windows;
-
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 mod unsupported_platform {
@@ -20,12 +18,15 @@ mod unsupported_platform {
     pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
         Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
     }
+
     pub fn start_audio_capture(_: &Either<String, i32>) -> NapiResult<bool> {
         Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
     }
+
     pub fn stop_audio_capture() -> NapiResult<bool> {
         Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
     }
+
     pub fn is_audio_capture_active() -> NapiResult<bool> {
         Ok(false)
     }
@@ -33,13 +34,10 @@ mod unsupported_platform {
 
 #[cfg(target_os = "linux")]
 use crate::linux as platform;
-
-#[cfg(target_os = "windows")]
-use crate::windows as platform;
-
 #[cfg(target_os = "macos")]
 use crate::macos as platform;
-
+#[cfg(target_os = "windows")]
+use crate::windows as platform;
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 use unsupported_platform as platform;
 
@@ -55,21 +53,17 @@ pub struct AudioApp {
 pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
     let query_lower = label.to_lowercase();
 
-    if let Some(app) = apps.iter().find(|a| a.name.to_lowercase() == query_lower) {
-        return Some(app.clone());
-    }
-    if let Some(app) = apps.iter().find(|a| query_lower.contains(&a.name.to_lowercase())) {
-        return Some(app.clone());
-    }
-    if let Some(app) = apps.iter().find(|a| a.name.to_lowercase().contains(&query_lower)) {
-        return Some(app.clone());
-    }
-
     let first_word = query_lower.split_whitespace().next()?;
+
     apps.iter()
-        .find(|a| {
-            let name_lower = a.name.to_lowercase();
-            name_lower.contains(first_word) || first_word.contains(&name_lower)
+        .find(|a| a.name.to_lowercase() == query_lower)
+        .or_else(|| apps.iter().find(|a| query_lower.contains(&a.name.to_lowercase())))
+        .or_else(|| apps.iter().find(|a| a.name.to_lowercase().contains(&query_lower)))
+        .or_else(|| {
+            apps.iter().find(|a| {
+                let name_lower = a.name.to_lowercase();
+                name_lower.contains(first_word) || first_word.contains(&name_lower)
+            })
         })
         .cloned()
 }

@@ -1,17 +1,17 @@
 use crate::AudioApp;
 use napi::{Either, Result as NapiResult};
-use pipewire::properties::{properties, PropertiesBox};
+use pipewire::properties::{PropertiesBox, properties};
 use pipewire::registry::GlobalObject;
 use pipewire::spa::param::audio::{AudioInfoRaw, AudioInfoRawFlags};
 use pipewire::spa::param::format::MediaType;
-use pipewire::spa::param::{format_utils, ParamType};
+use pipewire::spa::param::{ParamType, format_utils};
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -81,15 +81,15 @@ impl TargetSpec {
         if Some(node_id) == self.node_id {
             return true;
         }
-        if let (Some(want), Some(pid)) = (self.pid, info.pid) {
-            if want == pid {
-                return true;
-            }
+        if let (Some(want), Some(pid)) = (self.pid, info.pid)
+            && want == pid
+        {
+            return true;
         }
-        if let (Some(want), Some(binary)) = (&self.binary, &info.binary) {
-            if want == binary {
-                return true;
-            }
+        if let (Some(want), Some(binary)) = (&self.binary, &info.binary)
+            && want == binary
+        {
+            return true;
         }
         false
     }
@@ -150,12 +150,14 @@ impl ChannelLayout {
 }
 
 fn channel_short_name(channel: u32) -> Option<String> {
+    // SAFETY: pipewire-rs sys function returns null or a valid NUL-terminated C string.
     let ptr = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(channel) };
     if ptr.is_null() {
-        None
-    } else {
-        unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().ok().map(str::to_string)
+        return None;
     }
+    // SAFETY: ptr is non-null and points to a NUL-terminated C string.
+    let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
+    cstr.to_str().ok().map(str::to_string)
 }
 
 struct PortInfo {
@@ -267,12 +269,12 @@ impl GraphTracker {
             }
             "Stream/Output/Audio" => {
                 let mut info = AppNodeInfo::from_props(props);
-                if info.pid.is_none() || info.pid == Some(0) {
-                    if let Some(cid) = props.get("client.id").and_then(|v| v.parse::<u32>().ok()) {
-                        let p = self.client_pids.get(&cid).copied();
-                        if p.is_some_and(|pid| is_valid_pid(pid as i32)) {
-                            info.pid = p;
-                        }
+                if (info.pid.is_none() || info.pid == Some(0))
+                    && let Some(cid) = props.get("client.id").and_then(|v| v.parse::<u32>().ok())
+                {
+                    let p = self.client_pids.get(&cid).copied();
+                    if p.is_some_and(|pid| is_valid_pid(pid as i32)) {
+                        info.pid = p;
                     }
                 }
                 if info.pid.is_none() || info.pid == Some(0) {
@@ -301,11 +303,7 @@ impl GraphTracker {
             })
             .or_else(|| {
                 let name = props.get("application.name").unwrap_or("");
-                if !name.is_empty() {
-                    resolve_pid_by_name(name)
-                } else {
-                    None
-                }
+                if !name.is_empty() { resolve_pid_by_name(name) } else { None }
             });
         if let Some(pid) = pid {
             self.client_pids.insert(_global.id, pid as u32);
@@ -359,10 +357,10 @@ impl GraphTracker {
     }
 
     fn track_link_factory(&mut self, props: &DictRef) {
-        if props.get("factory.type.name") == Some(ObjectType::Link.to_str()) {
-            if let Some(name) = props.get("factory.name") {
-                *self.factory_name.borrow_mut() = Some(name.to_string());
-            }
+        if props.get("factory.type.name") == Some(ObjectType::Link.to_str())
+            && let Some(name) = props.get("factory.name")
+        {
+            *self.factory_name.borrow_mut() = Some(name.to_string());
         }
     }
 
@@ -404,21 +402,20 @@ impl GraphTracker {
         let (node, channel) = match self.ports.get(&port_id) {
             Some(p) if p.is_output && self.is_linkable_app(p.node) => {
                 let channel = match &p.channel {
-                    Some(channel) => channel.clone(),
+                    Some(channel) => channel.as_str(),
                     None => return,
                 };
                 (p.node, channel)
             }
             _ => return,
         };
-        let sink_port = self.ports.iter().find_map(|(pid, p)| {
-            if !p.is_output && p.node == sink && p.channel.as_deref() == Some(channel.as_str()) {
+        let sink_port = match self.ports.iter().find_map(|(pid, p)| {
+            if !p.is_output && p.node == sink && p.channel.as_deref() == Some(channel) {
                 Some(*pid)
             } else {
                 None
             }
-        });
-        let sink_port = match sink_port {
+        }) {
             Some(pid) => pid,
             None => return,
         };
@@ -438,8 +435,7 @@ impl GraphTracker {
         output_node: u32,
         input_node: u32,
     ) -> bool {
-        let factory =
-            self.factory_name.borrow().clone().unwrap_or_else(|| LINK_FACTORY.to_string());
+        let factory = self.factory_name.borrow().as_deref().unwrap_or(LINK_FACTORY).to_string();
         let props = properties! {
             "link.output.port" => output_port.to_string(),
             "link.input.port" => input_port.to_string(),
@@ -502,11 +498,7 @@ fn port_channel_from_name(port_name: Option<&str>) -> Option<String> {
     let name = port_name?;
     let underscore = name.rfind('_')?;
     let suffix = &name[underscore + 1..];
-    if suffix.is_empty() {
-        None
-    } else {
-        Some(suffix.to_string())
-    }
+    if suffix.is_empty() { None } else { Some(suffix.to_string()) }
 }
 
 fn create_capture_sink(
@@ -550,10 +542,11 @@ fn bind_default_metadata(
     let listener = metadata
         .add_listener_local()
         .property(move |subject, key, _type, value| {
-            if subject == pipewire::core::PW_ID_CORE && key == Some("default.audio.sink") {
-                if let Some(name) = value.and_then(json_object_name) {
-                    tracker.borrow_mut().set_default_sink_name(name);
-                }
+            if subject == pipewire::core::PW_ID_CORE
+                && key == Some("default.audio.sink")
+                && let Some(name) = value.and_then(json_object_name)
+            {
+                tracker.borrow_mut().set_default_sink_name(name);
             }
             0
         })
@@ -700,10 +693,10 @@ fn run_capture_session(
         let timeout = Duration::from_millis(10);
         main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(timeout));
 
-        if metadata_watch.is_none() {
-            if let Some(global) = tracker.borrow_mut().take_pending_metadata() {
-                metadata_watch = bind_default_metadata(&registry, &global, &tracker);
-            }
+        if metadata_watch.is_none()
+            && let Some(global) = tracker.borrow_mut().take_pending_metadata()
+        {
+            metadata_watch = bind_default_metadata(&registry, &global, &tracker);
         }
 
         let want_watch = tracker.borrow().default_sink_id();
@@ -844,11 +837,7 @@ fn client_sec_pid(props: &DictRef) -> Option<i32> {
         .get("pipewire.sec.pid")
         .and_then(|v| v.parse::<i32>().ok())
         .filter(|pid| is_valid_pid(*pid))?;
-    if is_pipewire_daemon(pid) {
-        None
-    } else {
-        Some(pid)
-    }
+    if is_pipewire_daemon(pid) { None } else { Some(pid) }
 }
 
 fn resolve_pid_by_binary(binary: &str) -> Option<i32> {
@@ -872,22 +861,19 @@ fn resolve_pid_by_binary(binary: &str) -> Option<i32> {
             continue;
         }
         let comm_path = format!("/proc/{}/comm", pid);
-        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-            if comm.trim().to_lowercase() == binary_lower {
-                candidates.push(pid);
-                continue;
-            }
+        if let Ok(comm) = std::fs::read_to_string(&comm_path)
+            && comm.trim().to_lowercase() == binary_lower
+        {
+            candidates.push(pid);
+            continue;
         }
         let cmdline_path = format!("/proc/{}/cmdline", pid);
-        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
-            if let Some(first) = cmdline.split('\0').next() {
-                if let Some(base) = std::path::Path::new(first).file_name().and_then(|s| s.to_str())
-                {
-                    if base.to_lowercase() == binary_lower {
-                        candidates.push(pid);
-                    }
-                }
-            }
+        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path)
+            && let Some(first) = cmdline.split('\0').next()
+            && let Some(base) = std::path::Path::new(first).file_name().and_then(|s| s.to_str())
+            && base.to_lowercase() == binary_lower
+        {
+            candidates.push(pid);
         }
     }
     (candidates.len() == 1).then_some(candidates[0])
@@ -926,18 +912,16 @@ fn resolve_pid_by_name(name: &str) -> Option<i32> {
             }
         }
         let cmdline_path = format!("/proc/{}/cmdline", pid);
-        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
-            if let Some(first) = cmdline.split('\0').next() {
-                if let Some(base) = std::path::Path::new(first).file_name().and_then(|s| s.to_str())
-                {
-                    let base = base.to_lowercase();
-                    if base == search_lower
-                        || base.starts_with(&search_lower)
-                        || search_lower.starts_with(&base)
-                    {
-                        candidates.push(pid);
-                    }
-                }
+        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path)
+            && let Some(first) = cmdline.split('\0').next()
+            && let Some(base) = std::path::Path::new(first).file_name().and_then(|s| s.to_str())
+        {
+            let base = base.to_lowercase();
+            if base == search_lower
+                || base.starts_with(&search_lower)
+                || search_lower.starts_with(&base)
+            {
+                candidates.push(pid);
             }
         }
     }
@@ -985,11 +969,7 @@ fn collect_client_pids(
                             .filter(|pid| is_valid_pid(*pid))
                     })
                     .or_else(|| {
-                        if !app_name.is_empty() {
-                            resolve_pid_by_name(&app_name)
-                        } else {
-                            None
-                        }
+                        if !app_name.is_empty() { resolve_pid_by_name(&app_name) } else { None }
                     });
                 if let Some(pid) = pid {
                     client_pids_clone.borrow_mut().insert(global.id, pid);
@@ -1097,7 +1077,7 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
         _ => {
             return Err(napi::Error::from_reason(
                 "A PipeWire node ID or -1 (system audio) is required",
-            ))
+            ));
         }
     };
 
@@ -1135,12 +1115,12 @@ pub fn is_audio_capture_active() -> NapiResult<bool> {
         if finished {
             stop_session(state);
         }
-        if let Some(session) = &state.session {
-            if let Ok(shared) = session.shared.lock() {
-                state.active_links = shared.link_ids.clone();
-                if state.virtual_sink_id.is_none() {
-                    state.virtual_sink_id = shared.sink_id.map(|id| id as i32);
-                }
+        if let Some(session) = &state.session
+            && let Ok(shared) = session.shared.lock()
+        {
+            state.active_links = shared.link_ids.clone();
+            if state.virtual_sink_id.is_none() {
+                state.virtual_sink_id = shared.sink_id.map(|id| id as i32);
             }
         }
         Ok(state.is_active)
@@ -1150,26 +1130,30 @@ pub fn is_audio_capture_active() -> NapiResult<bool> {
 }
 
 pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
-    unsafe {
-        let display = x11::xlib::XOpenDisplay(std::ptr::null());
-        if display.is_null() {
-            return None;
-        }
+    // SAFETY: X11 C library calls. We check all return values before dereferencing.
+    let display = unsafe { x11::xlib::XOpenDisplay(std::ptr::null()) };
+    if display.is_null() {
+        return None;
+    }
 
-        let atom_name = std::ffi::CString::new("_NET_WM_PID").ok()?;
-        let atom = x11::xlib::XInternAtom(display, atom_name.as_ptr(), 1);
-        if atom == 0 {
-            x11::xlib::XCloseDisplay(display);
-            return None;
-        }
+    let atom_name = std::ffi::CString::new("_NET_WM_PID").ok()?;
+    let atom = unsafe { x11::xlib::XInternAtom(display, atom_name.as_ptr(), 1) };
+    if atom == 0 {
+        // SAFETY: display was successfully opened above.
+        unsafe { x11::xlib::XCloseDisplay(display) };
+        return None;
+    }
 
-        let mut actual_type: x11::xlib::Atom = 0;
-        let mut actual_format: std::os::raw::c_int = 0;
-        let mut nitems: std::os::raw::c_ulong = 0;
-        let mut bytes_after: std::os::raw::c_ulong = 0;
-        let mut prop: *mut u8 = std::ptr::null_mut();
+    let mut actual_type: x11::xlib::Atom = 0;
+    let mut actual_format: std::os::raw::c_int = 0;
+    let mut nitems: std::os::raw::c_ulong = 0;
+    let mut bytes_after: std::os::raw::c_ulong = 0;
+    let mut prop: *mut u8 = std::ptr::null_mut();
 
-        let status = x11::xlib::XGetWindowProperty(
+    // SAFETY: XGetWindowProperty is called with valid display and atom.
+    // prop is only dereferenced after checking status == 0 and prop != null.
+    let status = unsafe {
+        x11::xlib::XGetWindowProperty(
             display,
             window_id as x11::xlib::Window,
             atom,
@@ -1182,23 +1166,26 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
             &mut nitems,
             &mut bytes_after,
             &mut prop,
-        );
+        )
+    };
 
-        let pid = if status == 0 && !prop.is_null() && nitems > 0 && actual_format == 32 {
-            Some(*(prop as *const u32))
-        } else {
-            None
-        };
+    // SAFETY: prop is valid only when status == 0 and the format/type match.
+    let pid = if status == 0 && !prop.is_null() && nitems > 0 && actual_format == 32 {
+        Some(unsafe { *(prop as *const u32) })
+    } else {
+        None
+    };
 
-        if !prop.is_null() {
-            x11::xlib::XFree(prop as *mut std::ffi::c_void);
-        }
-        x11::xlib::XCloseDisplay(display);
-
-        let pid = pid?;
-        let apps = list_audio_applications().ok()?;
-        apps.into_iter().find(|app| app.process_id == pid as i32)
+    if !prop.is_null() {
+        // SAFETY: XFree is called with the same pointer returned by XGetWindowProperty.
+        unsafe { x11::xlib::XFree(prop as *mut std::ffi::c_void) };
     }
+    // SAFETY: display is still valid from the open above.
+    unsafe { x11::xlib::XCloseDisplay(display) };
+
+    let pid = pid?;
+    let apps = list_audio_applications().ok()?;
+    apps.into_iter().find(|app| app.process_id == pid as i32)
 }
 
 fn portal_window_name(props: &DictRef) -> Option<String> {
@@ -1213,10 +1200,11 @@ fn portal_window_name(props: &DictRef) -> Option<String> {
         }
     }
 
-    if let Some(v) = props.get("media.name").filter(|v| !v.is_empty()) {
-        if !v.contains("pipewire") && v != "kwin_wayland" {
-            return Some(v.to_string());
-        }
+    if let Some(v) = props.get("media.name").filter(|v| !v.is_empty())
+        && !v.contains("pipewire")
+        && v != "kwin_wayland"
+    {
+        return Some(v.to_string());
     }
 
     if let Some(v) = props.get("node.name").filter(|v| !v.is_empty()) {
