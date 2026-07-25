@@ -8,7 +8,7 @@ use screencapturekit::prelude::{
 };
 
 fn napi_err(context: &str, e: impl std::fmt::Display) -> napi::Error {
-    napi::Error::from_reason(format!("{}: {}", context, e))
+    napi::Error::from_reason(format!("{context}: {e}"))
 }
 
 struct AudioOutputHandler;
@@ -23,12 +23,17 @@ struct MacCaptureState {
     target_bundle_id: Option<String>,
 }
 
+impl MacCaptureState {
+    const fn new() -> Self {
+        Self { is_active: false, stream: None, target_bundle_id: None }
+    }
+}
+
 static CAPTURE_STATE: Mutex<Option<MacCaptureState>> = Mutex::new(None);
 
 fn shareable_content() -> NapiResult<SCShareableContent> {
-    SCShareableContent::get().map_err(|e| {
-        napi_err("SCShareableContent::get failed (is screen recording permission granted?)", e)
-    })
+    SCShareableContent::get()
+        .map_err(|e| napi_err("SCShareableContent::get (grant screen recording permission?)", e))
 }
 
 fn resolve_target_bundle_id(
@@ -41,15 +46,8 @@ fn resolve_target_bundle_id(
             .iter()
             .find(|a| a.process_id() == *pid)
             .map(|a| a.bundle_identifier())
-            .ok_or_else(|| {
-                napi::Error::from_reason(format!(
-                    "No running application found for target PID {}",
-                    pid
-                ))
-            }),
-        _ => Err(napi::Error::from_reason(
-            "A bundle identifier or process ID is required as the audio capture target",
-        )),
+            .ok_or_else(|| napi::Error::from_reason(format!("No running app for PID {pid}"))),
+        _ => Err(napi::Error::from_reason("A bundle identifier or process ID is required")),
     }
 }
 
@@ -74,11 +72,7 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
 
 pub fn start_audio_capture(target_app_id: &napi::Either<String, i32>) -> NapiResult<bool> {
     let mut guard = CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    let state = guard.get_or_insert_with(|| MacCaptureState {
-        is_active: false,
-        stream: None,
-        target_bundle_id: None,
-    });
+    let state = guard.get_or_insert_with(MacCaptureState::new);
 
     if let Some(old_stream) = state.stream.take() {
         let _ = old_stream.stop_capture();
@@ -89,28 +83,20 @@ pub fn start_audio_capture(target_app_id: &napi::Either<String, i32>) -> NapiRes
     let applications = content.applications();
     let target_bundle_id = resolve_target_bundle_id(target_app_id, &applications)?;
 
-    let target_app = applications
-        .iter()
-        .find(|a| a.bundle_identifier() == target_bundle_id)
-        .ok_or_else(|| {
-            napi::Error::from_reason(format!(
-                "No running application found for target bundle ID {}",
-                target_bundle_id
-            ))
-        })?;
-    let included_apps: Vec<&SCRunningApplication> = vec![target_app];
+    let target_app =
+        applications.iter().find(|a| a.bundle_identifier() == target_bundle_id).ok_or_else(
+            || napi::Error::from_reason(format!("No running app for bundle {target_bundle_id}")),
+        )?;
 
     let display = content.displays().into_iter().next().ok_or_else(|| {
-        napi::Error::from_reason(
-            "No display available for ScreenCaptureKit audio capture".to_string(),
-        )
+        napi::Error::from_reason("No display available for ScreenCaptureKit audio capture".into())
     })?;
 
     let filter = SCContentFilter::create()
         .with_display(&display)
-        .with_including_applications(&included_apps, &[])
+        .with_including_applications(&[target_app], &[])
         .try_build()
-        .map_err(|e| napi_err("Failed to build SCContentFilter", e))?;
+        .map_err(|e| napi_err("SCContentFilter::try_build", e))?;
 
     let config = SCStreamConfiguration::new()
         .with_captures_audio(true)
@@ -123,7 +109,7 @@ pub fn start_audio_capture(target_app_id: &napi::Either<String, i32>) -> NapiRes
 
     let mut stream = SCStream::new(&filter, &config);
     stream.add_output_handler(AudioOutputHandler, SCStreamOutputType::Audio);
-    stream.start_capture().map_err(|e| napi_err("SCStream::start_capture failed", e))?;
+    stream.start_capture().map_err(|e| napi_err("SCStream::start_capture", e))?;
 
     state.stream = Some(stream);
     state.target_bundle_id = Some(target_bundle_id);
@@ -132,10 +118,10 @@ pub fn start_audio_capture(target_app_id: &napi::Either<String, i32>) -> NapiRes
 }
 
 pub fn stop_audio_capture() -> NapiResult<bool> {
-    let mut guard = CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let Ok(mut guard) = CAPTURE_STATE.lock() else { return Ok(true) };
     if let Some(state) = guard.as_mut() {
         if let Some(stream) = state.stream.take() {
-            stream.stop_capture().map_err(|e| napi_err("SCStream::stop_capture failed", e))?;
+            stream.stop_capture().map_err(|e| napi_err("SCStream::stop_capture", e))?;
         }
         state.is_active = false;
         state.target_bundle_id = None;
@@ -144,6 +130,14 @@ pub fn stop_audio_capture() -> NapiResult<bool> {
 }
 
 pub fn is_audio_capture_active() -> NapiResult<bool> {
-    let guard = CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let Ok(guard) = CAPTURE_STATE.lock() else { return Ok(false) };
     Ok(guard.as_ref().map(|s| s.is_active).unwrap_or(false))
+}
+
+pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
+    None
+}
+
+pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
+    None
 }

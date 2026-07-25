@@ -1,6 +1,5 @@
 #![deny(clippy::all)]
 
-use napi::Either;
 use napi_derive::napi;
 
 #[cfg(target_os = "linux")]
@@ -9,26 +8,32 @@ pub mod linux;
 pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
-
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 mod unsupported_platform {
     use crate::AudioApp;
-    use napi::{Either, Result as NapiResult};
 
-    pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
+    pub fn list_audio_applications() -> napi::Result<Vec<AudioApp>> {
         Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
     }
 
-    pub fn start_audio_capture(_: &Either<String, i32>) -> NapiResult<bool> {
+    pub fn start_audio_capture(_: &napi::Either<String, i32>) -> napi::Result<bool> {
         Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
     }
 
-    pub fn stop_audio_capture() -> NapiResult<bool> {
+    pub fn stop_audio_capture() -> napi::Result<bool> {
         Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
     }
 
-    pub fn is_audio_capture_active() -> NapiResult<bool> {
+    pub fn is_audio_capture_active() -> napi::Result<bool> {
         Ok(false)
+    }
+
+    pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
+        None
+    }
+
+    pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
+        None
     }
 }
 
@@ -51,18 +56,16 @@ pub struct AudioApp {
 }
 
 pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
-    let query_lower = label.to_lowercase();
-
-    let first_word = query_lower.split_whitespace().next()?;
-
+    let lower = label.to_lowercase();
+    let first_word = lower.split_whitespace().next()?;
     apps.iter()
-        .find(|a| a.name.to_lowercase() == query_lower)
-        .or_else(|| apps.iter().find(|a| query_lower.contains(&a.name.to_lowercase())))
-        .or_else(|| apps.iter().find(|a| a.name.to_lowercase().contains(&query_lower)))
+        .find(|a| a.name.to_lowercase() == lower)
+        .or_else(|| apps.iter().find(|a| lower.contains(&a.name.to_lowercase())))
+        .or_else(|| apps.iter().find(|a| a.name.to_lowercase().contains(&lower)))
         .or_else(|| {
             apps.iter().find(|a| {
-                let name_lower = a.name.to_lowercase();
-                name_lower.contains(first_word) || first_word.contains(&name_lower)
+                let n = a.name.to_lowercase();
+                n.contains(first_word) || first_word.contains(&n)
             })
         })
         .cloned()
@@ -70,7 +73,7 @@ pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<Au
 
 #[napi]
 pub fn init_engine() -> String {
-    "Native engine initialized".to_string()
+    "Native engine initialized".into()
 }
 
 #[napi]
@@ -79,7 +82,7 @@ pub fn list_audio_applications() -> napi::Result<Vec<AudioApp>> {
 }
 
 #[napi]
-pub fn start_audio_capture(target_app_id: Either<String, i32>) -> napi::Result<bool> {
+pub fn start_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Result<bool> {
     platform::start_audio_capture(&target_app_id)
 }
 
@@ -95,27 +98,12 @@ pub fn is_audio_capture_active() -> napi::Result<bool> {
 
 #[napi]
 pub fn resolve_audio_app_for_x11_window(window_id: i32) -> napi::Result<Option<AudioApp>> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(crate::linux::resolve_audio_by_x11_window(window_id as u32))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = window_id;
-        Ok(None)
-    }
+    Ok(platform::resolve_audio_app_for_x11_window(window_id as u32))
 }
 
 #[napi]
 pub fn resolve_audio_app_for_captured_window() -> napi::Result<Option<AudioApp>> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(crate::linux::resolve_audio_by_captured_window())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(None)
-    }
+    Ok(platform::resolve_audio_app_for_captured_window())
 }
 
 #[napi]

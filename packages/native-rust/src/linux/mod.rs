@@ -22,6 +22,81 @@ const NULL_SINK_FACTORY: &str = "support.null-audio-sink";
 const CAPTURE_MEDIA_CLASS: &str = "Audio/Source/Virtual";
 const LINK_FACTORY: &str = "link-factory";
 
+struct PwCtx {
+    main_loop: pipewire::main_loop::MainLoopRc,
+    core: pipewire::core::CoreRc,
+}
+
+fn pw_init() -> Result<PwCtx, String> {
+    let main_loop =
+        pipewire::main_loop::MainLoopRc::new(None).map_err(|e| format!("MainLoop: {e}"))?;
+    let context =
+        pipewire::context::ContextRc::new(&main_loop, None).map_err(|e| format!("Context: {e}"))?;
+    let core = context.connect_rc(None).map_err(|e| format!("Connect: {e}"))?;
+    Ok(PwCtx { main_loop, core })
+}
+
+fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::MainLoopRc) {
+    let done = Rc::new(RefCell::new(false));
+    let done_clone = done.clone();
+    let Some(pending) = core.sync(0).ok() else { return };
+    let main_loop_weak = main_loop.downgrade();
+    let _listener = core
+        .add_listener_local()
+        .done(move |id, seq| {
+            if id == pipewire::core::PW_ID_CORE && seq == pending {
+                *done_clone.borrow_mut() = true;
+                if let Some(ml) = main_loop_weak.upgrade() {
+                    ml.quit();
+                }
+            }
+        })
+        .register();
+    for _ in 0..100 {
+        if *done.borrow() {
+            break;
+        }
+        main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+    }
+}
+
+struct ProcEntry {
+    pid: i32,
+    comm: String,
+    cmdline: String,
+}
+
+fn iter_proc() -> Vec<ProcEntry> {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|e| {
+            let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+            if pid <= 0 {
+                return None;
+            }
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+            let cmdline =
+                std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            Some(ProcEntry { pid, comm: comm.trim().into(), cmdline })
+        })
+        .collect()
+}
+
+fn parse_target_id(target: &Either<String, i32>) -> NapiResult<(Option<u32>, bool)> {
+    match target {
+        Either::B(-1) => Ok((None, true)),
+        Either::B(n) if *n >= 0 => Ok((Some(*n as u32), false)),
+        Either::A(s) if s.trim() == "__system_audio__" => Ok((None, true)),
+        Either::A(s) => {
+            let n = s.trim().parse::<u32>().map_err(|_| {
+                napi::Error::from_reason("A PipeWire node ID or -1 (system audio) is required")
+            })?;
+            Ok((Some(n), false))
+        }
+        _ => Err(napi::Error::from_reason("A PipeWire node ID or -1 (system audio) is required")),
+    }
+}
+
 struct CaptureState {
     is_active: bool,
     target_app_id: Option<i32>,
@@ -31,7 +106,7 @@ struct CaptureState {
 }
 
 impl CaptureState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             is_active: false,
             target_app_id: None,
@@ -69,29 +144,14 @@ impl TargetSpec {
         if Some(node_id) != self.node_id {
             return;
         }
-        if self.pid.is_none() {
-            self.pid = info.pid;
-        }
-        if self.binary.is_none() {
-            self.binary = info.binary.clone();
-        }
+        self.pid = self.pid.or(info.pid);
+        self.binary = self.binary.clone().or_else(|| info.binary.clone());
     }
 
     fn matches(&self, node_id: u32, info: &AppNodeInfo) -> bool {
-        if Some(node_id) == self.node_id {
-            return true;
-        }
-        if let (Some(want), Some(pid)) = (self.pid, info.pid)
-            && want == pid
-        {
-            return true;
-        }
-        if let (Some(want), Some(binary)) = (&self.binary, &info.binary)
-            && want == binary
-        {
-            return true;
-        }
-        false
+        Some(node_id) == self.node_id
+            || self.pid.is_some_and(|p| info.pid == Some(p))
+            || self.binary.as_deref().is_some_and(|b| info.binary.as_deref() == Some(b))
     }
 }
 
@@ -106,7 +166,7 @@ impl AppNodeInfo {
         let pid = props
             .get("application.process.id")
             .and_then(|v| v.parse::<u32>().ok())
-            .filter(|p| *p > 0 && is_valid_pid(*p as i32));
+            .filter(|p| is_valid_pid(*p as i32));
         let binary =
             props.get("application.process.binary").map(str::to_string).filter(|b| !b.is_empty());
         Self { pid, binary }
@@ -125,7 +185,7 @@ struct ChannelLayout {
 
 impl ChannelLayout {
     fn stereo() -> Self {
-        Self { channels: 2, position: "FL,FR".to_string() }
+        Self { channels: 2, position: "FL,FR".into() }
     }
 
     fn from_audio_info(info: &AudioInfoRaw) -> Option<Self> {
@@ -150,14 +210,12 @@ impl ChannelLayout {
 }
 
 fn channel_short_name(channel: u32) -> Option<String> {
-    // SAFETY: pipewire-rs sys function returns null or a valid NUL-terminated C string.
     let ptr = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(channel) };
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: ptr is non-null and points to a NUL-terminated C string.
     let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
-    cstr.to_str().ok().map(str::to_string)
+    cstr.to_str().ok().map(Into::into)
 }
 
 struct PortInfo {
@@ -214,10 +272,7 @@ impl GraphTracker {
     }
 
     fn add_global(&mut self, global: &GlobalObject<&DictRef>, shared: &Arc<Mutex<SessionShared>>) {
-        let props = match global.props {
-            Some(props) => props,
-            None => return,
-        };
+        let Some(props) = global.props else { return };
         match &global.type_ {
             ObjectType::Node => self.add_node(global, props, shared),
             ObjectType::Port => self.add_port(global.id, props),
@@ -232,8 +287,8 @@ impl GraphTracker {
     fn remove_global(&mut self, id: u32, shared: &Arc<Mutex<SessionShared>>) {
         if self.sink_node == Some(id) {
             self.sink_node = None;
-            if let Ok(mut shared) = shared.lock() {
-                shared.sink_id = None;
+            if let Ok(mut s) = shared.lock() {
+                s.sink_id = None;
             }
         }
         self.system_sinks.remove(&id);
@@ -258,29 +313,30 @@ impl GraphTracker {
         let node_name = props.get("node.name").unwrap_or("");
         if node_name == CAPTURE_NODE_NAME {
             self.sink_node = Some(global.id);
-            if let Ok(mut shared) = shared.lock() {
-                shared.sink_id = Some(global.id);
+            if let Ok(mut s) = shared.lock() {
+                s.sink_id = Some(global.id);
             }
             return;
         }
         match media_class {
             "Audio/Sink" => {
-                self.system_sinks.insert(global.id, (node_name.to_string(), global.to_owned()));
+                self.system_sinks.insert(global.id, (node_name.into(), global.to_owned()));
             }
             "Stream/Output/Audio" => {
                 let mut info = AppNodeInfo::from_props(props);
-                if (info.pid.is_none() || info.pid == Some(0))
-                    && let Some(cid) = props.get("client.id").and_then(|v| v.parse::<u32>().ok())
-                {
-                    let p = self.client_pids.get(&cid).copied();
-                    if p.is_some_and(|pid| is_valid_pid(pid as i32)) {
-                        info.pid = p;
+                if info.pid.is_none_or(|p| p == 0) {
+                    if let Some(cid) = props.get("client.id").and_then(|v| v.parse::<u32>().ok()) {
+                        if let Some(&p) =
+                            self.client_pids.get(&cid).filter(|p| is_valid_pid(**p as i32))
+                        {
+                            info.pid = Some(p);
+                        }
                     }
                 }
-                if info.pid.is_none() || info.pid == Some(0) {
-                    info.pid = info.fallback_pid();
+                if info.pid.is_none_or(|p| p == 0) {
+                    info.pid = info.pid.or_else(|| info.fallback_pid());
                 }
-                if info.pid.is_none() || info.pid == Some(0) {
+                if info.pid.is_none_or(|p| p == 0) {
                     let name = props.get("application.name").unwrap_or("");
                     if !name.is_empty() {
                         info.pid = resolve_pid_by_name(name).map(|p| p as u32);
@@ -303,7 +359,7 @@ impl GraphTracker {
             })
             .or_else(|| {
                 let name = props.get("application.name").unwrap_or("");
-                if !name.is_empty() { resolve_pid_by_name(name) } else { None }
+                (!name.is_empty()).then(|| resolve_pid_by_name(name)).flatten()
             });
         if let Some(pid) = pid {
             self.client_pids.insert(_global.id, pid as u32);
@@ -311,10 +367,7 @@ impl GraphTracker {
     }
 
     fn add_port(&mut self, id: u32, props: &DictRef) {
-        let node = match props.get("node.id").and_then(|v| v.parse::<u32>().ok()) {
-            Some(node) => node,
-            None => return,
-        };
+        let Some(node) = props.get("node.id").and_then(|v| v.parse::<u32>().ok()) else { return };
         let is_output = match props.get("port.direction") {
             Some("out") => true,
             Some("in") => false,
@@ -322,13 +375,12 @@ impl GraphTracker {
         };
         let channel = props
             .get("audio.channel")
-            .map(str::to_string)
+            .map(Into::into)
             .or_else(|| port_channel_from_name(props.get("port.name")));
         self.ports.insert(id, PortInfo { node, is_output, channel });
 
         let port = &self.ports[&id];
-        let is_sink_input = !port.is_output && self.sink_node == Some(port.node);
-        if is_sink_input {
+        if !port.is_output && self.sink_node == Some(port.node) {
             let candidates: Vec<u32> = self
                 .ports
                 .iter()
@@ -360,7 +412,7 @@ impl GraphTracker {
         if props.get("factory.type.name") == Some(ObjectType::Link.to_str())
             && let Some(name) = props.get("factory.name")
         {
-            *self.factory_name.borrow_mut() = Some(name.to_string());
+            *self.factory_name.borrow_mut() = Some(name.into());
         }
     }
 
@@ -373,57 +425,42 @@ impl GraphTracker {
     fn set_default_sink_name(&mut self, name: String) {
         self.default_sink_name = Some(name);
     }
-
     fn take_pending_metadata(&mut self) -> Option<GlobalObject<PropertiesBox>> {
         self.pending_metadata.take()
     }
 
     fn default_sink_id(&self) -> Option<u32> {
         let name = self.default_sink_name.as_deref()?;
-        self.system_sinks.iter().find_map(|(id, (sink_name, _))| (sink_name == name).then_some(*id))
+        self.system_sinks.iter().find_map(|(id, (sn, _))| (sn == name).then_some(*id))
     }
 
     fn system_sink_global(&self, id: u32) -> Option<&GlobalObject<PropertiesBox>> {
-        self.system_sinks.get(&id).map(|(_, global)| global)
+        self.system_sinks.get(&id).map(|(_, g)| g)
     }
 
     fn is_linkable_app(&self, node: u32) -> bool {
-        if self.target.system_audio {
-            return true;
-        }
-        self.app_nodes.get(&node).is_some_and(|info| self.target.matches(node, info))
+        self.target.system_audio
+            || self.app_nodes.get(&node).is_some_and(|info| self.target.matches(node, info))
     }
 
     fn try_link(&mut self, port_id: u32) {
-        let sink = match self.sink_node {
-            Some(sink) => sink,
-            None => return,
-        };
-        let (node, channel) = match self.ports.get(&port_id) {
-            Some(p) if p.is_output && self.is_linkable_app(p.node) => {
-                let channel = match &p.channel {
-                    Some(channel) => channel.as_str(),
-                    None => return,
-                };
-                (p.node, channel)
-            }
-            _ => return,
-        };
-        let sink_port = match self.ports.iter().find_map(|(pid, p)| {
-            if !p.is_output && p.node == sink && p.channel.as_deref() == Some(channel) {
-                Some(*pid)
-            } else {
-                None
-            }
-        }) {
-            Some(pid) => pid,
-            None => return,
+        let Some(sink) = self.sink_node else { return };
+        let Some(port) = self.ports.get(&port_id) else { return };
+        if !port.is_output || !self.is_linkable_app(port.node) {
+            return;
+        }
+        let Some(channel) = port.channel.as_deref() else { return };
+        let Some(sink_port) = self.ports.iter().find_map(|(pid, p)| {
+            (!p.is_output && p.node == sink && p.channel.as_deref() == Some(channel))
+                .then_some(*pid)
+        }) else {
+            return;
         };
         let pair = (port_id, sink_port);
         if self.linked_pairs.contains(&pair) || self.pending_pairs.contains(&pair) {
             return;
         }
-        if self.create_link(port_id, sink_port, node, sink) {
+        if self.create_link(port_id, sink_port, port.node, sink) {
             self.pending_pairs.insert(pair);
         }
     }
@@ -435,15 +472,17 @@ impl GraphTracker {
         output_node: u32,
         input_node: u32,
     ) -> bool {
-        let factory = self.factory_name.borrow().as_deref().unwrap_or(LINK_FACTORY).to_string();
-        let props = properties! {
-            "link.output.port" => output_port.to_string(),
-            "link.input.port" => input_port.to_string(),
-            "link.output.node" => output_node.to_string(),
-            "link.input.node" => input_node.to_string(),
-            "object.linger" => "false",
-        };
-        match self.core.create_object::<pipewire::link::Link>(factory.as_str(), &props) {
+        let factory = self.factory_name.borrow().clone().unwrap_or_else(|| LINK_FACTORY.into());
+        match self.core.create_object::<pipewire::link::Link>(
+            &factory,
+            &properties! {
+                "link.output.port" => output_port.to_string(),
+                "link.input.port" => input_port.to_string(),
+                "link.output.node" => output_node.to_string(),
+                "link.input.node" => input_node.to_string(),
+                "object.linger" => "false",
+            },
+        ) {
             Ok(link) => {
                 self.link_proxies.insert((output_port, input_port), link);
                 true
@@ -453,10 +492,7 @@ impl GraphTracker {
     }
 
     fn on_sink_destroyed(&mut self, shared: &Arc<Mutex<SessionShared>>) {
-        let sink = match self.sink_node.take() {
-            Some(sink) => sink,
-            None => return,
-        };
+        let Some(sink) = self.sink_node.take() else { return };
         let sink_ports: HashSet<u32> =
             self.ports.iter().filter(|(_, p)| p.node == sink).map(|(pid, _)| *pid).collect();
         self.ports.retain(|_, p| p.node != sink);
@@ -475,8 +511,8 @@ impl GraphTracker {
             }
         }
         self.publish_links(shared);
-        if let Ok(mut shared) = shared.lock() {
-            shared.sink_id = None;
+        if let Ok(mut s) = shared.lock() {
+            s.sink_id = None;
         }
     }
 
@@ -488,17 +524,17 @@ impl GraphTracker {
     }
 
     fn publish_links(&self, shared: &Arc<Mutex<SessionShared>>) {
-        if let Ok(mut shared) = shared.lock() {
-            shared.link_ids = self.created_links.keys().map(|id| *id as i32).collect();
+        if let Ok(mut s) = shared.lock() {
+            s.link_ids = self.created_links.keys().map(|id| *id as i32).collect();
         }
     }
 }
 
 fn port_channel_from_name(port_name: Option<&str>) -> Option<String> {
     let name = port_name?;
-    let underscore = name.rfind('_')?;
-    let suffix = &name[underscore + 1..];
-    if suffix.is_empty() { None } else { Some(suffix.to_string()) }
+    let idx = name.rfind('_')?;
+    let suffix = &name[idx + 1..];
+    if suffix.is_empty() { None } else { Some(suffix.into()) }
 }
 
 fn create_capture_sink(
@@ -538,15 +574,15 @@ fn bind_default_metadata(
     tracker: &Rc<RefCell<GraphTracker>>,
 ) -> Option<(pipewire::metadata::Metadata, pipewire::metadata::MetadataListener)> {
     let metadata = registry.bind::<pipewire::metadata::Metadata, _>(global).ok()?;
-    let tracker = tracker.clone();
+    let t = tracker.clone();
     let listener = metadata
         .add_listener_local()
         .property(move |subject, key, _type, value| {
             if subject == pipewire::core::PW_ID_CORE
                 && key == Some("default.audio.sink")
-                && let Some(name) = value.and_then(json_object_name)
+                && let Some(name) = value.and_then(parse_json_name)
             {
-                tracker.borrow_mut().set_default_sink_name(name);
+                t.borrow_mut().set_default_sink_name(name);
             }
             0
         })
@@ -561,8 +597,8 @@ fn bind_default_sink(
     desired_layout: &Rc<RefCell<ChannelLayout>>,
 ) -> Option<DefaultSinkWatch> {
     let proxy = {
-        let tracker = tracker.borrow();
-        let global = tracker.system_sink_global(id)?;
+        let tracker_ref = tracker.borrow();
+        let global = tracker_ref.system_sink_global(id)?;
         registry.bind::<pipewire::node::Node, _>(global).ok()?
     };
     let desired = desired_layout.clone();
@@ -572,15 +608,9 @@ fn bind_default_sink(
             if param_type != ParamType::EnumFormat {
                 return;
             }
-            let pod = match pod {
-                Some(pod) => pod,
-                None => return,
-            };
-            if let Ok((media_type, _)) = format_utils::parse_format(pod) {
-                if media_type != MediaType::Audio {
-                    return;
-                }
-            } else {
+            let Some(pod) = pod else { return };
+            let Ok((media_type, _)) = format_utils::parse_format(pod) else { return };
+            if media_type != MediaType::Audio {
                 return;
             }
             let mut info = AudioInfoRaw::new();
@@ -596,16 +626,12 @@ fn bind_default_sink(
     Some(DefaultSinkWatch { id, _proxy: proxy, _listener: listener })
 }
 
-fn json_object_name(json: &str) -> Option<String> {
-    let key_pos = json.find("\"name\"")?;
-    let after_key = &json[key_pos + 6..];
-    let colon = after_key.find(':')?;
-    let after_colon = after_key[colon + 1..].trim_start();
-    if !after_colon.starts_with('"') {
-        return None;
-    }
+fn parse_json_name(json: &str) -> Option<String> {
+    let key_pos = json.find(r#""name""#)?;
+    let after_colon = json[key_pos + 6..].splitn(2, ':').nth(1)?.trim_start();
+    let val = after_colon.strip_prefix('"')?;
     let mut out = String::new();
-    let mut chars = after_colon[1..].chars();
+    let mut chars = val.chars();
     while let Some(c) = chars.next() {
         match c {
             '\\' => out.push(chars.next()?),
@@ -624,28 +650,12 @@ fn run_capture_session(
 ) {
     pipewire::init();
 
-    let main_loop = match pipewire::main_loop::MainLoopRc::new(None) {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = ready_tx.send(Err(e.to_string()));
-            return;
-        }
+    let Ok(pw) = pw_init() else {
+        let _ = ready_tx.send(Err("PipeWire init failed".into()));
+        return;
     };
-    let context = match pipewire::context::ContextRc::new(&main_loop, None) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = ready_tx.send(Err(e.to_string()));
-            return;
-        }
-    };
-    let core = match context.connect_rc(None) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = ready_tx.send(Err(e.to_string()));
-            return;
-        }
-    };
-    let registry = match core.get_registry() {
+
+    let registry = match pw.core.get_registry() {
         Ok(r) => r,
         Err(e) => {
             let _ = ready_tx.send(Err(e.to_string()));
@@ -654,26 +664,26 @@ fn run_capture_session(
     };
 
     let link_factory_name: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    let tracker = Rc::new(RefCell::new(GraphTracker::new(target, core.clone(), link_factory_name)));
+    let tracker =
+        Rc::new(RefCell::new(GraphTracker::new(target, pw.core.clone(), link_factory_name)));
 
     let _reg_listener = registry
         .add_listener_local()
         .global({
-            let tracker = tracker.clone();
-            let shared = shared.clone();
-            move |global| tracker.borrow_mut().add_global(global, &shared)
+            let t = tracker.clone();
+            let s = shared.clone();
+            move |global| t.borrow_mut().add_global(global, &s)
         })
         .global_remove({
-            let tracker = tracker.clone();
-            let shared = shared.clone();
-            move |id| tracker.borrow_mut().remove_global(id, &shared)
+            let t = tracker.clone();
+            let s = shared.clone();
+            move |id| t.borrow_mut().remove_global(id, &s)
         })
         .register();
 
     let desired_layout = Rc::new(RefCell::new(ChannelLayout::stereo()));
     let mut sink_layout = ChannelLayout::stereo();
-
-    let mut sink_proxy = match create_capture_sink(&core, &sink_layout) {
+    let mut sink_proxy = match create_capture_sink(&pw.core, &sink_layout) {
         Ok(node) => Some(node),
         Err(e) => {
             let _ = ready_tx.send(Err(e.to_string()));
@@ -690,8 +700,7 @@ fn run_capture_session(
     let mut sink_watch: Option<DefaultSinkWatch> = None;
 
     while !stop.load(Ordering::SeqCst) {
-        let timeout = Duration::from_millis(10);
-        main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(timeout));
+        pw.main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
 
         if metadata_watch.is_none()
             && let Some(global) = tracker.borrow_mut().take_pending_metadata()
@@ -707,8 +716,8 @@ fn run_capture_session(
 
         let layout = desired_layout.borrow().clone();
         if layout != sink_layout {
-            destroy_capture_sink(&core, &tracker, &mut sink_proxy, &shared);
-            if let Ok(node) = create_capture_sink(&core, &layout) {
+            destroy_capture_sink(&pw.core, &tracker, &mut sink_proxy, &shared);
+            if let Ok(node) = create_capture_sink(&pw.core, &layout) {
                 sink_proxy = Some(node);
                 sink_layout = layout;
             }
@@ -719,39 +728,41 @@ fn run_capture_session(
     drop(metadata_watch);
 
     for link in tracker.borrow_mut().drain_links() {
-        let _ = core.destroy_object(link);
+        let _ = pw.core.destroy_object(link);
     }
     if let Some(sink) = sink_proxy.take() {
-        let _ = core.destroy_object(sink);
+        let _ = pw.core.destroy_object(sink);
     }
 
-    if let Ok(pending) = core.sync(0) {
+    if let Ok(pending) = pw.core.sync(0) {
         let flush_done = Rc::new(RefCell::new(false));
-        let flush_done_clone = flush_done.clone();
-        let main_loop_weak = main_loop.downgrade();
-        let _core_listener = core
+        let fd = flush_done.clone();
+        let ml_weak = pw.main_loop.downgrade();
+        let _core_listener = pw
+            .core
             .add_listener_local()
             .done(move |id, seq| {
                 if id == pipewire::core::PW_ID_CORE && seq == pending {
-                    *flush_done_clone.borrow_mut() = true;
-                    if let Some(ml) = main_loop_weak.upgrade() {
+                    *fd.borrow_mut() = true;
+                    if let Some(ml) = ml_weak.upgrade() {
                         ml.quit();
                     }
                 }
             })
             .register();
-
         for _ in 0..50 {
             if *flush_done.borrow() {
                 break;
             }
-            main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+            pw.main_loop
+                .loop_()
+                .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
         }
     }
 
-    if let Ok(mut shared) = shared.lock() {
-        shared.sink_id = None;
-        shared.link_ids.clear();
+    if let Ok(mut s) = shared.lock() {
+        s.sink_id = None;
+        s.link_ids.clear();
     }
 }
 
@@ -764,10 +775,10 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
         let shared = shared.clone();
         let stop = stop.clone();
         thread::Builder::new()
-            .name("pw-window-audio-capture".to_string())
+            .name("pw-window-audio-capture".into())
             .spawn(move || run_capture_session(target, shared, stop, ready_tx))
             .map_err(|e| {
-                napi::Error::from_reason(format!("Failed to spawn PipeWire worker thread: {}", e))
+                napi::Error::from_reason(format!("Failed to spawn PipeWire worker: {e}"))
             })?
     };
 
@@ -781,24 +792,20 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
         Err(_) => {
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
-            return Err(napi::Error::from_reason(
-                "Timed out waiting for the PipeWire capture session to start",
-            ));
+            return Err(napi::Error::from_reason("Timed out waiting for PipeWire session"));
         }
     }
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let sink_known = shared.lock().map(|s| s.sink_id.is_some()).unwrap_or(false);
-        if sink_known {
+        if shared.lock().ok().is_some_and(|s| s.sink_id.is_some()) {
             break;
         }
         if Instant::now() >= deadline {
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
             return Err(napi::Error::from_reason(format!(
-                "PipeWire virtual capture source '{}' did not appear in the registry",
-                CAPTURE_NODE_NAME
+                "Virtual source '{CAPTURE_NODE_NAME}' did not appear"
             )));
         }
         thread::sleep(Duration::from_millis(10));
@@ -819,19 +826,14 @@ fn stop_session(state: &mut CaptureState) {
 }
 
 fn is_valid_pid(pid: i32) -> bool {
-    pid > 0 && std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    pid > 0 && std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
 fn is_pipewire_daemon(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{}/comm", pid))
-        .map(|c| matches!(c.trim(), "pipewire" | "pipewire-pulse" | "wireplumber"))
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .is_ok_and(|c| matches!(c.trim(), "pipewire" | "pipewire-pulse" | "wireplumber"))
 }
 
-/// `pipewire.sec.pid` is authenticated by the server from socket credentials,
-/// so it's always present in registry globals (unlike `application.process.id`).
-/// PipeWire-pulse proxied clients point at the daemon PID; reject those so the
-/// caller resolves through stream properties instead.
 fn client_sec_pid(props: &DictRef) -> Option<i32> {
     let pid = props
         .get("pipewire.sec.pid")
@@ -844,38 +846,18 @@ fn resolve_pid_by_binary(binary: &str) -> Option<i32> {
     if binary.is_empty() {
         return None;
     }
-    let binary_lower = binary.to_lowercase();
-    let mut candidates = Vec::new();
-    let dir = std::fs::read_dir("/proc").ok()?;
-    for entry in dir.flatten() {
-        let name = entry.file_name();
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => continue,
-        };
-        let pid: i32 = match name_str.parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        if pid <= 0 {
-            continue;
-        }
-        let comm_path = format!("/proc/{}/comm", pid);
-        if let Ok(comm) = std::fs::read_to_string(&comm_path)
-            && comm.trim().to_lowercase() == binary_lower
-        {
-            candidates.push(pid);
-            continue;
-        }
-        let cmdline_path = format!("/proc/{}/cmdline", pid);
-        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path)
-            && let Some(first) = cmdline.split('\0').next()
-            && let Some(base) = std::path::Path::new(first).file_name().and_then(|s| s.to_str())
-            && base.to_lowercase() == binary_lower
-        {
-            candidates.push(pid);
-        }
-    }
+    let lower = binary.to_lowercase();
+    let candidates: Vec<i32> = iter_proc()
+        .into_iter()
+        .filter(|e| {
+            e.comm.to_lowercase() == lower
+                || std::path::Path::new(e.cmdline.split('\0').next().unwrap_or(""))
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.to_lowercase() == lower)
+        })
+        .map(|e| e.pid)
+        .collect();
     (candidates.len() == 1).then_some(candidates[0])
 }
 
@@ -883,96 +865,57 @@ fn resolve_pid_by_name(name: &str) -> Option<i32> {
     if name.is_empty() {
         return None;
     }
-    let search_key = name.split_whitespace().next()?;
-    if search_key.len() < 2 {
-        return None;
-    }
+    let search_key = name.split_whitespace().next().filter(|s| s.len() >= 2)?;
     let search_lower = search_key.to_lowercase();
 
-    let mut candidates = Vec::new();
-    let dir = std::fs::read_dir("/proc").ok()?;
-    for entry in dir.flatten() {
-        let name_str = match entry.file_name().to_str() {
-            Some(s) => s.to_owned(),
-            None => continue,
-        };
-        let pid: i32 = match name_str.parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        if pid <= 0 {
-            continue;
-        }
-        let comm_path = format!("/proc/{}/comm", pid);
-        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-            let comm = comm.trim().to_lowercase();
-            if comm == search_lower || comm.starts_with(search_lower.as_str()) {
-                candidates.push(pid);
-                continue;
-            }
-        }
-        let cmdline_path = format!("/proc/{}/cmdline", pid);
-        if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path)
-            && let Some(first) = cmdline.split('\0').next()
-            && let Some(base) = std::path::Path::new(first).file_name().and_then(|s| s.to_str())
-        {
-            let base = base.to_lowercase();
-            if base == search_lower
-                || base.starts_with(&search_lower)
-                || search_lower.starts_with(&base)
-            {
-                candidates.push(pid);
-            }
-        }
-    }
-    candidates.into_iter().next()
-}
-
-fn node_pid(props: &DictRef) -> Option<i32> {
-    props
-        .get("application.process.id")
-        .and_then(|v| v.parse::<i32>().ok())
-        .filter(|pid| is_valid_pid(*pid))
-}
-
-fn client_pid(props: &DictRef, client_pids: &HashMap<u32, i32>) -> Option<i32> {
-    let cid = props.get("client.id").and_then(|cid| cid.parse::<u32>().ok())?;
-    let pid = *client_pids.get(&cid)?;
-    is_valid_pid(pid).then_some(pid)
+    iter_proc()
+        .into_iter()
+        .find(|e| {
+            let comm_lower = e.comm.to_lowercase();
+            comm_lower == search_lower
+                || comm_lower.starts_with(&search_lower)
+                || std::path::Path::new(e.cmdline.split('\0').next().unwrap_or(""))
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|base| {
+                        let b = base.to_lowercase();
+                        b == search_lower
+                            || b.starts_with(&search_lower)
+                            || search_lower.starts_with(&b)
+                    })
+        })
+        .map(|e| e.pid)
 }
 
 fn collect_client_pids(
-    registry: &pipewire::registry::Registry,
-    main_loop: &pipewire::main_loop::MainLoopRc,
     core: &pipewire::core::Core,
+    main_loop: &pipewire::main_loop::MainLoopRc,
+    registry: &pipewire::registry::Registry,
     apps: &Rc<RefCell<Vec<AudioApp>>>,
-) -> HashMap<u32, i32> {
-    let client_pids = Rc::new(RefCell::new(HashMap::<u32, i32>::new()));
-    let client_pids_clone = client_pids.clone();
-    let apps_clone = apps.clone();
+) -> HashMap<u32, u32> {
+    let client_pids: Rc<RefCell<HashMap<u32, u32>>> = Rc::new(RefCell::new(HashMap::new()));
+    let cp = client_pids.clone();
+    let ap = apps.clone();
 
     let _reg_listener = registry
         .add_listener_local()
         .global(move |global| {
-            let props = match global.props {
-                Some(props) => props,
-                None => return,
-            };
+            let Some(props) = global.props else { return };
 
             if global.type_ == ObjectType::Client {
-                let app_name = props.get("application.name").unwrap_or("").to_string();
+                let app_name = props.get("application.name").unwrap_or("");
                 let pid = client_sec_pid(props)
                     .or_else(|| {
                         props
                             .get("application.process.id")
                             .and_then(|v| v.parse::<i32>().ok())
-                            .filter(|pid| is_valid_pid(*pid))
+                            .filter(|p| is_valid_pid(*p))
                     })
                     .or_else(|| {
-                        if !app_name.is_empty() { resolve_pid_by_name(&app_name) } else { None }
+                        (!app_name.is_empty()).then(|| resolve_pid_by_name(app_name)).flatten()
                     });
                 if let Some(pid) = pid {
-                    client_pids_clone.borrow_mut().insert(global.id, pid);
+                    cp.borrow_mut().insert(global.id, pid as u32);
                 }
             }
 
@@ -987,19 +930,26 @@ fn collect_client_pids(
                 && !stream_name.is_empty()
                 && !stream_name.contains(CAPTURE_NODE_NAME)
             {
-                let pid = node_pid(props)
-                    .or_else(|| client_pid(props, &client_pids_clone.borrow()))
+                let pid = props
+                    .get("application.process.id")
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .filter(|p| is_valid_pid(*p))
+                    .or_else(|| {
+                        let cid = props.get("client.id").and_then(|c| c.parse::<u32>().ok())?;
+                        let p = *cp.borrow().get(&cid)?;
+                        is_valid_pid(p as i32).then_some(p as i32)
+                    })
                     .or_else(|| {
                         resolve_pid_by_binary(props.get("application.process.binary").unwrap_or(""))
                     })
                     .or_else(|| resolve_pid_by_name(stream_name))
                     .unwrap_or(0);
 
-                let mut list = apps_clone.borrow_mut();
+                let mut list = ap.borrow_mut();
                 if !list.iter().any(|a| a.id == global.id as i32) {
                     list.push(AudioApp {
                         id: global.id as i32,
-                        name: stream_name.to_string(),
+                        name: stream_name.into(),
                         process_id: pid,
                         bundle_id: None,
                     });
@@ -1008,83 +958,25 @@ fn collect_client_pids(
         })
         .register();
 
-    let done = Rc::new(RefCell::new(false));
-    let done_clone = done.clone();
-    let pending = core.sync(0).ok();
-    if let Some(pending) = pending {
-        let main_loop_weak = main_loop.downgrade();
-        let _core_listener = core
-            .add_listener_local()
-            .done(move |id, seq| {
-                if id == pipewire::core::PW_ID_CORE && seq == pending {
-                    *done_clone.borrow_mut() = true;
-                    if let Some(ml) = main_loop_weak.upgrade() {
-                        ml.quit();
-                    }
-                }
-            })
-            .register();
-
-        for _ in 0..100 {
-            if *done.borrow() {
-                break;
-            }
-            main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
-        }
-    }
-
+    sync_registry(core, main_loop);
     client_pids.take()
 }
 
 pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
     pipewire::init();
-
-    let main_loop = pipewire::main_loop::MainLoopRc::new(None).map_err(|e| {
-        napi::Error::from_reason(format!("Failed to create PipeWire main loop: {}", e))
-    })?;
-
-    let context = pipewire::context::ContextRc::new(&main_loop, None).map_err(|e| {
-        napi::Error::from_reason(format!("Failed to create PipeWire context: {}", e))
-    })?;
-
-    let core = context.connect(None).map_err(|e| {
-        napi::Error::from_reason(format!("Failed to connect to PipeWire core: {}", e))
-    })?;
-
-    let registry = core
-        .get_registry()
-        .map_err(|e| napi::Error::from_reason(format!("Failed to get PipeWire registry: {}", e)))?;
-
+    let pw = pw_init().map_err(|e| napi::Error::from_reason(format!("PipeWire init: {e}")))?;
+    let registry =
+        pw.core.get_registry().map_err(|e| napi::Error::from_reason(format!("Registry: {e}")))?;
     let apps = Rc::new(RefCell::new(Vec::<AudioApp>::new()));
-
-    collect_client_pids(&registry, &main_loop, &core, &apps);
-
-    let result = apps.take();
-    Ok(result)
+    collect_client_pids(&pw.core, &pw.main_loop, &registry, &apps);
+    Ok(apps.take())
 }
 
 pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    let (node_id, system_audio) = match target_app_id {
-        Either::B(-1) => (None, true),
-        Either::B(n) if *n >= 0 => (Some(*n as u32), false),
-        Either::A(s) if s.trim() == "__system_audio__" => (None, true),
-        Either::A(s) => {
-            let n = s.trim().parse::<u32>().ok().ok_or_else(|| {
-                napi::Error::from_reason("A PipeWire node ID or -1 (system audio) is required")
-            })?;
-            (Some(n), false)
-        }
-        _ => {
-            return Err(napi::Error::from_reason(
-                "A PipeWire node ID or -1 (system audio) is required",
-            ));
-        }
-    };
-
+    let (node_id, system_audio) = parse_target_id(target_app_id)?;
     let mut state_guard =
         CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
     let state = state_guard.get_or_insert_with(CaptureState::new);
-
     stop_session(state);
 
     let target = TargetSpec { node_id, system_audio, ..TargetSpec::default() };
@@ -1094,13 +986,11 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
     state.active_links.clear();
     state.is_active = true;
     state.session = Some(session);
-
     Ok(true)
 }
 
 pub fn stop_audio_capture() -> NapiResult<bool> {
-    let mut state_guard =
-        CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let Ok(mut state_guard) = CAPTURE_STATE.lock() else { return Ok(true) };
     if let Some(state) = state_guard.as_mut() {
         stop_session(state);
     }
@@ -1108,29 +998,23 @@ pub fn stop_audio_capture() -> NapiResult<bool> {
 }
 
 pub fn is_audio_capture_active() -> NapiResult<bool> {
-    let mut state_guard =
-        CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    if let Some(state) = state_guard.as_mut() {
-        let finished = state.session.as_ref().map(|s| s.join.is_finished()).unwrap_or(false);
-        if finished {
-            stop_session(state);
-        }
-        if let Some(session) = &state.session
-            && let Ok(shared) = session.shared.lock()
-        {
-            state.active_links = shared.link_ids.clone();
-            if state.virtual_sink_id.is_none() {
-                state.virtual_sink_id = shared.sink_id.map(|id| id as i32);
-            }
-        }
-        Ok(state.is_active)
-    } else {
-        Ok(false)
+    let Ok(mut state_guard) = CAPTURE_STATE.lock() else { return Ok(false) };
+    let Some(state) = state_guard.as_mut() else { return Ok(false) };
+    if state.session.as_ref().is_some_and(|s| s.join.is_finished()) {
+        stop_session(state);
     }
+    if let Some(session) = &state.session
+        && let Ok(shared) = session.shared.lock()
+    {
+        state.active_links = shared.link_ids.clone();
+        if state.virtual_sink_id.is_none() {
+            state.virtual_sink_id = shared.sink_id.map(|id| id as i32);
+        }
+    }
+    Ok(state.is_active)
 }
 
-pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
-    // SAFETY: X11 C library calls. We check all return values before dereferencing.
+pub fn resolve_audio_app_for_x11_window(window_id: u32) -> Option<AudioApp> {
     let display = unsafe { x11::xlib::XOpenDisplay(std::ptr::null()) };
     if display.is_null() {
         return None;
@@ -1139,7 +1023,6 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
     let atom_name = std::ffi::CString::new("_NET_WM_PID").ok()?;
     let atom = unsafe { x11::xlib::XInternAtom(display, atom_name.as_ptr(), 1) };
     if atom == 0 {
-        // SAFETY: display was successfully opened above.
         unsafe { x11::xlib::XCloseDisplay(display) };
         return None;
     }
@@ -1150,8 +1033,6 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
     let mut bytes_after: std::os::raw::c_ulong = 0;
     let mut prop: *mut u8 = std::ptr::null_mut();
 
-    // SAFETY: XGetWindowProperty is called with valid display and atom.
-    // prop is only dereferenced after checking status == 0 and prop != null.
     let status = unsafe {
         x11::xlib::XGetWindowProperty(
             display,
@@ -1169,7 +1050,6 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
         )
     };
 
-    // SAFETY: prop is valid only when status == 0 and the format/type match.
     let pid = if status == 0 && !prop.is_null() && nitems > 0 && actual_format == 32 {
         Some(unsafe { *(prop as *const u32) })
     } else {
@@ -1177,10 +1057,8 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
     };
 
     if !prop.is_null() {
-        // SAFETY: XFree is called with the same pointer returned by XGetWindowProperty.
         unsafe { x11::xlib::XFree(prop as *mut std::ffi::c_void) };
     }
-    // SAFETY: display is still valid from the open above.
     unsafe { x11::xlib::XCloseDisplay(display) };
 
     let pid = pid?;
@@ -1189,28 +1067,28 @@ pub fn resolve_audio_by_x11_window(window_id: u32) -> Option<AudioApp> {
 }
 
 fn portal_window_name(props: &DictRef) -> Option<String> {
-    for key in &[
+    for &key in &[
         "portal.screencast.application",
         "portal.screencast.title",
         "window.name",
         "pipewire.access.portal.app_id",
     ] {
         if let Some(v) = props.get(key).filter(|v| !v.is_empty()) {
-            return Some(v.to_string());
+            return Some(v.into());
         }
     }
 
-    if let Some(v) = props.get("media.name").filter(|v| !v.is_empty())
-        && !v.contains("pipewire")
-        && v != "kwin_wayland"
+    if let Some(v) = props
+        .get("media.name")
+        .filter(|v| !v.is_empty() && !v.contains("pipewire") && *v != "kwin_wayland")
     {
-        return Some(v.to_string());
+        return Some(v.into());
     }
 
     if let Some(v) = props.get("node.name").filter(|v| !v.is_empty()) {
         let lower = v.to_lowercase();
         if lower != "kwin_wayland" && lower != "gnome-shell" && !lower.contains("pipewire") {
-            return Some(v.to_string());
+            return Some(v.into());
         }
     }
 
@@ -1221,7 +1099,7 @@ fn portal_window_name(props: &DictRef) -> Option<String> {
             && lower != "gnome-shell"
             && !lower.contains("pipewire")
         {
-            return Some(v.to_string());
+            return Some(v.into());
         }
     }
 
@@ -1236,64 +1114,46 @@ fn is_kde_screencast_window(suffix: &str) -> bool {
     if parts.len() < 2 {
         return true;
     }
-    let is_monitor = parts[0].chars().all(|c| c.is_ascii_uppercase())
-        && parts[1].chars().all(|c| c.is_ascii_digit());
-    !is_monitor
+    !(parts[0].chars().all(|c| c.is_ascii_uppercase())
+        && parts[1].chars().all(|c| c.is_ascii_digit()))
 }
 
 fn kde_window_uuid_to_pid(uuid: &str) -> Option<u32> {
-    use std::process::Command;
-
-    let output = Command::new("kdotool").args(["getwindowpid", uuid]).output().ok()?;
-
+    let output =
+        std::process::Command::new("kdotool").args(["getwindowpid", uuid]).output().ok()?;
     if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return stdout.trim().parse::<u32>().ok();
+        return String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().ok();
     }
-
     None
 }
 
 fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
-    if !media_name.starts_with("kwin-screencast-") {
-        return None;
-    }
-
     let suffix = media_name.strip_prefix("kwin-screencast-")?;
-
     if !is_kde_screencast_window(suffix) {
         return None;
     }
-
     let pid = kde_window_uuid_to_pid(suffix)?;
     if pid == 0 {
         return None;
     }
-
     let apps = list_audio_applications().ok()?;
     apps.into_iter().find(|app| app.process_id == pid as i32)
 }
 
-pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
+pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     pipewire::init();
-
-    let main_loop = pipewire::main_loop::MainLoopRc::new(None).ok()?;
-    let context = pipewire::context::ContextRc::new(&main_loop, None).ok()?;
-    let core = context.connect(None).ok()?;
-    let registry = core.get_registry().ok()?;
+    let Ok(pw) = pw_init() else { return None };
+    let Ok(registry) = pw.core.get_registry() else { return None };
 
     let capture_names = Rc::new(RefCell::new(Vec::<String>::new()));
     let kde_media_names = Rc::new(RefCell::new(Vec::<String>::new()));
-    let capture_names_clone = capture_names.clone();
-    let kde_media_names_clone = kde_media_names.clone();
+    let cn = capture_names.clone();
+    let kmn = kde_media_names.clone();
 
     let _reg_listener = registry
         .add_listener_local()
         .global(move |global| {
-            let props = match global.props {
-                Some(props) => props,
-                None => return,
-            };
+            let Some(props) = global.props else { return };
             let media_class = props.get("media.class").unwrap_or("");
             if !media_class.starts_with("Video/") && !media_class.starts_with("Stream/Output/Video")
             {
@@ -1301,14 +1161,14 @@ pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
             }
             let mn = props.get("media.name").unwrap_or("");
             if mn.starts_with("kwin-screencast-") {
-                let mut list = kde_media_names_clone.borrow_mut();
-                if !list.contains(&mn.to_string()) {
-                    list.push(mn.to_string());
+                let mut list = kmn.borrow_mut();
+                if !list.iter().any(|s| s == mn) {
+                    list.push(mn.into());
                 }
                 return;
             }
             if let Some(name) = portal_window_name(props) {
-                let mut list = capture_names_clone.borrow_mut();
+                let mut list = cn.borrow_mut();
                 if !list.contains(&name) {
                     list.push(name);
                 }
@@ -1316,29 +1176,7 @@ pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
         })
         .register();
 
-    let done = Rc::new(RefCell::new(false));
-    let done_clone = done.clone();
-    let pending = core.sync(0).ok()?;
-
-    let main_loop_weak = main_loop.downgrade();
-    let _core_listener = core
-        .add_listener_local()
-        .done(move |id, seq| {
-            if id == pipewire::core::PW_ID_CORE && seq == pending {
-                *done_clone.borrow_mut() = true;
-                if let Some(ml) = main_loop_weak.upgrade() {
-                    ml.quit();
-                }
-            }
-        })
-        .register();
-
-    for _ in 0..100 {
-        if *done.borrow() {
-            break;
-        }
-        main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
-    }
+    sync_registry(&pw.core, &pw.main_loop);
 
     for mn in kde_media_names.take().iter() {
         if let Some(app) = resolve_kde_screencast_audio(mn) {
@@ -1347,7 +1185,7 @@ pub fn resolve_audio_by_captured_window() -> Option<AudioApp> {
     }
 
     let names = capture_names.take();
-    let apps = list_audio_applications().ok()?;
+    let Ok(apps) = list_audio_applications() else { return None };
     for name in &names {
         if let Some(app) = crate::find_best_audio_match(&apps, name) {
             return Some(app);
