@@ -1,4 +1,5 @@
-import { Check, ScreenShare, Users } from 'lucide-react';
+import { Room, RoomEvent, Track } from 'livekit-client';
+import { Check, ScreenShare } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -19,7 +20,7 @@ console.log(
 declare global {
   interface Window {
     electronAPI?: {
-      getAppConfig: () => Promise<{ apiEndpoint: string }>;
+      getAppConfig: () => Promise<{ apiEndpoint: string; livekitUrl: string }>;
       getPlatformInfo: () => Promise<{ platform: string; isWayland: boolean }>;
       getAudioApps: () => Promise<Array<{ id: number; name: string; processId: number }>>;
       startAudioCapture: (targetId: number) => Promise<boolean>;
@@ -67,13 +68,7 @@ interface DesktopSource {
   thumbnail: string;
 }
 
-/**
- * Finds the native virtual capture microphone ("Screenshare Window Audio").
- * Chromium filters PipeWire sink-monitor sources out of getUserMedia, so the
- * native layer exposes an Audio/Source/Virtual node instead. Device labels are
- * hidden until microphone access has been granted once, so this unlocks labels
- * on demand.
- */
+// Device labels are hidden until mic access is granted once, so we unlock them.
 const findCaptureAudioDevice = async (): Promise<MediaDeviceInfo | null> => {
   let devices = await navigator.mediaDevices.enumerateDevices();
   if (devices.some((d) => d.kind === 'audioinput' && !d.label)) {
@@ -92,11 +87,7 @@ const findCaptureAudioDevice = async (): Promise<MediaDeviceInfo | null> => {
   );
 };
 
-// ── Stream Telemetry ──────────────────────────────────────────────────
-// Surfaces live broadcast health (codec, resolution, frame rate, bitrate,
-// packet loss, audio) to the presenter. Read from RTCPeerConnection.getStats()
-// of the representative connected spectator link — codec/fps/bitrate match
-// across peers because the same outbound track + encoder parameters are used.
+// Read from RTCPeerConnection.getStats() of the published outbound track.
 
 const STATS_POLL_MS = 1000;
 const STATS_HISTORY_MAX = 48;
@@ -117,77 +108,6 @@ const codecLabel = (mime: string | null | undefined): string | null => {
   if (!mime) return null;
   const up = mime.toUpperCase();
   return VIDEO_CODEC_LABEL[up] ?? up.replace(/^(VIDEO|AUDIO)\//i, '');
-};
-
-const H264_CODEC_ORDER = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'] as const;
-
-const reorderSdpVideoCodecs = (sdp: string): string => {
-  const lines = sdp.split('\r\n');
-
-  const mVideoIdx = lines.findIndex((l) => l.startsWith('m=video'));
-  if (mVideoIdx === -1) return sdp;
-
-  const mParts = lines[mVideoIdx].split(' ');
-  const ptList = mParts.slice(3);
-  if (ptList.length <= 1) return sdp;
-
-  const ptCodec = new Map<string, string>();
-  const rtxToPrimary = new Map<string, string>();
-
-  for (const line of lines) {
-    const rm = line.match(/^a=rtpmap:(\d+)\s+(\S+)/);
-    if (rm) {
-      ptCodec.set(rm[1], rm[2].split('/')[0].toLowerCase());
-    }
-    const fm = line.match(/^a=fmtp:(\d+)\s+.*apt=(\d+)/);
-    if (fm) {
-      rtxToPrimary.set(fm[1], fm[2]);
-    }
-  }
-
-  const codecRank = (codec: string): number => {
-    const upper = codec.toUpperCase();
-    const idx = H264_CODEC_ORDER.indexOf(upper as (typeof H264_CODEC_ORDER)[number]);
-    return idx === -1 ? 99 : idx;
-  };
-
-  const groups: Array<{ primary: string; rtx: string | null; rank: number }> = [];
-  const consumedRtx = new Set<string>();
-
-  for (const pt of ptList) {
-    if (consumedRtx.has(pt)) continue;
-    if (rtxToPrimary.has(pt)) {
-      continue;
-    }
-
-    let rtxPt: string | null = null;
-    for (const [rtx, apt] of rtxToPrimary) {
-      if (apt === pt) {
-        rtxPt = rtx;
-        consumedRtx.add(rtx);
-        break;
-      }
-    }
-
-    const codec = ptCodec.get(pt) ?? '';
-    groups.push({ primary: pt, rtx: rtxPt, rank: codecRank(codec) });
-  }
-
-  groups.sort((a, b) => {
-    if (a.rank !== b.rank) return a.rank - b.rank;
-    return ptList.indexOf(a.primary) - ptList.indexOf(b.primary);
-  });
-
-  const newPtList: string[] = [];
-  for (const { primary, rtx } of groups) {
-    newPtList.push(primary);
-    if (rtx) newPtList.push(rtx);
-  }
-
-  const newLine = `${mParts.slice(0, 3).join(' ')} ${newPtList.join(' ')}`;
-  const newLines = [...lines];
-  newLines[mVideoIdx] = newLine;
-  return newLines.join('\r\n');
 };
 
 interface StreamTelemetry {
@@ -280,22 +200,20 @@ const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> =
   width = 88,
   height = 22,
 }) => {
-  const pts =
-    data.length >= 2
-      ? (() => {
-          const max = Math.max(...data);
-          const min = Math.min(...data, 0);
-          const span = Math.max(max - min, 0.001);
-          const step = width / (data.length - 1);
-          return data
-            .map((v, i) => {
-              const x = i * step;
-              const y = height - ((v - min) / span) * (height - 3) - 1.5;
-              return `${x.toFixed(1)},${y.toFixed(1)}`;
-            })
-            .join(' ');
-        })()
-      : '';
+  let points = '';
+  if (data.length >= 2) {
+    const max = Math.max(...data);
+    const min = Math.min(...data, 0);
+    const span = Math.max(max - min, 0.001);
+    const step = width / (data.length - 1);
+    points = data
+      .map((v, i) => {
+        const x = i * step;
+        const y = height - ((v - min) / span) * (height - 3) - 1.5;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+  }
   return (
     <svg
       width={width}
@@ -305,9 +223,9 @@ const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> =
       aria-hidden="true"
       preserveAspectRatio="none"
     >
-      {data.length >= 2 && (
+      {points && (
         <polyline
-          points={pts}
+          points={points}
           fill="none"
           stroke="currentColor"
           strokeWidth={1.5}
@@ -449,20 +367,23 @@ export const PresenterApp: React.FC = () => {
   const [bitrateLimit, setBitrateLimit] = useState(20_000_000);
   const [scaleResolutionDownBy, setScaleResolutionDownBy] = useState(1.0);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const liveKitRoomRef = useRef<Room | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const isSharingRef = useRef(false);
   const roomCodeRef = useRef('');
-  const spectatorIdsRef = useRef<Set<string>>(new Set());
-  const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
-  const handleSignalingMessageRef = useRef<(msg: unknown) => Promise<void>>(async () => {});
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const telemetryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const broadcastStartRef = useRef<number | null>(null);
-  const statsPrevRef = useRef(new WeakMap<RTCPeerConnection, StatsPrev>());
+  const statsPrevRef = useRef<StatsPrev>({
+    vBytes: 0,
+    vFrames: 0,
+    vTs: 0,
+    vInit: false,
+    aBytes: 0,
+    aTs: 0,
+    aInit: false,
+  });
   const bitrateHistoryRef = useRef<number[]>([]);
-  const prevConnectedRef = useRef(0);
   const streamFpsRef = useRef(60);
   const bitrateLimitRef = useRef(20_000_000);
   const scaleRef = useRef(1.0);
@@ -487,47 +408,38 @@ export const PresenterApp: React.FC = () => {
     scaleRef.current = scaleResolutionDownBy;
   }, [scaleResolutionDownBy]);
 
-  // Push live encoder parameter updates when settings change during an active stream.
+  // Push live encoder parameter updates via the published track's sender.
   useEffect(() => {
     if (!isSharing) return;
     const fps = streamFps;
     const br = bitrateLimit;
     const scale = scaleResolutionDownBy;
-    let cancelled = false;
-    const apply = async () => {
-      let updated = 0;
-      for (const pc of peerConnectionsRef.current.values()) {
-        if (cancelled) return;
-        if (pc.connectionState !== 'connected') continue;
-        const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
-        if (!sender) continue;
-        try {
-          const params = sender.getParameters();
-          if (!params.encodings?.length) params.encodings = [{}];
-          for (const enc of params.encodings) {
-            enc.maxBitrate = br;
-            enc.maxFramerate = fps;
-            enc.scaleResolutionDownBy = scale;
-            enc.priority = 'high';
-            enc.networkPriority = 'high';
-            enc.active = true;
-          }
-          await sender.setParameters(params);
-          updated++;
-        } catch (err) {
-          console.warn('[Presenter] live encoder update failed for peer:', err);
+    const update = async () => {
+      const room = liveKitRoomRef.current;
+      if (!room) return;
+      const pub = room.localParticipant.videoTrackPublications.values().next().value;
+      const sender = (pub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+      if (!sender) return;
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings?.length) params.encodings = [{}];
+        for (const enc of params.encodings) {
+          enc.maxBitrate = br;
+          enc.maxFramerate = fps;
+          enc.scaleResolutionDownBy = scale;
+          enc.priority = 'high';
+          enc.networkPriority = 'high';
+          enc.active = true;
         }
-      }
-      if (updated > 0) {
+        await sender.setParameters(params);
         console.log(
-          `[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps scale=${scale} → ${updated} peer(s)`,
+          `[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps scale=${scale}`,
         );
+      } catch (err) {
+        console.warn('[Presenter] live encoder update failed:', err);
       }
     };
-    void apply();
-    return () => {
-      cancelled = true;
-    };
+    void update();
   }, [streamFps, scaleResolutionDownBy, bitrateLimit, isSharing]);
 
   // Bind the live capture stream to the local preview <video>.
@@ -536,9 +448,7 @@ export const PresenterApp: React.FC = () => {
     if (!el) return;
     el.srcObject = previewStream;
     if (previewStream) {
-      el.play().catch(() => {
-        /* autoplay can fail until user gesture; muted should make it ok */
-      });
+      el.play().catch(() => console.warn('Video autoplay blocked until user gesture'));
     }
   }, [previewStream]);
 
@@ -581,17 +491,11 @@ export const PresenterApp: React.FC = () => {
     })();
 
     return () => {
-      for (const pc of peerConnectionsRef.current.values()) {
-        pc.close();
-      }
-      peerConnectionsRef.current.clear();
+      liveKitRoomRef.current?.disconnect();
+      liveKitRoomRef.current = null;
       if (telemetryPollRef.current) {
         clearInterval(telemetryPollRef.current);
         telemetryPollRef.current = null;
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
       }
     };
   }, [loadAudioApps, loadDesktopSources]);
@@ -643,155 +547,8 @@ export const PresenterApp: React.FC = () => {
     return null;
   };
 
-  // ── WebRTC Helper: apply optimal codec preference & encoding params ──
-  //
-  // 1. Prefer H.264 (maps to hardware encoder on most GPUs) over VP9 over
-  //    VP8 (usually software-encoded and more CPU-intensive at high res).
-  // 2. Set high-bitrate encoding parameters for low-latency LAN streaming.
-  //
-  const configureVideoTransceiver = (pc: RTCPeerConnection) => {
-    const transceivers = pc.getTransceivers();
-    const videoTransceiver = transceivers.find((t) => t.sender?.track?.kind === 'video');
-    if (!videoTransceiver) return;
-
-    // ── Codec preference ──────────────────────────────────────────────
-    // Hardware-accelerated encode: H.264 (HW) > VP9 (HW/SW) > VP8 (SW).
-    const caps = RTCRtpSender.getCapabilities('video');
-    if (caps?.codecs?.length) {
-      const codecOrder = ['VIDEO/H264', 'VIDEO/VP9', 'VIDEO/VP8'];
-
-      console.log(
-        '[Presenter] H.264 profiles in getCapabilities:',
-        caps.codecs
-          .filter((c) => c.mimeType.toUpperCase() === 'VIDEO/H264')
-          .map((c) => c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1])
-          .filter(Boolean)
-          .join(', '),
-      );
-
-      const H264_HIGH = 0x64;
-      const H264_MAIN = 0x4d;
-      const H264_BASELINE = 0x42;
-      const h264ProfileRank = (fmtp?: string): number => {
-        if (!fmtp) return 99;
-        const m = fmtp.match(/profile-level-id=([0-9a-fA-F]{6})/);
-        if (!m) return 99;
-        const profile = parseInt(m[1].slice(0, 2), 16);
-        switch (profile) {
-          case H264_HIGH:
-            return 0;
-          case H264_MAIN:
-            return 1;
-          case H264_BASELINE:
-            return 2;
-          default:
-            return 3;
-        }
-      };
-
-      const preferred = caps.codecs
-        .filter((c) => {
-          const mt = c.mimeType.toUpperCase();
-          return codecOrder.includes(mt);
-        })
-        .sort((a, b) => {
-          const ia = codecOrder.indexOf(a.mimeType.toUpperCase());
-          const ib = codecOrder.indexOf(b.mimeType.toUpperCase());
-          const da = ia === -1 ? 99 : ia;
-          const db = ib === -1 ? 99 : ib;
-          if (da !== db) return da - db;
-          if (a.mimeType.toUpperCase() === 'VIDEO/H264') {
-            return h264ProfileRank(a.sdpFmtpLine) - h264ProfileRank(b.sdpFmtpLine);
-          }
-          return 0;
-        });
-
-      try {
-        videoTransceiver.setCodecPreferences(preferred);
-        const summary = preferred
-          .map((c) => {
-            const plid = c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
-            return plid ? `${c.mimeType}(${plid})` : c.mimeType;
-          })
-          .join(' > ');
-        console.log('[Presenter] Video codec preference set (all profiles):', summary);
-      } catch (err) {
-        console.warn('[Presenter] setCodecPreferences failed:', err);
-      }
-    }
-
-    // ── Encoding parameters ───────────────────────────────────────────
-    // Set generous bitrate caps for LAN screenshare.  The RtpSender
-    // parameters are configured after createOffer/setLocalDescription.
-  };
-
-  // ── WebRTC Helper: set video encoding bitrate on the sender ────
-  const configureVideoEncoderParams = async (pc: RTCPeerConnection) => {
-    const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
-    if (!sender) return;
-
-    try {
-      const params = sender.getParameters();
-      if (!params.encodings || params.encodings.length === 0) {
-        params.encodings = [{}];
-      }
-
-      params.degradationPreference = 'maintain-resolution';
-
-      for (const enc of params.encodings) {
-        enc.maxBitrate = bitrateLimitRef.current;
-        enc.scaleResolutionDownBy = scaleRef.current;
-        enc.maxFramerate = streamFpsRef.current;
-        enc.priority = 'high';
-        enc.networkPriority = 'high';
-        enc.active = true;
-      }
-
-      await sender.setParameters(params);
-      console.log(
-        '[Presenter] Video encoder params:',
-        `degradationPreference=${params.degradationPreference}`,
-        params.encodings.map(
-          (e) => `maxBitrate=${e.maxBitrate} fps=${e.maxFramerate} scale=${e.scaleResolutionDownBy}`,
-        ),
-      );
-    } catch (err) {
-      console.warn('[Presenter] setParameters failed:', err);
-    }
-  };
-
-  // ── WebRTC Helper: log the negotiated video codec ──────────────
-  const logNegotiatedCodec = async (pc: RTCPeerConnection, label: string) => {
-    try {
-      const stats = await pc.getStats();
-      for (const report of stats.values()) {
-        if (report.type === 'outbound-rtp') {
-          const out = report as { kind?: string; codecId?: string };
-          if (out.kind === 'video' && out.codecId) {
-            const codecReport = stats.get(out.codecId);
-            if (codecReport) {
-              const cr = codecReport as { mimeType?: string; implementation?: string };
-              console.log(
-                `[Presenter] ${label} negotiated codec:`,
-                cr.mimeType,
-                `encoder=${cr.implementation || 'unknown'}`,
-              );
-            }
-          }
-        }
-      }
-    } catch (_err) {
-      // getStats may fail early — ignore.
-    }
-  };
-
-  // ── WebRTC Helper: unified telemetry polling ──────────────────
-  // Polls the representative connected peer's getStats() once per second,
-  // derives codec / resolution / frame-rate / bitrate / packet-loss /
-  // audio, refreshes the presenter's telemetry overlay, retains a 48s
-  // bitrate history for the sparkline, and logs a compact diagnostic to
-  // the console every 5 s. Lifetime is bound to the broadcast (started
-  // in handleStartShare, stopped in handleStopShare).
+  // Polls the published track sender's getStats() once per second.
+  // Started in handleStartShare, stopped in handleStopShare.
   const startTelemetryPolling = () => {
     if (telemetryPollRef.current) return;
     broadcastStartRef.current = performance.now();
@@ -803,11 +560,6 @@ export const PresenterApp: React.FC = () => {
     telemetryPollRef.current = setInterval(async () => {
       tick++;
 
-      // Pick the first connected PC as the representative link. Codec /
-      // fps / bitrate are consistent across peers (same track + encoder
-      // params), so a single peer is the honest read of encode health.
-      const rep = Array.from(peerConnectionsRef.current.values()).find((pc) => pc.connectionState === 'connected');
-
       const now = performance.now();
       const elapsedMs = broadcastStartRef.current ? now - broadcastStartRef.current : 0;
       const vTrack = localStreamRef.current?.getVideoTracks()[0] ?? null;
@@ -816,11 +568,15 @@ export const PresenterApp: React.FC = () => {
       const height = settings?.height ?? null;
       const targetFrameRate = settings?.frameRate ?? (vTrack ? 60 : null);
       const hasAudio = (localStreamRef.current?.getAudioTracks().length ?? 0) > 0;
-      const spectatorCount = spectatorIdsRef.current.size;
 
-      if (!rep) {
-        // Broadcasting but no uplink yet — keep capture-derived fields,
-        // mark link-dependent metrics as unavailable.
+      const room = liveKitRoomRef.current;
+      const spectatorCount = room ? room.remoteParticipants.size : 0;
+
+      // Get the video sender from the published track.
+      const videoPub = room?.localParticipant.videoTrackPublications.values().next().value;
+      const sender = (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+
+      if (!sender) {
         setTelemetry((p) => ({
           ...p,
           live: true,
@@ -839,15 +595,10 @@ export const PresenterApp: React.FC = () => {
         return;
       }
 
-      const pc = rep;
-      let prev = statsPrevRef.current.get(pc);
-      if (!prev) {
-        prev = { vBytes: 0, vFrames: 0, vTs: 0, vInit: false, aBytes: 0, aTs: 0, aInit: false };
-        statsPrevRef.current.set(pc, prev);
-      }
+      const prev = statsPrevRef.current;
 
       try {
-        const stats = await pc.getStats();
+        const stats = await sender.getStats();
         let videoMime: string | null = null;
         let videoEnc: string | null = null;
         let audioMime: string | null = null;
@@ -949,303 +700,17 @@ export const PresenterApp: React.FC = () => {
             }ms · ${spectatorCount} spectator(s)`,
           );
         }
-      } catch {
-        // Transient getStats failures during renegotiation/teardown — ignore.
+      } catch (err) {
+        console.warn('Transient getStats failure:', err);
       }
     }, STATS_POLL_MS);
   };
 
-  const createOfferForSpectator = async (spectatorId: string) => {
-    if (!localStreamRef.current || !wsRef.current) {
-      console.warn(`[Presenter] Cannot offer to ${spectatorId}: no local stream or ws`);
-      return;
-    }
-    if (wsRef.current.readyState !== WebSocket.OPEN) {
-      console.warn(`[Presenter] Cannot offer to ${spectatorId}: ws not open`);
-      return;
-    }
-
-    // Replace any existing PC for this spectator (re-offer after renegotiation).
-    const existing = peerConnectionsRef.current.get(spectatorId);
-    if (existing) {
-      existing.close();
-      peerConnectionsRef.current.delete(spectatorId);
-    }
-
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }],
-    });
-
-    peerConnectionsRef.current.set(spectatorId, pc);
-    pendingCandidatesRef.current.set(spectatorId, []);
-
-    const stream = localStreamRef.current;
-    for (const track of stream.getTracks()) {
-      console.log(`[Presenter] addTrack ${track.kind} readyState=${track.readyState} to ${spectatorId}`);
-      if (track.kind === 'video') {
-        pc.addTransceiver(track, {
-          direction: 'sendonly',
-          streams: [stream],
-          sendEncodings: [
-            {
-              maxBitrate: bitrateLimitRef.current,
-              maxFramerate: streamFpsRef.current,
-              scaleResolutionDownBy: scaleRef.current,
-              priority: 'high',
-              networkPriority: 'high',
-              active: true,
-            },
-          ],
-        });
-      } else {
-        pc.addTrack(track, stream);
-      }
-    }
-
-    // ── Prefer hardware-accelerated video codec (H.264 > VP9 > VP8) ──
-    // Must be called after addTrack creates the transceiver, before createOffer.
-    configureVideoTransceiver(pc);
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'WEBRTC_SIGNAL',
-            payload: {
-              targetId: spectatorId,
-              signal: { type: 'candidate', candidate: event.candidate.toJSON() },
-            },
-          }),
-        );
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log(`[Presenter] PC ${spectatorId} state:`, pc.connectionState);
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        peerConnectionsRef.current.delete(spectatorId);
-      }
-      // Telemetry polling is unified across all connected peers — see startTelemetryPolling.
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'connected') {
-        logNegotiatedCodec(pc, spectatorId);
-        updateConnectedStatus();
-      } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-        updateConnectedStatus();
-      }
-    };
-
-    try {
-      const offer = await pc.createOffer({ offerToReceiveVideo: false, offerToReceiveAudio: false });
-
-      // Ensure H.264 payload types appear first in the SDP video line so the
-      // spectator's answerer-driven negotiation (RFC 3264) picks H.264 rather
-      // than falling back to VP9/VP8 when both sides support H.264.
-      if (offer.sdp) {
-        offer.sdp = reorderSdpVideoCodecs(offer.sdp);
-      }
-
-      await pc.setLocalDescription(offer);
-
-      // ── Set sender encoding parameters (bitrate, priority) now that the
-      // local description is in place and the encoder can be configured.
-      await configureVideoEncoderParams(pc);
-
-      const payload = {
-        type: 'WEBRTC_SIGNAL',
-        payload: {
-          targetId: spectatorId,
-          signal: { type: 'offer', sdp: offer.sdp },
-        },
-      };
-      wsRef.current.send(JSON.stringify(payload));
-      console.log(`[Presenter] Sent offer to spectator ${spectatorId} (sdp ${offer.sdp?.length ?? 0} bytes)`);
-    } catch (err) {
-      console.error(`[Presenter] Failed to create offer for ${spectatorId}:`, err);
-      pc.close();
-      peerConnectionsRef.current.delete(spectatorId);
-    }
-  };
-
-  /** Merge local tracking with server room state so we never miss a spectator. */
-  const resolveSpectatorIds = async (hintIds?: string[]): Promise<string[]> => {
-    const ids = new Set<string>(spectatorIdsRef.current);
-    if (hintIds) {
-      for (const id of hintIds) ids.add(id);
-    }
-
-    const code = roomCodeRef.current;
-    if (code) {
-      try {
-        const res = await fetch(`${apiEndpoint}/api/rooms/${encodeURIComponent(code)}`);
-        if (res.ok) {
-          const room = await res.json();
-          const participants = room.participants || {};
-          for (const p of Object.values(participants) as Array<{ id: string; role: string }>) {
-            if (p.role === 'spectator' && p.id) {
-              ids.add(p.id);
-              spectatorIdsRef.current.add(p.id);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('[Presenter] Failed to fetch room participants:', err);
-      }
-    }
-
-    setSpectatorCount(ids.size);
-    return Array.from(ids);
-  };
-
-  const offerToAllSpectators = async (hintIds?: string[]) => {
-    const ids = await resolveSpectatorIds(hintIds);
-    console.log(`[Presenter] Offering stream to ${ids.length} spectator(s):`, ids);
-    if (ids.length === 0) {
-      return;
-    }
-    await Promise.all(ids.map((id) => createOfferForSpectator(id)));
-  };
-
-  const updateConnectedStatus = () => {
-    const total = spectatorIdsRef.current.size;
-    if (total === 0) return;
-    const connected = Array.from(peerConnectionsRef.current.values()).filter(
-      (pc) => pc.iceConnectionState === 'connected' || pc.connectionState === 'connected',
-    ).length;
-    // Surface a new spectator connection as a transient toast with a chime
-    // instead of a persistent line in the status bar.
-    if (connected > prevConnectedRef.current) {
-      pushToast({
-        title: 'Spectator Connected',
-        description: `Streaming live — connected to ${connected} of ${total} spectator(s)`,
-        variant: 'success',
-        icon: <Users className="h-5 w-5" aria-hidden="true" />,
-      });
-    }
-    prevConnectedRef.current = connected;
-  };
-
-  const handleSignalingMessage = async (msg: unknown) => {
-    const { type, payload } = msg as { type: string; payload: Record<string, unknown> };
-    console.log('[Presenter] signaling message:', type, payload);
-
-    if (type === 'ROOM_CREATED') {
-      const code = payload.code as string;
-      const url = (payload.shareUrl as string) || '';
-      roomCodeRef.current = code;
-      setRoomCode(code);
-      setShareUrl(url);
-      spectatorIdsRef.current.clear();
-      setSpectatorCount(0);
-      prevConnectedRef.current = 0;
-
-      if (url) {
-        void copyText(url).then((ok) => {
-          if (ok) {
-            setCopied('link');
-            setTimeout(() => setCopied(null), 2500);
-          }
-        });
-      }
-    } else if (type === 'JOINED_ROOM') {
-      const code = payload.code as string;
-      setRoomCode(code);
-      spectatorIdsRef.current.clear();
-      setSpectatorCount(0);
-      prevConnectedRef.current = 0;
-    } else if (type === 'USER_JOINED') {
-      const spectatorId = (payload.participant as { id?: string } | undefined)?.id;
-      if (!spectatorId) return;
-
-      spectatorIdsRef.current.add(spectatorId);
-      setSpectatorCount(spectatorIdsRef.current.size);
-
-      // Offer immediately if already streaming (refs avoid stale React state).
-      if (isSharingRef.current && localStreamRef.current) {
-        void createOfferForSpectator(spectatorId);
-      }
-    } else if (type === 'USER_LEFT') {
-      const userId = payload.userId as string | undefined;
-      if (!userId) return;
-      spectatorIdsRef.current.delete(userId);
-      setSpectatorCount(spectatorIdsRef.current.size);
-      const pc = peerConnectionsRef.current.get(userId);
-      if (pc) {
-        pc.close();
-        peerConnectionsRef.current.delete(userId);
-      }
-      pendingCandidatesRef.current.delete(userId);
-      updateConnectedStatus();
-    } else if (type === 'PUBLISH_ACK') {
-      // Server-authoritative list of spectators currently in the room.
-      const spectatorIds = (payload?.spectatorIds as string[] | undefined) || [];
-      console.log('[Presenter] PUBLISH_ACK spectators:', spectatorIds);
-      for (const id of spectatorIds) spectatorIdsRef.current.add(id);
-      setSpectatorCount(spectatorIdsRef.current.size);
-      if (isSharingRef.current && localStreamRef.current) {
-        void offerToAllSpectators(spectatorIds);
-      }
-    } else if (type === 'PUBLISH_REJECTED') {
-      console.error('[Presenter] PUBLISH_REJECTED:', payload?.reason);
-    } else if (type === 'WEBRTC_SIGNAL') {
-      const sp = payload as { senderId?: string; signal?: Record<string, unknown> };
-      const { senderId, signal } = sp;
-      if (!senderId || !signal) return;
-
-      const pc = peerConnectionsRef.current.get(senderId);
-      if (!pc) {
-        // Queue ICE until offer path creates the PC (should be rare).
-        if (signal.candidate || signal.type === 'candidate') {
-          const list = pendingCandidatesRef.current.get(senderId) || [];
-          list.push((signal.candidate || signal) as unknown as RTCIceCandidateInit);
-          pendingCandidatesRef.current.set(senderId, list);
-        }
-        return;
-      }
-
-      try {
-        if (signal.type === 'answer') {
-          if (pc.signalingState === 'have-local-offer') {
-            await pc.setRemoteDescription(new RTCSessionDescription(signal as unknown as RTCSessionDescriptionInit));
-            // Re-apply encoder params now that remote answer is known —
-            // the negotiated codec may affect encoder configuration.
-            await configureVideoEncoderParams(pc);
-            const queued = pendingCandidatesRef.current.get(senderId) || [];
-            for (const c of queued) {
-              await pc.addIceCandidate(new RTCIceCandidate(c));
-            }
-            pendingCandidatesRef.current.set(senderId, []);
-            console.log(`[Presenter] Applied answer from ${senderId}`);
-          } else {
-            console.warn(`[Presenter] Ignoring answer from ${senderId}; signalingState=${pc.signalingState}`);
-          }
-        } else if (signal.candidate || signal.type === 'candidate') {
-          const candidateInit = (signal.candidate || signal) as unknown as RTCIceCandidateInit;
-          if (pc.remoteDescription) {
-            await pc.addIceCandidate(new RTCIceCandidate(candidateInit));
-          } else {
-            const list = pendingCandidatesRef.current.get(senderId) || [];
-            list.push(candidateInit);
-            pendingCandidatesRef.current.set(senderId, list);
-          }
-        }
-      } catch (err) {
-        console.error(`[Presenter] Error handling signal from ${senderId}:`, err);
-      }
-    }
-  };
-
-  // Keep WS handler pointed at the latest closure without re-binding the socket.
-  handleSignalingMessageRef.current = handleSignalingMessage;
-
   const handleCreateRoom = async () => {
     primeAudioContext();
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
+
+    liveKitRoomRef.current?.disconnect();
+    liveKitRoomRef.current = null;
 
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
@@ -1264,13 +729,13 @@ export const PresenterApp: React.FC = () => {
       const room = await res.json();
       const code = room.code as string;
       const url = room.shareUrl as string;
+      const token = room.token as string;
+      const livekitUrl = room.livekitUrl as string;
 
       roomCodeRef.current = code;
       setRoomCode(code);
       setShareUrl(url);
-      spectatorIdsRef.current.clear();
       setSpectatorCount(0);
-      prevConnectedRef.current = 0;
 
       void copyText(url).then((ok) => {
         if (ok) {
@@ -1279,47 +744,25 @@ export const PresenterApp: React.FC = () => {
         }
       });
 
-      const wsProtocol = apiEndpoint.startsWith('https') ? 'wss' : 'ws';
-      const wsHost = apiEndpoint.replace(/^https?:\/\//, '');
-      const wsUrl = `${wsProtocol}://${wsHost}`;
+      const lkRoom = new Room();
+      liveKitRoomRef.current = lkRoom;
 
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        ws.send(
-          JSON.stringify({
-            type: 'JOIN_ROOM',
-            payload: { code, clientOrigin: 'desktop', requestedRole: 'presenter' },
-          }),
-        );
-      };
-
-      ws.onmessage = async (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          await handleSignalingMessageRef.current(msg);
-        } catch (err) {
-          console.error('Signaling message parse error:', err);
+      lkRoom.on(RoomEvent.ParticipantConnected, () => {
+        setSpectatorCount(lkRoom.remoteParticipants.size);
+      });
+      lkRoom.on(RoomEvent.ParticipantDisconnected, () => {
+        setSpectatorCount(lkRoom.remoteParticipants.size);
+      });
+      lkRoom.on(RoomEvent.Disconnected, () => {
+        if (liveKitRoomRef.current === lkRoom) {
+          setRoomCode('');
+          setShareUrl('');
+          setSpectatorCount(0);
+          liveKitRoomRef.current = null;
         }
-      };
+      });
 
-      ws.onclose = () => {
-        setRoomCode('');
-        setShareUrl('');
-        spectatorIdsRef.current.clear();
-        setSpectatorCount(0);
-        prevConnectedRef.current = 0;
-      };
-
-      ws.onerror = (err) => {
-        console.error('WebSocket error:', err);
-        pushToast({
-          title: 'Connection error',
-          description: 'Lost contact with the signaling server.',
-          variant: 'error',
-        });
-      };
+      await lkRoom.connect(livekitUrl, token);
     } catch (err) {
       console.error('Failed to create room:', err);
       const message = err instanceof Error ? err.message : 'Failed to create room';
@@ -1327,11 +770,7 @@ export const PresenterApp: React.FC = () => {
     }
   };
 
-  /**
-   * Captures the video track of the window to share. On Wayland the window
-   * selection happens in the native xdg-desktop-portal dialog; on X11 the
-   * in-app source picker selection is used.
-   */
+  // Wayland uses xdg-desktop-portal; X11 uses the in-app source picker.
   const captureVideoTrack = async (): Promise<MediaStreamTrack> => {
     if (isWayland) {
       // The main-process displayMediaRequestHandler answers this request;
@@ -1383,11 +822,7 @@ export const PresenterApp: React.FC = () => {
     return track;
   };
 
-  /**
-   * Starts exclusive native capture of the selected application's audio and
-   * returns its audio track from the virtual capture microphone. ONLY the
-   * selected application's audio is captured.
-   */
+  // Returns the selected app's audio track from the virtual capture microphone.
   const captureAudioTrack = async (targetId: number): Promise<MediaStreamTrack | null> => {
     const started = await window.electronAPI?.startAudioCapture(targetId);
     if (!started) {
@@ -1422,18 +857,11 @@ export const PresenterApp: React.FC = () => {
     try {
       const videoTrack = await captureVideoTrack();
 
-      // Auto-detect audio source.  Uses a local variable to avoid the
-      // React async-state pitfall — setSelectedAudioAppId is async but
-      // we need the resolved ID synchronously right here.
       let targetAudioId: number | null = selectedAudioAppId;
 
       if (targetAudioId === null && !audioAppExplicitlySet) {
-        // Refresh audio app list so auto-resolve has the freshest PipeWire state.
         await loadAudioApps();
 
-        // On Wayland the video track label is a generic portal identifier, not
-        // a window title that can be matched.  Pass no hint so the main process
-        // falls through to lastCapturedSourceName (set by displayMediaRequestHandler).
         const app = await attemptAutoResolve(
           isWayland ? {} : { sourceId: selectedSourceId, nameHint: videoTrack.label },
         );
@@ -1442,7 +870,6 @@ export const PresenterApp: React.FC = () => {
 
       if (targetAudioId === null) {
         setAutoDetectFailed(true);
-        // Query capture context from main process (populated by pw-dump)
         let ctx: CaptureContext | null = null;
         if (isWayland && window.electronAPI?.getCaptureContext) {
           ctx = await window.electronAPI.getCaptureContext();
@@ -1450,9 +877,6 @@ export const PresenterApp: React.FC = () => {
         }
 
         if (isWayland && ctx?.de === 'kde') {
-          // On KDE, fall back to system-wide audio capture (link all audio
-          // output nodes to the virtual sink) since window identity is not
-          // available in PipeWire streams.
           setAutoDetectFailed(false);
           targetAudioId = -1;
         } else {
@@ -1489,21 +913,44 @@ export const PresenterApp: React.FC = () => {
         handleStopShare();
       };
 
+      // Publish to LiveKit
+      const room = liveKitRoomRef.current;
+      if (!room) {
+        throw new Error('Not connected to a room');
+      }
+
+      // Unpublish any previous tracks first (e.g. after restart).
+      const existingPubs = [...room.localParticipant.trackPublications.values()];
+      for (const pub of existingPubs) {
+        if (pub.track) {
+          await room.localParticipant.unpublishTrack(pub.track);
+        }
+      }
+
+      // Reset stats accumulator for fresh telemetry.
+      statsPrevRef.current = { vBytes: 0, vFrames: 0, vTs: 0, vInit: false, aBytes: 0, aTs: 0, aInit: false };
+
+      await room.localParticipant.publishTrack(videoTrack, {
+        source: Track.Source.ScreenShare,
+        videoEncoding: {
+          maxBitrate: bitrateLimitRef.current,
+          maxFramerate: streamFpsRef.current,
+          priority: 'high',
+        },
+        simulcast: false,
+      });
+
+      if (audioTrack) {
+        await room.localParticipant.publishTrack(audioTrack, {
+          source: Track.Source.ScreenShareAudio,
+        });
+      }
+
       setIsSharing(true);
       isSharingRef.current = true;
 
-      // Begin the unified telemetry poll (codec/res/fps/bitrate/loss/audio + sparkline).
       setTelemetry({ ...idleTelemetry(), live: true });
       startTelemetryPolling();
-
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'PUBLISH_STREAM',
-            payload: { streamId: 'desktop-main-display' },
-          }),
-        );
-      }
     } catch (err: unknown) {
       console.error('Failed to capture screen:', err);
       const message = err instanceof Error ? err.message : 'Unknown capture error';
@@ -1523,13 +970,18 @@ export const PresenterApp: React.FC = () => {
       localStreamRef.current = null;
     }
     setPreviewStream(null);
-    for (const pc of peerConnectionsRef.current.values()) {
-      pc.close();
+
+    // Unpublish tracks from LiveKit but keep the room connected.
+    const room = liveKitRoomRef.current;
+    if (room) {
+      const pubs = [...room.localParticipant.trackPublications.values()];
+      for (const pub of pubs) {
+        if (pub.track) {
+          await room.localParticipant.unpublishTrack(pub.track);
+        }
+      }
     }
-    peerConnectionsRef.current.clear();
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'STOP_STREAM', payload: {} }));
-    }
+
     if (telemetryPollRef.current) {
       clearInterval(telemetryPollRef.current);
       telemetryPollRef.current = null;
@@ -1537,9 +989,7 @@ export const PresenterApp: React.FC = () => {
     broadcastStartRef.current = null;
     bitrateHistoryRef.current = [];
     setTelemetry(idleTelemetry());
-    pendingCandidatesRef.current.clear();
     isSharingRef.current = false;
-    prevConnectedRef.current = 0;
     if (window.electronAPI) {
       await window.electronAPI.stopAudioCapture();
     }

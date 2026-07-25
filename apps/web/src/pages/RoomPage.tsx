@@ -1,4 +1,4 @@
-import type { JoinedRoomPayload, Participant } from '@slopcast/shared-types';
+import { ConnectionState, Room, RoomEvent } from 'livekit-client';
 import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -6,8 +6,6 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { VideoPlayer } from '../components/VideoPlayer';
-import { SignalingClient } from '../services/SignalingClient';
-import { type WebRTCConnectionState, WebRTCReceiver } from '../services/WebRTCReceiver';
 
 export const RoomPage: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -19,14 +17,11 @@ export const RoomPage: React.FC = () => {
   const [statusText, setStatusText] = useState('Connecting...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [participants, setParticipants] = useState<Participant[]>([]);
-  const [_myUserId, setMyUserId] = useState<string>('');
+  const [participantCount, setParticipantCount] = useState(0);
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [copied, setCopied] = useState(false);
-  const [_rtcState, setRtcState] = useState<WebRTCConnectionState>('new');
 
-  const signalingRef = useRef<SignalingClient | null>(null);
-  const rtcReceiverRef = useRef<WebRTCReceiver | null>(null);
+  const roomRef = useRef<Room | null>(null);
   const connectGenRef = useRef(0);
 
   const copyLink = () => {
@@ -45,149 +40,113 @@ export const RoomPage: React.FC = () => {
     setStatusText('Connecting...');
     setErrorMsg(null);
     setMediaStream(null);
-    setParticipants([]);
+    setParticipantCount(0);
 
-    if (rtcReceiverRef.current) {
-      rtcReceiverRef.current.close();
-      rtcReceiverRef.current = null;
-    }
-    if (signalingRef.current) {
-      signalingRef.current.disconnect();
-      signalingRef.current = null;
+    if (roomRef.current) {
+      roomRef.current.removeAllListeners();
+      roomRef.current.disconnect();
+      roomRef.current = null;
     }
 
-    const client = new SignalingClient();
-    signalingRef.current = client;
+    const room = new Room({ adaptiveStream: true });
+    roomRef.current = room;
 
-    const receiver = new WebRTCReceiver(client, {
-      onStream: (stream) => {
-        if (isStale()) return;
+    room.on(RoomEvent.TrackSubscribed, (track) => {
+      if (isStale()) return;
+      const stream = track.mediaStream;
+      if (stream) {
         setMediaStream(stream);
-        setConnectionStatus('live');
-        setStatusText('Live');
-      },
-      onStateChange: (state) => {
-        if (isStale()) return;
-        setRtcState(state);
-        if (state === 'connected') {
-          setConnectionStatus('live');
-          setStatusText('Live');
-        } else if (state === 'connecting') {
-          setStatusText('Connecting...');
-        } else if (state === 'disconnected' || state === 'failed') {
-          setStatusText('Disconnected');
-        }
-      },
-      onError: (err) => {
-        if (isStale()) return;
-        setErrorMsg(`WebRTC error: ${err.message}`);
-      },
-      onPublishNotice: () => {
-        if (isStale()) return;
-        setStatusText('Presenter streaming — connecting...');
-      },
-      onStreamEnd: () => {
-        if (isStale()) return;
+      }
+      setConnectionStatus('live');
+      setStatusText('Live');
+    });
+
+    room.on(RoomEvent.TrackUnsubscribed, () => {
+      if (isStale()) return;
+      const hasTracks = [...room.remoteParticipants.values()].some((p) => p.trackPublications.size > 0);
+      if (!hasTracks) {
         setMediaStream(null);
-        setConnectionStatus('connecting');
+        setConnectionStatus('disconnected');
         setStatusText('Stream ended — waiting for presenter...');
-      },
-    });
-    rtcReceiverRef.current = receiver;
-
-    client.on('connected', () => {
-      if (isStale()) return;
-      setErrorMsg(null);
-      setStatusText('Joining room...');
-      client.joinRoom(roomId);
-    });
-
-    client.on('joined_room', (payload: JoinedRoomPayload) => {
-      if (isStale()) return;
-      setConnectionStatus('connecting');
-      setErrorMsg(null);
-      setParticipants(payload.participants);
-      if (payload.assignedId) setMyUserId(payload.assignedId);
-
-      if (payload.isStreaming) {
-        setStatusText('Presenter is live — connecting...');
-      } else {
-        const hasPresenter = payload.participants.some((p) => p.role === 'presenter');
-        setStatusText(hasPresenter ? 'Waiting for stream...' : 'Room connected. Waiting for presenter...');
       }
     });
 
-    client.on('role_assignment', (payload) => {
-      if (payload.reason) console.log('[RoomPage] Role notice:', payload.reason);
-    });
-
-    client.on('user_joined', (participant) => {
+    room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
       if (isStale()) return;
-      setParticipants((prev) => {
-        if (prev.some((p) => p.id === participant.id)) return prev;
-        return [...prev, participant];
-      });
+      switch (state) {
+        case ConnectionState.Reconnecting:
+          setStatusText('Reconnecting...');
+          break;
+        case ConnectionState.Disconnected:
+          setConnectionStatus('disconnected');
+          setStatusText('Connection lost');
+          break;
+        default:
+          break;
+      }
     });
 
-    client.on('user_left', (userId) => {
-      if (isStale()) return;
-      setParticipants((prev) => prev.filter((p) => p.id !== userId));
-    });
-
-    client.on('room_closed', (payload) => {
+    room.on(RoomEvent.Disconnected, () => {
       if (isStale()) return;
       setConnectionStatus('closed');
-      setStatusText('Room Closed');
-      setErrorMsg(payload.reason || 'The presenter closed the session.');
-      if (rtcReceiverRef.current) rtcReceiverRef.current.close();
+      setStatusText('Room closed');
     });
 
-    client.on('stop_stream', () => {
+    room.on(RoomEvent.ParticipantConnected, () => {
       if (isStale()) return;
-      setMediaStream(null);
-      setConnectionStatus('connecting');
-      setStatusText('Stream ended — waiting for presenter...');
-      if (rtcReceiverRef.current) rtcReceiverRef.current.close();
+      setParticipantCount(room.remoteParticipants.size);
     });
 
-    client.on('error', (payload) => {
+    room.on(RoomEvent.ParticipantDisconnected, () => {
       if (isStale()) return;
-      setConnectionStatus('error');
-      setErrorMsg(payload.message);
+      const count = room.remoteParticipants.size;
+      setParticipantCount(count);
+      if (count === 0) {
+        setConnectionStatus('closed');
+        setStatusText('Presenter left');
+      }
     });
 
-    client.on('disconnected', (reason) => {
-      if (isStale()) return;
-      console.warn('[RoomPage] Signaling Disconnected:', reason);
-      setConnectionStatus('disconnected');
-      setStatusText('Connection lost');
-    });
+    const livekitUrl = (window as { __SLOPCAST_CONFIG__?: { livekitUrl?: string } }).__SLOPCAST_CONFIG__?.livekitUrl;
 
-    client.connect().catch((_err) => {
-      if (isStale()) return;
-      setConnectionStatus('error');
-      setErrorMsg('Could not connect to signaling server');
-    });
+    const apiEndpoint = (window as { __SLOPCAST_CONFIG__?: { apiEndpoint?: string } }).__SLOPCAST_CONFIG__?.apiEndpoint;
+    const baseUrl = livekitUrl
+      ? livekitUrl.replace(/^ws(s?):\/\//, 'http$1://')
+      : apiEndpoint
+        ? apiEndpoint
+        : `${window.location.protocol}//${window.location.hostname}:3001`;
+
+    const getToken = async (): Promise<string> => {
+      const res = await fetch(`${baseUrl}/api/rooms/${roomId}/token`);
+      if (!res.ok) throw new Error('Failed to fetch spectator token');
+      const data = (await res.json()) as { token: string };
+      return data.token;
+    };
+
+    const livekitUrlForClient = livekitUrl || `ws://${window.location.hostname}:7880`;
+
+    getToken()
+      .then((token) => room.connect(livekitUrlForClient, token))
+      .catch((err) => {
+        if (isStale()) return;
+        setConnectionStatus('error');
+        setErrorMsg(`Connection failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
   }, [roomId]);
 
   useEffect(() => {
     initializeConnection();
     return () => {
       connectGenRef.current += 1;
-      if (rtcReceiverRef.current) {
-        rtcReceiverRef.current.close();
-        rtcReceiverRef.current = null;
-      }
-      if (signalingRef.current) {
-        signalingRef.current.disconnect();
-        signalingRef.current = null;
+      if (roomRef.current) {
+        roomRef.current.removeAllListeners();
+        roomRef.current.disconnect();
+        roomRef.current = null;
       }
     };
   }, [initializeConnection]);
 
   const handleResync = () => initializeConnection();
-
-  const getStatsFn = useCallback(async () => rtcReceiverRef.current?.getStats() ?? null, []);
 
   const statusVariant: 'live' | 'disconnected' | 'info' =
     connectionStatus === 'live'
@@ -212,7 +171,6 @@ export const RoomPage: React.FC = () => {
           statusText={statusText}
           onResync={handleResync}
           fullBleed
-          getStatsFn={getStatsFn}
         />
       </div>
 
@@ -242,9 +200,9 @@ export const RoomPage: React.FC = () => {
                 <span className="truncate min-w-0">{statusText}</span>
               </Badge>
             </span>
-            {participants.length > 0 && (
+            {participantCount > 0 && (
               <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium text-gray-400 bg-black/40 border border-white/10 backdrop-blur-md shrink-0">
-                {participants.length} spectator{participants.length !== 1 ? 's' : ''}
+                {participantCount} spectator{participantCount !== 1 ? 's' : ''}
               </span>
             )}
           </div>
