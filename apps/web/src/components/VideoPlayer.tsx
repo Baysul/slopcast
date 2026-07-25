@@ -79,9 +79,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       video.srcObject = mediaStream;
       const videoTracks = mediaStream.getVideoTracks();
       setHasVideoTrack(videoTracks.length > 0 && videoTracks[0].enabled);
-      setNeedsUserGesture(true);
+      setNeedsUserGesture(false);
       setIsPlaying(false);
       setIsMuted(false);
+
+      video
+        .play()
+        .then(() => {
+          setIsPlaying(true);
+          unlockAudioContexts();
+        })
+        .catch(() => {
+          video.muted = true;
+          setIsMuted(true);
+          video
+            .play()
+            .then(() => {
+              setIsPlaying(true);
+              setNeedsUserGesture(true);
+            })
+            .catch(() => {
+              setNeedsUserGesture(true);
+            });
+        });
     } else {
       video.srcObject = null;
       setHasVideoTrack(false);
@@ -215,10 +235,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             className="flex flex-col items-center gap-4 px-8 py-6 bg-safelight/20 border border-safelight/40 rounded-2xl
                        text-white hover:bg-safelight/30 transition-all backdrop-blur-md cursor-pointer"
           >
-            <Play className="w-10 h-10 text-safelight" />
-            <span className="font-semibold text-base">Click to watch</span>
+            {isPlaying ? (
+              <Volume2 className="w-10 h-10 text-safelight" />
+            ) : (
+              <Play className="w-10 h-10 text-safelight" />
+            )}
+            <span className="font-semibold text-base">{isPlaying ? 'Click to enable audio' : 'Click to watch'}</span>
             {mediaStream?.getAudioTracks().length ? (
-              <span className="text-xs text-white/40">Video and audio will play after click</span>
+              <span className="text-xs text-white/40">
+                {isPlaying ? 'Video is playing — tap to hear audio' : 'Video and audio will play after click'}
+              </span>
             ) : null}
           </button>
         </div>
