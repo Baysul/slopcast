@@ -22,7 +22,7 @@ import { type ChildProcess, execSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+
 import type { Page } from 'playwright';
 
 // ── Configuration Types ────────────────────────────────────────────────
@@ -70,8 +70,7 @@ interface TestResult {
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const __DIRNAME = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__DIRNAME, '..', '..', '..');
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'test-output');
 const CONFIG_PATH = path.join(REPO_ROOT, 'screen-share.config.json');
 const DESKTOP_CONSOLE_LOG = path.join(OUTPUT_DIR, 'desktop-console.log');
@@ -145,14 +144,14 @@ function killPort(port: number): void {
 
 function httpGet(url: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    http
+    const req = http
       .get(url, (res) => {
         res.resume();
         resolve(res.statusCode ?? 0);
       })
       .on('error', reject)
-      .setTimeout(3000, function () {
-        this.destroy();
+      .setTimeout(3000, () => {
+        req.destroy();
         reject(new Error(`HTTP GET ${url} timed out`));
       });
   });
