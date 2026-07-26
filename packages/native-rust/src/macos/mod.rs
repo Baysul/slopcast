@@ -1,6 +1,6 @@
 use crate::AudioApp;
 use napi::Result as NapiResult;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use screencapturekit::prelude::{
     CMSampleBuffer, SCContentFilter, SCRunningApplication, SCShareableContent, SCStream,
@@ -89,7 +89,7 @@ pub fn start_audio_capture(target_app_id: &napi::Either<String, i32>) -> NapiRes
         )?;
 
     let display = content.displays().into_iter().next().ok_or_else(|| {
-        napi::Error::from_reason("No display available for ScreenCaptureKit audio capture".into())
+        napi::Error::from_reason("No display available for ScreenCaptureKit audio capture")
     })?;
 
     let filter = SCContentFilter::create()
