@@ -11,6 +11,7 @@ COPY apps/server/ apps/server/
 RUN pnpm --filter @slopcast/shared-types build
 RUN pnpm --filter server build
 RUN pnpm --filter server deploy --prod /deploy
+COPY slopcast.config.json /deploy/
 
 FROM node:24-alpine
 COPY --from=builder /deploy /app
