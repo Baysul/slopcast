@@ -45,7 +45,7 @@ Well first of all, native Linux desktop support is a must. The app should:
 
 The desktop app captures exactly one target application's audio via native OS APIs (PipeWire on Linux). No other app's sound ever leaks into the stream.
 
-## Quick start
+## Development
 
 ```bash
 pnpm install
@@ -62,6 +62,138 @@ pnpm dev:desktop
 ```
 
 Click **Create Live Room** in the desktop app, copy the room link, and open it in a browser.
+
+## Configuration
+
+For local development, configuration is loaded from `slopcast.config.json` at the project root
+with LiveKit defaults pointing to `ws://localhost:7880`. In production, set the environment
+variables below to override each value — they take precedence over the config file.
+
+### Environment variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `SERVER_PORT` | API server port | `3001` |
+| `WEB_PORT` | Web client port | `3000` |
+| `API_ENDPOINT` | URL the web client uses to reach the API | `http://localhost:3001` |
+| `WEBSITE_URL` | Public web app URL (used in generated share links) | `http://localhost:3000` |
+| `LIVEKIT_URL` | LiveKit server WebSocket URL | `ws://localhost:7880` |
+| `LIVEKIT_API_KEY` | LiveKit API key | `devkey` |
+| `LIVEKIT_API_SECRET` | LiveKit API secret | `secret` |
+
+## Deployment
+
+### Docker Compose
+
+The repository includes a `docker-compose.yml` that runs both the API server and the web client:
+
+```bash
+# Set your LiveKit credentials
+export LIVEKIT_API_KEY=your-api-key
+export LIVEKIT_API_SECRET=your-api-secret
+
+# Start both services
+docker compose up -d
+```
+
+The API server is exposed on port `3001`, the web client on port `3000`. By default, the web
+container's `API_ENDPOINT` points to the server container directly.
+
+### Reverse proxy (production)
+
+For production, put a reverse proxy in front to serve both the web SPA (static files) and the API
+server. The examples below use a single domain like `app.example.com`.
+
+#### Nginx
+
+Place the built web app files at `/var/www/slopcast-web` (or mount them from the
+`slopcast-web` container) and create `/etc/nginx/nginx.conf`:
+
+```nginx
+http {
+  server {
+    listen 80;
+    server_name app.example.com;
+
+    root /var/www/slopcast-web;
+    index index.html;
+
+    location / {
+      try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+      proxy_pass http://127.0.0.1:3001;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /health {
+      proxy_pass http://127.0.0.1:3001;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /ws {
+      proxy_pass http://127.0.0.1:3001;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $host;
+    }
+  }
+}
+```
+
+For HTTPS, add `ssl` and redirect port 80:
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name app.example.com;
+  # ssl_certificate /etc/nginx/ssl/cert.pem;
+  # ssl_certificate_key /etc/nginx/ssl/key.pem;
+  # ... same location blocks as the HTTP example above
+}
+
+server {
+  listen 80;
+  server_name app.example.com;
+  return 301 https://$host$request_uri;
+}
+```
+
+#### Caddy
+
+Create a `Caddyfile`:
+
+```
+app.example.com {
+  root * /var/www/slopcast-web
+  try_files {path} /index.html
+  file_server
+
+  reverse_proxy /api/* 127.0.0.1:3001
+  reverse_proxy /health 127.0.0.1:3001
+  reverse_proxy /ws 127.0.0.1:3001
+}
+```
+
+Caddy provisions TLS certificates automatically via Let's Encrypt / ZeroSSL when the
+domain's DNS points to the server. No extra HTTPS configuration is needed.
+
+To run Caddy in Docker with the Docker Compose setup (uncomment the `caddy` service in
+`docker-compose.yml`) and place the `Caddyfile` alongside:
+
+```yaml
+# docker-compose.yml additions:
+volumes:
+  - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  - caddy_data:/data
+  - caddy_config:/config
+```
 
 ## Project structure
 
