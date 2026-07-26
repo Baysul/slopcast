@@ -209,12 +209,51 @@ impl ChannelLayout {
 }
 
 fn channel_short_name(channel: u32) -> Option<String> {
-    let ptr = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(channel) };
-    if ptr.is_null() {
-        return None;
-    }
-    let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
-    cstr.to_str().ok().map(Into::into)
+    Some(
+        match channel {
+            0 => "UNK",
+            1 => "NA",
+            2 => "MONO",
+            3 => "FL",
+            4 => "FR",
+            5 => "FC",
+            6 => "LFE",
+            7 => "SL",
+            8 => "SR",
+            9 => "FLC",
+            10 => "FRC",
+            11 => "RC",
+            12 => "RL",
+            13 => "RR",
+            14 => "TC",
+            15 => "TFL",
+            16 => "TFC",
+            17 => "TFR",
+            18 => "TRL",
+            19 => "TRC",
+            20 => "TRR",
+            21 => "RLC",
+            22 => "RRC",
+            23 => "FLW",
+            24 => "FRW",
+            25 => "LFE2",
+            26 => "FLH",
+            27 => "FCH",
+            28 => "FRH",
+            29 => "TFLC",
+            30 => "TFRC",
+            31 => "TSL",
+            32 => "TSR",
+            33 => "LLFE",
+            34 => "RLFE",
+            35 => "BC",
+            36 => "BLC",
+            37 => "BRC",
+            n @ 0x1000..=0x1027 => return Some(format!("AUX{}", n - 0x1000)),
+            _ => return None,
+        }
+        .into(),
+    )
 }
 
 struct PortInfo {
