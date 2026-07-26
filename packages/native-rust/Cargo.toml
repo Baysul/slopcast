@@ -29,6 +29,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Variant",
     "Wdk_System_SystemServices",
 ] }
+# Direct dependency required: the `#[implement]` proc-macro emits `windows_core::` paths.
 windows-core = "0.62.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

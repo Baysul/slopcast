@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use napi::{Either, Result as NapiResult};
 use windows::Wdk::System::SystemServices::RtlGetVersion;
-use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, HRESULT, S_OK, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, S_OK, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
     AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncCompletionHandler,
-    IActivateAudioInterfaceAsyncCompletionHandler_Impl, IActivateAudioInterfaceAsyncOperation,
+    ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
     IAudioCaptureClient, IAudioClient, IAudioSessionControl2, IAudioSessionManager2,
     IMMDeviceEnumerator, MMDeviceEnumerator, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
     VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
@@ -33,7 +33,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::{CreateEventA, SetEvent, WaitForMultipleObjects};
 use windows::Win32::System::Variant::VT_BLOB;
-use windows::core::{Error, IUnknown, Interface, PCSTR, Ref, implement};
+use windows::core::{Error, HRESULT, IUnknown, Interface, PCSTR, Ref, implement};
 
 use crate::AudioApp;
 
@@ -62,9 +62,12 @@ fn napi_err(context: &str, e: impl std::fmt::Display) -> napi::Error {
 }
 
 fn os_build_number() -> Option<u32> {
+    // SAFETY: all-zero is a valid OSVERSIONINFOW bit pattern.
     let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
     info.dwOSVersionInfoSize = size_of::<OSVERSIONINFOW>() as u32;
-    unsafe { RtlGetVersion(&mut info).ok().map(|_| info.dwBuildNumber) }
+    // SAFETY: `info` is a valid, correctly sized out-buffer that outlives the call.
+    let status = unsafe { RtlGetVersion(&mut info) };
+    status.is_ok().then_some(info.dwBuildNumber)
 }
 
 fn snapshot_process_names() -> HashMap<u32, String> {
@@ -89,54 +92,61 @@ fn snapshot_process_names() -> HashMap<u32, String> {
 }
 
 pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
+    // SAFETY: standard per-thread COM initialization; balanced below on success.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let com_ok = hr == S_OK;
-    let result = unsafe { enumerate_audio_apps() };
+    let result = enumerate_audio_apps();
     if com_ok {
+        // SAFETY: balances the successful CoInitializeEx above.
         unsafe { CoUninitialize() };
     }
     result
 }
 
-unsafe fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
+fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
     let names = snapshot_process_names();
-    let enumerator: IMMDeviceEnumerator =
-        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            .map_err(|e| napi_err("CoCreateInstance(MMDeviceEnumerator)", e))?;
-    let device = enumerator
-        .GetDefaultAudioEndpoint(eRender, eConsole)
-        .map_err(|e| napi_err("GetDefaultAudioEndpoint", e))?;
-    let manager: IAudioSessionManager2 = device
-        .Activate(CLSCTX_ALL, None)
-        .map_err(|e| napi_err("Activate(IAudioSessionManager2)", e))?;
-    let sessions =
-        manager.GetSessionEnumerator().map_err(|e| napi_err("GetSessionEnumerator", e))?;
-    let count = sessions.GetCount().map_err(|e| napi_err("GetSessionEnumerator::GetCount", e))?;
+    // SAFETY: COM was initialized on this thread by the caller. Every interface
+    // obtained here is valid, used only on this thread, and released on drop.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| napi_err("CoCreateInstance(MMDeviceEnumerator)", e))?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .map_err(|e| napi_err("GetDefaultAudioEndpoint", e))?;
+        let manager: IAudioSessionManager2 = device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|e| napi_err("Activate(IAudioSessionManager2)", e))?;
+        let sessions =
+            manager.GetSessionEnumerator().map_err(|e| napi_err("GetSessionEnumerator", e))?;
+        let count =
+            sessions.GetCount().map_err(|e| napi_err("GetSessionEnumerator::GetCount", e))?;
 
-    let mut apps = Vec::new();
-    let mut seen: HashSet<u32> = HashSet::new();
-    for i in 0..count {
-        let Ok(control) = sessions.GetSession(i) else { continue };
-        let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
-        if control2.IsSystemSoundsSession() == S_OK {
-            continue;
+        let mut apps = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+        for i in 0..count {
+            let Ok(control) = sessions.GetSession(i) else { continue };
+            let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+            if control2.IsSystemSoundsSession() == S_OK {
+                continue;
+            }
+            let Ok(pid) = control2.GetProcessId() else { continue };
+            if pid == 0 || !seen.insert(pid) {
+                continue;
+            }
+            let name = names.get(&pid).cloned().unwrap_or_else(|| format!("Process {pid}"));
+            apps.push(AudioApp { id: pid as i32, name, process_id: pid as i32, bundle_id: None });
         }
-        let Ok(pid) = control2.GetProcessId() else { continue };
-        if pid == 0 || !seen.insert(pid) {
-            continue;
-        }
-        let name = names.get(&pid).cloned().unwrap_or_else(|| format!("Process {pid}"));
-        apps.push(AudioApp { id: pid as i32, name, process_id: pid as i32, bundle_id: None });
+        Ok(apps)
     }
-    Ok(apps)
 }
 
-#[implement(IActivateAudioInterfaceAsyncCompletionHandler)]
+#[implement(IActivateAudioInterfaceCompletionHandler)]
 struct ActivationHandler {
     state: Arc<(Mutex<bool>, Condvar)>,
 }
 
-impl IActivateAudioInterfaceAsyncCompletionHandler_Impl for ActivationHandler_Impl {
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
     fn ActivateCompleted(
         &self,
         _activateoperation: Ref<IActivateAudioInterfaceAsyncOperation>,
@@ -151,7 +161,7 @@ impl IActivateAudioInterfaceAsyncCompletionHandler_Impl for ActivationHandler_Im
     }
 }
 
-unsafe fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IAudioClient> {
+fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IAudioClient> {
     let mut activation_params = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
@@ -181,14 +191,19 @@ unsafe fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IA
     };
 
     let setup = Arc::new((Mutex::new(false), Condvar::new()));
-    let callback: IActivateAudioInterfaceAsyncCompletionHandler =
+    let callback: IActivateAudioInterfaceCompletionHandler =
         ActivationHandler { state: setup.clone() }.into();
-    let operation = ActivateAudioInterfaceAsync(
-        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-        &IAudioClient::IID,
-        Some(&raw_prop as *const PROPVARIANT),
-        &callback,
-    )?;
+    // SAFETY: `raw_prop` points to `activation_params`, which lives until this
+    // function returns, and we block until activation completes (or times out)
+    // before returning, so the async operation cannot outlive the pointer.
+    let operation = unsafe {
+        ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&raw_prop as *const PROPVARIANT),
+            &callback,
+        )?
+    };
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let (lock, cvar) = &*setup;
@@ -208,19 +223,26 @@ unsafe fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IA
 
     let mut audio_client: Option<IUnknown> = None;
     let mut result = HRESULT(0);
-    operation.GetActivateResult(&mut result, &mut audio_client)?;
+    // SAFETY: called exactly once, after activation completed; both out-params
+    // are valid and outlive the call.
+    unsafe { operation.GetActivateResult(&mut result, &mut audio_client) }?;
     result.ok()?;
     let unknown =
         audio_client.ok_or_else(|| Error::new(E_FAIL, "Activation returned no interface"))?;
     unknown.cast::<IAudioClient>()
 }
 
-unsafe fn activate_system_loopback() -> windows::core::Result<(IAudioClient, *mut WAVEFORMATEX)> {
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-    let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
-    let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
-    let mix_format = client.GetMixFormat()?;
-    Ok((client, mix_format))
+fn activate_system_loopback() -> windows::core::Result<(IAudioClient, *mut WAVEFORMATEX)> {
+    // SAFETY: COM was initialized on this thread by the caller. The returned
+    // interface and mix-format pointer are owned by the caller.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+        let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+        let mix_format = client.GetMixFormat()?;
+        Ok((client, mix_format))
+    }
 }
 
 fn make_loopback_format() -> WAVEFORMATEXTENSIBLE {
@@ -250,36 +272,46 @@ struct CaptureSession {
 }
 
 impl CaptureSession {
-    unsafe fn drain_packets(&self) -> Result<(), String> {
-        loop {
-            let packet_frames = self
-                .capture_client
-                .GetNextPacketSize()
-                .map_err(|e| format!("GetNextPacketSize: {e}"))?;
-            if packet_frames == 0 {
-                return Ok(());
+    fn drain_packets(&self) -> Result<(), String> {
+        // SAFETY: `capture_client` is a valid interface owned by this session;
+        // every buffer obtained is released before the next iteration.
+        unsafe {
+            loop {
+                let packet_frames = self
+                    .capture_client
+                    .GetNextPacketSize()
+                    .map_err(|e| format!("GetNextPacketSize: {e}"))?;
+                if packet_frames == 0 {
+                    return Ok(());
+                }
+                let mut data: *mut u8 = std::ptr::null_mut();
+                let mut frames: u32 = 0;
+                let mut flags: u32 = 0;
+                self.capture_client
+                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                    .map_err(|e| format!("GetBuffer: {e}"))?;
+                self.capture_client
+                    .ReleaseBuffer(frames)
+                    .map_err(|e| format!("ReleaseBuffer: {e}"))?;
             }
-            let mut data: *mut u8 = std::ptr::null_mut();
-            let mut frames: u32 = 0;
-            let mut flags: u32 = 0;
-            self.capture_client
-                .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
-                .map_err(|e| format!("GetBuffer: {e}"))?;
-            self.capture_client.ReleaseBuffer(frames).map_err(|e| format!("ReleaseBuffer: {e}"))?;
         }
     }
 
-    unsafe fn run(&self, stop_event: HANDLE) -> Result<(), String> {
+    fn run(&self, stop_event: HANDLE) -> Result<(), String> {
         let handles = [stop_event, self.audio_event];
-        loop {
-            let ev = WaitForMultipleObjects(&handles, false, u32::MAX);
-            if ev.0 == WAIT_OBJECT_0.0 {
-                return Ok(());
-            }
-            if ev.0 == WAIT_OBJECT_0.0 + 1 {
-                self.drain_packets()?;
-            } else {
-                return Err("WaitForMultipleObjects failed".into());
+        // SAFETY: both handles are valid for the duration of this call — the
+        // stop event is owned by the capture state, the audio event by `self`.
+        unsafe {
+            loop {
+                let ev = WaitForMultipleObjects(&handles, false, u32::MAX);
+                if ev.0 == WAIT_OBJECT_0.0 {
+                    return Ok(());
+                }
+                if ev.0 == WAIT_OBJECT_0.0 + 1 {
+                    self.drain_packets()?;
+                } else {
+                    return Err("WaitForMultipleObjects failed".into());
+                }
             }
         }
     }
@@ -294,7 +326,7 @@ impl Drop for CaptureSession {
     }
 }
 
-unsafe fn build_capture_session(target_pid: u32) -> Result<(CaptureSession, CaptureMode), String> {
+fn build_capture_session(target_pid: u32) -> Result<(CaptureSession, CaptureMode), String> {
     let process_loopback_supported =
         os_build_number().is_some_and(|b| b >= PROCESS_LOOPBACK_MIN_BUILD);
 
@@ -314,37 +346,49 @@ unsafe fn build_capture_session(target_pid: u32) -> Result<(CaptureSession, Capt
     };
 
     let explicit_format = make_loopback_format();
-    let format_ptr: *const WAVEFORMATEX = mix_format_ptr.unwrap_or(&explicit_format.Format);
-    let init_result = client.Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
-        200_000,
-        0,
-        format_ptr,
-        None,
-    );
-    if let Some(ptr) = mix_format_ptr {
-        CoTaskMemFree(Some(ptr.cast()));
-    }
-    init_result.map_err(|e| format!("IAudioClient::Initialize: {e}"))?;
+    let format_ptr: *const WAVEFORMATEX = match mix_format_ptr {
+        Some(ptr) => ptr.cast_const(),
+        None => &explicit_format.Format,
+    };
+    // SAFETY: `client` is a valid IAudioClient. `format_ptr` points either to the
+    // COM-allocated mix format (freed via CoTaskMemFree right after Initialize)
+    // or to `explicit_format`, which outlives the call. The returned capture
+    // client and event handle are owned by the CaptureSession and closed on drop.
+    let (capture_client, audio_event) = unsafe {
+        let init_result = client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+            200_000,
+            0,
+            format_ptr,
+            None,
+        );
+        if let Some(ptr) = mix_format_ptr {
+            CoTaskMemFree(Some(ptr.cast()));
+        }
+        init_result.map_err(|e| format!("IAudioClient::Initialize: {e}"))?;
 
-    let capture_client = client
-        .GetService::<IAudioCaptureClient>()
-        .map_err(|e| format!("GetService(IAudioCaptureClient): {e}"))?;
-    let audio_event = CreateEventA(None, false, false, PCSTR::null())
-        .map_err(|e| format!("CreateEventA: {e}"))?;
-    client.SetEventHandle(audio_event).map_err(|e| format!("SetEventHandle: {e}"))?;
-    client.Start().map_err(|e| format!("IAudioClient::Start: {e}"))?;
+        let capture_client = client
+            .GetService::<IAudioCaptureClient>()
+            .map_err(|e| format!("GetService(IAudioCaptureClient): {e}"))?;
+        let audio_event = CreateEventA(None, false, false, PCSTR::null())
+            .map_err(|e| format!("CreateEventA: {e}"))?;
+        client.SetEventHandle(audio_event).map_err(|e| format!("SetEventHandle: {e}"))?;
+        client.Start().map_err(|e| format!("IAudioClient::Start: {e}"))?;
+        Ok::<_, String>((capture_client, audio_event))
+    }?;
 
     Ok((CaptureSession { client, capture_client, audio_event }, mode))
 }
 
-unsafe fn run_capture(
+fn run_capture(
     target_pid: u32,
     stop_event_raw: usize,
     startup_tx: &Sender<Result<CaptureMode, String>>,
 ) -> Result<(), String> {
-    let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+    // SAFETY: standard per-thread COM init on the dedicated capture thread;
+    // balanced by CoUninitialize below on success.
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     if !hr.is_ok() && hr != HRESULT(RPC_E_CHANGED_MODE) {
         let msg = format!("CoInitializeEx failed: {hr:?}");
         let _ = startup_tx.send(Err(msg.clone()));
@@ -367,7 +411,8 @@ unsafe fn run_capture(
     let run_result = session.run(stop_event);
     drop(session);
     if com_ok {
-        CoUninitialize();
+        // SAFETY: balances the successful CoInitializeEx at the top.
+        unsafe { CoUninitialize() };
     }
     run_result
 }
@@ -417,7 +462,7 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
     let join = std::thread::Builder::new()
         .name("wasapi-loopback-capture".into())
         .spawn(move || {
-            let _ = unsafe { run_capture(target_pid, stop_raw, &tx) };
+            let _ = run_capture(target_pid, stop_raw, &tx);
         })
         .map_err(|e| {
             let _ = unsafe { CloseHandle(stop_event) };
@@ -442,7 +487,7 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
             let _ = unsafe { SetEvent(stop_event) };
             let _ = join.join();
             let _ = unsafe { CloseHandle(stop_event) };
-            Err(napi::Error::from_reason("WASAPI startup timed out".into()))
+            Err(napi::Error::from_reason("WASAPI startup timed out"))
         }
     }
 }
