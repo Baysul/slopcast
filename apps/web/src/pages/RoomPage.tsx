@@ -1,4 +1,4 @@
-import { ConnectionState, Room, RoomEvent } from 'livekit-client';
+import { ConnectionState, type RemoteTrack, Room, RoomEvent } from 'livekit-client';
 import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -23,6 +23,7 @@ export const RoomPage: React.FC = () => {
 
   const roomRef = useRef<Room | null>(null);
   const connectGenRef = useRef(0);
+  const managedStreamRef = useRef<MediaStream | null>(null);
 
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href).catch(() => {});
@@ -42,6 +43,12 @@ export const RoomPage: React.FC = () => {
     setMediaStream(null);
     setParticipantCount(0);
 
+    if (managedStreamRef.current) {
+      managedStreamRef.current.getTracks().forEach((t) => {
+        t.stop();
+      });
+      managedStreamRef.current = null;
+    }
     if (roomRef.current) {
       roomRef.current.removeAllListeners();
       roomRef.current.disconnect();
@@ -51,23 +58,35 @@ export const RoomPage: React.FC = () => {
     const room = new Room({ adaptiveStream: true });
     roomRef.current = room;
 
-    room.on(RoomEvent.TrackSubscribed, (track) => {
+    room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
       if (isStale()) return;
-      const stream = track.mediaStream;
-      if (stream) {
-        setMediaStream(stream);
+      if (!managedStreamRef.current) {
+        managedStreamRef.current = new MediaStream();
       }
+      managedStreamRef.current.addTrack(track.mediaStreamTrack);
+      setMediaStream(new MediaStream(managedStreamRef.current.getTracks()));
       setConnectionStatus('live');
       setStatusText('Live');
     });
 
-    room.on(RoomEvent.TrackUnsubscribed, () => {
+    room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
       if (isStale()) return;
+      if (managedStreamRef.current) {
+        managedStreamRef.current.removeTrack(track.mediaStreamTrack);
+      }
       const hasTracks = [...room.remoteParticipants.values()].some((p) => p.trackPublications.size > 0);
       if (!hasTracks) {
+        if (managedStreamRef.current) {
+          managedStreamRef.current.getTracks().forEach((t) => {
+            t.stop();
+          });
+          managedStreamRef.current = null;
+        }
         setMediaStream(null);
         setConnectionStatus('disconnected');
         setStatusText('Stream ended — waiting for presenter...');
+      } else {
+        setMediaStream(new MediaStream(managedStreamRef.current?.getTracks() ?? []));
       }
     });
 
@@ -107,26 +126,28 @@ export const RoomPage: React.FC = () => {
       }
     });
 
-    const livekitUrl = (window as { __SLOPCAST_CONFIG__?: { livekitUrl?: string } }).__SLOPCAST_CONFIG__?.livekitUrl;
-
     const apiEndpoint = (window as { __SLOPCAST_CONFIG__?: { apiEndpoint?: string } }).__SLOPCAST_CONFIG__?.apiEndpoint;
-    const baseUrl = livekitUrl
-      ? livekitUrl.replace(/^ws(s?):\/\//, 'http$1://')
-      : apiEndpoint
-        ? apiEndpoint
+    const injectedLivekitUrl = (window as { __SLOPCAST_CONFIG__?: { livekitUrl?: string } }).__SLOPCAST_CONFIG__
+      ?.livekitUrl;
+
+    const baseUrl = apiEndpoint
+      ? apiEndpoint
+      : injectedLivekitUrl
+        ? injectedLivekitUrl.replace(/^ws(s?):\/\//, 'http$1://')
         : `${window.location.protocol}//${window.location.hostname}:3001`;
 
-    const getToken = async (): Promise<string> => {
+    const getToken = async (): Promise<{ token: string; livekitUrl: string }> => {
       const res = await fetch(`${baseUrl}/api/rooms/${roomId}/token`);
       if (!res.ok) throw new Error('Failed to fetch spectator token');
-      const data = (await res.json()) as { token: string };
-      return data.token;
+      const data = (await res.json()) as { token: string; livekitUrl: string };
+      return data;
     };
 
-    const livekitUrlForClient = livekitUrl || `ws://${window.location.hostname}:7880`;
-
     getToken()
-      .then((token) => room.connect(livekitUrlForClient, token))
+      .then(({ token, livekitUrl }) => {
+        const livekitUrlForClient = livekitUrl || injectedLivekitUrl || `ws://${window.location.hostname}:7880`;
+        return room.connect(livekitUrlForClient, token);
+      })
       .catch((err) => {
         if (isStale()) return;
         setConnectionStatus('error');
@@ -138,6 +159,12 @@ export const RoomPage: React.FC = () => {
     initializeConnection();
     return () => {
       connectGenRef.current += 1;
+      if (managedStreamRef.current) {
+        managedStreamRef.current.getTracks().forEach((t) => {
+          t.stop();
+        });
+        managedStreamRef.current = null;
+      }
       if (roomRef.current) {
         roomRef.current.removeAllListeners();
         roomRef.current.disconnect();
