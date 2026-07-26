@@ -244,6 +244,17 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('switch-audio-capture', (_event, targetId: number | string) => {
+    try {
+      // Switch the audio target on the fly without destroying the virtual capture
+      // node — the existing MediaStreamTrack stays alive and seamless.
+      return native.switchAudioCapture(targetId);
+    } catch (err) {
+      console.error('switch-audio-capture IPC error:', err);
+      return false;
+    }
+  });
+
   ipcMain.handle('get-desktop-sources', async () => {
     const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
     return sources.map((s) => ({

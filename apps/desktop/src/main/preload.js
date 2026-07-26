@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAudioApps: () => ipcRenderer.invoke('get-audio-apps'),
   startAudioCapture: (targetId) => ipcRenderer.invoke('start-audio-capture', targetId),
   stopAudioCapture: () => ipcRenderer.invoke('stop-audio-capture'),
+  switchAudioCapture: (targetId) => ipcRenderer.invoke('switch-audio-capture', targetId),
   getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
   clipboardWriteText: (text) => ipcRenderer.invoke('clipboard-write-text', text),
   resolveAudioSource: (opts) => ipcRenderer.invoke('resolve-audio-source', opts),
