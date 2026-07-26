@@ -161,52 +161,9 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
     }
 }
 
-fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IAudioClient> {
-    let mut activation_params = AUDIOCLIENT_ACTIVATION_PARAMS {
-        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
-            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
-                TargetProcessId: target_pid,
-                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-            },
-        },
-    };
-
-    let raw_prop = PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_BLOB,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    blob: BLOB {
-                        cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: (&mut activation_params as *mut AUDIOCLIENT_ACTIVATION_PARAMS)
-                            .cast::<u8>(),
-                    },
-                },
-            }),
-        },
-    };
-
-    let setup = Arc::new((Mutex::new(false), Condvar::new()));
-    let callback: IActivateAudioInterfaceCompletionHandler =
-        ActivationHandler { state: setup.clone() }.into();
-    // SAFETY: `raw_prop` points to `activation_params`, which lives until this
-    // function returns, and we block until activation completes (or times out)
-    // before returning, so the async operation cannot outlive the pointer.
-    let operation = unsafe {
-        ActivateAudioInterfaceAsync(
-            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-            &IAudioClient::IID,
-            Some(&raw_prop as *const PROPVARIANT),
-            &callback,
-        )?
-    };
-
+fn wait_for_activation(setup: &Arc<(Mutex<bool>, Condvar)>) -> windows::core::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let (lock, cvar) = &*setup;
+    let (lock, cvar) = &**setup;
     let mut completed =
         lock.lock().map_err(|e| Error::new(E_FAIL, format!("Activation mutex poisoned: {e}")))?;
     while !*completed {
@@ -219,7 +176,65 @@ fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IAudioCli
             .map_err(|e| Error::new(E_FAIL, format!("Activation condvar poisoned: {e}")))?;
         completed = guard;
     }
-    drop(completed);
+    Ok(())
+}
+
+fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IAudioClient> {
+    // Heap-allocated so the pointee address stays valid even if the async
+    // activation outlives this function (see the forget below).
+    let mut activation_params = Box::new(AUDIOCLIENT_ACTIVATION_PARAMS {
+        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                TargetProcessId: target_pid,
+                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+            },
+        },
+    });
+
+    let raw_prop = PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_BLOB,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0 {
+                    blob: BLOB {
+                        cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                        pBlobData: (&mut *activation_params as *mut AUDIOCLIENT_ACTIVATION_PARAMS)
+                            .cast::<u8>(),
+                    },
+                },
+            }),
+        },
+    };
+
+    let setup = Arc::new((Mutex::new(false), Condvar::new()));
+    let callback: IActivateAudioInterfaceCompletionHandler =
+        ActivationHandler { state: setup.clone() }.into();
+    // SAFETY: `raw_prop` points to the heap-allocated `activation_params`. On
+    // success the completion callback has fired before we return, so COM no
+    // longer references the params; on every error path below the Box is
+    // deliberately leaked so a late-completing operation can never read freed
+    // memory.
+    let operation = unsafe {
+        ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            &IAudioClient::IID,
+            Some(&raw_prop as *const PROPVARIANT),
+            &callback,
+        )?
+    };
+
+    let wait_result = wait_for_activation(&setup);
+    if wait_result.is_err() {
+        // The operation may still dereference the params after we return; leak
+        // them deliberately. Bounded one-time cost on a path that indicates the
+        // audio subsystem is already unresponsive.
+        std::mem::forget(activation_params);
+    }
+    wait_result?;
 
     let mut audio_client: Option<IUnknown> = None;
     let mut result = HRESULT(0);
