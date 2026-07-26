@@ -119,6 +119,7 @@ struct CaptureSession {
     stop: Arc<AtomicBool>,
     join: thread::JoinHandle<()>,
     shared: Arc<Mutex<SessionShared>>,
+    target_tx: mpsc::Sender<TargetSpec>,
 }
 
 #[derive(Default)]
@@ -338,8 +339,18 @@ impl GraphTracker {
                         info.pid = resolve_pid_by_name(name).map(|p| p as u32);
                     }
                 }
-                self.target.learn(global.id, &info);
-                self.app_nodes.insert(global.id, info);
+                let our_pid = std::process::id() as u32;
+                let is_slopcast = info.pid.is_some_and(|p| p == our_pid)
+                    || props
+                        .get("application.name")
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains("slopcast")
+                    || node_name.to_lowercase().contains("slopcast");
+                if !is_slopcast {
+                    self.target.learn(global.id, &info);
+                    self.app_nodes.insert(global.id, info);
+                }
             }
             _ => {}
         }
@@ -519,6 +530,27 @@ impl GraphTracker {
         self.link_proxies.drain().map(|(_, link)| link).collect()
     }
 
+    fn change_target(&mut self, new_target: TargetSpec, core: &pipewire::core::Core) {
+        for (_, link) in self.link_proxies.drain() {
+            let _ = core.destroy_object(link);
+        }
+        self.created_links.clear();
+        self.linked_pairs.clear();
+        self.pending_pairs.clear();
+
+        self.target = new_target;
+
+        let output_ports: Vec<u32> = self
+            .ports
+            .iter()
+            .filter(|(_, p)| p.is_output && self.is_linkable_app(p.node))
+            .map(|(id, _)| *id)
+            .collect();
+        for port_id in output_ports {
+            self.try_link(port_id);
+        }
+    }
+
     fn publish_links(&self, shared: &Arc<Mutex<SessionShared>>) {
         if let Ok(mut s) = shared.lock() {
             s.link_ids = self.created_links.keys().map(|id| *id as i32).collect();
@@ -649,6 +681,7 @@ fn run_capture_session(
     shared: Arc<Mutex<SessionShared>>,
     stop: Arc<AtomicBool>,
     ready_tx: mpsc::Sender<Result<(), String>>,
+    target_rx: mpsc::Receiver<TargetSpec>,
 ) {
     pipewire::init();
 
@@ -710,6 +743,13 @@ fn run_capture_session(
 
     while !stop.load(Ordering::SeqCst) {
         pw.main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+
+        while let Ok(new_target) = target_rx.try_recv() {
+            tracker.borrow_mut().change_target(new_target, &pw.core);
+            if let Ok(mut s) = shared.lock() {
+                s.link_ids.clear();
+            }
+        }
 
         if metadata_watch.is_none()
             && let Some(global) = tracker.borrow_mut().take_pending_metadata()
@@ -777,13 +817,14 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
     let shared = Arc::new(Mutex::new(SessionShared::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    let (target_tx, target_rx) = mpsc::channel::<TargetSpec>();
 
     let join = {
         let shared = shared.clone();
         let stop = stop.clone();
         thread::Builder::new()
             .name("pw-window-audio-capture".into())
-            .spawn(move || run_capture_session(target, shared, stop, ready_tx))
+            .spawn(move || run_capture_session(target, shared, stop, ready_tx, target_rx))
             .map_err(|e| {
                 napi::Error::from_reason(format!("Failed to spawn PipeWire worker: {e}"))
             })?
@@ -818,7 +859,7 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
         thread::sleep(Duration::from_millis(10));
     }
 
-    Ok(CaptureSession { stop, join, shared })
+    Ok(CaptureSession { stop, join, shared, target_tx })
 }
 
 fn stop_session(state: &mut CaptureState) {
@@ -937,6 +978,7 @@ fn collect_client_pids(
                 && !stream_name.is_empty()
                 && !stream_name.contains(CAPTURE_NODE_NAME)
             {
+                let our_pid = std::process::id() as i32;
                 let pid = props
                     .get("application.process.id")
                     .and_then(|v| v.parse::<i32>().ok())
@@ -951,6 +993,10 @@ fn collect_client_pids(
                     })
                     .or_else(|| resolve_pid_by_name(stream_name))
                     .unwrap_or(0);
+
+                if pid == our_pid || stream_name.to_lowercase().contains("slopcast") {
+                    return;
+                }
 
                 let mut list = ap.borrow_mut();
                 if !list.iter().any(|a| a.id == global.id as i32) {
@@ -994,6 +1040,27 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
     state.active_links.clear();
     state.is_active = true;
     state.session = Some(session);
+    Ok(true)
+}
+
+pub fn switch_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
+    let (node_id, system_audio) = parse_target_id(target_app_id)?;
+    let mut state_guard =
+        CAPTURE_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let Some(state) = state_guard.as_mut() else {
+        return Err(napi::Error::from_reason("No active audio capture session to switch"));
+    };
+    let Some(session) = &state.session else {
+        return Err(napi::Error::from_reason("No active audio capture session to switch"));
+    };
+
+    let target = TargetSpec { node_id, system_audio, ..TargetSpec::default() };
+    session.target_tx.send(target).map_err(|e| {
+        napi::Error::from_reason(format!("Failed to send audio target switch: {e}"))
+    })?;
+
+    state.target_app_id = node_id.map(|id| id as i32);
+    state.active_links.clear();
     Ok(true)
 }
 

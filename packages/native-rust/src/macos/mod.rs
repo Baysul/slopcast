@@ -134,6 +134,10 @@ pub fn is_audio_capture_active() -> NapiResult<bool> {
     Ok(guard.as_ref().map(|s| s.is_active).unwrap_or(false))
 }
 
+pub fn switch_audio_capture(_: &napi::Either<String, i32>) -> NapiResult<bool> {
+    Err(napi::Error::from_reason("Audio target switching is not yet supported on macOS"))
+}
+
 pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
     None
 }

@@ -22,3 +22,12 @@ export interface ErrorPayload {
   message: string;
   code?: string;
 }
+
+export interface AudioApp {
+  id: number;
+  name: string;
+  processId: number;
+  bundleId?: string | null;
+}
+
+export type AudioTargetId = number | '__system_audio__';
