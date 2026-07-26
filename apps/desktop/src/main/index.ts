@@ -49,7 +49,7 @@ switch (process.platform) {
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-gpu-memory-buffer-video-frames');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
-app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
+// app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
 app.commandLine.appendSwitch('enable-features', features.join(','));
 app.commandLine.appendSwitch('enable-low-latency-video-decoder');
 app.commandLine.appendSwitch('disable-background-timer-throttling');

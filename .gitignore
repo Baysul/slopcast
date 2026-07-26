@@ -34,6 +34,10 @@ npm-debug.log*
 
 # Tool config
 .opencode/
+.impeccable/
+
+# Test artifacts
+test-output/
 
 # Misc
 .cache/
