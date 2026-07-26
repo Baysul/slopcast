@@ -16,10 +16,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const CAPTURE_NODE_NAME: &str = "Slopcast-Window-Audio";
-const CAPTURE_NODE_DESCRIPTION: &str = "Slopcast Window Audio";
+const CAPTURE_NODE_DESCRIPTION: &str = "Slopcast-Window-Audio";
 const ADAPTER_FACTORY: &str = "adapter";
-const NULL_SINK_FACTORY: &str = "support.null-audio-sink";
-const CAPTURE_MEDIA_CLASS: &str = "Audio/Source/Virtual";
 const LINK_FACTORY: &str = "link-factory";
 
 struct PwCtx {
@@ -100,7 +98,7 @@ fn parse_target_id(target: &Either<String, i32>) -> NapiResult<(Option<u32>, boo
 struct CaptureState {
     is_active: bool,
     target_app_id: Option<i32>,
-    virtual_sink_id: Option<i32>,
+    capture_node_id: Option<i32>,
     active_links: Vec<i32>,
     session: Option<CaptureSession>,
 }
@@ -110,7 +108,7 @@ impl CaptureState {
         Self {
             is_active: false,
             target_app_id: None,
-            virtual_sink_id: None,
+            capture_node_id: None,
             active_links: Vec::new(),
             session: None,
         }
@@ -125,7 +123,7 @@ struct CaptureSession {
 
 #[derive(Default)]
 struct SessionShared {
-    sink_id: Option<u32>,
+    capture_node_id: Option<u32>,
     link_ids: Vec<i32>,
 }
 
@@ -177,15 +175,15 @@ impl AppNodeInfo {
     }
 }
 
+/// Channel layout of the capture node, as an `audio.position` property value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChannelLayout {
-    channels: u32,
     position: String,
 }
 
 impl ChannelLayout {
     fn stereo() -> Self {
-        Self { channels: 2, position: "FL,FR".into() }
+        Self { position: "FL,FR".into() }
     }
 
     fn from_audio_info(info: &AudioInfoRaw) -> Option<Self> {
@@ -205,7 +203,7 @@ impl ChannelLayout {
             }
             names.push(name);
         }
-        Some(Self { channels, position: names.join(",") })
+        Some(Self { position: names.join(",") })
     }
 }
 
@@ -234,7 +232,7 @@ struct GraphTracker {
     target: TargetSpec,
     core: pipewire::core::CoreRc,
     factory_name: Rc<RefCell<Option<String>>>,
-    sink_node: Option<u32>,
+    capture_node_id: Option<u32>,
     app_nodes: HashMap<u32, AppNodeInfo>,
     ports: HashMap<u32, PortInfo>,
     linked_pairs: HashSet<(u32, u32)>,
@@ -257,7 +255,7 @@ impl GraphTracker {
             target,
             core,
             factory_name,
-            sink_node: None,
+            capture_node_id: None,
             app_nodes: HashMap::new(),
             ports: HashMap::new(),
             linked_pairs: HashSet::new(),
@@ -285,10 +283,10 @@ impl GraphTracker {
     }
 
     fn remove_global(&mut self, id: u32, shared: &Arc<Mutex<SessionShared>>) {
-        if self.sink_node == Some(id) {
-            self.sink_node = None;
+        if self.capture_node_id == Some(id) {
+            self.capture_node_id = None;
             if let Ok(mut s) = shared.lock() {
-                s.sink_id = None;
+                s.capture_node_id = None;
             }
         }
         self.system_sinks.remove(&id);
@@ -312,9 +310,9 @@ impl GraphTracker {
         let media_class = props.get("media.class").unwrap_or("");
         let node_name = props.get("node.name").unwrap_or("");
         if node_name == CAPTURE_NODE_NAME {
-            self.sink_node = Some(global.id);
+            self.capture_node_id = Some(global.id);
             if let Ok(mut s) = shared.lock() {
-                s.sink_id = Some(global.id);
+                s.capture_node_id = Some(global.id);
             }
             return;
         }
@@ -324,17 +322,15 @@ impl GraphTracker {
             }
             "Stream/Output/Audio" => {
                 let mut info = AppNodeInfo::from_props(props);
-                if info.pid.is_none_or(|p| p == 0) {
-                    if let Some(cid) = props.get("client.id").and_then(|v| v.parse::<u32>().ok()) {
-                        if let Some(&p) =
-                            self.client_pids.get(&cid).filter(|p| is_valid_pid(**p as i32))
-                        {
-                            info.pid = Some(p);
-                        }
-                    }
+                if info.pid.is_none_or(|p| p == 0)
+                    && let Some(cid) = props.get("client.id").and_then(|v| v.parse::<u32>().ok())
+                    && let Some(&p) =
+                        self.client_pids.get(&cid).filter(|p| is_valid_pid(**p as i32))
+                {
+                    info.pid = Some(p);
                 }
                 if info.pid.is_none_or(|p| p == 0) {
-                    info.pid = info.pid.or_else(|| info.fallback_pid());
+                    info.pid = info.fallback_pid();
                 }
                 if info.pid.is_none_or(|p| p == 0) {
                     let name = props.get("application.name").unwrap_or("");
@@ -380,7 +376,7 @@ impl GraphTracker {
         self.ports.insert(id, PortInfo { node, is_output, channel });
 
         let port = &self.ports[&id];
-        if !port.is_output && self.sink_node == Some(port.node) {
+        if !port.is_output && self.capture_node_id == Some(port.node) {
             let candidates: Vec<u32> = self
                 .ports
                 .iter()
@@ -444,23 +440,23 @@ impl GraphTracker {
     }
 
     fn try_link(&mut self, port_id: u32) {
-        let Some(sink) = self.sink_node else { return };
+        let Some(capture) = self.capture_node_id else { return };
         let Some(port) = self.ports.get(&port_id) else { return };
         if !port.is_output || !self.is_linkable_app(port.node) {
             return;
         }
         let Some(channel) = port.channel.as_deref() else { return };
-        let Some(sink_port) = self.ports.iter().find_map(|(pid, p)| {
-            (!p.is_output && p.node == sink && p.channel.as_deref() == Some(channel))
+        let Some(capture_port) = self.ports.iter().find_map(|(pid, p)| {
+            (!p.is_output && p.node == capture && p.channel.as_deref() == Some(channel))
                 .then_some(*pid)
         }) else {
             return;
         };
-        let pair = (port_id, sink_port);
+        let pair = (port_id, capture_port);
         if self.linked_pairs.contains(&pair) || self.pending_pairs.contains(&pair) {
             return;
         }
-        if self.create_link(port_id, sink_port, port.node, sink) {
+        if self.create_link(port_id, capture_port, port.node, capture) {
             self.pending_pairs.insert(pair);
         }
     }
@@ -491,17 +487,17 @@ impl GraphTracker {
         }
     }
 
-    fn on_sink_destroyed(&mut self, shared: &Arc<Mutex<SessionShared>>) {
-        let Some(sink) = self.sink_node.take() else { return };
-        let sink_ports: HashSet<u32> =
-            self.ports.iter().filter(|(_, p)| p.node == sink).map(|(pid, _)| *pid).collect();
-        self.ports.retain(|_, p| p.node != sink);
+    fn on_capture_node_destroyed(&mut self, shared: &Arc<Mutex<SessionShared>>) {
+        let Some(capture) = self.capture_node_id.take() else { return };
+        let capture_ports: HashSet<u32> =
+            self.ports.iter().filter(|(_, p)| p.node == capture).map(|(pid, _)| *pid).collect();
+        self.ports.retain(|_, p| p.node != capture);
         self.pending_pairs
-            .retain(|(out, inp)| !sink_ports.contains(out) && !sink_ports.contains(inp));
+            .retain(|(out, inp)| !capture_ports.contains(out) && !capture_ports.contains(inp));
         let dead: Vec<u32> = self
             .created_links
             .iter()
-            .filter(|(_, (out, inp))| sink_ports.contains(out) || sink_ports.contains(inp))
+            .filter(|(_, (out, inp))| capture_ports.contains(out) || capture_ports.contains(inp))
             .map(|(id, _)| *id)
             .collect();
         for id in dead {
@@ -512,7 +508,7 @@ impl GraphTracker {
         }
         self.publish_links(shared);
         if let Ok(mut s) = shared.lock() {
-            s.sink_id = None;
+            s.capture_node_id = None;
         }
     }
 
@@ -537,34 +533,40 @@ fn port_channel_from_name(port_name: Option<&str>) -> Option<String> {
     if suffix.is_empty() { None } else { Some(suffix.into()) }
 }
 
-fn create_capture_sink(
-    core: &pipewire::core::CoreRc,
+/// Creates the virtual node the target application's audio is linked into.
+///
+/// It is a virtual *source*, not a null sink: Chromium's PulseAudio backend
+/// drops every source that is a sink monitor (`monitor_of_sink` set) when
+/// enumerating input devices, so a null sink's `.monitor` can never reach
+/// `enumerateDevices()` in the renderer. A virtual source is a first-class
+/// PulseAudio source and still exposes input ports to link into.
+fn create_capture_node(
+    core: &pipewire::core::Core,
     layout: &ChannelLayout,
-) -> Result<pipewire::node::Node, pipewire::Error> {
+) -> Result<pipewire::node::Node, String> {
     core.create_object::<pipewire::node::Node>(
         ADAPTER_FACTORY,
         &properties! {
-            "factory.name" => NULL_SINK_FACTORY,
+            "factory.name" => "support.null-audio-sink",
             "node.name" => CAPTURE_NODE_NAME,
             "node.description" => CAPTURE_NODE_DESCRIPTION,
-            "device.description" => CAPTURE_NODE_DESCRIPTION,
-            "media.class" => CAPTURE_MEDIA_CLASS,
-            "audio.channels" => layout.channels.to_string(),
-            "audio.position" => layout.position.clone(),
-            "monitor.channel-volumes" => "true",
+            "media.class" => "Audio/Source/Virtual",
+            "audio.position" => layout.position.as_str(),
+            "object.linger" => "false",
         },
     )
+    .map_err(|e| format!("Failed to create virtual capture node: {e}"))
 }
 
-fn destroy_capture_sink(
-    core: &pipewire::core::CoreRc,
+fn destroy_capture_node(
+    node: &mut Option<pipewire::node::Node>,
+    core: &pipewire::core::Core,
     tracker: &Rc<RefCell<GraphTracker>>,
-    sink_proxy: &mut Option<pipewire::node::Node>,
     shared: &Arc<Mutex<SessionShared>>,
 ) {
-    tracker.borrow_mut().on_sink_destroyed(shared);
-    if let Some(old) = sink_proxy.take() {
-        let _ = core.destroy_object(old);
+    tracker.borrow_mut().on_capture_node_destroyed(shared);
+    if let Some(node) = node.take() {
+        let _ = core.destroy_object(node);
     }
 }
 
@@ -628,7 +630,7 @@ fn bind_default_sink(
 
 fn parse_json_name(json: &str) -> Option<String> {
     let key_pos = json.find(r#""name""#)?;
-    let after_colon = json[key_pos + 6..].splitn(2, ':').nth(1)?.trim_start();
+    let after_colon = json[key_pos + 6..].split_once(':')?.1.trim_start();
     let val = after_colon.strip_prefix('"')?;
     let mut out = String::new();
     let mut chars = val.chars();
@@ -682,14 +684,21 @@ fn run_capture_session(
         .register();
 
     let desired_layout = Rc::new(RefCell::new(ChannelLayout::stereo()));
-    let mut sink_layout = ChannelLayout::stereo();
-    let mut sink_proxy = match create_capture_sink(&pw.core, &sink_layout) {
+    let mut capture_layout = ChannelLayout::stereo();
+    let mut capture_node = match create_capture_node(&pw.core, &capture_layout) {
         Ok(node) => Some(node),
         Err(e) => {
-            let _ = ready_tx.send(Err(e.to_string()));
+            let _ = ready_tx.send(Err(e));
             return;
         }
     };
+
+    for _ in 0..100 {
+        pw.main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+        if shared.lock().ok().is_some_and(|s| s.capture_node_id.is_some_and(|id| id != 0)) {
+            break;
+        }
+    }
 
     let _ = ready_tx.send(Ok(()));
 
@@ -715,11 +724,11 @@ fn run_capture_session(
         }
 
         let layout = desired_layout.borrow().clone();
-        if layout != sink_layout {
-            destroy_capture_sink(&pw.core, &tracker, &mut sink_proxy, &shared);
-            if let Ok(node) = create_capture_sink(&pw.core, &layout) {
-                sink_proxy = Some(node);
-                sink_layout = layout;
+        if layout != capture_layout {
+            destroy_capture_node(&mut capture_node, &pw.core, &tracker, &shared);
+            if let Ok(node) = create_capture_node(&pw.core, &layout) {
+                capture_node = Some(node);
+                capture_layout = layout;
             }
         }
     }
@@ -730,9 +739,7 @@ fn run_capture_session(
     for link in tracker.borrow_mut().drain_links() {
         let _ = pw.core.destroy_object(link);
     }
-    if let Some(sink) = sink_proxy.take() {
-        let _ = pw.core.destroy_object(sink);
-    }
+    destroy_capture_node(&mut capture_node, &pw.core, &tracker, &shared);
 
     if let Ok(pending) = pw.core.sync(0) {
         let flush_done = Rc::new(RefCell::new(false));
@@ -761,7 +768,7 @@ fn run_capture_session(
     }
 
     if let Ok(mut s) = shared.lock() {
-        s.sink_id = None;
+        s.capture_node_id = None;
         s.link_ids.clear();
     }
 }
@@ -798,7 +805,7 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        if shared.lock().ok().is_some_and(|s| s.sink_id.is_some()) {
+        if shared.lock().ok().is_some_and(|s| s.capture_node_id.is_some()) {
             break;
         }
         if Instant::now() >= deadline {
@@ -821,7 +828,7 @@ fn stop_session(state: &mut CaptureState) {
     }
     state.is_active = false;
     state.active_links.clear();
-    state.virtual_sink_id = None;
+    state.capture_node_id = None;
     state.target_app_id = None;
 }
 
@@ -981,7 +988,8 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
 
     let target = TargetSpec { node_id, system_audio, ..TargetSpec::default() };
     let session = spawn_capture_session(target)?;
-    state.virtual_sink_id = session.shared.lock().ok().and_then(|s| s.sink_id).map(|id| id as i32);
+    state.capture_node_id =
+        session.shared.lock().ok().and_then(|s| s.capture_node_id).map(|id| id as i32);
     state.target_app_id = node_id.map(|id| id as i32);
     state.active_links.clear();
     state.is_active = true;
@@ -1007,8 +1015,8 @@ pub fn is_audio_capture_active() -> NapiResult<bool> {
         && let Ok(shared) = session.shared.lock()
     {
         state.active_links = shared.link_ids.clone();
-        if state.virtual_sink_id.is_none() {
-            state.virtual_sink_id = shared.sink_id.map(|id| id as i32);
+        if state.capture_node_id.is_none() {
+            state.capture_node_id = shared.capture_node_id.map(|id| id as i32);
         }
     }
     Ok(state.is_active)

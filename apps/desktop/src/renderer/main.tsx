@@ -7,16 +7,6 @@ import { Badge } from './components/ui/Badge';
 import { primeAudioContext, ToastViewport, useToasts } from './components/ui/Toast';
 import './index.css';
 
-// Module-level VAAPI diagnostic — runs before React mounts, no IPC needed.
-console.log(
-  '[Presenter] Module load — H.264 profiles:',
-  RTCRtpSender.getCapabilities('video')
-    ?.codecs?.filter((c) => c.mimeType.toUpperCase() === 'VIDEO/H264')
-    .map((c) => c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1])
-    .filter(Boolean)
-    .join(', ') || 'NONE',
-);
-
 declare global {
   interface Window {
     electronAPI?: {
@@ -69,22 +59,29 @@ interface DesktopSource {
 }
 
 // Device labels are hidden until mic access is granted once, so we unlock them.
+let audioDevicesLogged = false;
+
 const findCaptureAudioDevice = async (): Promise<MediaDeviceInfo | null> => {
-  let devices = await navigator.mediaDevices.enumerateDevices();
-  if (devices.some((d) => d.kind === 'audioinput' && !d.label)) {
-    const unlock = await navigator.mediaDevices.getUserMedia({ audio: true });
-    for (const t of unlock.getTracks()) {
-      t.stop();
-    }
-    devices = await navigator.mediaDevices.enumerateDevices();
+  const devices = await navigator.mediaDevices.enumerateDevices();
+
+  if (!audioDevicesLogged) {
+    audioDevicesLogged = true;
+    const allInputs = devices.filter((d) => d.kind === 'audioinput');
+    console.log(
+      '[findCaptureAudioDevice] all audioinput devices:',
+      allInputs.map((d) => `${d.deviceId.substring(0, 8)}… "${d.label}" group=${d.groupId.substring(0, 8)}…`),
+    );
   }
-  return (
-    devices.find(
-      (d) =>
-        d.kind === 'audioinput' &&
-        (d.label.toLowerCase().includes('slopcast') || d.label.toLowerCase().includes('slopcast-window-audio')),
-    ) ?? null
+
+  // The native layer names the virtual source "Slopcast-Window-Audio"; Chromium
+  // surfaces the PipeWire node description as the device label.
+  const target = devices.find((d) => d.kind === 'audioinput' && d.label.toLowerCase().includes('slopcast'));
+  if (!target) return null;
+
+  console.log(
+    `[findCaptureAudioDevice] found: id=${target.deviceId.substring(0, 8)}… label="${target.label}" group=${target.groupId.substring(0, 8)}…`,
   );
+  return target;
 };
 
 // Read from RTCPeerConnection.getStats() of the published outbound track.
@@ -346,6 +343,7 @@ export const PresenterApp: React.FC = () => {
   const [roomCode, setRoomCode] = useState<string>('');
   const [shareUrl, setShareUrl] = useState<string>('');
   const [apiEndpoint, setApiEndpoint] = useState<string>('http://localhost:3001');
+  const [livekitUrl, setLivekitUrl] = useState<string>('');
   const [isWayland, setIsWayland] = useState<boolean>(false);
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
   const [selectedAudioAppId, setSelectedAudioAppId] = useState<number | null>(null);
@@ -477,6 +475,7 @@ export const PresenterApp: React.FC = () => {
 
         const config = await window.electronAPI.getAppConfig();
         if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
+        if (config.livekitUrl) setLivekitUrl(config.livekitUrl);
       }
       loadAudioApps();
 
@@ -730,7 +729,8 @@ export const PresenterApp: React.FC = () => {
       const code = room.code as string;
       const url = room.shareUrl as string;
       const token = room.token as string;
-      const livekitUrl = room.livekitUrl as string;
+      const apiLivekitUrl = room.livekitUrl as string;
+      const resolvedLivekitUrl = livekitUrl || apiLivekitUrl;
 
       roomCodeRef.current = code;
       setRoomCode(code);
@@ -762,7 +762,7 @@ export const PresenterApp: React.FC = () => {
         }
       });
 
-      await lkRoom.connect(livekitUrl, token);
+      await lkRoom.connect(resolvedLivekitUrl, token);
     } catch (err) {
       console.error('Failed to create room:', err);
       const message = err instanceof Error ? err.message : 'Failed to create room';
@@ -822,16 +822,24 @@ export const PresenterApp: React.FC = () => {
     return track;
   };
 
-  // Returns the selected app's audio track from the virtual capture microphone.
+  // Returns the selected app's audio track from the virtual capture source.
   const captureAudioTrack = async (targetId: number): Promise<MediaStreamTrack | null> => {
     const started = await window.electronAPI?.startAudioCapture(targetId);
     if (!started) {
       throw new Error('Native audio capture failed to start');
     }
 
-    // The virtual mic can take a moment to appear in Chromium's device list;
-    // poll briefly for it.
-    for (let attempt = 0; attempt < 40; attempt++) {
+    // enumerateDevices() only reports device labels once the page holds mic
+    // access, and we match the virtual source by label. Open and release the
+    // default mic to claim that access (the main process auto-grants it).
+    const unlock = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+    for (const t of unlock?.getTracks() ?? []) {
+      t.stop();
+    }
+
+    // The virtual source is created asynchronously by PipeWire and reaches
+    // Chromium through the PulseAudio compat layer, so poll briefly for it.
+    for (let attempt = 0; attempt < 20; attempt++) {
       const device = await findCaptureAudioDevice();
       if (device) {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -849,7 +857,7 @@ export const PresenterApp: React.FC = () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error('Virtual capture microphone did not appear as an audio device');
+    throw new Error('Virtual capture source did not appear as an audio input device');
   };
 
   const handleStartShare = async () => {
@@ -919,24 +927,34 @@ export const PresenterApp: React.FC = () => {
         throw new Error('Not connected to a room');
       }
 
-      // Unpublish any previous tracks first (e.g. after restart).
-      const existingPubs = [...room.localParticipant.trackPublications.values()];
-      for (const pub of existingPubs) {
-        if (pub.track) {
-          await room.localParticipant.unpublishTrack(pub.track);
+      // Unpublish any previous tracks before re-publishing (e.g. after restart).
+      let hadExisting = false;
+      for (const pub of room.localParticipant.trackPublications.values()) {
+        const t = pub.track;
+        if (t) {
+          await room.localParticipant.unpublishTrack(t);
+          hadExisting = true;
         }
+      }
+
+      if (hadExisting) {
+        // Give the SDP renegotiation a moment to settle before publishing.
+        await new Promise((r) => setTimeout(r, 100));
       }
 
       // Reset stats accumulator for fresh telemetry.
       statsPrevRef.current = { vBytes: 0, vFrames: 0, vTs: 0, vInit: false, aBytes: 0, aTs: 0, aInit: false };
 
+      // `screenShareEncoding: undefined` overrides LiveKit's 2.5 Mbps default
+      // preset so it negotiates the track without a target bitrate. With one,
+      // it munges `x-google-start-bitrate` into the sending m-section's fmtp,
+      // which then disagrees with the recvonly placeholder sections LiveKit
+      // pre-populates for the same VP8 payload type — libwebrtc rejects that as
+      // a bundled payload type collision (RFC 8843). The encoder parameters we
+      // actually want are applied on the sender right after publishing.
       await room.localParticipant.publishTrack(videoTrack, {
         source: Track.Source.ScreenShare,
-        videoEncoding: {
-          maxBitrate: bitrateLimitRef.current,
-          maxFramerate: streamFpsRef.current,
-          priority: 'high',
-        },
+        screenShareEncoding: undefined,
         simulcast: false,
       });
 
@@ -974,10 +992,10 @@ export const PresenterApp: React.FC = () => {
     // Unpublish tracks from LiveKit but keep the room connected.
     const room = liveKitRoomRef.current;
     if (room) {
-      const pubs = [...room.localParticipant.trackPublications.values()];
-      for (const pub of pubs) {
-        if (pub.track) {
-          await room.localParticipant.unpublishTrack(pub.track);
+      for (const pub of room.localParticipant.trackPublications.values()) {
+        const t = pub.track;
+        if (t) {
+          await room.localParticipant.unpublishTrack(t);
         }
       }
     }
