@@ -34,7 +34,14 @@ npm-debug.log*
 
 # Tool config
 .opencode/
+opencode.json
 .impeccable/
+.mcp/
+
+# Project documentation
+AGENTS.md
+DESIGN.md
+PRODUCT.md
 
 # Test artifacts
 test-output/
