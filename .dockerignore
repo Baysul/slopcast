@@ -19,3 +19,4 @@ packages/native-rust/index.js
 packages/native-rust/index.d.ts
 packages/native-rust/*.node
 packages/native-rust/Cargo.lock
+slopcast.config.json
