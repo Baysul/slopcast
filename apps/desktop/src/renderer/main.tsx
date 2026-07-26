@@ -1,5 +1,5 @@
 import { Room, RoomEvent, Track } from 'livekit-client';
-import { Check, ScreenShare } from 'lucide-react';
+import { Check, ChevronDown, ScreenShare } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -15,6 +15,7 @@ declare global {
       getAudioApps: () => Promise<Array<{ id: number; name: string; processId: number }>>;
       startAudioCapture: (targetId: number) => Promise<boolean>;
       stopAudioCapture: () => Promise<boolean>;
+      switchAudioCapture: (targetId: number) => Promise<boolean>;
       getDesktopSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
       clipboardWriteText: (text: string) => Promise<boolean>;
       resolveAudioSource: (opts?: {
@@ -361,6 +362,7 @@ export const PresenterApp: React.FC = () => {
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   // ── Stream Settings (user-configurable encoder parameters) ───────────
+  const [streamSettingsOpen, setStreamSettingsOpen] = useState(true);
   const [streamFps, setStreamFps] = useState(60);
   const [bitrateLimit, setBitrateLimit] = useState(20_000_000);
   const [scaleResolutionDownBy, setScaleResolutionDownBy] = useState(1.0);
@@ -385,6 +387,7 @@ export const PresenterApp: React.FC = () => {
   const streamFpsRef = useRef(60);
   const bitrateLimitRef = useRef(20_000_000);
   const scaleRef = useRef(1.0);
+  const audioAppIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     isSharingRef.current = isSharing;
@@ -405,6 +408,87 @@ export const PresenterApp: React.FC = () => {
   useEffect(() => {
     scaleRef.current = scaleResolutionDownBy;
   }, [scaleResolutionDownBy]);
+
+  useEffect(() => {
+    audioAppIdRef.current = selectedAudioAppId;
+  }, [selectedAudioAppId]);
+
+  const captureAudioTrack = useCallback(async (targetId: number): Promise<MediaStreamTrack | null> => {
+    const started = await window.electronAPI?.startAudioCapture(targetId);
+    if (!started) {
+      throw new Error('Native audio capture failed to start');
+    }
+
+    const unlock = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+    for (const t of unlock?.getTracks() ?? []) {
+      t.stop();
+    }
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const device = await findCaptureAudioDevice();
+      if (device) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: { exact: device.deviceId },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+        });
+        const track = stream.getAudioTracks()[0];
+        if (track) {
+          return track;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error('Virtual capture source did not appear as an audio input device');
+  }, []);
+
+  const replaceAudioTrack = useCallback(async (targetId: number): Promise<void> => {
+    const room = liveKitRoomRef.current;
+    if (!room) return;
+
+    // Tell Rust to switch which application's audio is linked into the
+    // virtual capture node. The node itself stays alive, the existing
+    // MediaStreamTrack continues producing audio — the content seamlessly
+    // changes to the new target's audio.
+    const switched = await window.electronAPI?.switchAudioCapture(targetId);
+    if (!switched) {
+      throw new Error('Native audio target switch failed');
+    }
+    audioAppIdRef.current = targetId;
+  }, []);
+
+  // Real-time audio source switching while sharing.
+  useEffect(() => {
+    if (!isSharing) return;
+    if (selectedAudioAppId === null) return;
+
+    const prevId = audioAppIdRef.current;
+    if (prevId === selectedAudioAppId) return;
+    if (prevId == null && selectedAudioAppId != null) {
+      audioAppIdRef.current = selectedAudioAppId;
+      return;
+    }
+
+    const switchAudio = async () => {
+      try {
+        await replaceAudioTrack(selectedAudioAppId);
+        setSelectedAudioAppId(selectedAudioAppId);
+        setAutoDetectedApp(null);
+        setAudioAppExplicitlySet(true);
+      } catch (err) {
+        console.error('[Presenter] audio switch failed:', err);
+        pushToast({
+          title: 'Audio switch failed',
+          description: 'Could not switch to the selected audio source.',
+          variant: 'error',
+        });
+      }
+    };
+    void switchAudio();
+  }, [selectedAudioAppId, isSharing, replaceAudioTrack, pushToast]);
 
   // Push live encoder parameter updates via the published track's sender.
   useEffect(() => {
@@ -433,12 +517,26 @@ export const PresenterApp: React.FC = () => {
         console.log(
           `[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps scale=${scale}`,
         );
+
+        // Re-apply audio if it was dropped during renegotiation.
+        const currentId = audioAppIdRef.current;
+        if (currentId != null) {
+          const hasAudio = (localStreamRef.current?.getAudioTracks().length ?? 0) > 0;
+          if (!hasAudio) {
+            console.log('[Presenter] Audio track lost after settings change, re-applying...');
+            try {
+              await replaceAudioTrack(currentId);
+            } catch (err) {
+              console.warn('[Presenter] audio re-apply failed:', err);
+            }
+          }
+        }
       } catch (err) {
         console.warn('[Presenter] live encoder update failed:', err);
       }
     };
     void update();
-  }, [streamFps, scaleResolutionDownBy, bitrateLimit, isSharing]);
+  }, [streamFps, scaleResolutionDownBy, bitrateLimit, isSharing, replaceAudioTrack]);
 
   // Bind the live capture stream to the local preview <video>.
   useEffect(() => {
@@ -517,6 +615,15 @@ export const PresenterApp: React.FC = () => {
       app = audioApps[0];
     }
 
+    // Layer 4: monitor/display source — fall back to system audio.
+    if (!app && window.electronAPI?.getCaptureContext) {
+      const ctx = await window.electronAPI.getCaptureContext();
+      setCaptureContext(ctx);
+      if (ctx?.sourceType === 'monitor') {
+        app = { id: -1, name: 'System Audio', processId: 0 };
+      }
+    }
+
     if (app) {
       setAutoDetectedApp(app);
       setSelectedAudioAppId(app.id);
@@ -571,11 +678,13 @@ export const PresenterApp: React.FC = () => {
       const room = liveKitRoomRef.current;
       const spectatorCount = room ? room.remoteParticipants.size : 0;
 
-      // Get the video sender from the published track.
+      // Get senders from published tracks.
       const videoPub = room?.localParticipant.videoTrackPublications.values().next().value;
-      const sender = (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+      const videoSender = (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+      const audioPub = room?.localParticipant.audioTrackPublications.values().next().value;
+      const audioSender = (audioPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
 
-      if (!sender) {
+      if (!videoSender) {
         setTelemetry((p) => ({
           ...p,
           live: true,
@@ -597,7 +706,10 @@ export const PresenterApp: React.FC = () => {
       const prev = statsPrevRef.current;
 
       try {
-        const stats = await sender.getStats();
+        const [videoStats, audioStats] = await Promise.all([
+          videoSender.getStats(),
+          audioSender ? audioSender.getStats() : Promise.resolve(null),
+        ]);
         let videoMime: string | null = null;
         let videoEnc: string | null = null;
         let audioMime: string | null = null;
@@ -610,48 +722,54 @@ export const PresenterApp: React.FC = () => {
         let encWidth: number | null = null;
         let encHeight: number | null = null;
 
-        for (const reportRaw of stats.values()) {
-          const report = reportRaw as RTCStatLike;
-          if (report.type === 'outbound-rtp') {
-            const ts = report.timestamp ?? 0;
-            const codecReport = report.codecId ? (stats.get(report.codecId) as RTCStatLike | undefined) : undefined;
+        for (const stats of [videoStats, audioStats]) {
+          if (!stats) continue;
+          for (const reportRaw of stats.values()) {
+            const report = reportRaw as RTCStatLike;
+            if (report.type === 'outbound-rtp') {
+              const ts = report.timestamp ?? 0;
+              const codecReport = report.codecId ? (stats.get(report.codecId) as RTCStatLike | undefined) : undefined;
 
-            if (report.kind === 'video') {
-              videoMime = codecReport?.mimeType ?? null;
-              videoEnc = codecReport?.implementation ?? null;
-              encWidth = report.frameWidth ?? null;
-              encHeight = report.frameHeight ?? null;
-              packetsSent += report.packetsSent || 0;
-              packetsLost += report.packetsLost || 0;
-              if (prev.vInit && ts > prev.vTs) {
-                const dt = (ts - prev.vTs) / 1000;
-                const db = (report.bytesSent ?? 0) - prev.vBytes;
-                if (db >= 0) videoBps = (db * 8) / dt;
-                if (typeof report.framesSent === 'number') {
-                  const df = report.framesSent - prev.vFrames;
-                  if (df >= 0) fps = df / dt;
+              if (report.kind === 'video') {
+                videoMime = codecReport?.mimeType ?? null;
+                videoEnc = codecReport?.implementation ?? null;
+                encWidth = report.frameWidth ?? null;
+                encHeight = report.frameHeight ?? null;
+                packetsSent += report.packetsSent || 0;
+                packetsLost += report.packetsLost || 0;
+                if (prev.vInit && ts > prev.vTs) {
+                  const dt = (ts - prev.vTs) / 1000;
+                  const db = (report.bytesSent ?? 0) - prev.vBytes;
+                  if (db >= 0) videoBps = (db * 8) / dt;
+                  if (typeof report.framesSent === 'number') {
+                    const df = report.framesSent - prev.vFrames;
+                    if (df >= 0) fps = df / dt;
+                  }
                 }
+                prev.vInit = true;
+                prev.vBytes = report.bytesSent ?? prev.vBytes;
+                prev.vFrames = typeof report.framesSent === 'number' ? report.framesSent : prev.vFrames;
+                prev.vTs = ts || prev.vTs;
+              } else if (report.kind === 'audio') {
+                audioMime = codecReport?.mimeType ?? null;
+                packetsSent += report.packetsSent || 0;
+                packetsLost += report.packetsLost || 0;
+                if (prev.aInit && ts > prev.aTs) {
+                  const dt = (ts - prev.aTs) / 1000;
+                  const db = (report.bytesSent ?? 0) - prev.aBytes;
+                  if (db >= 0) audioBps = (db * 8) / dt;
+                }
+                prev.aInit = true;
+                prev.aBytes = report.bytesSent ?? prev.aBytes;
+                prev.aTs = ts || prev.aTs;
               }
-              prev.vInit = true;
-              prev.vBytes = report.bytesSent ?? prev.vBytes;
-              prev.vFrames = typeof report.framesSent === 'number' ? report.framesSent : prev.vFrames;
-              prev.vTs = ts || prev.vTs;
-            } else if (report.kind === 'audio') {
-              audioMime = codecReport?.mimeType ?? null;
-              packetsSent += report.packetsSent || 0;
-              packetsLost += report.packetsLost || 0;
-              if (prev.aInit && ts > prev.aTs) {
-                const dt = (ts - prev.aTs) / 1000;
-                const db = (report.bytesSent ?? 0) - prev.aBytes;
-                if (db >= 0) audioBps = (db * 8) / dt;
+            } else if (report.type === 'candidate-pair') {
+              if (
+                (report.nominated || report.state === 'succeeded') &&
+                typeof report.currentRoundTripTime === 'number'
+              ) {
+                rttMs = report.currentRoundTripTime * 1000;
               }
-              prev.aInit = true;
-              prev.aBytes = report.bytesSent ?? prev.aBytes;
-              prev.aTs = ts || prev.aTs;
-            }
-          } else if (report.type === 'candidate-pair') {
-            if ((report.nominated || report.state === 'succeeded') && typeof report.currentRoundTripTime === 'number') {
-              rttMs = report.currentRoundTripTime * 1000;
             }
           }
         }
@@ -708,8 +826,14 @@ export const PresenterApp: React.FC = () => {
   const handleCreateRoom = async () => {
     primeAudioContext();
 
-    liveKitRoomRef.current?.disconnect();
-    liveKitRoomRef.current = null;
+    const oldRoom = liveKitRoomRef.current;
+    if (oldRoom) {
+      oldRoom.off(RoomEvent.ParticipantConnected);
+      oldRoom.off(RoomEvent.ParticipantDisconnected);
+      oldRoom.off(RoomEvent.Disconnected);
+      oldRoom.disconnect();
+      liveKitRoomRef.current = null;
+    }
 
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
@@ -744,14 +868,22 @@ export const PresenterApp: React.FC = () => {
         }
       });
 
-      const lkRoom = new Room();
+      const lkRoom = new Room({
+        publishDefaults: {
+          videoCodec: 'h264',
+        },
+      });
       liveKitRoomRef.current = lkRoom;
 
-      lkRoom.on(RoomEvent.ParticipantConnected, () => {
-        setSpectatorCount(lkRoom.remoteParticipants.size);
+      lkRoom.on(RoomEvent.ParticipantConnected, (participant) => {
+        if (!participant.isLocal) {
+          setSpectatorCount(lkRoom.remoteParticipants.size);
+        }
       });
-      lkRoom.on(RoomEvent.ParticipantDisconnected, () => {
-        setSpectatorCount(lkRoom.remoteParticipants.size);
+      lkRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
+        if (!participant.isLocal) {
+          setSpectatorCount(lkRoom.remoteParticipants.size);
+        }
       });
       lkRoom.on(RoomEvent.Disconnected, () => {
         if (liveKitRoomRef.current === lkRoom) {
@@ -822,44 +954,6 @@ export const PresenterApp: React.FC = () => {
     return track;
   };
 
-  // Returns the selected app's audio track from the virtual capture source.
-  const captureAudioTrack = async (targetId: number): Promise<MediaStreamTrack | null> => {
-    const started = await window.electronAPI?.startAudioCapture(targetId);
-    if (!started) {
-      throw new Error('Native audio capture failed to start');
-    }
-
-    // enumerateDevices() only reports device labels once the page holds mic
-    // access, and we match the virtual source by label. Open and release the
-    // default mic to claim that access (the main process auto-grants it).
-    const unlock = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
-    for (const t of unlock?.getTracks() ?? []) {
-      t.stop();
-    }
-
-    // The virtual source is created asynchronously by PipeWire and reaches
-    // Chromium through the PulseAudio compat layer, so poll briefly for it.
-    for (let attempt = 0; attempt < 20; attempt++) {
-      const device = await findCaptureAudioDevice();
-      if (device) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            deviceId: { exact: device.deviceId },
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-        });
-        const track = stream.getAudioTracks()[0];
-        if (track) {
-          return track;
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    throw new Error('Virtual capture source did not appear as an audio input device');
-  };
-
   const handleStartShare = async () => {
     primeAudioContext();
     try {
@@ -884,9 +978,12 @@ export const PresenterApp: React.FC = () => {
           setCaptureContext(ctx);
         }
 
-        if (isWayland && ctx?.de === 'kde') {
+        const isMonitor = ctx?.sourceType === 'monitor' || (!isWayland && selectedSourceId?.startsWith('screen:'));
+
+        if (isMonitor || (isWayland && ctx?.de === 'kde')) {
           setAutoDetectFailed(false);
           targetAudioId = -1;
+          console.log('[Presenter] No specific app resolved — using system audio (desktop audio fallback)');
         } else {
           pushToast({
             title: 'No audio detected',
@@ -902,6 +999,7 @@ export const PresenterApp: React.FC = () => {
       if (targetAudioId !== null) {
         try {
           audioTrack = await captureAudioTrack(targetAudioId);
+          audioAppIdRef.current = targetAudioId;
         } catch (err) {
           console.error('Audio capture failed (continuing video-only):', err);
           pushToast({
@@ -1008,6 +1106,7 @@ export const PresenterApp: React.FC = () => {
     bitrateHistoryRef.current = [];
     setTelemetry(idleTelemetry());
     isSharingRef.current = false;
+    audioAppIdRef.current = null;
     if (window.electronAPI) {
       await window.electronAPI.stopAudioCapture();
     }
@@ -1061,9 +1160,6 @@ export const PresenterApp: React.FC = () => {
               <ScreenShare className="w-5 h-5" aria-hidden="true" />
             </span>
             <h1 className="text-lg font-bold text-gray-100 shrink-0 tracking-tight">Slopcast</h1>
-            <span className="hidden sm:inline-flex text-[10px] bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded-full border border-indigo-500/30">
-              {isWayland ? 'Wayland' : 'X11'}
-            </span>
             {isSharing && (
               <span role="status" aria-live="polite">
                 <Badge variant="live">
@@ -1089,18 +1185,18 @@ export const PresenterApp: React.FC = () => {
             ) : (
               <div className="flex items-center gap-2">
                 {spectatorCount > 0 && (
-                  <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium text-gray-400 bg-gray-900/80 border border-gray-800 shrink-0 tabular-nums">
+                  <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium text-muted-foreground bg-gray-900/80 border border-accent shrink-0 tabular-nums">
                     {spectatorCount} spectator{spectatorCount === 1 ? '' : 's'}
                   </span>
                 )}
                 <button
                   type="button"
                   onClick={handleCopyCode}
-                  className="flex items-center gap-2 bg-gray-900/80 border border-gray-800 px-3 py-1.5 rounded-lg text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  className="flex items-center gap-2 bg-gray-900/80 border border-gray-800 px-3 py-1.5 rounded-lg text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background transition-colors"
                 >
                   <span className="text-gray-400 font-mono">{roomCode}</span>
-                  <span className="bg-gray-800 hover:bg-gray-700 text-gray-200 px-2 py-0.5 rounded border border-gray-700 transition-colors">
-                    {copied === 'code' ? 'Copied!' : 'Copy'}
+                  <span className="text-gray-200 bg-accent/50 px-2 py-0.5 rounded">
+                    {copied === 'code' ? 'Copied' : 'Copy'}
                   </span>
                 </button>
                 <button
@@ -1165,16 +1261,21 @@ export const PresenterApp: React.FC = () => {
 
             <p className="text-xs text-gray-500 leading-relaxed">
               Auto-detected from your window selection. Click an app below to override — only that app's audio is
-              streamed.
+              streamed. Select <strong className="text-gray-300">Desktop Audio</strong> to capture all system sound.
             </p>
 
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-              {audioApps.length === 0 ? (
-                <p className="text-xs text-gray-600 text-center py-6">No active audio applications detected</p>
-              ) : (
-                audioApps.map((app) => {
+              {(() => {
+                const renderBtn = (app: AudioApp, isDesktopAudio: boolean) => {
                   const isSelected = app.id === selectedAudioAppId;
                   const isAutoDetected = autoDetectedApp?.id === app.id;
+                  const btnClass = `flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                    isSelected
+                      ? isDesktopAudio
+                        ? 'bg-amber-950/40 border-amber-500/40 text-amber-200'
+                        : 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                      : 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300'
+                  }`;
                   return (
                     <button
                       key={app.id}
@@ -1190,17 +1291,17 @@ export const PresenterApp: React.FC = () => {
                           setAutoDetectedApp(null);
                         }
                       }}
-                      className={`flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-                        isSelected
-                          ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
-                          : 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300'
-                      }`}
+                      className={btnClass}
                     >
                       <div className="min-w-0 flex-1">
                         <span className="font-semibold block truncate">{app.name}</span>
                         <div className="flex items-center gap-2 mt-0.5">
                           <span className="text-[10px] opacity-60">
-                            {app.processId > 0 ? `PID: ${app.processId}` : 'PID: unknown'}
+                            {isDesktopAudio
+                              ? 'All system audio'
+                              : app.processId > 0
+                                ? `PID: ${app.processId}`
+                                : 'PID: unknown'}
                           </span>
                           {isAutoDetected && (
                             <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
@@ -1209,12 +1310,30 @@ export const PresenterApp: React.FC = () => {
                           )}
                         </div>
                       </div>
-
-                      {isSelected && <Check className="w-4 h-4 shrink-0 text-emerald-300" aria-hidden="true" />}
+                      {isSelected && (
+                        <Check
+                          className={`w-4 h-4 shrink-0 ${isDesktopAudio ? 'text-amber-300' : 'text-emerald-300'}`}
+                          aria-hidden="true"
+                        />
+                      )}
                     </button>
                   );
-                })
-              )}
+                };
+
+                const desktopAudio: AudioApp = { id: -1, name: 'Desktop Audio (All System Sound)', processId: 0 };
+                const items: React.ReactNode[] = [renderBtn(desktopAudio, true)];
+                if (audioApps.length > 0) {
+                  items.push(<div key="divider" className="border-t border-gray-800 my-1.5" />);
+                  for (const app of audioApps) {
+                    items.push(renderBtn(app, false));
+                  }
+                }
+                return items.length > 0 ? (
+                  items
+                ) : (
+                  <p className="text-xs text-gray-600 text-center py-6">No active audio applications detected</p>
+                );
+              })()}
             </div>
           </div>
 
@@ -1229,7 +1348,7 @@ export const PresenterApp: React.FC = () => {
                   via PipeWire introspection.
                 </p>
                 {captureContext?.de === 'kde' && !autoDetectFailed && (
-                  <p className="text-amber-300/80 bg-amber-950/30 border border-amber-700/30 rounded-lg p-2.5 leading-relaxed">
+                  <p className="text-gray-400 bg-gray-800/40 border border-gray-700/40 rounded-lg p-2.5 leading-relaxed">
                     KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection fails,
                     select an audio app manually.
                   </p>
@@ -1268,9 +1387,9 @@ export const PresenterApp: React.FC = () => {
             )}
 
             {autoDetectFailed && captureContext?.de === 'kde' && (
-              <div className="bg-amber-950/40 border border-amber-600/30 rounded-lg p-3 space-y-1">
-                <p className="text-xs font-semibold text-amber-300">KDE Audio Auto-Detection Failed</p>
-                <p className="text-[11px] text-amber-400/70 leading-relaxed">
+              <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 space-y-1">
+                <p className="text-xs font-semibold text-gray-200">KDE Audio Auto-Detection Failed</p>
+                <p className="text-[11px] text-gray-500 leading-relaxed">
                   Select an audio app from the panel above, then stop and restart the screenshare.
                 </p>
               </div>
@@ -1299,94 +1418,116 @@ export const PresenterApp: React.FC = () => {
         </div>
 
         {/* Stream Settings */}
-        <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-6 space-y-5">
-          <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Stream Settings</h2>
-            <p className="text-xs text-gray-500 leading-relaxed mt-1">
-              Changes apply in real time — no restart needed.
-            </p>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {/* Resolution */}
-            <div className="space-y-1.5">
-              <label
-                htmlFor="stream-resolution"
-                className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
-              >
-                Resolution
-              </label>
-              <select
-                id="stream-resolution"
-                value={scaleResolutionDownBy}
-                onChange={(e) => setScaleResolutionDownBy(Number(e.target.value))}
-                className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 cursor-pointer"
-              >
-                <option value={1.0}>1080p (Full HD)</option>
-                <option value={1.5}>720p (HD)</option>
-                <option value={2.0}>540p</option>
-              </select>
+        <div className="bg-gray-900/80 border border-gray-800 rounded-xl">
+          <button
+            type="button"
+            onClick={() => setStreamSettingsOpen((v) => !v)}
+            className={`flex w-full items-center justify-between gap-3 px-6 pt-6 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-safelight/70 ${
+              streamSettingsOpen ? 'pb-0' : 'pb-6'
+            }`}
+            aria-expanded={streamSettingsOpen}
+          >
+            <div>
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Stream Settings</h2>
+              <p className="text-xs text-gray-500 leading-relaxed mt-1">
+                Changes apply in real time — no restart needed.
+              </p>
             </div>
-
-            {/* Frame Rate */}
-            <div className="space-y-1.5">
-              <label
-                htmlFor="stream-fps"
-                className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
-              >
-                Frame Rate
-              </label>
-              <select
-                id="stream-fps"
-                value={streamFps}
-                onChange={(e) => setStreamFps(Number(e.target.value))}
-                className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 cursor-pointer"
-              >
-                <option value={15}>15 fps</option>
-                <option value={24}>24 fps</option>
-                <option value={30}>30 fps</option>
-                <option value={60}>60 fps</option>
-              </select>
-            </div>
-
-            {/* Bitrate Limit */}
-            <div className="space-y-1.5">
-              <label
-                htmlFor="stream-bitrate"
-                className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
-              >
-                Bitrate Limit
-              </label>
-              <select
-                id="stream-bitrate"
-                value={bitrateLimit}
-                onChange={(e) => setBitrateLimit(Number(e.target.value))}
-                className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 cursor-pointer"
-              >
-                <option value={1_000_000}>1 Mbps</option>
-                <option value={2_000_000}>2 Mbps</option>
-                <option value={4_000_000}>4 Mbps</option>
-                <option value={6_000_000}>6 Mbps</option>
-                <option value={10_000_000}>10 Mbps</option>
-                <option value={20_000_000}>20 Mbps</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <label
-              htmlFor="api-endpoint"
-              className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
-            >
-              API Endpoint
-            </label>
-            <input
-              id="api-endpoint"
-              type="text"
-              value={apiEndpoint}
-              onChange={(e) => setApiEndpoint(e.target.value)}
-              placeholder="http://localhost:3001"
-              className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 font-mono"
+            <ChevronDown
+              className={`size-4 shrink-0 text-gray-500 transition-transform duration-200 ${
+                streamSettingsOpen ? 'rotate-0' : '-rotate-90'
+              }`}
             />
+          </button>
+          <div
+            className={`overflow-hidden transition-all duration-200 ease-out ${
+              streamSettingsOpen ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'
+            }`}
+          >
+            <div className="space-y-5 p-6">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {/* Resolution */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="stream-resolution"
+                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                  >
+                    Resolution
+                  </label>
+                  <select
+                    id="stream-resolution"
+                    value={scaleResolutionDownBy}
+                    onChange={(e) => setScaleResolutionDownBy(Number(e.target.value))}
+                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                  >
+                    <option value={1.0}>1080p (Full HD)</option>
+                    <option value={1.5}>720p (HD)</option>
+                    <option value={2.0}>540p</option>
+                  </select>
+                </div>
+
+                {/* Frame Rate */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="stream-fps"
+                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                  >
+                    Frame Rate
+                  </label>
+                  <select
+                    id="stream-fps"
+                    value={streamFps}
+                    onChange={(e) => setStreamFps(Number(e.target.value))}
+                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                  >
+                    <option value={15}>15 fps</option>
+                    <option value={24}>24 fps</option>
+                    <option value={30}>30 fps</option>
+                    <option value={60}>60 fps</option>
+                  </select>
+                </div>
+
+                {/* Bitrate Limit */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="stream-bitrate"
+                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                  >
+                    Bitrate Limit
+                  </label>
+                  <select
+                    id="stream-bitrate"
+                    value={bitrateLimit}
+                    onChange={(e) => setBitrateLimit(Number(e.target.value))}
+                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                  >
+                    <option value={1_000_000}>1 Mbps</option>
+                    <option value={2_000_000}>2 Mbps</option>
+                    <option value={4_000_000}>4 Mbps</option>
+                    <option value={6_000_000}>6 Mbps</option>
+                    <option value={10_000_000}>10 Mbps</option>
+                    <option value={20_000_000}>20 Mbps</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="api-endpoint"
+                  className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                >
+                  API Endpoint
+                </label>
+                <input
+                  id="api-endpoint"
+                  type="text"
+                  value={apiEndpoint}
+                  onChange={(e) => setApiEndpoint(e.target.value)}
+                  placeholder="http://localhost:3001"
+                  className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background font-mono"
+                />
+              </div>
+            </div>
           </div>
         </div>
       </main>
