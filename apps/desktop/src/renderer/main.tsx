@@ -828,9 +828,7 @@ export const PresenterApp: React.FC = () => {
 
     const oldRoom = liveKitRoomRef.current;
     if (oldRoom) {
-      oldRoom.off(RoomEvent.ParticipantConnected);
-      oldRoom.off(RoomEvent.ParticipantDisconnected);
-      oldRoom.off(RoomEvent.Disconnected);
+      oldRoom.removeAllListeners();
       oldRoom.disconnect();
       liveKitRoomRef.current = null;
     }
