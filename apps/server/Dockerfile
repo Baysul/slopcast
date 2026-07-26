@@ -14,7 +14,6 @@ COPY apps/server/ apps/server/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter @slopcast/shared-types build
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter server build
 RUN pnpm --filter server deploy --prod /deploy
-COPY slopcast.config.json /deploy/
 
 FROM node:24-slim
 ENV PNPM_HOME="/pnpm"
