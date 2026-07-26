@@ -29,6 +29,7 @@ const features: string[] = [];
 
 if (isWayland) {
   features.push('WebRTCPipeWireCapturer');
+  features.push('WaylandLinuxDrmSyncobj');
 }
 
 switch (process.platform) {
@@ -54,6 +55,12 @@ app.commandLine.appendSwitch('enable-features', features.join(','));
 app.commandLine.appendSwitch('enable-low-latency-video-decoder');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('no-zygote');
+
+if (isWayland) {
+  app.commandLine.appendSwitch('use-gl', 'angle');
+  app.commandLine.appendSwitch('use-angle', 'vulkan');
+}
 
 function resolveIconPath(): string | null {
   const candidates = [
