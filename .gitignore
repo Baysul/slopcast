@@ -39,6 +39,9 @@ npm-debug.log*
 # Test artifacts
 test-output/
 
+# Configuration
+slopcast.config.json
+
 # Misc
 .cache/
 .tmp/

@@ -1,0 +1,9 @@
+{
+  "serverPort": 3001,
+  "webPort": 3000,
+  "apiEndpoint": "http://localhost:3001",
+  "websiteUrl": "http://localhost:3000",
+  "livekitUrl": "ws://localhost:7880",
+  "livekitApiKey": "your-api-key",
+  "livekitApiSecret": "your-api-secret"
+}
