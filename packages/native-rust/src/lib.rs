@@ -28,6 +28,10 @@ mod unsupported_platform {
         Ok(false)
     }
 
+    pub fn switch_audio_capture(_: &napi::Either<String, i32>) -> napi::Result<bool> {
+        Err(napi::Error::from_reason("Native audio capture is not supported on this platform"))
+    }
+
     pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
         None
     }
@@ -89,6 +93,11 @@ pub fn start_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Re
 #[napi]
 pub fn stop_audio_capture() -> napi::Result<bool> {
     platform::stop_audio_capture()
+}
+
+#[napi]
+pub fn switch_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Result<bool> {
+    platform::switch_audio_capture(&target_app_id)
 }
 
 #[napi]
