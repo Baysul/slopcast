@@ -27,6 +27,9 @@
     "package:desktop": "pnpm check && pnpm --filter desktop package",
     "dist:desktop": "pnpm check && pnpm --filter desktop dist",
     "dist:desktop:linux": "pnpm check && pnpm --filter desktop dist:linux",
+    "dist:desktop:linux:appimage": "pnpm check && pnpm --filter desktop dist:linux:appimage",
+    "dist:desktop:linux:deb": "pnpm check && pnpm --filter desktop dist:linux:deb",
+    "dist:desktop:linux:tar": "pnpm check && pnpm --filter desktop dist:linux:tar",
     "dist:desktop:mac": "pnpm check && pnpm --filter desktop dist:mac",
     "dist:desktop:win": "pnpm check && pnpm --filter desktop dist:win"
   },

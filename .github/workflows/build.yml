@@ -68,11 +68,25 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: linux
+            name: linux-appimage
+            script: dist:desktop:linux:appimage
+            asset-path: apps/desktop/release/*.AppImage
+          - os: ubuntu-latest
+            name: linux-deb
+            script: dist:desktop:linux:deb
+            asset-path: apps/desktop/release/*.deb
+          - os: ubuntu-latest
+            name: linux-tar
+            script: dist:desktop:linux:tar
+            asset-path: apps/desktop/release/*.tar.gz
           - os: macos-latest
-            target: mac
+            name: mac
+            script: dist:desktop:mac
+            asset-path: apps/desktop/release/*.dmg
           - os: windows-latest
-            target: win
+            name: win
+            script: dist:desktop:win
+            asset-path: apps/desktop/release/*.exe
     steps:
       - uses: actions/checkout@v6
 
@@ -95,12 +109,12 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build desktop
-        run: pnpm dist:desktop:${{ matrix.target }}
+        run: pnpm ${{ matrix.script }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: desktop-${{ matrix.target }}
-          path: apps/desktop/release/*
+          name: desktop-${{ matrix.name }}
+          path: ${{ matrix.asset-path }}
           retention-days: 7
           if-no-files-found: error
