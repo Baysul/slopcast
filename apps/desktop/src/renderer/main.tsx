@@ -1,3 +1,5 @@
+import type { AudioApp, AudioAppLevel } from '@slopcast/shared-types';
+import { codecLabel, fmtBitrate, fmtLoss } from '@slopcast/shared-types';
 import { Room, RoomEvent, Track } from 'livekit-client';
 import { Check, ChevronDown, ScreenShare } from 'lucide-react';
 import type React from 'react';
@@ -49,45 +51,32 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-interface AudioApp {
-  id: number;
-  name: string;
-  processId: number;
-  windowTitle?: string | null;
-}
-
 interface AudioAppGroup {
   representative: AudioApp;
   members: AudioApp[];
 }
 
-// Chromium-family browsers give every playback stream identical properties
-// (application.name, media.name="Playback", one shared audio-service PID), so
-// their per-tab streams are indistinguishable — and selecting any of them
-// captures all of that app's audio via native PID matching. Such anonymous
-// duplicates are collapsed into a single picker row. Streams that carry a real
-// window title (Firefox, native apps) stay individual so their titles keep
-// telling them apart.
+// All streams belonging to the same PipeWire client (or same app name when no
+// client id is available) are collapsed into a single picker row. This gives
+// predictable per-application audio capture on every platform — Windows and
+// macOS also target apps, not individual streams. MPRIS now-playing titles
+// (where available) or the first member's PipeWire window title is shown as
+// the row's subtitle instead of a process ID.
 function groupAudioApps(apps: AudioApp[]): AudioAppGroup[] {
   const groups: AudioAppGroup[] = [];
-  const untitledByIdentity = new Map<string, AudioAppGroup>();
+  const identityMap = new Map<string, AudioAppGroup>();
   for (const app of apps) {
-    const key = app.processId > 0 && !app.windowTitle ? `${app.name}:${app.processId}` : null;
-    const existing = key ? untitledByIdentity.get(key) : undefined;
+    const key = app.clientId != null && app.clientId > 0 ? `c:${app.clientId}` : `n:${app.name.toLowerCase()}`;
+    const existing = identityMap.get(key);
     if (existing) {
       existing.members.push(app);
       continue;
     }
     const group: AudioAppGroup = { representative: app, members: [app] };
     groups.push(group);
-    if (key) untitledByIdentity.set(key, group);
+    identityMap.set(key, group);
   }
   return groups;
-}
-
-interface AudioAppLevel {
-  id: number;
-  level: number;
 }
 
 interface DesktopSource {
@@ -126,24 +115,6 @@ const findCaptureAudioDevice = async (): Promise<MediaDeviceInfo | null> => {
 
 const STATS_POLL_MS = 1000;
 const STATS_HISTORY_MAX = 48;
-
-const VIDEO_CODEC_LABEL: Record<string, string> = {
-  'VIDEO/H264': 'H.264',
-  'VIDEO/H265': 'H.265',
-  'VIDEO/VP8': 'VP8',
-  'VIDEO/VP9': 'VP9',
-  'VIDEO/AV1': 'AV1',
-  'AUDIO/OPUS': 'Opus',
-  'AUDIO/RED': 'RED',
-  'AUDIO/G722': 'G.722',
-  'AUDIO/TELEPHONEEVENT': 'DTMF',
-};
-
-const codecLabel = (mime: string | null | undefined): string | null => {
-  if (!mime) return null;
-  const up = mime.toUpperCase();
-  return VIDEO_CODEC_LABEL[up] ?? up.replace(/^(VIDEO|AUDIO)\//i, '');
-};
 
 interface StreamTelemetry {
   live: boolean;
@@ -212,14 +183,6 @@ interface RTCStatLike {
   frameWidth?: number;
   frameHeight?: number;
 }
-
-const fmtBitrate = (bps: number | null): string => {
-  if (bps == null) return '—';
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-  return `${Math.max(1, Math.round(bps / 1000))} kbps`;
-};
-
-const fmtLoss = (pct: number | null): string => (pct == null ? '—' : `${pct < 0.1 ? pct.toFixed(2) : pct.toFixed(1)}%`);
 
 const fmtDuration = (ms: number): string => {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -401,7 +364,7 @@ export const PresenterApp: React.FC = () => {
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   // ── Stream Settings (user-configurable encoder parameters) ───────────
-  const [streamSettingsOpen, setStreamSettingsOpen] = useState(true);
+  const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
   const [streamFps, setStreamFps] = useState(60);
   const [bitrateLimit, setBitrateLimit] = useState(20_000_000);
   const [scaleResolutionDownBy, setScaleResolutionDownBy] = useState(1.0);
@@ -1335,23 +1298,31 @@ export const PresenterApp: React.FC = () => {
 
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
               {(() => {
-                const nameCounts = new Map<string, number>();
-                for (const g of audioAppGroups) {
-                  const n = g.representative.name;
-                  nameCounts.set(n, (nameCounts.get(n) ?? 0) + 1);
-                }
-                const displayName = (app: AudioApp): string => {
-                  if ((nameCounts.get(app.name) ?? 0) > 1 && app.windowTitle) {
-                    return `${app.name} — ${app.windowTitle}`;
-                  }
-                  return app.name;
-                };
-                const subLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string => {
+                const displayName = (app: AudioApp): string => app.name;
+                const groupSubLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string | null => {
                   if (isDesktopAudio) return 'All system audio';
-                  const { representative, members } = group;
-                  const pid = representative.processId > 0 ? `PID: ${representative.processId}` : 'PID: unknown';
-                  if (members.length > 1) return `${members.length} audio streams · ${pid}`;
-                  return pid;
+                  const { members } = group;
+                  let label: string | undefined;
+                  for (const m of members) {
+                    if (m.mediaTitle) {
+                      label = m.mediaTitle;
+                      break;
+                    }
+                  }
+                  if (!label) {
+                    for (const m of members) {
+                      if (m.windowTitle) {
+                        label = m.windowTitle;
+                        break;
+                      }
+                    }
+                  }
+                  if (label) {
+                    if (members.length > 1) return `${label} \u00B7 ${members.length} streams`;
+                    return label;
+                  }
+                  if (members.length > 1) return `${members.length} audio streams`;
+                  return null;
                 };
 
                 const renderBtn = (group: AudioAppGroup, isDesktopAudio: boolean) => {
@@ -1388,14 +1359,20 @@ export const PresenterApp: React.FC = () => {
                           <span className="font-semibold truncate min-w-0">{displayName(representative)}</span>
                           {!isDesktopAudio && <AudioLevelMeter level={level} />}
                         </div>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-[10px] opacity-60">{subLabel(group, isDesktopAudio)}</span>
-                          {isAutoDetected && (
-                            <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
-                              auto
-                            </span>
-                          )}
-                        </div>
+                        {(() => {
+                          const label = groupSubLabel(group, isDesktopAudio);
+                          if (!label) return null;
+                          return (
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <span className="text-[10px] opacity-60">{label}</span>
+                              {isAutoDetected && (
+                                <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
+                                  auto
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
                       {isSelected && (
                         <Check
@@ -1407,7 +1384,13 @@ export const PresenterApp: React.FC = () => {
                   );
                 };
 
-                const desktopAudio: AudioApp = { id: -1, name: 'Desktop Audio (All System Sound)', processId: 0 };
+                const desktopAudio: AudioApp = {
+                  id: -1,
+                  name: 'Desktop Audio (All System Sound)',
+                  processId: 0,
+                  clientId: null,
+                  mediaTitle: null,
+                };
                 const items: React.ReactNode[] = [
                   renderBtn({ representative: desktopAudio, members: [desktopAudio] }, true),
                 ];

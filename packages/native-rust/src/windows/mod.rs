@@ -35,7 +35,7 @@ use windows::Win32::System::Threading::{CreateEventA, SetEvent, WaitForMultipleO
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Error, HRESULT, IUnknown, Interface, PCSTR, Ref, implement};
 
-use crate::AudioApp;
+use crate::{AudioApp, AudioAppLevel};
 
 const PROCESS_LOOPBACK_MIN_BUILD: u32 = 22621;
 const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
@@ -135,7 +135,13 @@ fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
                 continue;
             }
             let name = names.get(&pid).cloned().unwrap_or_else(|| format!("Process {pid}"));
-            apps.push(AudioApp { id: pid as i32, name, process_id: pid as i32, bundle_id: None });
+            apps.push(AudioApp {
+                id: pid as i32,
+                name,
+                process_id: pid as i32,
+                bundle_id: None,
+                window_title: None,
+            });
         }
         Ok(apps)
     }
@@ -542,4 +548,16 @@ pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
 
 pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     None
+}
+
+pub fn start_audio_metering() -> NapiResult<bool> {
+    Ok(false)
+}
+
+pub fn stop_audio_metering() -> NapiResult<bool> {
+    Ok(true)
+}
+
+pub fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
+    Ok(Vec::new())
 }

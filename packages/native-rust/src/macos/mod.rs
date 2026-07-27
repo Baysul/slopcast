@@ -1,4 +1,4 @@
-use crate::AudioApp;
+use crate::{AudioApp, AudioAppLevel};
 use napi::Result as NapiResult;
 use std::sync::Mutex;
 
@@ -65,6 +65,7 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
             name,
             process_id: pid,
             bundle_id: Some(app.bundle_identifier()),
+            window_title: None,
         });
     }
     Ok(apps)
@@ -144,4 +145,16 @@ pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
 
 pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     None
+}
+
+pub fn start_audio_metering() -> NapiResult<bool> {
+    Ok(false)
+}
+
+pub fn stop_audio_metering() -> NapiResult<bool> {
+    Ok(true)
+}
+
+pub fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
+    Ok(Vec::new())
 }

@@ -3,6 +3,9 @@ name = "native-rust"
 version = "0.1.0"
 edition = "2024"
 
+[lints.clippy]
+all = "deny"
+
 [lib]
 crate-type = ["cdylib"]
 
@@ -13,6 +16,7 @@ napi-derive = "3"
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.10.0"
 x11 = "2.21"
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = [
