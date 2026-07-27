@@ -1,8 +1,9 @@
 import { Room, RoomEvent, Track } from 'livekit-client';
 import { Check, ChevronDown, ScreenShare } from 'lucide-react';
 import type React from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { AudioLevelMeter } from './components/ui/AudioLevelMeter';
 import { Badge } from './components/ui/Badge';
 import { primeAudioContext, ToastViewport, useToasts } from './components/ui/Toast';
 import './index.css';
@@ -12,15 +13,16 @@ declare global {
     electronAPI?: {
       getAppConfig: () => Promise<{ apiEndpoint: string; livekitUrl: string }>;
       getPlatformInfo: () => Promise<{ platform: string; isWayland: boolean }>;
-      getAudioApps: () => Promise<Array<{ id: number; name: string; processId: number }>>;
+      getAudioApps: () => Promise<AudioApp[]>;
       startAudioCapture: (targetId: number) => Promise<boolean>;
       stopAudioCapture: () => Promise<boolean>;
       switchAudioCapture: (targetId: number) => Promise<boolean>;
+      startAudioMetering: () => Promise<boolean>;
+      stopAudioMetering: () => Promise<boolean>;
+      getAudioLevels: () => Promise<AudioAppLevel[]>;
       getDesktopSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
       clipboardWriteText: (text: string) => Promise<boolean>;
-      resolveAudioSource: (opts?: {
-        sourceId?: string;
-      }) => Promise<{ id: number; name: string; processId: number } | null>;
+      resolveAudioSource: (opts?: { sourceId?: string }) => Promise<AudioApp | null>;
       getCaptureContext: () => Promise<CaptureContext | null>;
     };
   }
@@ -51,6 +53,41 @@ interface AudioApp {
   id: number;
   name: string;
   processId: number;
+  windowTitle?: string | null;
+}
+
+interface AudioAppGroup {
+  representative: AudioApp;
+  members: AudioApp[];
+}
+
+// Chromium-family browsers give every playback stream identical properties
+// (application.name, media.name="Playback", one shared audio-service PID), so
+// their per-tab streams are indistinguishable — and selecting any of them
+// captures all of that app's audio via native PID matching. Such anonymous
+// duplicates are collapsed into a single picker row. Streams that carry a real
+// window title (Firefox, native apps) stay individual so their titles keep
+// telling them apart.
+function groupAudioApps(apps: AudioApp[]): AudioAppGroup[] {
+  const groups: AudioAppGroup[] = [];
+  const untitledByIdentity = new Map<string, AudioAppGroup>();
+  for (const app of apps) {
+    const key = app.processId > 0 && !app.windowTitle ? `${app.name}:${app.processId}` : null;
+    const existing = key ? untitledByIdentity.get(key) : undefined;
+    if (existing) {
+      existing.members.push(app);
+      continue;
+    }
+    const group: AudioAppGroup = { representative: app, members: [app] };
+    groups.push(group);
+    if (key) untitledByIdentity.set(key, group);
+  }
+  return groups;
+}
+
+interface AudioAppLevel {
+  id: number;
+  level: number;
 }
 
 interface DesktopSource {
@@ -347,6 +384,8 @@ export const PresenterApp: React.FC = () => {
   const [livekitUrl, setLivekitUrl] = useState<string>('');
   const [isWayland, setIsWayland] = useState<boolean>(false);
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
+  const [audioLevels, setAudioLevels] = useState<ReadonlyMap<number, number>>(new Map());
+  const audioAppGroups = useMemo(() => groupAudioApps(audioApps), [audioApps]);
   const [selectedAudioAppId, setSelectedAudioAppId] = useState<number | null>(null);
   const [audioAppExplicitlySet, setAudioAppExplicitlySet] = useState(false);
   const [autoDetectedApp, setAutoDetectedApp] = useState<AudioApp | null>(null);
@@ -596,6 +635,38 @@ export const PresenterApp: React.FC = () => {
       }
     };
   }, [loadAudioApps, loadDesktopSources]);
+
+  // Per-app audio metering: native PipeWire meter streams report a peak level
+  // per audio node; decay applied here so bars fall smoothly between polls.
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.startAudioMetering) return;
+
+    let cancelled = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    void api.startAudioMetering().then((started) => {
+      if (!started || cancelled) return;
+      interval = setInterval(() => {
+        void api.getAudioLevels().then((levels) => {
+          if (cancelled) return;
+          setAudioLevels((prev) => {
+            const next = new Map<number, number>();
+            for (const { id, level } of levels) {
+              next.set(id, Math.max(level, (prev.get(id) ?? 0) * 0.72));
+            }
+            return next;
+          });
+        });
+      }, 150);
+    });
+
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+      void api.stopAudioMetering().catch(() => {});
+    };
+  }, []);
 
   const attemptAutoResolve = async (opts?: { sourceId?: string; nameHint?: string }): Promise<AudioApp | null> => {
     if (!window.electronAPI) return null;
@@ -1264,9 +1335,30 @@ export const PresenterApp: React.FC = () => {
 
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
               {(() => {
-                const renderBtn = (app: AudioApp, isDesktopAudio: boolean) => {
-                  const isSelected = app.id === selectedAudioAppId;
-                  const isAutoDetected = autoDetectedApp?.id === app.id;
+                const nameCounts = new Map<string, number>();
+                for (const g of audioAppGroups) {
+                  const n = g.representative.name;
+                  nameCounts.set(n, (nameCounts.get(n) ?? 0) + 1);
+                }
+                const displayName = (app: AudioApp): string => {
+                  if ((nameCounts.get(app.name) ?? 0) > 1 && app.windowTitle) {
+                    return `${app.name} — ${app.windowTitle}`;
+                  }
+                  return app.name;
+                };
+                const subLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string => {
+                  if (isDesktopAudio) return 'All system audio';
+                  const { representative, members } = group;
+                  const pid = representative.processId > 0 ? `PID: ${representative.processId}` : 'PID: unknown';
+                  if (members.length > 1) return `${members.length} audio streams · ${pid}`;
+                  return pid;
+                };
+
+                const renderBtn = (group: AudioAppGroup, isDesktopAudio: boolean) => {
+                  const { representative, members } = group;
+                  const isSelected = members.some((m) => m.id === selectedAudioAppId);
+                  const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
+                  const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
                   const btnClass = `flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                     isSelected
                       ? isDesktopAudio
@@ -1276,31 +1368,28 @@ export const PresenterApp: React.FC = () => {
                   }`;
                   return (
                     <button
-                      key={app.id}
+                      key={representative.id}
                       type="button"
                       onClick={() => {
-                        if (app.id === selectedAudioAppId) {
+                        if (isSelected) {
                           setAudioAppExplicitlySet(false);
                           setSelectedAudioAppId(null);
                           setAutoDetectedApp(null);
                         } else {
                           setAudioAppExplicitlySet(true);
-                          setSelectedAudioAppId(app.id);
+                          setSelectedAudioAppId(representative.id);
                           setAutoDetectedApp(null);
                         }
                       }}
                       className={btnClass}
                     >
                       <div className="min-w-0 flex-1">
-                        <span className="font-semibold block truncate">{app.name}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold truncate min-w-0">{displayName(representative)}</span>
+                          {!isDesktopAudio && <AudioLevelMeter level={level} />}
+                        </div>
                         <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-[10px] opacity-60">
-                            {isDesktopAudio
-                              ? 'All system audio'
-                              : app.processId > 0
-                                ? `PID: ${app.processId}`
-                                : 'PID: unknown'}
-                          </span>
+                          <span className="text-[10px] opacity-60">{subLabel(group, isDesktopAudio)}</span>
                           {isAutoDetected && (
                             <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
                               auto
@@ -1319,11 +1408,13 @@ export const PresenterApp: React.FC = () => {
                 };
 
                 const desktopAudio: AudioApp = { id: -1, name: 'Desktop Audio (All System Sound)', processId: 0 };
-                const items: React.ReactNode[] = [renderBtn(desktopAudio, true)];
-                if (audioApps.length > 0) {
+                const items: React.ReactNode[] = [
+                  renderBtn({ representative: desktopAudio, members: [desktopAudio] }, true),
+                ];
+                if (audioAppGroups.length > 0) {
                   items.push(<div key="divider" className="border-t border-gray-800 my-1.5" />);
-                  for (const app of audioApps) {
-                    items.push(renderBtn(app, false));
+                  for (const group of audioAppGroups) {
+                    items.push(renderBtn(group, false));
                   }
                 }
                 return items.length > 0 ? (
