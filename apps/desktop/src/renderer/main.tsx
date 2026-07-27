@@ -1,5 +1,12 @@
-import type { AudioApp, AudioAppLevel } from '@slopcast/shared-types';
-import { codecLabel, fmtBitrate, fmtLoss } from '@slopcast/shared-types';
+import type { AudioApp, AudioAppLevel, ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
+import {
+  codecLabel,
+  DEFAULT_STREAM_SETTINGS,
+  fmtBitrate,
+  fmtLoss,
+  RESOLUTION_DIMENSIONS,
+  VIDEO_CODEC_PRIORITY,
+} from '@slopcast/shared-types';
 import { Room, RoomEvent, Track } from 'livekit-client';
 import { Check, ChevronDown, ScreenShare } from 'lucide-react';
 import type React from 'react';
@@ -26,6 +33,8 @@ declare global {
       clipboardWriteText: (text: string) => Promise<boolean>;
       resolveAudioSource: (opts?: { sourceId?: string }) => Promise<AudioApp | null>;
       getCaptureContext: () => Promise<CaptureContext | null>;
+      getStreamSettings: () => Promise<StreamSettings>;
+      saveStreamSettings: (settings: StreamSettings) => Promise<boolean>;
     };
   }
 }
@@ -115,6 +124,104 @@ const findCaptureAudioDevice = async (): Promise<MediaDeviceInfo | null> => {
 
 const STATS_POLL_MS = 1000;
 const STATS_HISTORY_MAX = 48;
+
+// The audio app list re-enumerates PipeWire on this cadence; settings writes
+// to disk are debounced so rapid changes coalesce into one save + one toast.
+const AUDIO_APPS_POLL_MS = 3000;
+const SETTINGS_SAVE_DEBOUNCE_MS = 800;
+
+const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
+  a.fps === b.fps &&
+  a.bitrateLimit === b.bitrateLimit &&
+  a.videoCodec === b.videoCodec &&
+  a.resolution === b.resolution &&
+  a.apiEndpoint === b.apiEndpoint;
+
+interface CodecInfo {
+  codec: VideoCodec;
+  label: string;
+  hardware: boolean;
+  recommended: boolean;
+}
+
+const KNOWN_VIDEO_CODECS: Record<string, { codec: VideoCodec; label: string }> = {
+  'VIDEO/AV1': { codec: 'av1', label: 'AV1' },
+  'VIDEO/H265': { codec: 'h265', label: 'HEVC (H.265)' },
+  'VIDEO/HEVC': { codec: 'h265', label: 'HEVC (H.265)' },
+  'VIDEO/H264': { codec: 'h264', label: 'H.264' },
+  'VIDEO/VP9': { codec: 'vp9', label: 'VP9' },
+  'VIDEO/VP8': { codec: 'vp8', label: 'VP8' },
+};
+
+// Multiple profile/level variants per family: isConfigSupported validates the
+// codec string's level against the requested resolution, so probing a single
+// low-level string (e.g. avc1.42E01E at 1080p) falsely reports "unsupported"
+// even when the hardware encoder handles the family at higher levels.
+const WEBCODECS_PROBE_CODECS: Record<VideoCodec, string[]> = {
+  vp8: ['vp8'],
+  h264: ['avc1.640028', 'avc1.4D4028', 'avc1.42E028'],
+  vp9: ['vp09.00.40.08', 'vp09.00.41.08'],
+  av1: ['av01.0.08M.08', 'av01.0.09M.08'],
+  h265: ['hev1.1.6.L120.B0', 'hvc1.1.6.L120.B0', 'hev1.2.4.L120.B0', 'hvc1.2.4.L120.B0'],
+};
+
+const sortByEncodingEfficiency = (codecs: CodecInfo[]): CodecInfo[] => {
+  const priority = new Map<VideoCodec, number>(VIDEO_CODEC_PRIORITY.map((c, i) => [c, i]));
+  return [...codecs].sort((a, b) => (priority.get(a.codec) ?? 99) - (priority.get(b.codec) ?? 99));
+};
+
+// Every codec Chromium's WebRTC stack can send on this device. Hardware
+// acceleration is probed separately (async) via WebCodecs.
+function detectSupportedCodecs(): CodecInfo[] {
+  const caps = RTCRtpSender.getCapabilities('video');
+  if (!caps) {
+    return [{ codec: 'h264', label: 'H.264', hardware: false, recommended: false }];
+  }
+
+  const mimeTypes = new Set(caps.codecs.map((c) => c.mimeType.toUpperCase()));
+  const available: CodecInfo[] = [];
+  for (const [mime, info] of Object.entries(KNOWN_VIDEO_CODECS)) {
+    if (mimeTypes.has(mime) && !available.some((c) => c.codec === info.codec)) {
+      available.push({ ...info, hardware: false, recommended: false });
+    }
+  }
+  return sortByEncodingEfficiency(available);
+}
+
+const supportsHardwareEncoding = async (codec: VideoCodec): Promise<boolean> => {
+  for (const probe of WEBCODECS_PROBE_CODECS[codec]) {
+    try {
+      const { supported } = await VideoEncoder.isConfigSupported({
+        codec: probe,
+        width: 1920,
+        height: 1080,
+        bitrate: 6_000_000,
+        framerate: 30,
+        hardwareAcceleration: 'prefer-hardware',
+      });
+      if (supported) return true;
+    } catch (err) {
+      console.warn(`[Codecs] hardware probe failed for ${codec} (${probe}):`, err);
+    }
+  }
+  return false;
+};
+
+// Tags each codec with hardware-acceleration availability, then hoists the
+// most efficient hardware encoder to the top as the recommended choice.
+const probeCodecHardware = async (codecs: CodecInfo[]): Promise<CodecInfo[]> => {
+  const probed = await Promise.all(
+    codecs.map(async (info) => ({ ...info, hardware: await supportsHardwareEncoding(info.codec) })),
+  );
+  const recommended = probed.find((c) => c.hardware);
+  if (!recommended) return probed;
+  return [{ ...recommended, recommended: true }, ...probed.filter((c) => c.codec !== recommended.codec)];
+};
+
+const codecOptionSuffix = (info: CodecInfo): string => {
+  if (info.recommended) return 'Hardware - Recommended';
+  return info.hardware ? 'Hardware' : 'Software';
+};
 
 interface StreamTelemetry {
   live: boolean;
@@ -365,9 +472,15 @@ export const PresenterApp: React.FC = () => {
 
   // ── Stream Settings (user-configurable encoder parameters) ───────────
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
-  const [streamFps, setStreamFps] = useState(60);
-  const [bitrateLimit, setBitrateLimit] = useState(20_000_000);
-  const [scaleResolutionDownBy, setScaleResolutionDownBy] = useState(1.0);
+  const [streamFps, setStreamFps] = useState(DEFAULT_STREAM_SETTINGS.fps);
+  const [bitrateLimit, setBitrateLimit] = useState(DEFAULT_STREAM_SETTINGS.bitrateLimit);
+  const [availableCodecs, setAvailableCodecs] = useState(() => detectSupportedCodecs());
+  const [videoCodec, setVideoCodec] = useState<VideoCodec>(() => {
+    const top = availableCodecs[0]?.codec ?? 'h264';
+    const saved = DEFAULT_STREAM_SETTINGS.videoCodec;
+    return availableCodecs.some((c) => c.codec === saved) ? saved : top;
+  });
+  const [resolution, setResolution] = useState<ResolutionPreset>(DEFAULT_STREAM_SETTINGS.resolution);
 
   const liveKitRoomRef = useRef<Room | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -386,10 +499,14 @@ export const PresenterApp: React.FC = () => {
     aInit: false,
   });
   const bitrateHistoryRef = useRef<number[]>([]);
-  const streamFpsRef = useRef(60);
-  const bitrateLimitRef = useRef(20_000_000);
-  const scaleRef = useRef(1.0);
+  const streamFpsRef = useRef(DEFAULT_STREAM_SETTINGS.fps);
+  const bitrateLimitRef = useRef(DEFAULT_STREAM_SETTINGS.bitrateLimit);
+  const resolutionRef = useRef(DEFAULT_STREAM_SETTINGS.resolution);
   const audioAppIdRef = useRef<number | null>(null);
+  // Gates the persistence effect until the saved file has been loaded, and
+  // remembers the last written values so hydration never triggers a re-save.
+  const settingsHydratedRef = useRef(false);
+  const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
 
   useEffect(() => {
     isSharingRef.current = isSharing;
@@ -408,12 +525,49 @@ export const PresenterApp: React.FC = () => {
   }, [bitrateLimit]);
 
   useEffect(() => {
-    scaleRef.current = scaleResolutionDownBy;
-  }, [scaleResolutionDownBy]);
+    resolutionRef.current = resolution;
+  }, [resolution]);
 
   useEffect(() => {
     audioAppIdRef.current = selectedAudioAppId;
   }, [selectedAudioAppId]);
+
+  // Persist stream settings to disk. Writes are debounced so a burst of
+  // changes (e.g. typing in the API endpoint field) coalesces into a single
+  // save — and therefore a single "saved" notification.
+  useEffect(() => {
+    if (!settingsHydratedRef.current) return;
+    const current: StreamSettings = {
+      fps: streamFps,
+      bitrateLimit,
+      videoCodec,
+      resolution,
+      apiEndpoint,
+    };
+    const last = lastSavedSettingsRef.current;
+    if (last && streamSettingsEqual(last, current)) return;
+
+    const timer = setTimeout(() => {
+      void window.electronAPI
+        ?.saveStreamSettings(current)
+        .then((ok) => {
+          if (!ok) {
+            pushToast({
+              title: 'Settings save failed',
+              description: 'The settings file could not be written to disk.',
+              variant: 'error',
+            });
+            return;
+          }
+          lastSavedSettingsRef.current = current;
+          pushToast({ title: 'Stream settings saved', variant: 'success' });
+        })
+        .catch((err: unknown) => {
+          console.error('[Presenter] saveStreamSettings IPC failed:', err);
+        });
+    }, SETTINGS_SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint, pushToast]);
 
   const captureAudioTrack = useCallback(async (targetId: number): Promise<MediaStreamTrack | null> => {
     const started = await window.electronAPI?.startAudioCapture(targetId);
@@ -497,7 +651,6 @@ export const PresenterApp: React.FC = () => {
     if (!isSharing) return;
     const fps = streamFps;
     const br = bitrateLimit;
-    const scale = scaleResolutionDownBy;
     const update = async () => {
       const room = liveKitRoomRef.current;
       if (!room) return;
@@ -510,15 +663,13 @@ export const PresenterApp: React.FC = () => {
         for (const enc of params.encodings) {
           enc.maxBitrate = br;
           enc.maxFramerate = fps;
-          enc.scaleResolutionDownBy = scale;
+          enc.scaleResolutionDownBy = 1.0;
           enc.priority = 'high';
           enc.networkPriority = 'high';
           enc.active = true;
         }
         await sender.setParameters(params);
-        console.log(
-          `[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps scale=${scale}`,
-        );
+        console.log(`[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps`);
 
         // Re-apply audio if it was dropped during renegotiation.
         const currentId = audioAppIdRef.current;
@@ -538,7 +689,7 @@ export const PresenterApp: React.FC = () => {
       }
     };
     void update();
-  }, [streamFps, scaleResolutionDownBy, bitrateLimit, isSharing, replaceAudioTrack]);
+  }, [streamFps, bitrateLimit, isSharing, replaceAudioTrack]);
 
   // Bind the live capture stream to the local preview <video>.
   useEffect(() => {
@@ -576,17 +727,27 @@ export const PresenterApp: React.FC = () => {
         const config = await window.electronAPI.getAppConfig();
         if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
         if (config.livekitUrl) setLivekitUrl(config.livekitUrl);
+
+        const codecs = await probeCodecHardware(detectSupportedCodecs());
+        setAvailableCodecs(codecs);
+        console.log(
+          '[Presenter] App start — codecs:',
+          codecs.map((c) => `${c.label} (${codecOptionSuffix(c)})`).join(', '),
+        );
+
+        // Persisted settings take precedence over config-file defaults.
+        const saved = await window.electronAPI.getStreamSettings();
+        lastSavedSettingsRef.current = saved;
+        setStreamFps(saved.fps);
+        setBitrateLimit(saved.bitrateLimit);
+        const bestCodec = codecs[0]?.codec ?? 'h264';
+        const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
+        setVideoCodec(savedOk ? saved.videoCodec : bestCodec);
+        setResolution(saved.resolution);
+        setApiEndpoint(saved.apiEndpoint);
+        settingsHydratedRef.current = true;
       }
       loadAudioApps();
-
-      console.log(
-        '[Presenter] App start — H.264 profiles in getCapabilities:',
-        RTCRtpSender.getCapabilities('video')
-          ?.codecs?.filter((c) => c.mimeType.toUpperCase() === 'VIDEO/H264')
-          .map((c) => c.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1])
-          .filter(Boolean)
-          .join(', ') || 'none',
-      );
     })();
 
     return () => {
@@ -598,6 +759,17 @@ export const PresenterApp: React.FC = () => {
       }
     };
   }, [loadAudioApps, loadDesktopSources]);
+
+  // Keep the audio source list fresh. listAudioApplications() is a read-only
+  // PipeWire enumeration on a throwaway connection — it never touches the
+  // capture or metering sessions, and the selection lives in separate state
+  // keyed by stable node ids, so an active stream is never interrupted.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      void loadAudioApps();
+    }, AUDIO_APPS_POLL_MS);
+    return () => clearInterval(interval);
+  }, [loadAudioApps]);
 
   // Per-app audio metering: native PipeWire meter streams report a peak level
   // per audio node; decay applied here so bars fall smoothly between polls.
@@ -902,7 +1074,7 @@ export const PresenterApp: React.FC = () => {
 
       const lkRoom = new Room({
         publishDefaults: {
-          videoCodec: 'h264',
+          videoCodec,
         },
       });
       liveKitRoomRef.current = lkRoom;
@@ -936,6 +1108,7 @@ export const PresenterApp: React.FC = () => {
 
   // Wayland uses xdg-desktop-portal; X11 uses the in-app source picker.
   const captureVideoTrack = async (): Promise<MediaStreamTrack> => {
+    const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
     if (isWayland) {
       // The main-process displayMediaRequestHandler answers this request;
       // xdg-desktop-portal shows the desktop environment's own window picker.
@@ -943,8 +1116,8 @@ export const PresenterApp: React.FC = () => {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           frameRate: { ideal: fps, max: fps },
-          width: { ideal: 1920, max: 1920 },
-          height: { ideal: 1080, max: 1080 },
+          width: { ideal: dims.width, max: dims.width },
+          height: { ideal: dims.height, max: dims.height },
         },
         audio: false,
       });
@@ -976,8 +1149,8 @@ export const PresenterApp: React.FC = () => {
           chromeMediaSourceId: selectedSourceId,
           minFrameRate: streamFpsRef.current,
           maxFrameRate: streamFpsRef.current,
-          maxWidth: 1920,
-          maxHeight: 1080,
+          maxWidth: dims.width,
+          maxHeight: dims.height,
         },
       },
     });
@@ -1517,7 +1690,29 @@ export const PresenterApp: React.FC = () => {
             }`}
           >
             <div className="space-y-5 p-6">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Video Codec */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="stream-codec"
+                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                  >
+                    Video Codec
+                  </label>
+                  <select
+                    id="stream-codec"
+                    value={videoCodec}
+                    onChange={(e) => setVideoCodec(e.target.value as VideoCodec)}
+                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                  >
+                    {availableCodecs.map((info) => (
+                      <option key={info.codec} value={info.codec}>
+                        {info.label} ({codecOptionSuffix(info)})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Resolution */}
                 <div className="space-y-1.5">
                   <label
@@ -1528,16 +1723,18 @@ export const PresenterApp: React.FC = () => {
                   </label>
                   <select
                     id="stream-resolution"
-                    value={scaleResolutionDownBy}
-                    onChange={(e) => setScaleResolutionDownBy(Number(e.target.value))}
+                    value={resolution}
+                    onChange={(e) => setResolution(e.target.value as ResolutionPreset)}
                     className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
                   >
-                    <option value={1.0}>1080p (Full HD)</option>
-                    <option value={1.5}>720p (HD)</option>
-                    <option value={2.0}>540p</option>
+                    <option value="1080p">1080p (Full HD)</option>
+                    <option value="1440p">1440p (QHD)</option>
+                    <option value="2160p">4K (Ultra HD)</option>
                   </select>
                 </div>
+              </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 {/* Frame Rate */}
                 <div className="space-y-1.5">
                   <label
@@ -1579,6 +1776,9 @@ export const PresenterApp: React.FC = () => {
                     <option value={6_000_000}>6 Mbps</option>
                     <option value={10_000_000}>10 Mbps</option>
                     <option value={20_000_000}>20 Mbps</option>
+                    <option value={30_000_000}>30 Mbps</option>
+                    <option value={50_000_000}>50 Mbps</option>
+                    <option value={80_000_000}>80 Mbps</option>
                   </select>
                 </div>
               </div>

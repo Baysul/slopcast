@@ -1,7 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import * as native from '@slopcast/native-rust';
+import {
+  DEFAULT_STREAM_SETTINGS,
+  type ResolutionPreset,
+  type StreamSettings,
+  type VideoCodec,
+} from '@slopcast/shared-types';
 import { loadConfig } from '@slopcast/shared-types/config';
 import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, nativeImage, session } from 'electron';
 
@@ -22,6 +28,62 @@ let lastCaptureContext: CaptureContext | null = null;
 const isWayland =
   process.platform === 'linux' && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY);
 
+// ── Stream Settings Persistence ─────────────────────────────────────────
+// Stored as JSON in Electron's per-platform user-data directory
+// (%APPDATA%/<app-name> on Windows, ~/.config/<app-name> on Linux,
+// ~/Library/Application Support/<app-name> on macOS).
+const STREAM_SETTINGS_FILE = 'stream-settings.json';
+let streamSettingsCache: StreamSettings | null = null;
+
+const streamSettingsPath = (): string => path.join(app.getPath('userData'), STREAM_SETTINGS_FILE);
+
+// Hand-edited or corrupt files must never crash the app — fall back per field.
+function sanitizeStreamSettings(raw: unknown): StreamSettings {
+  const d = DEFAULT_STREAM_SETTINGS;
+  if (typeof raw !== 'object' || raw === null) return d;
+  const o = raw as Record<string, unknown>;
+  const num = (v: unknown, min: number, max: number, fallback: number): number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : fallback;
+  const codec = (v: unknown): VideoCodec =>
+    v === 'h264' || v === 'h265' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
+  const resolution = (v: unknown): ResolutionPreset =>
+    v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
+  return {
+    fps: num(o.fps, 1, 240, d.fps),
+    bitrateLimit: num(o.bitrateLimit, 100_000, 200_000_000, d.bitrateLimit),
+    videoCodec: codec(o.videoCodec),
+    resolution: resolution(o.resolution),
+    apiEndpoint: typeof o.apiEndpoint === 'string' && o.apiEndpoint.trim() !== '' ? o.apiEndpoint : d.apiEndpoint,
+  };
+}
+
+function loadStreamSettings(): StreamSettings {
+  if (streamSettingsCache) return streamSettingsCache;
+  const file = streamSettingsPath();
+  let parsed: unknown = null;
+  if (existsSync(file)) {
+    try {
+      parsed = JSON.parse(readFileSync(file, 'utf-8'));
+    } catch (err) {
+      console.error(`Failed to parse ${STREAM_SETTINGS_FILE}, using defaults:`, err);
+    }
+  }
+  streamSettingsCache = sanitizeStreamSettings(parsed);
+  return streamSettingsCache;
+}
+
+function saveStreamSettings(raw: unknown): boolean {
+  const settings = sanitizeStreamSettings(raw);
+  try {
+    writeFileSync(streamSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, 'utf-8');
+    streamSettingsCache = settings;
+    return true;
+  } catch (err) {
+    console.error(`Failed to write ${STREAM_SETTINGS_FILE}:`, err);
+    return false;
+  }
+}
+
 // ── Hardware-Accelerated Video Encoding ─────────────────────────────────
 // Flags must be set before app.whenReady(). Build one combined list because
 // appendSwitch stores only the *last* value for the same switch name.
@@ -31,6 +93,8 @@ if (isWayland) {
   features.push('WebRTCPipeWireCapturer');
   features.push('WaylandLinuxDrmSyncobj');
 }
+
+features.push('PlatformHEVCDecoderSupport');
 
 switch (process.platform) {
   case 'linux':
@@ -214,6 +278,10 @@ app.whenReady().then(() => {
     apiEndpoint: appConfig.apiEndpoint,
     livekitUrl: appConfig.livekitUrl,
   }));
+
+  ipcMain.handle('get-stream-settings', () => loadStreamSettings());
+
+  ipcMain.handle('save-stream-settings', (_event, raw: unknown) => saveStreamSettings(raw));
 
   ipcMain.handle('get-platform-info', () => ({
     platform: process.platform,
