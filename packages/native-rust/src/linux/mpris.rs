@@ -27,9 +27,12 @@ pub(crate) fn list_players() -> Vec<MprisPlayer> {
             continue;
         }
 
-        let Ok(proxy) =
-            Proxy::new(&conn, name.as_str(), "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2")
-        else {
+        let Ok(proxy) = Proxy::new(
+            &conn,
+            name.as_str(),
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2",
+        ) else {
             continue;
         };
         let Ok(identity) = proxy.get_property::<String>("Identity") else {
@@ -44,7 +47,13 @@ pub(crate) fn list_players() -> Vec<MprisPlayer> {
             "/org/mpris/MediaPlayer2",
             "org.mpris.MediaPlayer2.Player",
         ) else {
-            players.push(MprisPlayer { pid, identity, desktop_entry, playing: false, title: None });
+            players.push(MprisPlayer {
+                pid,
+                identity,
+                desktop_entry,
+                playing: false,
+                title: None,
+            });
             continue;
         };
         let playback_status: Option<String> = player_proxy.get_property("PlaybackStatus").ok();
@@ -62,7 +71,13 @@ pub(crate) fn list_players() -> Vec<MprisPlayer> {
             });
         let playing = playback_status.as_deref() == Some("Playing");
 
-        players.push(MprisPlayer { pid, identity, desktop_entry, playing, title });
+        players.push(MprisPlayer {
+            pid,
+            identity,
+            desktop_entry,
+            playing,
+            title,
+        });
     }
 
     players
