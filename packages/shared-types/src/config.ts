@@ -36,7 +36,6 @@ export function loadConfig(): AppConfig {
   };
 
   const configPath = findConfigFile();
-  const source = configPath ? `file (${configPath})` : 'defaults (no config file found)';
 
   if (configPath) {
     try {
@@ -54,17 +53,11 @@ export function loadConfig(): AppConfig {
         livekitApiKey: envLivekitApiKey || fileConfig.livekitApiKey || defaults.livekitApiKey,
         livekitApiSecret: envLivekitApiSecret || fileConfig.livekitApiSecret || defaults.livekitApiSecret,
       };
-      console.log(
-        `[config] loaded from ${source}: livekitUrl=${resolved.livekitUrl}, apiKey=${resolved.livekitApiKey.slice(0, 8)}..., serverPort=${resolved.serverPort}`,
-      );
       return resolved;
     } catch {
       console.error('Failed to parse slopcast.config.json, using env/defaults');
     }
   }
 
-  console.log(
-    `[config] using ${source}: livekitUrl=${defaults.livekitUrl}, apiKey=${defaults.livekitApiKey.slice(0, 8)}..., serverPort=${defaults.serverPort}`,
-  );
   return defaults;
 }
