@@ -233,11 +233,9 @@ Both run on Node.js with no additional native dependencies. Playwright (Chromium
 pnpm exec playwright install chromium
 ```
 
-For full architecture details see [AGENTS.md](AGENTS.md).
-
 ---
 
-[^1]: Currently tested on Chromium-based browsers (Chrome, Edge, Brave, Opera).
+[^1]: Currently tested on Chromium-based browsers (Chrome, Edge, Brave, Opera) and Firefox.
 
 [^2]: The presenter still has to download the app, but a spectator **does not.**
 
