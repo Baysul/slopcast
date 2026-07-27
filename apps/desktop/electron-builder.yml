@@ -28,3 +28,5 @@ linux:
     - AppImage
     - deb
   category: Utility
+deb:
+  artifactName: ${productName}_${version}_${arch}.${ext}

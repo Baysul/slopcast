@@ -18,6 +18,9 @@
     "package": "pnpm build && electron-builder build --dir",
     "dist": "pnpm build && electron-builder build",
     "dist:linux": "pnpm build && electron-builder build --linux",
+    "dist:linux:appimage": "pnpm build && electron-builder build --linux AppImage",
+    "dist:linux:deb": "pnpm build && electron-builder build --linux deb",
+    "dist:linux:tar": "pnpm build && electron-builder build --linux --dir && cd release && mv linux-unpacked Slopcast-$npm_package_version-linux-amd64 && tar -czf Slopcast-$npm_package_version-linux-amd64.tar.gz Slopcast-$npm_package_version-linux-amd64",
     "dist:mac": "pnpm build && electron-builder build --mac",
     "dist:win": "pnpm build && electron-builder build --win"
   },
