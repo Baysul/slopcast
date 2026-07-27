@@ -1,17 +1,16 @@
+import { randomInt } from 'node:crypto';
+
+const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
+const DIGITS = '0123456789';
+
+function randomPart(source: string, length: number): string {
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += source.charAt(randomInt(source.length));
+  }
+  return result;
+}
+
 export function generateRoomCode(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz';
-  const nums = '0123456789';
-
-  const getRandom = (source: string, length: number) => {
-    let result = '';
-    for (let i = 0; i < length; i++) {
-      result += source.charAt(Math.floor(Math.random() * source.length));
-    }
-    return result;
-  };
-
-  const part1 = getRandom(chars, 3);
-  const part2 = getRandom(nums, 3);
-  const part3 = getRandom(chars, 3);
-  return `${part1}-${part2}-${part3}`;
+  return `${randomPart(LETTERS, 3)}-${randomPart(DIGITS, 3)}-${randomPart(LETTERS, 3)}`;
 }
