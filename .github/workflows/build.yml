@@ -71,11 +71,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libglib2.0-dev
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9.15.4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -87,7 +87,7 @@ jobs:
         run: pnpm dist:desktop:${{ matrix.target }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.target }}
           path: apps/desktop/release/*
