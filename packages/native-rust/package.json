@@ -9,7 +9,7 @@
     "dev": "napi build --platform",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "check": "cargo fmt --check",
+    "check": "cargo fmt --check && node scripts/check-targets.mjs",
     "rust:fmt": "cargo fmt",
     "rust:check": "cargo fmt --check"
   },
