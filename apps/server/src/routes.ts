@@ -30,13 +30,32 @@ export function initRoutes(host: string, apiKey: string, apiSecret: string, webs
   router.get('/health', health);
 
   router.post('/api/rooms', async (req, res) => {
-    const origin = req.headers['x-client-origin'] ?? 'desktop';
-    if (origin === 'web') {
-      res.status(403).json({ error: 'Web clients cannot create rooms' });
+    // Soft enforcement: the desktop app declares itself via this header. The
+    // hard publish barrier is the SFU — spectator tokens get canPublish:false.
+    const origin = req.headers['x-client-origin'];
+    if (origin !== 'desktop') {
+      res.status(403).json({ error: 'Only desktop clients can create rooms' });
       return;
     }
 
-    const code = generateRoomCode();
+    // Room names live in LiveKit; regenerate on the (astronomically unlikely)
+    // collision with an active room.
+    let code = generateRoomCode();
+    try {
+      const active = await roomClient.listRooms();
+      const names = new Set(active.map((r) => r.name));
+      for (let attempts = 0; names.has(code) && attempts < 5; attempts++) {
+        code = generateRoomCode();
+      }
+      if (names.has(code)) {
+        res.status(503).json({ error: 'Could not allocate a unique room code, try again' });
+        return;
+      }
+    } catch (err) {
+      // The SFU being unreachable must not block room creation.
+      console.error('Room collision check failed, proceeding unchecked:', err);
+    }
+
     const identity = `presenter-${code}-${Date.now()}`;
     const token = await presenterToken(apiKey, apiSecret, code, identity);
 
