@@ -19,13 +19,14 @@
  */
 
 import { type ChildProcess, execSync, spawn } from 'node:child_process';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 
 import { loadConfig } from '@slopcast/shared-types/config';
 
-import type { Page } from 'playwright';
+import type { Browser, ElectronApplication, Page } from 'playwright';
 
 // ── Configuration Types ────────────────────────────────────────────────
 
@@ -42,7 +43,7 @@ interface GpuInfo {
 }
 
 interface LogEntry {
-  source: 'server' | 'web' | 'desktop-main' | 'desktop-renderer' | 'spectator';
+  source: 'server' | 'web' | 'desktop-main' | 'desktop-renderer' | 'spectator' | 'livekit';
   message: string;
   timestamp: number;
 }
@@ -74,10 +75,10 @@ const RESULT_PATH = path.join(OUTPUT_DIR, 'e2e-result.json');
 
 const HEALTH_POLL_MS = 500;
 const STARTUP_TIMEOUT_MS = 30_000;
-const ROOM_CREATE_TIMEOUT_MS = 15_000;
+// Room creation hits the just-spawned tsx dev server — cold compiles can take 25s+.
+const ROOM_CREATE_TIMEOUT_MS = 30_000;
 const SPECTATOR_CONNECT_TIMEOUT_MS = 20_000;
 const STREAM_TIMEOUT_MS = 20_000;
-const TEST_TOTAL_TIMEOUT_MS = 120_000;
 
 const FATAL_PATTERNS = [
   /(?:FATAL|fatal)\s*error/i,
@@ -178,6 +179,75 @@ function spawnLogging(command: string, args: string[], label: string, logEntries
   return proc;
 }
 
+// ── LiveKit Preflight ──────────────────────────────────────────────────
+
+function tcpCheck(host: string, port: number, timeoutMs = 2000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const done = (ok: boolean) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+    socket.setTimeout(timeoutMs, () => done(false));
+  });
+}
+
+function parseWsEndpoint(url: string): { host: string; port: number } | null {
+  const m = url.match(/^wss?:\/\/([^/:]+)(?::(\d+))?/);
+  if (!m) return null;
+  return { host: m[1], port: m[2] ? Number.parseInt(m[2], 10) : 80 };
+}
+
+function findOnPath(bin: string): boolean {
+  try {
+    execSync(process.platform === 'win32' ? `where ${bin}` : `which ${bin}`, { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The media plane needs a reachable LiveKit SFU. Without one the test can only
+// fail at the streaming stage, so check early and start a local dev server
+// when possible (the app defaults ws://localhost:7880 + devkey/secret match
+// `livekit-server --dev` exactly).
+async function ensureLiveKit(url: string, logEntries: LogEntry[]): Promise<ChildProcess | null> {
+  const endpoint = parseWsEndpoint(url);
+  if (!endpoint) {
+    log('LIVEKIT', `Could not parse LiveKit URL "${url}" — assuming external SFU`);
+    return null;
+  }
+  if (await tcpCheck(endpoint.host, endpoint.port)) {
+    log('LIVEKIT', `LiveKit reachable at ${endpoint.host}:${endpoint.port}`);
+    return null;
+  }
+  if (endpoint.host !== 'localhost' && endpoint.host !== '127.0.0.1') {
+    throw new Error(
+      `LiveKit SFU unreachable at ${url}. Check network/credentials (slopcast.config.json or LIVEKIT_URL).`,
+    );
+  }
+  if (!findOnPath('livekit-server')) {
+    throw new Error(
+      `LiveKit SFU unreachable at ${url} and no livekit-server binary on PATH. ` +
+        'Start one manually (livekit-server --dev) or point LIVEKIT_URL at a reachable instance.',
+    );
+  }
+  log('LIVEKIT', `Nothing on ${endpoint.host}:${endpoint.port} — starting local livekit-server --dev...`);
+  const proc = spawnLogging('livekit-server', ['--dev'], 'livekit', logEntries);
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await tcpCheck(endpoint.host, endpoint.port)) {
+      log('LIVEKIT', 'livekit-server is up');
+      return proc;
+    }
+    await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
+  }
+  proc.kill('SIGTERM');
+  throw new Error('livekit-server did not open its port within the startup timeout');
+}
+
 // ── Spotify Detection ──────────────────────────────────────────────────
 
 function findSpotifyProcess(): boolean {
@@ -255,10 +325,13 @@ function validateGpuReport(report: GpuInfo | null): string[] {
   const featureStatus = report.featureStatus ?? [];
   const problems: string[] = report.problems ?? [];
 
+  // getGPUInfo statuses are lowercase tokens like "enabled", "disabled_software".
   const hasSoftwareRenderer =
-    featureStatus.some(
-      (f) => f.name === 'gpu_compositing' && (f.status.includes('Software') || f.status.includes('disabled')),
-    ) || problems.some((p) => p.toLowerCase().includes('software'));
+    featureStatus.some((f) => {
+      if (f.name !== 'gpu_compositing') return false;
+      const s = f.status.toLowerCase();
+      return s.includes('software') || s.includes('disabled');
+    }) || problems.some((p) => p.toLowerCase().includes('software'));
 
   if (hasSoftwareRenderer) {
     issues.push('GPU acceleration appears disabled or software-rendered');
@@ -316,375 +389,397 @@ async function runTest(): Promise<TestResult> {
   log('CONFIG', `serverPort=${config.serverPort} webPort=${config.webPort}`);
   log('CONFIG', `apiEndpoint=${config.apiEndpoint} websiteUrl=${config.websiteUrl}`);
 
-  // Kill conflicting processes on configured ports.
-  killPort(config.serverPort);
-  killPort(config.webPort);
-  await new Promise((r) => setTimeout(r, 500));
+  mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  // Spawn API server.
-  log('SPAWN', 'Starting API server...');
-  const serverProc = spawnLogging('pnpm', ['--filter', 'server', 'dev'], 'server', logEntries);
-  await pollHealth(`${config.apiEndpoint}/health`, STARTUP_TIMEOUT_MS, 'API server');
-
-  // Spawn Web server.
-  log('SPAWN', 'Starting Web dev server...');
-  const webProc = spawnLogging('pnpm', ['--filter', 'web', 'dev'], 'web', logEntries);
-  await pollHealth(config.websiteUrl, STARTUP_TIMEOUT_MS, 'Web server');
-
-  // Spotify check.
-  log('SPOTIFY', 'Checking Spotify process...');
-  const spotifyRunning = findSpotifyProcess();
-  if (spotifyRunning) {
-    log('SPOTIFY', 'Spotify is already running');
-  } else {
-    log('SPOTIFY', 'Spotify not running — attempting to launch...');
-    const launched = launchSpotify();
-    if (launched) {
-      log('SPOTIFY', 'Spotify launched successfully');
-    } else {
-      log('SPOTIFY', 'Could not launch Spotify (may not be installed)');
-    }
-  }
-
-  // ── Step 2: Presenter Automation (Electron via Playwright) ───────────
-  log('TEST', '=== Step 2: Presenter Automation (Electron) ===');
-
-  // Dynamic import to avoid type issues at top level before playwright is installed.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-
-  const { chromium, _electron: electron } = await import('playwright');
-
-  const desktopDir = path.join(REPO_ROOT, 'apps', 'desktop');
-  const electronBin = path.join(desktopDir, 'node_modules', 'electron', 'dist', 'electron');
-
-  if (!existsSync(electronBin)) {
-    throw new Error(`Electron binary not found at ${electronBin}. Run "pnpm install" and "pnpm build:desktop" first.`);
-  }
-
-  log('ELECTRON', `Launching Electron from ${electronBin}`);
-  log('ELECTRON', `App directory: ${desktopDir}`);
-
-  const electronApp = await electron.launch({
-    executablePath: electronBin,
-    args: [desktopDir],
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-    },
-    timeout: 30_000,
-  });
-
-  // Capture main process console via pipe.
-  electronApp.process().stdout?.on('data', (data: Buffer) => {
-    for (const line of data.toString().split('\n').filter(Boolean)) {
-      logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
-    }
-  });
-  electronApp.process().stderr?.on('data', (data: Buffer) => {
-    for (const line of data.toString().split('\n').filter(Boolean)) {
-      logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
-    }
-  });
-
-  // Wait for first window and capture renderer console.
-  const page: Page = await electronApp.firstWindow();
-
-  page.on('console', (msg) => {
-    logEntries.push({
-      source: 'desktop-renderer',
-      message: `[${msg.type()}] ${msg.text()}`,
-      timestamp: Date.now(),
-    });
-  });
-
-  page.on('pageerror', (err) => {
-    logEntries.push({
-      source: 'desktop-renderer',
-      message: `UNCAUGHT: ${err.message}`,
-      timestamp: Date.now(),
-    });
-  });
-
-  await page.waitForLoadState('domcontentloaded');
-  log('ELECTRON', 'Desktop window loaded');
-
-  // Click "Create Live Room" button.
-  const createRoomBtn = page.locator('button', { hasText: 'Create Live Room' });
-  await createRoomBtn.waitFor({ state: 'visible', timeout: ROOM_CREATE_TIMEOUT_MS });
-  log('ELECTRON', '"Create Live Room" button visible');
-
-  await createRoomBtn.click();
-  log('ELECTRON', 'Clicked "Create Live Room"');
-
-  // Wait for room code to appear (replaces the Create button).
-  const roomCodeSpan = page.locator('span.font-mono');
-  await roomCodeSpan.waitFor({ state: 'visible', timeout: ROOM_CREATE_TIMEOUT_MS });
-  const roomCode = (await roomCodeSpan.textContent())?.trim() ?? '';
-  result.roomCode = roomCode;
-  result.shareUrl = `${config.websiteUrl}/room/${roomCode}`;
-  log('ELECTRON', `Room created: code=${roomCode} url=${result.shareUrl}`);
-
-  if (!roomCode) {
-    throw new Error('Failed to extract room code from Electron UI');
-  }
-
-  // Attempt to select and share a screen source.
-  // On X11: select a source thumbnail; on Wayland: portal dialog is native.
-  const isWaylandBtn = page.locator('text=/Wayland|X11/');
-  const platformText = (await isWaylandBtn.textContent()) ?? '';
-  const isX11 = platformText.includes('X11');
-  const isWaylandPlatform = platformText.includes('Wayland');
-
-  log('ELECTRON', `Platform detected: ${platformText.trim()}`);
-
-  if (isX11) {
-    // Select the first available screen source thumbnail.
-    const sourceBtns = page.locator('button:has(img)');
-    const sourceCount = await sourceBtns.count();
-    if (sourceCount > 0) {
-      await sourceBtns.first().click();
-      log('ELECTRON', `Selected screen source (${sourceCount} available)`);
-      await new Promise((r) => setTimeout(r, 500));
-    } else {
-      log('ELECTRON', 'No screen source thumbnails found');
-    }
-  }
-
-  // Click "Start Screenshare".
-  const startBtn = page.locator('button', { hasText: 'Start Screenshare' });
-  try {
-    await startBtn.waitFor({ state: 'visible', timeout: 5000 });
-    const isDisabled = await startBtn.isDisabled();
-    if (!isDisabled) {
-      await startBtn.click();
-      log('ELECTRON', 'Clicked "Start Screenshare"');
-
-      if (isWaylandPlatform) {
-        log('ELECTRON', 'Wayland portal dialog may need manual interaction (xdg-desktop-portal)');
-      }
-    } else {
-      log('ELECTRON', '"Start Screenshare" button is disabled — may need source selection');
-    }
-  } catch {
-    log('ELECTRON', '"Start Screenshare" button not found or not available');
-  }
-
-  // Give stream time to start.  On X11 the thumbnail picker is instant;
-  // on Wayland the xdg-desktop-portal dialog requires manual interaction.
-  // Poll the LIVE badge for up to STREAM_TIMEOUT_MS.
-  {
-    const deadline = Date.now() + STREAM_TIMEOUT_MS;
-    let isLive = false;
-    log('ELECTRON', `Waiting for streaming to start (timeout ${STREAM_TIMEOUT_MS}ms)...`);
-    while (Date.now() < deadline) {
-      const liveBadge = page.locator('text=LIVE');
-      if ((await liveBadge.count()) > 0) {
-        isLive = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-    log('ELECTRON', `Streaming live: ${isLive}`);
-  }
-
-  // ── GPU Diagnostic Data ──────────────────────────────────────────
-  log('ELECTRON', 'Retrieving GPU diagnostic data...');
+  // Resources tracked for guaranteed cleanup — a failure at any step must not
+  // leak server processes or browser instances into the next retry.
+  let serverProc: ChildProcess | null = null;
+  let webProc: ChildProcess | null = null;
+  let livekitProc: ChildProcess | null = null;
+  let electronApp: ElectronApplication | null = null;
+  let browser: Browser | null = null;
   let gpuInfo: GpuInfo | null = null;
+
   try {
-    gpuInfo = await electronApp.evaluate(async ({ app }) => {
-      try {
-        return (await app.getGPUInfo('complete')) as GpuInfo | null;
-      } catch (err) {
-        log('ELECTRON', `GPU info retrieval failed: ${err}`);
-        return null;
+    livekitProc = await ensureLiveKit(config.livekitUrl, logEntries);
+
+    // Kill conflicting processes on configured ports.
+    killPort(config.serverPort);
+    killPort(config.webPort);
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Spawn API server.
+    log('SPAWN', 'Starting API server...');
+    serverProc = spawnLogging('pnpm', ['--filter', 'server', 'dev'], 'server', logEntries);
+    await pollHealth(`${config.apiEndpoint}/health`, STARTUP_TIMEOUT_MS, 'API server');
+
+    // Spawn Web server.
+    log('SPAWN', 'Starting Web dev server...');
+    webProc = spawnLogging('pnpm', ['--filter', 'web', 'dev'], 'web', logEntries);
+    await pollHealth(config.websiteUrl, STARTUP_TIMEOUT_MS, 'Web server');
+
+    // Spotify check.
+    log('SPOTIFY', 'Checking Spotify process...');
+    const spotifyRunning = findSpotifyProcess();
+    if (spotifyRunning) {
+      log('SPOTIFY', 'Spotify is already running');
+    } else {
+      log('SPOTIFY', 'Spotify not running — attempting to launch...');
+      const launched = launchSpotify();
+      if (launched) {
+        log('SPOTIFY', 'Spotify launched successfully');
+      } else {
+        log('SPOTIFY', 'Could not launch Spotify (may not be installed)');
+      }
+    }
+
+    // ── Step 2: Presenter Automation (Electron via Playwright) ───────────
+    log('TEST', '=== Step 2: Presenter Automation (Electron) ===');
+
+    // Dynamic import to avoid type issues at top level before playwright is installed.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+
+    const { chromium, _electron: electron } = await import('playwright');
+
+    const desktopDir = path.join(REPO_ROOT, 'apps', 'desktop');
+    const electronBin = path.join(desktopDir, 'node_modules', 'electron', 'dist', 'electron');
+
+    if (!existsSync(electronBin)) {
+      throw new Error(
+        `Electron binary not found at ${electronBin}. Run "pnpm install" and "pnpm build:desktop" first.`,
+      );
+    }
+
+    log('ELECTRON', `Launching Electron from ${electronBin}`);
+    log('ELECTRON', `App directory: ${desktopDir}`);
+
+    electronApp = await electron.launch({
+      executablePath: electronBin,
+      args: [desktopDir],
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+      },
+      timeout: 30_000,
+    });
+
+    // Capture main process console via pipe.
+    electronApp.process().stdout?.on('data', (data: Buffer) => {
+      for (const line of data.toString().split('\n').filter(Boolean)) {
+        logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
+      }
+    });
+    electronApp.process().stderr?.on('data', (data: Buffer) => {
+      for (const line of data.toString().split('\n').filter(Boolean)) {
+        logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
       }
     });
 
-    if (gpuInfo) {
-      writeFileSync(GPU_REPORT_PATH, JSON.stringify(gpuInfo, null, 2));
-      log('ELECTRON', `GPU report written to ${GPU_REPORT_PATH}`);
-      result.gpuReport = gpuInfo;
+    // Wait for first window and capture renderer console.
+    const page: Page = await electronApp.firstWindow();
+
+    page.on('console', (msg) => {
+      logEntries.push({
+        source: 'desktop-renderer',
+        message: `[${msg.type()}] ${msg.text()}`,
+        timestamp: Date.now(),
+      });
+    });
+
+    page.on('pageerror', (err) => {
+      logEntries.push({
+        source: 'desktop-renderer',
+        message: `UNCAUGHT: ${err.message}`,
+        timestamp: Date.now(),
+      });
+    });
+
+    await page.waitForLoadState('domcontentloaded');
+    log('ELECTRON', 'Desktop window loaded');
+
+    // Click "Create Live Room" button.
+    const createRoomBtn = page.locator('button', { hasText: 'Create Live Room' });
+    await createRoomBtn.waitFor({ state: 'visible', timeout: ROOM_CREATE_TIMEOUT_MS });
+    log('ELECTRON', '"Create Live Room" button visible');
+
+    await createRoomBtn.click();
+    log('ELECTRON', 'Clicked "Create Live Room"');
+
+    // Wait for room code to appear (replaces the Create button).
+    // The code span is the only font-mono element with text-gray-400; other
+    // font-mono spans (telemetry) use different gray shades.
+    const roomCodeSpan = page.locator('span.font-mono.text-gray-400');
+    await roomCodeSpan.waitFor({ state: 'visible', timeout: ROOM_CREATE_TIMEOUT_MS });
+    const roomCode = ((await roomCodeSpan.textContent()) ?? '').trim();
+    result.roomCode = roomCode;
+    result.shareUrl = `${config.websiteUrl}/room/${roomCode}`;
+    log('ELECTRON', `Room created: code=${roomCode} url=${result.shareUrl}`);
+
+    if (!roomCode) {
+      throw new Error('Failed to extract room code from Electron UI');
     }
-  } catch (err) {
-    log('ELECTRON', `Failed to retrieve GPU info: ${err}`);
-  }
 
-  // ── Step 3: Spectator Automation (Chromium via Playwright) ───────────
-  log('TEST', '=== Step 3: Spectator Automation (Chromium) ===');
-
-  const browser = await chromium.launch({
-    args: [
-      '--use-fake-ui-for-media-stream',
-      '--use-fake-device-for-media-stream',
-      '--autoplay-policy=no-user-gesture-required',
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-    ],
-  });
-
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 },
-  });
-  const spectatorPage = await context.newPage();
-
-  spectatorPage.on('console', (msg) => {
-    logEntries.push({
-      source: 'spectator',
-      message: `[${msg.type()}] ${msg.text()}`,
-      timestamp: Date.now(),
+    // Platform detection: query the main process over IPC — there is no
+    // platform text in the renderer DOM to scrape.
+    const platformInfo = await page.evaluate(() => {
+      const api = (window as any).electronAPI;
+      return api?.getPlatformInfo ? api.getPlatformInfo() : null;
     });
-  });
+    const isWaylandPlatform = platformInfo?.isWayland !== false;
+    const isX11 = !isWaylandPlatform;
 
-  spectatorPage.on('pageerror', (err) => {
-    logEntries.push({
-      source: 'spectator',
-      message: `UNCAUGHT: ${err.message}`,
-      timestamp: Date.now(),
-    });
-  });
+    log('ELECTRON', `Platform detected: ${isWaylandPlatform ? 'Wayland' : 'X11'}`);
 
-  log('SPECTATOR', `Navigating to ${result.shareUrl}`);
-  await spectatorPage.goto(result.shareUrl, { waitUntil: 'networkidle', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
+    if (isX11) {
+      // Select the first available screen source thumbnail.
+      const sourceBtns = page.locator('button:has(img)');
+      const sourceCount = await sourceBtns.count();
+      if (sourceCount > 0) {
+        await sourceBtns.first().click();
+        log('ELECTRON', `Selected screen source (${sourceCount} available)`);
+        await new Promise((r) => setTimeout(r, 500));
+      } else {
+        log('ELECTRON', 'No screen source thumbnails found');
+      }
+    }
 
-  // Wait for connection status badge.
-  try {
-    await spectatorPage.waitForFunction(
-      () => {
-        const badges = document.querySelectorAll('[role="status"]');
-        for (const badge of badges) {
-          const text = badge.textContent?.toLowerCase() ?? '';
-          if (text.includes('live') || text.includes('connecting') || text.includes('waiting')) {
-            return true;
-          }
+    // Click "Start Screenshare".
+    const startBtn = page.locator('button', { hasText: 'Start Screenshare' });
+    try {
+      await startBtn.waitFor({ state: 'visible', timeout: 5000 });
+      const isDisabled = await startBtn.isDisabled();
+      if (!isDisabled) {
+        await startBtn.click();
+        log('ELECTRON', 'Clicked "Start Screenshare"');
+
+        if (isWaylandPlatform) {
+          // setDisplayMediaRequestHandler auto-picks the first window source —
+          // no native portal dialog appears, the share starts headlessly.
+          log('ELECTRON', 'Wayland: display media handler auto-selects a window source');
         }
-        return false;
-      },
-      { timeout: SPECTATOR_CONNECT_TIMEOUT_MS },
-    );
-    log('SPECTATOR', 'Connection status badge visible');
-    result.spectatorConnected = true;
-  } catch (err) {
-    log('SPECTATOR', `Connection status badge never appeared: ${err}`);
-    result.errors.push('Spectator never reached connecting/live state');
-  }
+      } else {
+        log('ELECTRON', '"Start Screenshare" button is disabled — may need source selection');
+      }
+    } catch {
+      log('ELECTRON', '"Start Screenshare" button not found or not available');
+    }
 
-  // Wait for video element to appear and start playing.
-  try {
-    await spectatorPage.waitForSelector('video', { state: 'attached', timeout: STREAM_TIMEOUT_MS });
+    // Give stream time to start. The header shows a role="status" LIVE badge
+    // only while sharing — poll it for up to STREAM_TIMEOUT_MS.
+    {
+      const deadline = Date.now() + STREAM_TIMEOUT_MS;
+      let isLive = false;
+      log('ELECTRON', `Waiting for streaming to start (timeout ${STREAM_TIMEOUT_MS}ms)...`);
+      while (Date.now() < deadline) {
+        const liveBadge = page.locator('[role="status"]');
+        if ((await liveBadge.count()) > 0) {
+          isLive = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      log('ELECTRON', `Streaming live: ${isLive}`);
+    }
 
-    // Poll for video frames — the element may appear before frames decode.
-    await spectatorPage.waitForFunction(
-      () => {
+    // ── GPU Diagnostic Data ──────────────────────────────────────────
+    log('ELECTRON', 'Retrieving GPU diagnostic data...');
+    try {
+      gpuInfo = await electronApp.evaluate(async ({ app }) => {
+        try {
+          return (await app.getGPUInfo('complete')) as GpuInfo | null;
+        } catch (err) {
+          log('ELECTRON', `GPU info retrieval failed: ${err}`);
+          return null;
+        }
+      });
+
+      if (gpuInfo) {
+        writeFileSync(GPU_REPORT_PATH, JSON.stringify(gpuInfo, null, 2));
+        log('ELECTRON', `GPU report written to ${GPU_REPORT_PATH}`);
+        result.gpuReport = gpuInfo;
+      }
+    } catch (err) {
+      log('ELECTRON', `Failed to retrieve GPU info: ${err}`);
+    }
+
+    // ── Step 3: Spectator Automation (Chromium via Playwright) ───────────
+    log('TEST', '=== Step 3: Spectator Automation (Chromium) ===');
+
+    browser = await chromium.launch({
+      args: [
+        '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        '--autoplay-policy=no-user-gesture-required',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+      ],
+    });
+
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+    });
+    const spectatorPage = await context.newPage();
+
+    spectatorPage.on('console', (msg) => {
+      logEntries.push({
+        source: 'spectator',
+        message: `[${msg.type()}] ${msg.text()}`,
+        timestamp: Date.now(),
+      });
+    });
+
+    spectatorPage.on('pageerror', (err) => {
+      logEntries.push({
+        source: 'spectator',
+        message: `UNCAUGHT: ${err.message}`,
+        timestamp: Date.now(),
+      });
+    });
+
+    log('SPECTATOR', `Navigating to ${result.shareUrl}`);
+    await spectatorPage.goto(result.shareUrl, { waitUntil: 'networkidle', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
+
+    // Wait for connection status badge.
+    try {
+      await spectatorPage.waitForFunction(
+        () => {
+          const badges = document.querySelectorAll('[role="status"]');
+          for (const badge of badges) {
+            const text = badge.textContent?.toLowerCase() ?? '';
+            if (text.includes('live') || text.includes('connecting') || text.includes('waiting')) {
+              return true;
+            }
+          }
+          return false;
+        },
+        { timeout: SPECTATOR_CONNECT_TIMEOUT_MS },
+      );
+      log('SPECTATOR', 'Connection status badge visible');
+      result.spectatorConnected = true;
+    } catch (err) {
+      log('SPECTATOR', `Connection status badge never appeared: ${err}`);
+      result.errors.push('Spectator never reached connecting/live state');
+    }
+
+    // Wait for video element to appear and start playing.
+    try {
+      await spectatorPage.waitForSelector('video', { state: 'attached', timeout: STREAM_TIMEOUT_MS });
+
+      // Poll for video frames — the element may appear before frames decode.
+      await spectatorPage.waitForFunction(
+        () => {
+          const videos = document.querySelectorAll('video');
+          for (const video of videos) {
+            if (video.videoWidth > 0 && video.videoHeight > 0 && !video.paused && video.readyState >= 2) {
+              return true;
+            }
+          }
+          return false;
+        },
+        { timeout: STREAM_TIMEOUT_MS },
+      );
+
+      const videoState = await spectatorPage.evaluate(() => {
         const videos = document.querySelectorAll('video');
         for (const video of videos) {
-          if (video.videoWidth > 0 && video.videoHeight > 0 && !video.paused && video.readyState >= 2) {
-            return true;
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            return {
+              found: true,
+              width: video.videoWidth,
+              height: video.videoHeight,
+              playing: !video.paused,
+              readyState: video.readyState,
+            };
           }
         }
-        return false;
-      },
-      { timeout: STREAM_TIMEOUT_MS },
-    );
+        return { found: false, width: 0, height: 0, playing: false, readyState: -1 };
+      });
 
-    const videoState = await spectatorPage.evaluate(() => {
-      const videos = document.querySelectorAll('video');
-      for (const video of videos) {
-        if (video.videoWidth > 0 && video.videoHeight > 0) {
-          return {
-            found: true,
-            width: video.videoWidth,
-            height: video.videoHeight,
-            playing: !video.paused,
-            readyState: video.readyState,
-          };
-        }
+      if (videoState.found) {
+        log(
+          'SPECTATOR',
+          `Video streaming: ${videoState.width}x${videoState.height} playing=${videoState.playing} readyState=${videoState.readyState}`,
+        );
+        result.spectatorVideoReceived = true;
+        result.spectatorVideoPlaying = videoState.playing;
+        result.spectatorVideoWidth = videoState.width;
+        result.spectatorVideoHeight = videoState.height;
+      } else {
+        log('SPECTATOR', 'Video element present but no video track data');
+        result.errors.push('Video element found but no video frames received');
       }
-      return { found: false, width: 0, height: 0, playing: false, readyState: -1 };
-    });
+    } catch (err) {
+      log('SPECTATOR', `Video element never appeared: ${err}`);
+      result.errors.push('Spectator video element never appeared');
+    }
 
-    if (videoState.found) {
-      log(
-        'SPECTATOR',
-        `Video streaming: ${videoState.width}x${videoState.height} playing=${videoState.playing} readyState=${videoState.readyState}`,
-      );
-      result.spectatorVideoReceived = true;
-      result.spectatorVideoPlaying = videoState.playing;
-      result.spectatorVideoWidth = videoState.width;
-      result.spectatorVideoHeight = videoState.height;
-    } else {
-      log('SPECTATOR', 'Video element present but no video track data');
-      result.errors.push('Video element found but no video frames received');
+    // Additional stability wait to let stream settle.
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // ── Step 4: Diagnostic Validation ────────────────────────────────────
+    log('TEST', '=== Step 4: Diagnostic Validation ===');
+
+    // Validate desktop logs.
+    const desktopLogs = logEntries.filter((e) => e.source === 'desktop-main' || e.source === 'desktop-renderer');
+    const desktopErrors = validateLogs(desktopLogs, 'Desktop');
+    result.consoleErrors = desktopErrors;
+    if (desktopErrors.length > 0) {
+      result.errors.push(`${desktopErrors.length} suspicious desktop console log entry(s)`);
+    }
+
+    // Validate spectator logs.
+    const spectatorLogs = logEntries.filter((e) => e.source === 'spectator');
+    const spectatorErrors = validateLogs(spectatorLogs, 'Spectator');
+    result.consoleErrors.push(...spectatorErrors);
+    if (spectatorErrors.length > 0) {
+      result.errors.push(`${spectatorErrors.length} suspicious spectator console log entry(s)`);
+    }
+
+    // Validate GPU report.
+    const gpuIssues = validateGpuReport(gpuInfo);
+    if (gpuIssues.length > 0) {
+      for (const issue of gpuIssues) {
+        result.errors.push(`GPU: ${issue}`);
+      }
+    }
+
+    // Validate spectator stream receipt.
+    if (!result.spectatorVideoReceived) {
+      result.errors.push('Spectator did not receive video stream within timeout');
     }
   } catch (err) {
-    log('SPECTATOR', `Video element never appeared: ${err}`);
-    result.errors.push('Spectator video element never appeared');
-  }
+    const message = err instanceof Error ? err.message : String(err);
+    log('TEST', `FATAL: ${message}`);
+    result.errors.push(message);
+  } finally {
+    // Console logs are written on every outcome — they are the primary
+    // diagnostic artifact when a step fails before validation runs.
+    const consoleOutput = logEntries
+      .map((e) => `[${new Date(e.timestamp).toISOString()}] [${e.source}] ${e.message}`)
+      .join('\n');
+    writeFileSync(DESKTOP_CONSOLE_LOG, consoleOutput);
+    const webLogEntries = logEntries.filter((e) => e.source === 'spectator');
+    writeFileSync(WEB_CONSOLE_LOG, webLogEntries.map((e) => e.message).join('\n'));
 
-  // Additional stability wait to let stream settle.
-  await new Promise((r) => setTimeout(r, 3000));
-
-  // ── Step 4: Diagnostic Validation ────────────────────────────────────
-  log('TEST', '=== Step 4: Diagnostic Validation ===');
-
-  // Write console logs.
-  const consoleOutput = logEntries
-    .map((e) => `[${new Date(e.timestamp).toISOString()}] [${e.source}] ${e.message}`)
-    .join('\n');
-  writeFileSync(DESKTOP_CONSOLE_LOG, consoleOutput);
-  log('DIAGNOSTIC', `Desktop console log written (${logEntries.length} entries)`);
-
-  // Write web spectator logs separately.
-  const webLogEntries = logEntries.filter((e) => e.source === 'spectator');
-  writeFileSync(WEB_CONSOLE_LOG, webLogEntries.map((e) => e.message).join('\n'));
-  log('DIAGNOSTIC', `Web console log written (${webLogEntries.length} entries)`);
-
-  // Validate desktop logs.
-  const desktopLogs = logEntries.filter((e) => e.source === 'desktop-main' || e.source === 'desktop-renderer');
-  const desktopErrors = validateLogs(desktopLogs, 'Desktop');
-  result.consoleErrors = desktopErrors;
-  if (desktopErrors.length > 0) {
-    result.errors.push(`${desktopErrors.length} suspicious desktop console log entry(s)`);
-  }
-
-  // Validate spectator logs.
-  const spectatorLogs = logEntries.filter((e) => e.source === 'spectator');
-  const spectatorErrors = validateLogs(spectatorLogs, 'Spectator');
-  result.consoleErrors.push(...spectatorErrors);
-  if (spectatorErrors.length > 0) {
-    result.errors.push(`${spectatorErrors.length} suspicious spectator console log entry(s)`);
-  }
-
-  // Validate GPU report.
-  const gpuIssues = validateGpuReport(gpuInfo);
-  if (gpuIssues.length > 0) {
-    for (const issue of gpuIssues) {
-      result.errors.push(`GPU: ${issue}`);
+    log('CLEANUP', 'Shutting down...');
+    if (browser) {
+      await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
     }
-  }
-
-  // Validate spectator stream receipt.
-  if (!result.spectatorVideoReceived) {
-    result.errors.push('Spectator did not receive video stream within timeout');
-  }
-
-  // ── Cleanup ───────────────────────────────────────────────────────
-  log('CLEANUP', 'Shutting down...');
-
-  await context.close().catch(() => log('CLEANUP', 'Spectator context already closed'));
-  await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
-  await electronApp.close().catch(() => log('CLEANUP', 'Electron app already closed'));
-
-  for (const proc of [serverProc, webProc]) {
-    try {
-      proc.kill('SIGTERM');
-    } catch (err) {
-      log('CLEANUP', `Process kill failed: ${err}`);
+    if (electronApp) {
+      await electronApp.close().catch(() => log('CLEANUP', 'Electron app already closed'));
     }
-  }
+    for (const proc of [serverProc, webProc, livekitProc]) {
+      try {
+        proc?.kill('SIGTERM');
+      } catch (err) {
+        log('CLEANUP', `Process kill failed: ${err}`);
+      }
+    }
 
-  // Ensure ports are freed.
-  killPort(config.serverPort);
-  killPort(config.webPort);
+    // Ensure ports are freed.
+    killPort(config.serverPort);
+    killPort(config.webPort);
+  }
 
   // ── Final Assessment ──────────────────────────────────────────────
   result.passed = result.errors.length === 0;
@@ -708,10 +803,9 @@ async function main(): Promise<void> {
     log('TEST', `========================================`);
 
     try {
-      const result = await Promise.race([
-        runTest(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Test timed out')), TEST_TOTAL_TIMEOUT_MS)),
-      ]);
+      // No outer race: every wait inside runTest is individually bounded, and
+      // an orphaned run's cleanup would kill the next attempt's servers.
+      const result = await runTest();
 
       result.retries = attempt - 1;
       lastResult = result;
