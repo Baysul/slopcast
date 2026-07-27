@@ -16,7 +16,9 @@ export const Header: React.FC<HeaderProps> = ({ roomCode, shareUrl, status = 'co
 
   const handleCopyLink = () => {
     const url = shareUrl || window.location.href;
-    navigator.clipboard.writeText(url).catch(() => {});
+    navigator.clipboard.writeText(url).catch((err) => {
+      console.warn('[Header] copy link failed:', err);
+    });
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
