@@ -40,7 +40,11 @@ export const AudioLevelMeter: React.FC<AudioLevelMeterProps> = ({ level }) => {
       const v = history[i] ?? 0;
       const barHeight = Math.max(1.5, Math.min(1, v) * HEIGHT);
       const x = i * (barWidth + gap);
-      ctx.fillStyle = v > 0.02 ? `rgba(196, 128, 74, ${0.35 + Math.min(1, v) * 0.65})` : 'rgba(255, 255, 255, 0.08)';
+      if (v > 0.02) {
+        ctx.fillStyle = `rgba(196, 128, 74, ${0.35 + Math.min(1, v) * 0.65})`;
+      } else {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+      }
       ctx.beginPath();
       ctx.roundRect(x, HEIGHT - barHeight, barWidth, barHeight, 1);
       ctx.fill();
