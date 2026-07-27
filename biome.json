@@ -24,7 +24,36 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "preset": "recommended"
+      "preset": "recommended",
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noEmptyBlockStatements": "error"
+      },
+      "style": {
+        "noNonNullAssertion": "error",
+        "noNestedTernary": "error",
+        "noUselessElse": "error"
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": {
+          "level": "warn",
+          "options": {
+            "maxAllowedComplexity": 15
+          }
+        },
+        "noExcessiveLinesPerFunction": {
+          "level": "warn",
+          "options": {
+            "maxLines": 50,
+            "skipBlankLines": true,
+            "skipIifes": false
+          }
+        }
+      },
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error"
+      }
     }
   },
   "javascript": {
@@ -46,19 +75,6 @@
         "rules": {
           "suspicious": {
             "noUnknownAtRules": "off"
-          }
-        }
-      }
-    },
-    {
-      "includes": ["apps/server/src/test-*.ts"],
-      "linter": {
-        "rules": {
-          "style": {
-            "noNonNullAssertion": "off"
-          },
-          "suspicious": {
-            "noExplicitAny": "off"
           }
         }
       }

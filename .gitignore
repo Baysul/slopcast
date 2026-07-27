@@ -10,7 +10,6 @@ release/
 packages/native-rust/index.js
 packages/native-rust/index.d.ts
 packages/native-rust/*.node
-packages/native-rust/Cargo.lock
 
 # Environment
 .env
@@ -52,3 +51,6 @@ slopcast.config.json
 # Misc
 .cache/
 .tmp/
+
+# npm lockfile — this workspace uses pnpm (pnpm-lock.yaml)
+package-lock.json
