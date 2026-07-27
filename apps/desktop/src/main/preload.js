@@ -14,4 +14,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clipboardWriteText: (text) => ipcRenderer.invoke('clipboard-write-text', text),
   resolveAudioSource: (opts) => ipcRenderer.invoke('resolve-audio-source', opts),
   getCaptureContext: () => ipcRenderer.invoke('get-capture-context'),
+  getStreamSettings: () => ipcRenderer.invoke('get-stream-settings'),
+  saveStreamSettings: (settings) => ipcRenderer.invoke('save-stream-settings', settings),
 });
