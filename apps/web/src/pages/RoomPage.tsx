@@ -3,9 +3,18 @@ import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { SpectatorBanner } from '../components/SpectatorBanner';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { VideoPlayer } from '../components/VideoPlayer';
+
+type StatusVariant = 'live' | 'disconnected' | 'info';
+
+const STATUS_BADGE_CLASS: Record<StatusVariant, string> = {
+  live: 'bg-safelight/15 border-safelight/25',
+  disconnected: 'bg-destructive/15 border-destructive/25',
+  info: 'bg-white/5 text-gray-400 border-white/10',
+};
 
 export const RoomPage: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -26,7 +35,9 @@ export const RoomPage: React.FC = () => {
   const managedStreamRef = useRef<MediaStream | null>(null);
 
   const copyLink = () => {
-    navigator.clipboard.writeText(window.location.href).catch(() => {});
+    navigator.clipboard.writeText(window.location.href).catch((err) => {
+      console.warn('[Room] copy link failed:', err);
+    });
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -130,11 +141,12 @@ export const RoomPage: React.FC = () => {
     const injectedLivekitUrl = (window as { __SLOPCAST_CONFIG__?: { livekitUrl?: string } }).__SLOPCAST_CONFIG__
       ?.livekitUrl;
 
-    const baseUrl = apiEndpoint
-      ? apiEndpoint
-      : injectedLivekitUrl
-        ? injectedLivekitUrl.replace(/^ws(s?):\/\//, 'http$1://')
-        : `${window.location.protocol}//${window.location.hostname}:3001`;
+    let baseUrl = `${window.location.protocol}//${window.location.hostname}:3001`;
+    if (apiEndpoint) {
+      baseUrl = apiEndpoint;
+    } else if (injectedLivekitUrl) {
+      baseUrl = injectedLivekitUrl.replace(/^ws(s?):\/\//, 'http$1://');
+    }
 
     const getToken = async (): Promise<{ token: string; livekitUrl: string }> => {
       const res = await fetch(`${baseUrl}/api/rooms/${roomId}/token`);
@@ -175,19 +187,12 @@ export const RoomPage: React.FC = () => {
 
   const handleResync = () => initializeConnection();
 
-  const statusVariant: 'live' | 'disconnected' | 'info' =
-    connectionStatus === 'live'
-      ? 'live'
-      : connectionStatus === 'disconnected' || connectionStatus === 'closed' || connectionStatus === 'error'
-        ? 'disconnected'
-        : 'info';
-
-  const statusOverride =
-    statusVariant === 'live'
-      ? 'bg-safelight/15 border-safelight/25'
-      : statusVariant === 'disconnected'
-        ? 'bg-destructive/15 border-destructive/25'
-        : 'bg-white/5 text-gray-400 border-white/10';
+  const statusVariant = (): StatusVariant => {
+    if (connectionStatus === 'live') return 'live';
+    if (connectionStatus === 'connecting') return 'info';
+    return 'disconnected';
+  };
+  const variant = statusVariant();
 
   return (
     <div className="min-h-screen bg-black text-gray-100 relative">
@@ -215,8 +220,8 @@ export const RoomPage: React.FC = () => {
             </button>
             <span role="status" aria-live="polite" className="min-w-0">
               <Badge
-                variant={statusVariant}
-                className={`min-w-0 max-w-[60vw] sm:max-w-[320px] shrink transition-colors duration-300 ${statusOverride}`}
+                variant={variant}
+                className={`min-w-0 max-w-[60vw] sm:max-w-[320px] shrink transition-colors duration-300 ${STATUS_BADGE_CLASS[variant]}`}
               >
                 {connectionStatus === 'live' && (
                   <span className="relative w-1.5 h-1.5 shrink-0" aria-hidden="true">
@@ -243,6 +248,10 @@ export const RoomPage: React.FC = () => {
             {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
           </button>
         </div>
+      </div>
+
+      <div className="fixed bottom-4 left-4 z-30 pointer-events-none">
+        <SpectatorBanner compact />
       </div>
 
       {errorMsg && (

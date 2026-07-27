@@ -3,6 +3,7 @@ import type React from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
+import { SpectatorBanner } from '../components/SpectatorBanner';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Input } from '../components/ui/Input';
@@ -82,6 +83,8 @@ export const HomePage: React.FC = () => {
             </Button>
           </form>
         </Card>
+
+        <SpectatorBanner />
       </main>
     </div>
   );

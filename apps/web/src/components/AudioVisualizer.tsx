@@ -32,7 +32,9 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
         if (!ACtor) return;
         audioCtx = new ACtor();
         if (audioCtx.state === 'suspended') {
-          audioCtx.resume().catch(() => {});
+          audioCtx.resume().catch((err) => {
+            console.warn('[AudioVisualizer] AudioContext resume failed:', err);
+          });
         }
 
         const analyser = audioCtx.createAnalyser();
@@ -78,7 +80,9 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
 
     const onUnlock = () => {
       if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume().catch(() => {});
+        audioCtx.resume().catch((err) => {
+          console.warn('[AudioVisualizer] AudioContext resume failed:', err);
+        });
       }
       startVisualizer();
     };
@@ -87,7 +91,11 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
     return () => {
       window.removeEventListener(AUDIO_UNLOCK_EVENT, onUnlock);
       if (animationFrameId) cancelAnimationFrame(animationFrameId);
-      if (audioCtx && audioCtx.state !== 'closed') audioCtx.close().catch(() => {});
+      if (audioCtx && audioCtx.state !== 'closed') {
+        audioCtx.close().catch((err) => {
+          console.warn('[AudioVisualizer] AudioContext close failed:', err);
+        });
+      }
     };
   }, [mediaStream]);
 

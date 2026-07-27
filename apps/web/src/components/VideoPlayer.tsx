@@ -195,6 +195,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
+  const GestureIcon = isPlaying ? Volume2 : Play;
+  const audioTrackCount = mediaStream?.getAudioTracks().length ?? 0;
+
   return (
     <div
       ref={containerRef}
@@ -235,17 +238,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             className="flex flex-col items-center gap-4 px-8 py-6 bg-safelight/20 border border-safelight/40 rounded-2xl
                        text-white hover:bg-safelight/30 transition-all backdrop-blur-md cursor-pointer"
           >
-            {isPlaying ? (
-              <Volume2 className="w-10 h-10 text-safelight" />
-            ) : (
-              <Play className="w-10 h-10 text-safelight" />
-            )}
+            <GestureIcon className="w-10 h-10 text-safelight" />
             <span className="font-semibold text-base">{isPlaying ? 'Click to enable audio' : 'Click to watch'}</span>
-            {mediaStream?.getAudioTracks().length ? (
+            {audioTrackCount > 0 && (
               <span className="text-xs text-white/40">
                 {isPlaying ? 'Video is playing — tap to hear audio' : 'Video and audio will play after click'}
               </span>
-            ) : null}
+            )}
           </button>
         </div>
       )}
