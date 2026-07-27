@@ -9,6 +9,11 @@ files:
   - package.json
   - "!node_modules/.bin"
   - "!node_modules/.cache"
+  # The pnpm symlink to packages/native-rust is followed wholesale — exclude
+  # cargo build artifacts and rust sources; only index.js + the .node ship.
+  - "!**/target/**"
+  - "!**/node_modules/@slopcast/native-rust/{src,scripts,node_modules}/**"
+  - "!**/node_modules/@slopcast/native-rust/{Cargo.toml,Cargo.lock,rustfmt.toml,test-native.js,build.rs}"
 mac:
   category: public.app-category.utilities
   target:
