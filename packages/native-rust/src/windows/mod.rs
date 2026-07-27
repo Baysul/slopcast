@@ -79,7 +79,11 @@ fn snapshot_process_names() -> HashMap<u32, String> {
     entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
     if unsafe { Process32FirstW(snapshot, &mut entry).is_ok() } {
         loop {
-            let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
             map.insert(entry.th32ProcessID, name);
             if unsafe { Process32NextW(snapshot, &mut entry).is_err() } {
@@ -117,24 +121,35 @@ fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
         let manager: IAudioSessionManager2 = device
             .Activate(CLSCTX_ALL, None)
             .map_err(|e| napi_err("Activate(IAudioSessionManager2)", e))?;
-        let sessions =
-            manager.GetSessionEnumerator().map_err(|e| napi_err("GetSessionEnumerator", e))?;
-        let count =
-            sessions.GetCount().map_err(|e| napi_err("GetSessionEnumerator::GetCount", e))?;
+        let sessions = manager
+            .GetSessionEnumerator()
+            .map_err(|e| napi_err("GetSessionEnumerator", e))?;
+        let count = sessions
+            .GetCount()
+            .map_err(|e| napi_err("GetSessionEnumerator::GetCount", e))?;
 
         let mut apps = Vec::new();
         let mut seen: HashSet<u32> = HashSet::new();
         for i in 0..count {
-            let Ok(control) = sessions.GetSession(i) else { continue };
-            let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+            let Ok(control) = sessions.GetSession(i) else {
+                continue;
+            };
+            let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+                continue;
+            };
             if control2.IsSystemSoundsSession() == S_OK {
                 continue;
             }
-            let Ok(pid) = control2.GetProcessId() else { continue };
+            let Ok(pid) = control2.GetProcessId() else {
+                continue;
+            };
             if pid == 0 || !seen.insert(pid) {
                 continue;
             }
-            let name = names.get(&pid).cloned().unwrap_or_else(|| format!("Process {pid}"));
+            let name = names
+                .get(&pid)
+                .cloned()
+                .unwrap_or_else(|| format!("Process {pid}"));
             apps.push(AudioApp {
                 id: pid as i32,
                 name,
@@ -172,12 +187,16 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
 fn wait_for_activation(setup: &Arc<(Mutex<bool>, Condvar)>) -> windows::core::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let (lock, cvar) = &**setup;
-    let mut completed =
-        lock.lock().map_err(|e| Error::new(E_FAIL, format!("Activation mutex poisoned: {e}")))?;
+    let mut completed = lock
+        .lock()
+        .map_err(|e| Error::new(E_FAIL, format!("Activation mutex poisoned: {e}")))?;
     while !*completed {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(Error::new(HRESULT::from_win32(1460), "Timed out waiting for activation"));
+            return Err(Error::new(
+                HRESULT::from_win32(1460),
+                "Timed out waiting for activation",
+            ));
         }
         let (guard, _) = cvar
             .wait_timeout(completed, remaining)
@@ -219,8 +238,10 @@ fn activate_process_loopback(target_pid: u32) -> windows::core::Result<IAudioCli
     };
 
     let setup = Arc::new((Mutex::new(false), Condvar::new()));
-    let callback: IActivateAudioInterfaceCompletionHandler =
-        ActivationHandler { state: setup.clone() }.into();
+    let callback: IActivateAudioInterfaceCompletionHandler = ActivationHandler {
+        state: setup.clone(),
+    }
+    .into();
     // SAFETY: `raw_prop` points to the heap-allocated `activation_params`. On
     // success the completion callback has fired before we return, so COM no
     // longer references the params; on every error path below the Box is
@@ -282,7 +303,9 @@ fn make_loopback_format() -> WAVEFORMATEXTENSIBLE {
             wBitsPerSample: BITS_PER_SAMPLE,
             cbSize: (size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>()) as u16,
         },
-        Samples: WAVEFORMATEXTENSIBLE_0 { wValidBitsPerSample: BITS_PER_SAMPLE },
+        Samples: WAVEFORMATEXTENSIBLE_0 {
+            wValidBitsPerSample: BITS_PER_SAMPLE,
+        },
         SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
         dwChannelMask: 0x3,
     }
@@ -396,12 +419,23 @@ fn build_capture_session(target_pid: u32) -> Result<(CaptureSession, CaptureMode
             .map_err(|e| format!("GetService(IAudioCaptureClient): {e}"))?;
         let audio_event = CreateEventA(None, false, false, PCSTR::null())
             .map_err(|e| format!("CreateEventA: {e}"))?;
-        client.SetEventHandle(audio_event).map_err(|e| format!("SetEventHandle: {e}"))?;
-        client.Start().map_err(|e| format!("IAudioClient::Start: {e}"))?;
+        client
+            .SetEventHandle(audio_event)
+            .map_err(|e| format!("SetEventHandle: {e}"))?;
+        client
+            .Start()
+            .map_err(|e| format!("IAudioClient::Start: {e}"))?;
         Ok::<_, String>((capture_client, audio_event))
     }?;
 
-    Ok((CaptureSession { client, capture_client, audio_event }, mode))
+    Ok((
+        CaptureSession {
+            client,
+            capture_client,
+            audio_event,
+        },
+        mode,
+    ))
 }
 
 fn run_capture(
@@ -467,7 +501,9 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
         Either::B(pid) => *pid as u32,
     };
 
-    let mut guard = WASAPI_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let mut guard = WASAPI_STATE
+        .lock()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
     let state = guard.get_or_insert_with(|| WasapiState {
         is_active: false,
         target_pid: None,
@@ -520,7 +556,9 @@ fn napi_error(context: &str, e: String) -> napi::Error {
 }
 
 pub fn stop_audio_capture() -> NapiResult<bool> {
-    let Ok(mut guard) = WASAPI_STATE.lock() else { return Ok(true) };
+    let Ok(mut guard) = WASAPI_STATE.lock() else {
+        return Ok(true);
+    };
     if let Some(state) = guard.as_mut() {
         stop_capture_locked(state);
     }
@@ -528,12 +566,20 @@ pub fn stop_audio_capture() -> NapiResult<bool> {
 }
 
 pub fn is_audio_capture_active() -> NapiResult<bool> {
-    let Ok(mut guard) = WASAPI_STATE.lock() else { return Ok(false) };
-    let Some(state) = guard.as_mut() else { return Ok(false) };
+    let Ok(mut guard) = WASAPI_STATE.lock() else {
+        return Ok(false);
+    };
+    let Some(state) = guard.as_mut() else {
+        return Ok(false);
+    };
     if !state.is_active {
         return Ok(false);
     }
-    if state.capture_thread.as_ref().is_some_and(|t| t.is_finished()) {
+    if state
+        .capture_thread
+        .as_ref()
+        .is_some_and(|t| t.is_finished())
+    {
         stop_capture_locked(state);
         return Ok(false);
     }
@@ -541,7 +587,9 @@ pub fn is_audio_capture_active() -> NapiResult<bool> {
 }
 
 pub fn switch_audio_capture(_: &Either<String, i32>) -> NapiResult<bool> {
-    Err(napi::Error::from_reason("Audio target switching is not yet supported on Windows"))
+    Err(napi::Error::from_reason(
+        "Audio target switching is not yet supported on Windows",
+    ))
 }
 
 pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
