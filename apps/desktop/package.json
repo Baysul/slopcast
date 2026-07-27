@@ -3,7 +3,6 @@
   "author": "Basil <parsley@duck.com>",
   "desktopName": "slopcast-app",
   "icon": "resources/icon.png",
-  "homepage": "https://github.com/npm/example#readme",
   "version": "0.1.0",
   "private": true,
   "main": "dist/main/index.js",

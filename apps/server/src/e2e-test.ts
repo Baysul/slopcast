@@ -437,8 +437,6 @@ async function runTest(): Promise<TestResult> {
     log('TEST', '=== Step 2: Presenter Automation (Electron) ===');
 
     // Dynamic import to avoid type issues at top level before playwright is installed.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-
     const { chromium, _electron: electron } = await import('playwright');
 
     const desktopDir = path.join(REPO_ROOT, 'apps', 'desktop');
@@ -571,7 +569,7 @@ async function runTest(): Promise<TestResult> {
       let isLive = false;
       log('ELECTRON', `Waiting for streaming to start (timeout ${STREAM_TIMEOUT_MS}ms)...`);
       while (Date.now() < deadline) {
-        const liveBadge = page.locator('[role="status"]');
+        const liveBadge = page.locator('header [role="status"]', { hasText: 'LIVE' });
         if ((await liveBadge.count()) > 0) {
           isLive = true;
           break;

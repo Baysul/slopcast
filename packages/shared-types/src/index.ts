@@ -101,5 +101,8 @@ export const fmtBitrate = (bps: number | null): string => {
   return `${Math.max(1, Math.round(bps / 1000))} kbps`;
 };
 
-export const fmtLoss = (pct: number | null): string =>
-  pct == null ? '\u2014' : `${pct < 0.1 ? pct.toFixed(2) : pct.toFixed(1)}%`;
+export const fmtLoss = (pct: number | null): string => {
+  if (pct == null) return '—';
+  if (pct < 0.1) return `${pct.toFixed(2)}%`;
+  return `${pct.toFixed(1)}%`;
+};

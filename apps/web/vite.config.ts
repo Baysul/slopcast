@@ -15,11 +15,6 @@ export default defineConfig({
   server: {
     port: config.webPort,
     proxy: {
-      '/ws': {
-        target: config.apiEndpoint,
-        ws: true,
-        rewrite: () => '/',
-      },
       '/api': {
         target: config.apiEndpoint,
         changeOrigin: true,

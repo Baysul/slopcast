@@ -2,7 +2,6 @@
   "name": "slopcast-monorepo",
   "desktopName": "slopcast-app",
   "author": "Basil <parsley@duck.com>",
-  "homepage": "https://github.com/npm/example#readme",
   "private": true,
   "version": "0.1.0",
   "packageManager": "pnpm@9.15.4",
@@ -32,9 +31,6 @@
     "dist:desktop:linux:tar": "pnpm check && pnpm --filter desktop dist:linux:tar",
     "dist:desktop:mac": "pnpm check && pnpm --filter desktop dist:mac",
     "dist:desktop:win": "pnpm check && pnpm --filter desktop dist:win"
-  },
-  "dependencies": {
-    "opencode-goal-plugin": "^0.6.5"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
