@@ -31,7 +31,7 @@ declare global {
       getAudioLevels: () => Promise<AudioAppLevel[]>;
       getDesktopSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
       clipboardWriteText: (text: string) => Promise<boolean>;
-      resolveAudioSource: (opts?: { sourceId?: string }) => Promise<AudioApp | null>;
+      resolveAudioSource: (opts?: { sourceId?: string; nameHint?: string }) => Promise<AudioApp | null>;
       getCaptureContext: () => Promise<CaptureContext | null>;
       getStreamSettings: () => Promise<StreamSettings>;
       saveStreamSettings: (settings: StreamSettings) => Promise<boolean>;
@@ -370,10 +370,35 @@ const TelemetryCell: React.FC<{
   </div>
 );
 
+const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
+  if (!t.hasAudio) {
+    return <span className="text-sm font-mono font-semibold leading-none text-gray-600">video only</span>;
+  }
+  return (
+    <span className="flex items-baseline gap-1.5 leading-none">
+      <span className="text-sm font-mono font-semibold tabular-nums leading-none text-gray-100">
+        {t.audioCodec ?? '—'}
+      </span>
+      {t.audioBitrate != null && (
+        <span className="text-[10px] font-mono tabular-nums leading-none text-gray-500">
+          {fmtBitrate(t.audioBitrate)}
+        </span>
+      )}
+    </span>
+  );
+};
+
 const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
   const fpsDegrade = t.frameRate != null && t.targetFrameRate != null && t.frameRate < t.targetFrameRate * 0.75;
   const lossDegrade = t.packetLossPct != null && t.packetLossPct > 1;
-  const fpsSub = t.targetFrameRate != null ? `/ ${Math.round(t.targetFrameRate)}` : undefined;
+  let fpsValue = '—';
+  let fpsSub: string | undefined;
+  if (t.frameRate != null) {
+    fpsValue = `${Math.round(t.frameRate)} fps`;
+  }
+  if (t.targetFrameRate != null) {
+    fpsSub = `/ ${Math.round(t.targetFrameRate)}`;
+  }
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 select-none">
@@ -392,12 +417,7 @@ const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetr
             sub={t.videoEncoder ? `· ${t.videoEncoder}` : undefined}
           />
           <TelemetryCell label="Resolution" value={t.width && t.height ? `${t.width}×${t.height}` : '—'} />
-          <TelemetryCell
-            label="Frame Rate"
-            value={t.frameRate != null ? `${Math.round(t.frameRate)} fps` : '—'}
-            sub={fpsSub}
-            degrade={fpsDegrade}
-          />
+          <TelemetryCell label="Frame Rate" value={fpsValue} sub={fpsSub} degrade={fpsDegrade} />
           <TelemetryCell label="Bitrate" value={fmtBitrate(t.videoBitrate)} />
           <TelemetryCell label="Loss" value={fmtLoss(t.packetLossPct)} degrade={lossDegrade} />
 
@@ -406,20 +426,7 @@ const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetr
             <span className="text-[9px] font-semibold uppercase tracking-[0.1em] leading-none text-gray-500">
               Audio
             </span>
-            {t.hasAudio ? (
-              <span className="flex items-baseline gap-1.5 leading-none">
-                <span className="text-sm font-mono font-semibold tabular-nums leading-none text-gray-100">
-                  {t.audioCodec ?? '—'}
-                </span>
-                {t.audioBitrate != null && (
-                  <span className="text-[10px] font-mono tabular-nums leading-none text-gray-500">
-                    {fmtBitrate(t.audioBitrate)}
-                  </span>
-                )}
-              </span>
-            ) : (
-              <span className="text-sm font-mono font-semibold leading-none text-gray-600">video only</span>
-            )}
+            <AudioTelemetryValue telemetry={t} />
           </div>
 
           <div className="grow basis-0 min-w-0" />
@@ -575,7 +582,12 @@ export const PresenterApp: React.FC = () => {
       throw new Error('Native audio capture failed to start');
     }
 
-    const unlock = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+    // Best-effort label unlock: without mic permission the virtual source's
+    // label stays hidden and findCaptureAudioDevice cannot match it.
+    const unlock = await navigator.mediaDevices.getUserMedia({ audio: true }).catch((err) => {
+      console.warn('[Presenter] mic permission denied; device labels may stay hidden:', err);
+      return null;
+    });
     for (const t of unlock?.getTracks() ?? []) {
       t.stop();
     }
@@ -799,7 +811,7 @@ export const PresenterApp: React.FC = () => {
     return () => {
       cancelled = true;
       if (interval) clearInterval(interval);
-      void api.stopAudioMetering().catch(() => {});
+      void api.stopAudioMetering().catch((err) => console.warn('[Presenter] stopAudioMetering failed:', err));
     };
   }, []);
 
@@ -912,10 +924,11 @@ export const PresenterApp: React.FC = () => {
       const prev = statsPrevRef.current;
 
       try {
-        const [videoStats, audioStats] = await Promise.all([
-          videoSender.getStats(),
-          audioSender ? audioSender.getStats() : Promise.resolve(null),
-        ]);
+        let audioStatsPromise: Promise<RTCStatsReport | null> = Promise.resolve(null);
+        if (audioSender) {
+          audioStatsPromise = audioSender.getStats();
+        }
+        const [videoStats, audioStats] = await Promise.all([videoSender.getStats(), audioStatsPromise]);
         let videoMime: string | null = null;
         let videoEnc: string | null = null;
         let audioMime: string | null = null;
@@ -994,17 +1007,26 @@ export const PresenterApp: React.FC = () => {
         const sBr = brBuf.length ? (brBuf.reduce((a, b) => a + b, 0) / brBuf.length) * 1_000_000 : null;
         const lossPct = packetsSent > 0 ? (packetsLost / (packetsSent + packetsLost)) * 100 : 0;
 
+        let videoCodecLabel: string | null = null;
+        if (videoMime) {
+          videoCodecLabel = codecLabel(videoMime);
+        }
+        let audioCodecLabel: string | null = null;
+        if (audioMime) {
+          audioCodecLabel = codecLabel(audioMime);
+        }
+
         setTelemetry((p) => ({
           live: true,
           updatedAt: Date.now(),
-          videoCodec: videoMime ? codecLabel(videoMime) : p.videoCodec,
+          videoCodec: videoCodecLabel ?? p.videoCodec,
           videoEncoder: videoEnc ?? p.videoEncoder,
           width: encWidth ?? width,
           height: encHeight ?? height,
           targetFrameRate,
           frameRate: sFps ?? p.frameRate,
           videoBitrate: sBr ?? p.videoBitrate,
-          audioCodec: audioMime ? codecLabel(audioMime) : p.audioCodec,
+          audioCodec: audioCodecLabel ?? p.audioCodec,
           audioBitrate: audioBps ?? p.audioBitrate,
           hasAudio,
           packetLossPct: lossPct,
@@ -1015,12 +1037,20 @@ export const PresenterApp: React.FC = () => {
         }));
 
         if (tick % 5 === 0) {
+          let fpsText = '–';
+          if (sFps != null) {
+            fpsText = String(Math.round(sFps));
+          }
+          let brText = '–';
+          if (sBr != null) {
+            brText = (sBr / 1_000_000).toFixed(1);
+          }
+          let rttText = '–';
+          if (rttMs != null) {
+            rttText = String(Math.round(rttMs));
+          }
           console.log(
-            `[Telemetry] ${videoMime ?? '?'} ${encWidth ?? width ?? '?'}×${encHeight ?? height ?? '?'} ${
-              sFps != null ? Math.round(sFps) : '–'
-            }/${targetFrameRate ?? '–'}fps ${sBr != null ? (sBr / 1_000_000).toFixed(1) : '–'}Mbps loss ${lossPct.toFixed(2)}% rtt ${
-              rttMs != null ? Math.round(rttMs) : '–'
-            }ms · ${spectatorCount} spectator(s)`,
+            `[Telemetry] ${videoMime ?? '?'} ${encWidth ?? width ?? '?'}×${encHeight ?? height ?? '?'} ${fpsText}/${targetFrameRate ?? '–'}fps ${brText}Mbps loss ${lossPct.toFixed(2)}% rtt ${rttText}ms · ${spectatorCount} spectator(s)`,
           );
         }
       } catch (err) {
@@ -1047,17 +1077,17 @@ export const PresenterApp: React.FC = () => {
     try {
       const res = await fetch(`${apiEndpoint}/api/rooms`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Client-Origin': 'desktop' },
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown server error' }));
-        throw new Error(err.error || `Server returned ${res.status}`);
+        const err = (await res.json().catch(() => ({ error: 'Unknown server error' }))) as { error?: string };
+        throw new Error(err.error ?? `Server returned ${res.status}`);
       }
-      const room = await res.json();
-      const code = room.code as string;
-      const url = room.shareUrl as string;
-      const token = room.token as string;
-      const apiLivekitUrl = room.livekitUrl as string;
+      const room = (await res.json()) as { code: string; shareUrl: string; token: string; livekitUrl: string };
+      const code = room.code;
+      const url = room.shareUrl;
+      const token = room.token;
+      const apiLivekitUrl = room.livekitUrl;
       const resolvedLivekitUrl = livekitUrl || apiLivekitUrl;
 
       roomCodeRef.current = code;
@@ -1348,12 +1378,19 @@ export const PresenterApp: React.FC = () => {
   };
 
   const canStartShare = !!roomCode && !isSharing && (isWayland || !!selectedSourceId);
-  const startDisabledReason =
-    isSharing || canStartShare
-      ? null
-      : !roomCode
-        ? 'Create a live room to start sharing.'
-        : 'Select a window above to start sharing.';
+  const startDisabledReason = (): string | null => {
+    if (isSharing || canStartShare) return null;
+    if (!roomCode) return 'Create a live room to start sharing.';
+    return 'Select a window above to start sharing.';
+  };
+  const disabledReason = startDisabledReason();
+
+  const shareButtonClass = ((): string => {
+    if (isSharing) {
+      return 'bg-destructive/90 hover:bg-destructive text-white';
+    }
+    return 'bg-safelight hover:bg-safelight-hover text-safelight-foreground';
+  })();
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -1498,18 +1535,25 @@ export const PresenterApp: React.FC = () => {
                   return null;
                 };
 
+                const pickerRowClass = (isSelected: boolean, isDesktopAudio: boolean): string => {
+                  if (isSelected && isDesktopAudio) {
+                    return 'bg-amber-950/40 border-amber-500/40 text-amber-200';
+                  }
+                  if (isSelected) {
+                    return 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200';
+                  }
+                  return 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300';
+                };
+
                 const renderBtn = (group: AudioAppGroup, isDesktopAudio: boolean) => {
                   const { representative, members } = group;
                   const isSelected = members.some((m) => m.id === selectedAudioAppId);
                   const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
                   const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
-                  const btnClass = `flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-                    isSelected
-                      ? isDesktopAudio
-                        ? 'bg-amber-950/40 border-amber-500/40 text-amber-200'
-                        : 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
-                      : 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300'
-                  }`;
+                  const btnClass = `flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
+                    isSelected,
+                    isDesktopAudio,
+                  )}`;
                   return (
                     <button
                       key={representative.id}
@@ -1573,11 +1617,8 @@ export const PresenterApp: React.FC = () => {
                     items.push(renderBtn(group, false));
                   }
                 }
-                return items.length > 0 ? (
-                  items
-                ) : (
-                  <p className="text-xs text-gray-600 text-center py-6">No active audio applications detected</p>
-                );
+                // The Desktop Audio row is always present, so items is never empty.
+                return items;
               })()}
             </div>
           </div>
@@ -1586,50 +1627,55 @@ export const PresenterApp: React.FC = () => {
           <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-6 space-y-4">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Screenshare Source</h2>
 
-            {isWayland ? (
-              <div className="space-y-2 text-xs">
-                <p className="text-gray-500 leading-relaxed">
-                  The system dialog (xdg-desktop-portal) will let you pick the window to share. Audio is auto-detected
-                  via PipeWire introspection.
-                </p>
-                {captureContext?.de === 'kde' && !autoDetectFailed && (
-                  <p className="text-gray-400 bg-gray-800/40 border border-gray-700/40 rounded-lg p-2.5 leading-relaxed">
-                    KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection fails,
-                    select an audio app manually.
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
-                {desktopSources.map((source) => {
-                  const isSelected = source.id === selectedSourceId;
-                  return (
-                    <button
-                      key={source.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedSourceId(source.id);
-                        void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
-                      }}
-                      aria-label={source.name}
-                      className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-                        isSelected
-                          ? 'bg-gray-800/50 border-gray-600 ring-1 ring-gray-600/30'
-                          : 'bg-background/60 border-gray-800/60 hover:border-gray-700'
-                      }`}
-                    >
-                      <img
-                        src={source.thumbnail}
-                        alt=""
-                        className="w-full h-20 object-cover rounded"
-                        aria-hidden="true"
-                      />
-                      <span className="block font-medium truncate text-gray-300">{source.name}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            {(() => {
+              if (isWayland) {
+                return (
+                  <div className="space-y-2 text-xs">
+                    <p className="text-gray-500 leading-relaxed">
+                      The system dialog (xdg-desktop-portal) will let you pick the window to share. Audio is
+                      auto-detected via PipeWire introspection.
+                    </p>
+                    {captureContext?.de === 'kde' && !autoDetectFailed && (
+                      <p className="text-gray-400 bg-gray-800/40 border border-gray-700/40 rounded-lg p-2.5 leading-relaxed">
+                        KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection
+                        fails, select an audio app manually.
+                      </p>
+                    )}
+                  </div>
+                );
+              }
+              return (
+                <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
+                  {desktopSources.map((source) => {
+                    const isSelected = source.id === selectedSourceId;
+                    return (
+                      <button
+                        key={source.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedSourceId(source.id);
+                          void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
+                        }}
+                        aria-label={source.name}
+                        className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                          isSelected
+                            ? 'bg-gray-800/50 border-gray-600 ring-1 ring-gray-600/30'
+                            : 'bg-background/60 border-gray-800/60 hover:border-gray-700'
+                        }`}
+                      >
+                        <img
+                          src={source.thumbnail}
+                          alt=""
+                          className="w-full h-20 object-cover rounded"
+                          aria-hidden="true"
+                        />
+                        <span className="block font-medium truncate text-gray-300">{source.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             {autoDetectFailed && captureContext?.de === 'kde' && (
               <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 space-y-1">
@@ -1645,18 +1691,14 @@ export const PresenterApp: React.FC = () => {
               onClick={isSharing ? handleStopShare : handleStartShare}
               disabled={!isSharing && !canStartShare}
               title={isSharing ? 'Stop the broadcast and disconnect all spectators.' : undefined}
-              aria-describedby={startDisabledReason ? 'start-screenshare-hint' : undefined}
-              className={`w-full py-3 text-sm font-bold rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-                isSharing
-                  ? 'bg-destructive/90 hover:bg-destructive text-white'
-                  : 'bg-safelight hover:bg-safelight-hover text-safelight-foreground'
-              }`}
+              aria-describedby={disabledReason ? 'start-screenshare-hint' : undefined}
+              className={`w-full py-3 text-sm font-bold rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background ${shareButtonClass}`}
             >
               {isSharing ? 'Stop Screenshare' : 'Start Screenshare'}
             </button>
-            {startDisabledReason && (
+            {disabledReason && (
               <p id="start-screenshare-hint" className="text-[11px] text-gray-500 leading-relaxed">
-                {startDisabledReason}
+                {disabledReason}
               </p>
             )}
           </div>

@@ -143,7 +143,10 @@ export const useToasts = () => {
       };
       setToasts((prev) => {
         const next = [...prev, toast];
-        return next.length > MAX_VISIBLE ? next.slice(next.length - MAX_VISIBLE) : next;
+        if (next.length > MAX_VISIBLE) {
+          return next.slice(next.length - MAX_VISIBLE);
+        }
+        return next;
       });
       // Throttle the chime so a burst of connections plays one cascade rather
       // than a stutter of overlapping tones.
