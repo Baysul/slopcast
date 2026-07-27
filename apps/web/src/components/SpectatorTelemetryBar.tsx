@@ -1,3 +1,4 @@
+import { codecLabel, fmtBitrate, fmtLoss } from '@slopcast/shared-types';
 import type React from 'react';
 
 export interface SpectatorTelemetry {
@@ -12,29 +13,6 @@ export interface SpectatorTelemetry {
   hasAudio: boolean;
   quality: 'excellent' | 'degraded' | 'poor';
 }
-
-const VIDEO_CODEC_LABEL: Record<string, string> = {
-  'VIDEO/H264': 'H.264',
-  'VIDEO/H265': 'H.265',
-  'VIDEO/VP8': 'VP8',
-  'VIDEO/VP9': 'VP9',
-  'VIDEO/AV1': 'AV1',
-};
-
-const codecLabel = (mime: string | null | undefined): string | null => {
-  if (!mime) return null;
-  const up = mime.toUpperCase();
-  return VIDEO_CODEC_LABEL[up] ?? up.replace(/^(VIDEO|AUDIO)\//i, '');
-};
-
-const fmtBitrate = (bps: number | null): string => {
-  if (bps == null) return '\u2014';
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-  return `${Math.max(1, Math.round(bps / 1000))} kbps`;
-};
-
-const fmtLoss = (pct: number | null): string =>
-  pct == null ? '\u2014' : `${pct < 0.1 ? pct.toFixed(2) : pct.toFixed(1)}%`;
 
 const TelemetryCell: React.FC<{
   label: string;

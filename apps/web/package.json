@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "pnpm --filter @slopcast/shared-types build",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },

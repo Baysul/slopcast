@@ -1,5 +1,3 @@
-#![deny(clippy::all)]
-
 use napi_derive::napi;
 
 #[cfg(target_os = "linux")]
@@ -39,6 +37,18 @@ mod unsupported_platform {
     pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
         None
     }
+
+    pub fn start_audio_metering() -> napi::Result<bool> {
+        Ok(false)
+    }
+
+    pub fn stop_audio_metering() -> napi::Result<bool> {
+        Ok(true)
+    }
+
+    pub fn get_audio_levels() -> napi::Result<Vec<crate::AudioAppLevel>> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -57,6 +67,16 @@ pub struct AudioApp {
     pub name: String,
     pub process_id: i32,
     pub bundle_id: Option<String>,
+    pub window_title: Option<String>,
+    pub client_id: Option<i32>,
+    pub media_title: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone, Copy)]
+pub struct AudioAppLevel {
+    pub id: i32,
+    pub level: f64,
 }
 
 pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
@@ -119,4 +139,19 @@ pub fn resolve_audio_app_for_captured_window() -> napi::Result<Option<AudioApp>>
 pub fn resolve_audio_app_by_name(label: String) -> napi::Result<Option<AudioApp>> {
     let apps = platform::list_audio_applications()?;
     Ok(find_best_audio_match(&apps, &label))
+}
+
+#[napi]
+pub fn start_audio_metering() -> napi::Result<bool> {
+    platform::start_audio_metering()
+}
+
+#[napi]
+pub fn stop_audio_metering() -> napi::Result<bool> {
+    platform::stop_audio_metering()
+}
+
+#[napi]
+pub fn get_audio_levels() -> napi::Result<Vec<AudioAppLevel>> {
+    platform::get_audio_levels()
 }

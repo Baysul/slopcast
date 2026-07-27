@@ -1,16 +1,19 @@
-use crate::AudioApp;
+use crate::{AudioApp, AudioAppLevel};
+pub(crate) mod mpris;
 use napi::{Either, Result as NapiResult};
 use pipewire::properties::{PropertiesBox, properties};
 use pipewire::registry::GlobalObject;
-use pipewire::spa::param::audio::{AudioInfoRaw, AudioInfoRawFlags};
+use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw, AudioInfoRawFlags};
 use pipewire::spa::param::format::MediaType;
 use pipewire::spa::param::{ParamType, format_utils};
-use pipewire::spa::utils::dict::DictRef;
+use pipewire::spa::pod::{Object, Pod, Value};
+use pipewire::spa::utils::{SpaTypes, dict::DictRef};
+use pipewire::stream::{StreamFlags, StreamListener, StreamRc};
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -135,6 +138,7 @@ struct TargetSpec {
     node_id: Option<u32>,
     pid: Option<u32>,
     binary: Option<String>,
+    client_id: Option<u32>,
     system_audio: bool,
 }
 
@@ -145,10 +149,12 @@ impl TargetSpec {
         }
         self.pid = self.pid.or(info.pid);
         self.binary = self.binary.clone().or_else(|| info.binary.clone());
+        self.client_id = self.client_id.or(info.client_id);
     }
 
     fn matches(&self, node_id: u32, info: &AppNodeInfo) -> bool {
         Some(node_id) == self.node_id
+            || self.client_id.is_some_and(|c| info.client_id == Some(c))
             || self.pid.is_some_and(|p| info.pid == Some(p))
             || self.binary.as_deref().is_some_and(|b| info.binary.as_deref() == Some(b))
     }
@@ -158,6 +164,7 @@ impl TargetSpec {
 struct AppNodeInfo {
     pid: Option<u32>,
     binary: Option<String>,
+    client_id: Option<u32>,
 }
 
 impl AppNodeInfo {
@@ -168,7 +175,9 @@ impl AppNodeInfo {
             .filter(|p| is_valid_pid(*p as i32));
         let binary =
             props.get("application.process.binary").map(str::to_string).filter(|b| !b.is_empty());
-        Self { pid, binary }
+        let client_id =
+            props.get("client.id").and_then(|v| v.parse::<u32>().ok()).filter(|id| *id > 0);
+        Self { pid, binary, client_id }
     }
 
     fn fallback_pid(&self) -> Option<u32> {
@@ -974,8 +983,35 @@ fn resolve_pid_by_name(name: &str) -> Option<i32> {
         .map(|e| e.pid)
 }
 
+/// Best-effort window/tab title for an audio stream node, used by the UI to tell
+/// same-named applications apart. Browsers put the tab title in `media.name`;
+/// values that just restate the app name or a generic role are not titles.
+fn stream_window_title(props: &DictRef, app_name: &str) -> Option<String> {
+    const GENERIC: [&str; 11] = [
+        "playback",
+        "playback stream",
+        "playback streams",
+        "playstream",
+        "audio stream",
+        "audiostream",
+        "output",
+        "output stream",
+        "record",
+        "audio",
+        "stream",
+    ];
+    for key in ["media.name", "media.title", "window.title", "node.description"] {
+        let Some(value) = props.get(key).filter(|v| !v.is_empty()) else { continue };
+        if value == app_name || GENERIC.contains(&value.to_lowercase().as_str()) {
+            continue;
+        }
+        return Some(value.into());
+    }
+    None
+}
+
 fn collect_client_pids(
-    core: &pipewire::core::Core,
+    core: &pipewire::core::CoreRc,
     main_loop: &pipewire::main_loop::MainLoopRc,
     registry: &pipewire::registry::Registry,
     apps: &Rc<RefCell<Vec<AudioApp>>>,
@@ -983,6 +1019,17 @@ fn collect_client_pids(
     let client_pids: Rc<RefCell<HashMap<u32, u32>>> = Rc::new(RefCell::new(HashMap::new()));
     let cp = client_pids.clone();
     let ap = apps.clone();
+    // Node info props (e.g. `media.name`, where browsers put the tab title) are
+    // not part of the registry advertisement — they only arrive after binding
+    // the node. Audio stream nodes are bound here and kept until the second
+    // sync round below has delivered their info events.
+    let bound_nodes: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let bindings = bound_nodes.clone();
+    let bind_registry: Rc<RefCell<Option<pipewire::registry::RegistryRc>>> =
+        Rc::new(RefCell::new(None));
+    let reg_cell = bind_registry.clone();
+    let core_rc = core.clone();
 
     let _reg_listener = registry
         .add_listener_local()
@@ -1039,19 +1086,110 @@ fn collect_client_pids(
 
                 let mut list = ap.borrow_mut();
                 if !list.iter().any(|a| a.id == global.id as i32) {
+                    let client_id = props
+                        .get("client.id")
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .filter(|id| *id > 0);
+
                     list.push(AudioApp {
                         id: global.id as i32,
                         name: stream_name.into(),
                         process_id: pid,
                         bundle_id: None,
+                        window_title: stream_window_title(props, stream_name),
+                        client_id: client_id.map(|id| id as i32),
+                        media_title: None,
                     });
+                    drop(list);
+
+                    if reg_cell.borrow().is_none() {
+                        *reg_cell.borrow_mut() = core_rc.get_registry_rc().ok();
+                    }
+                    let Some(node) = reg_cell
+                        .borrow()
+                        .as_ref()
+                        .and_then(|reg| reg.bind::<pipewire::node::Node, _>(global).ok())
+                    else {
+                        return;
+                    };
+                    let node_id = global.id;
+                    let apps_info = ap.clone();
+                    let listener = node
+                        .add_listener_local()
+                        .info(move |info| {
+                            let Some(props) = info.props() else { return };
+                            let mut list = apps_info.borrow_mut();
+                            let Some(app) = list.iter_mut().find(|a| a.id == node_id as i32) else {
+                                return;
+                            };
+                            let title = stream_window_title(props, &app.name);
+                            app.window_title = title;
+                        })
+                        .register();
+                    bindings.borrow_mut().push((node, listener));
                 }
             }
         })
         .register();
 
     sync_registry(core, main_loop);
+    // Second round trip: bound node proxies deliver their info events.
+    sync_registry(core, main_loop);
     client_pids.take()
+}
+
+/// Normalize a string for fuzzy matching: lowercase, strip non-alphanumeric.
+fn norm(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Annotate audio apps with MPRIS now-playing titles.
+/// MPRIS players are matched to apps by PID (when the player's bus-owner PID
+/// matches the audio stream's process_id), then by fuzzy name containment
+/// (identity/desktop-entry vs app name). Among matching players, the one with
+/// `PlaybackStatus == "Playing"` wins; otherwise the first is used.
+fn annotate_mpris_titles(apps: &mut [AudioApp]) {
+    let players = mpris::list_players();
+    if players.is_empty() {
+        return;
+    }
+    for app in apps.iter_mut() {
+        let candidates: Vec<&mpris::MprisPlayer> = players
+            .iter()
+            .filter(|p| {
+                if p.pid.is_some_and(|pid| pid > 0 && pid == app.process_id as u32) {
+                    return true;
+                }
+                let app_norm = norm(&app.name);
+                let id_norm = norm(&p.identity);
+                if contains_fuzzy(&app_norm, &id_norm) {
+                    return true;
+                }
+                if let Some(de) = &p.desktop_entry {
+                    let de_norm = norm(de);
+                    if contains_fuzzy(&app_norm, &de_norm) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .collect();
+        let best =
+            candidates.iter().copied().find(|p| p.playing).or_else(|| candidates.first().copied());
+        if let Some(player) = best
+            && let Some(title) = &player.title
+        {
+            app.media_title = Some(title.into());
+        }
+    }
+}
+
+/// True when either string subsumes the other (min length 3).
+fn contains_fuzzy(a: &str, b: &str) -> bool {
+    if a.len() < 3 || b.len() < 3 {
+        return false;
+    }
+    a.contains(b) || b.contains(a)
 }
 
 pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
@@ -1061,7 +1199,9 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
         pw.core.get_registry().map_err(|e| napi::Error::from_reason(format!("Registry: {e}")))?;
     let apps = Rc::new(RefCell::new(Vec::<AudioApp>::new()));
     collect_client_pids(&pw.core, &pw.main_loop, &registry, &apps);
-    Ok(apps.take())
+    let mut apps = apps.take();
+    annotate_mpris_titles(&mut apps);
+    Ok(apps)
 }
 
 pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
@@ -1306,4 +1446,258 @@ pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
         }
     }
     None
+}
+
+// ---------- Per-app audio level metering ----------
+
+struct MeterStream {
+    _stream: StreamRc,
+    _listener: StreamListener<Arc<AtomicU32>>,
+}
+
+struct MeterSession {
+    stop: Arc<AtomicBool>,
+    join: thread::JoinHandle<()>,
+    levels: Arc<Mutex<HashMap<u32, Arc<AtomicU32>>>>,
+}
+
+static METER_STATE: Mutex<Option<MeterSession>> = Mutex::new(None);
+
+/// EnumFormat param offering exactly F32LE with native rate/channels, so meter
+/// streams never force format conversion in the graph.
+fn meter_format_param() -> Option<Vec<u8>> {
+    let mut audio_info = AudioInfoRaw::new();
+    audio_info.set_format(AudioFormat::F32LE);
+    let obj = Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties: audio_info.into(),
+    };
+    let serialized = pipewire::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(obj),
+    )
+    .ok()?;
+    Some(serialized.0.into_inner())
+}
+
+/// Creates a capture stream tapped into the given application node. AUTOCONNECT
+/// links the app's output ports to the meter's input ports additively — the
+/// app's existing links (speaker playback) are never touched.
+fn meter_stream(
+    core: &pipewire::core::CoreRc,
+    node_id: u32,
+    level: Arc<AtomicU32>,
+) -> Option<MeterStream> {
+    let stream = StreamRc::new(
+        core.clone(),
+        "slopcast-audio-meter",
+        properties! {
+            "media.class" => "Stream/Input/Audio",
+            "node.name" => format!("slopcast-meter-{node_id}"),
+            "node.description" => "Slopcast Audio Meter",
+            "node.dont-move" => "true",
+            "node.dont-reconnect" => "true",
+            "node.dont-fallback" => "true",
+        },
+    )
+    .ok()?;
+
+    let listener = stream
+        .add_local_listener_with_user_data(level)
+        .process(|stream, level| {
+            let Some(mut buffer) = stream.dequeue_buffer() else { return };
+            let mut peak: f32 = 0.0;
+            for data in buffer.datas_mut() {
+                let start = data.chunk().offset() as usize;
+                let size = data.chunk().size() as usize;
+                let Some(bytes) = data.data() else { continue };
+                let end = start.saturating_add(size).min(bytes.len());
+                let Some(slice) = bytes.get(start..end) else { continue };
+                for sample in slice.chunks_exact(4) {
+                    let mag =
+                        f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]).abs();
+                    peak = peak.max(mag);
+                }
+            }
+            level.store(peak.to_bits(), Ordering::Relaxed);
+        })
+        .register()
+        .ok()?;
+
+    let values = meter_format_param()?;
+    let pod = Pod::from_bytes(&values)?;
+    let mut params = [pod];
+    stream
+        .connect(
+            pipewire::spa::utils::Direction::Input,
+            Some(node_id),
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            &mut params,
+        )
+        .ok()?;
+
+    Some(MeterStream { _stream: stream, _listener: listener })
+}
+
+fn run_meter_session(
+    stop: Arc<AtomicBool>,
+    levels: Arc<Mutex<HashMap<u32, Arc<AtomicU32>>>>,
+    ready_tx: mpsc::Sender<Result<(), String>>,
+) {
+    pipewire::init();
+
+    let Ok(pw) = pw_init() else {
+        let _ = ready_tx.send(Err("PipeWire init failed".into()));
+        return;
+    };
+    let registry = match pw.core.get_registry() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = ready_tx.send(Err(e.to_string()));
+            return;
+        }
+    };
+
+    let meters: Rc<RefCell<HashMap<u32, MeterStream>>> = Rc::new(RefCell::new(HashMap::new()));
+    let our_pid = std::process::id();
+
+    let _reg_listener = registry
+        .add_listener_local()
+        .global({
+            let meters = meters.clone();
+            let levels = levels.clone();
+            let core = pw.core.clone();
+            move |global| {
+                let Some(props) = global.props else { return };
+                if global.type_ != ObjectType::Node {
+                    return;
+                }
+                if props.get("media.class") != Some("Stream/Output/Audio") {
+                    return;
+                }
+                let name = props
+                    .get("application.name")
+                    .or_else(|| props.get("node.name"))
+                    .or_else(|| props.get("media.name"))
+                    .unwrap_or("");
+                if name.is_empty()
+                    || name.contains(CAPTURE_NODE_NAME)
+                    || name.to_lowercase().contains("slopcast")
+                {
+                    return;
+                }
+                if props.get("application.process.id").and_then(|v| v.parse::<u32>().ok())
+                    == Some(our_pid)
+                {
+                    return;
+                }
+
+                let mut map = meters.borrow_mut();
+                if map.contains_key(&global.id) {
+                    return;
+                }
+                let level = Arc::new(AtomicU32::new(0));
+                let Some(meter) = meter_stream(&core, global.id, level.clone()) else { return };
+                map.insert(global.id, meter);
+                drop(map);
+                if let Ok(mut l) = levels.lock() {
+                    l.insert(global.id, level);
+                }
+            }
+        })
+        .global_remove({
+            let meters = meters.clone();
+            let levels = levels.clone();
+            move |id| {
+                meters.borrow_mut().remove(&id);
+                if let Ok(mut l) = levels.lock() {
+                    l.remove(&id);
+                }
+            }
+        })
+        .register();
+
+    let _ = ready_tx.send(Ok(()));
+
+    while !stop.load(Ordering::SeqCst) {
+        pw.main_loop.loop_().iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+    }
+
+    meters.borrow_mut().clear();
+    if let Ok(mut l) = levels.lock() {
+        l.clear();
+    }
+}
+
+pub fn start_audio_metering() -> NapiResult<bool> {
+    let mut guard = METER_STATE.lock().map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    if guard.is_some() {
+        return Ok(true);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let levels = Arc::new(Mutex::new(HashMap::new()));
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+
+    let join = {
+        let stop = stop.clone();
+        let levels = levels.clone();
+        thread::Builder::new()
+            .name("pw-audio-metering".into())
+            .spawn(move || run_meter_session(stop, levels, ready_tx))
+            .map_err(|e| {
+                napi::Error::from_reason(format!("Failed to spawn metering worker: {e}"))
+            })?
+    };
+
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            return Err(napi::Error::from_reason(reason));
+        }
+        Err(_) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            return Err(napi::Error::from_reason("Timed out starting audio metering"));
+        }
+    }
+
+    *guard = Some(MeterSession { stop, join, levels });
+    Ok(true)
+}
+
+pub fn stop_audio_metering() -> NapiResult<bool> {
+    let Ok(mut guard) = METER_STATE.lock() else { return Ok(true) };
+    if let Some(session) = guard.take() {
+        session.stop.store(true, Ordering::SeqCst);
+        let _ = session.join.join();
+    }
+    Ok(true)
+}
+
+pub fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
+    let Ok(guard) = METER_STATE.lock() else { return Ok(Vec::new()) };
+    let Some(session) = guard.as_ref() else { return Ok(Vec::new()) };
+    let Ok(levels) = session.levels.lock() else { return Ok(Vec::new()) };
+    Ok(levels
+        .iter()
+        .map(|(id, level)| {
+            let raw = f32::from_bits(level.load(Ordering::Relaxed));
+            AudioAppLevel {
+                id: *id as i32,
+                level: if raw.is_finite() { f64::from(raw.clamp(0.0, 1.0)) } else { 0.0 },
+            }
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_spa_function_accessible() {
+        let _ = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(3) };
+    }
 }

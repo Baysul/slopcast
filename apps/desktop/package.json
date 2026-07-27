@@ -9,7 +9,7 @@
   "main": "dist/main/index.js",
   "scripts": {
     "predev": "pnpm --filter @slopcast/native-rust build:debug",
-    "prebuild": "pnpm --filter @slopcast/native-rust build",
+    "prebuild": "pnpm --filter @slopcast/shared-types build && pnpm --filter @slopcast/native-rust build",
     "dev": "pnpm build && electron .",
     "build": "tsc -p tsconfig.json && cp src/main/preload.js dist/main/preload.js && vite build",
     "build:main": "tsc -p tsconfig.json && cp src/main/preload.js dist/main/preload.js",

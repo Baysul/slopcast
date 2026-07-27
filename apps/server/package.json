@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "test:e2e": "tsx src/e2e-test.ts",
+    "prebuild": "pnpm --filter @slopcast/shared-types build",
     "build": "tsc"
   },
   "dependencies": {

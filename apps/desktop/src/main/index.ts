@@ -148,6 +148,11 @@ function stopNativeCapture() {
   } catch (err) {
     console.error('Failed to stop audio capture:', err);
   }
+  try {
+    native.stopAudioMetering();
+  } catch (err) {
+    console.error('Failed to stop audio metering:', err);
+  }
 }
 
 app.whenReady().then(() => {
@@ -252,6 +257,33 @@ app.whenReady().then(() => {
     } catch (err) {
       console.error('switch-audio-capture IPC error:', err);
       return false;
+    }
+  });
+
+  ipcMain.handle('start-audio-metering', () => {
+    try {
+      return native.startAudioMetering();
+    } catch (err) {
+      console.error('start-audio-metering IPC error:', err);
+      return false;
+    }
+  });
+
+  ipcMain.handle('stop-audio-metering', () => {
+    try {
+      return native.stopAudioMetering();
+    } catch (err) {
+      console.error('stop-audio-metering IPC error:', err);
+      return false;
+    }
+  });
+
+  ipcMain.handle('get-audio-levels', () => {
+    try {
+      return native.getAudioLevels();
+    } catch (err) {
+      console.error('get-audio-levels IPC error:', err);
+      return [];
     }
   });
 
