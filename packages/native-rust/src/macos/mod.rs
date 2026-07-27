@@ -66,6 +66,8 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
             process_id: pid,
             bundle_id: Some(app.bundle_identifier()),
             window_title: None,
+            client_id: None,
+            media_title: None,
         });
     }
     Ok(apps)
