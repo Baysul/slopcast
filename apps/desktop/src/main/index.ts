@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import * as native from '@slopcast/native-rust';
@@ -114,7 +113,6 @@ switch (process.platform) {
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-gpu-memory-buffer-video-frames');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
-// app.commandLine.appendSwitch('disable-gpu-driver-bug-workarounds');
 app.commandLine.appendSwitch('enable-features', features.join(','));
 app.commandLine.appendSwitch('enable-low-latency-video-decoder');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
@@ -134,15 +132,28 @@ function resolveIconPath(): string | null {
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
+function toCaptureContext(raw: native.CaptureContext): CaptureContext {
+  return {
+    de: raw.de === 'kde' || raw.de === 'gnome' ? raw.de : 'unknown',
+    sourceType: raw.sourceType === 'monitor' || raw.sourceType === 'window' ? raw.sourceType : 'unknown',
+    mediaName: raw.mediaName ?? null,
+    videoNodeCount: raw.videoNodeCount,
+  };
+}
+
 function createWindow() {
   const iconPath = resolveIconPath();
+  let icon: Electron.NativeImage | undefined;
+  if (iconPath) {
+    icon = nativeImage.createFromPath(iconPath);
+  }
 
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 900,
     title: 'Slopcast Desktop Presenter',
     backgroundColor: '#090d16',
-    icon: iconPath ? nativeImage.createFromPath(iconPath) : undefined,
+    icon,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -201,6 +212,12 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    stopNativeCapture();
+  });
+
+  // Windows fires this on logoff/shutdown instead of before-quit — native
+  // sessions must be torn down there too.
+  mainWindow.on('session-end', () => {
     stopNativeCapture();
   });
 }
@@ -395,50 +412,21 @@ app.whenReady().then(() => {
       }
     }
 
-    // Layer 3: pw-dump subprocess to inspect the PipeWire graph.
+    // Layer 3: native video-graph introspection — reports which desktop
+    // environment is streaming, whether the source is a monitor or a window,
+    // and the best-matched audio app for the captured source.
     try {
-      const output = execFileSync('pw-dump', [], { timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'] });
-      const state = JSON.parse(output.toString());
-      let matchApp: native.AudioApp | null = null;
-      const ctx: CaptureContext = { de: 'unknown', mediaName: null, sourceType: 'unknown', videoNodeCount: 0 };
-
-      for (const obj of state) {
-        const props: Record<string, string> = obj.info?.props ?? {};
-        const mc: string = props['media.class'] ?? '';
-        if (!mc.startsWith('Stream/Output/Video')) continue;
-
-        ctx.videoNodeCount++;
-        const mn: string = props['media.name'] ?? '';
-        ctx.mediaName = mn;
-        console.log(`[resolve-audio-source] pw-dump vid node id=${obj.id}: media.name="${mn}"`);
-
-        if (mn.startsWith('kwin-screencast-')) {
-          ctx.de = 'kde';
-          const suffix = mn.slice('kwin-screencast-'.length);
-          ctx.sourceType = /^[A-Z]+-\d+$/.test(suffix) ? 'monitor' : 'window';
-          if (ctx.sourceType === 'window' && suffix) {
-            try {
-              matchApp = native.resolveAudioAppByName(suffix);
-            } catch (err) {
-              console.warn('pw-dump KDE suffix match failed:', err);
-            }
-          }
-        } else if (props['portal.screencast.application']) {
-          ctx.de = 'gnome';
-        }
-      }
-
-      lastCaptureContext = ctx;
+      const ctx = native.getCaptureContext();
+      lastCaptureContext = toCaptureContext(ctx);
       console.log(
-        `[resolve-audio-source] Wayland pw-dump: de=${ctx.de} sourceType=${ctx.sourceType} mediaName="${ctx.mediaName}" videoNodes=${ctx.videoNodeCount}`,
+        `[resolve-audio-source] Wayland context: de=${lastCaptureContext.de} sourceType=${lastCaptureContext.sourceType} mediaName="${lastCaptureContext.mediaName ?? ''}" videoNodes=${lastCaptureContext.videoNodeCount}`,
       );
-
-      if (matchApp) {
-        console.log(`[resolve-audio-source] pw-dump name-match → "${matchApp.name}"`);
-        return matchApp;
+      if (ctx.app) {
+        console.log(`[resolve-audio-source] Wayland context-match → "${ctx.app.name}"`);
+        return ctx.app;
       }
     } catch (err) {
-      console.error('[resolve-audio-source] pw-dump fallback error:', err);
+      console.error('[resolve-audio-source] capture-context error:', err);
       lastCaptureContext = { de: 'unknown', mediaName: null, sourceType: 'unknown', videoNodeCount: 0 };
     }
 
@@ -485,7 +473,10 @@ app.whenReady().then(() => {
   ipcMain.handle(
     'resolve-audio-source',
     async (_event, opts: { sourceId?: string; nameHint?: string }): Promise<native.AudioApp | null> => {
-      return isWayland ? await resolveAudioForWayland(opts.nameHint) : resolveAudioForX11(opts.sourceId, opts.nameHint);
+      if (isWayland) {
+        return resolveAudioForWayland(opts.nameHint);
+      }
+      return resolveAudioForX11(opts.sourceId, opts.nameHint);
     },
   );
 
