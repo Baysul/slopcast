@@ -10,7 +10,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "check": "biome ci && pnpm --filter @slopcast/native-rust rust:check",
+    "check": "biome ci && pnpm --recursive check",
     "check:fix": "biome check --write",
     "lint": "biome lint",
     "lint:fix": "biome lint --write",
