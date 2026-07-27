@@ -141,6 +141,8 @@ fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
                 process_id: pid as i32,
                 bundle_id: None,
                 window_title: None,
+                client_id: None,
+                media_title: None,
             });
         }
         Ok(apps)
