@@ -1200,7 +1200,9 @@ export const PresenterApp: React.FC = () => {
         await loadAudioApps();
 
         const app = await attemptAutoResolve(
-          isWayland ? {} : { sourceId: selectedSourceId, nameHint: videoTrack.label },
+          isWayland
+            ? { nameHint: videoTrack.label }
+            : { sourceId: selectedSourceId, nameHint: videoTrack.label },
         );
         targetAudioId = app?.id ?? null;
       }
