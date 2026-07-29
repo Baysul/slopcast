@@ -1,12 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import * as nativeLiveKit from '@slopcast/native-livekit';
 import * as native from '@slopcast/native-rust';
-import {
-  DEFAULT_STREAM_SETTINGS,
-  type ResolutionPreset,
-  type StreamSettings,
-  type VideoCodec,
-} from '@slopcast/shared-types';
+import { type StreamSettings, sanitizeStreamSettings } from '@slopcast/shared-types';
 import { loadConfig } from '@slopcast/shared-types/config';
 import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, nativeImage, session } from 'electron';
 
@@ -20,12 +16,20 @@ interface CaptureContext {
   mediaName: string | null;
   sourceType: 'monitor' | 'window' | 'unknown';
   videoNodeCount: number;
+  screencastNodeId: number | null;
 }
 
 let lastCaptureContext: CaptureContext | null = null;
 
 const isWayland =
   process.platform === 'linux' && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY);
+
+const detectDesktopEnvironment = (): CaptureContext['de'] => {
+  const de = (process.env.XDG_CURRENT_DESKTOP ?? '').toUpperCase();
+  if (de.includes('KDE')) return 'kde';
+  if (de.includes('GNOME')) return 'gnome';
+  return 'unknown';
+};
 
 // ── Stream Settings Persistence ─────────────────────────────────────────
 // Stored as JSON in Electron's per-platform user-data directory
@@ -35,26 +39,6 @@ const STREAM_SETTINGS_FILE = 'stream-settings.json';
 let streamSettingsCache: StreamSettings | null = null;
 
 const streamSettingsPath = (): string => path.join(app.getPath('userData'), STREAM_SETTINGS_FILE);
-
-// Hand-edited or corrupt files must never crash the app — fall back per field.
-function sanitizeStreamSettings(raw: unknown): StreamSettings {
-  const d = DEFAULT_STREAM_SETTINGS;
-  if (typeof raw !== 'object' || raw === null) return d;
-  const o = raw as Record<string, unknown>;
-  const num = (v: unknown, min: number, max: number, fallback: number): number =>
-    typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : fallback;
-  const codec = (v: unknown): VideoCodec =>
-    v === 'h264' || v === 'h265' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
-  const resolution = (v: unknown): ResolutionPreset =>
-    v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
-  return {
-    fps: num(o.fps, 1, 240, d.fps),
-    bitrateLimit: num(o.bitrateLimit, 100_000, 200_000_000, d.bitrateLimit),
-    videoCodec: codec(o.videoCodec),
-    resolution: resolution(o.resolution),
-    apiEndpoint: typeof o.apiEndpoint === 'string' && o.apiEndpoint.trim() !== '' ? o.apiEndpoint : d.apiEndpoint,
-  };
-}
 
 function loadStreamSettings(): StreamSettings {
   if (streamSettingsCache) return streamSettingsCache;
@@ -117,12 +101,10 @@ app.commandLine.appendSwitch('enable-features', features.join(','));
 app.commandLine.appendSwitch('enable-low-latency-video-decoder');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
-app.commandLine.appendSwitch('no-zygote');
-
-if (isWayland) {
-  app.commandLine.appendSwitch('use-gl', 'angle');
-  app.commandLine.appendSwitch('use-angle', 'vulkan');
-}
+// DO NOT re-add --no-zygote. In Electron 43 this flag forces posix_spawn() instead of
+// fork() for GPU child processes, which prevents PipeWire thread loops from being inherited.
+// The null pw_thread_loop* that results triggers a CHECK failure → SIGTRAP on screen-share
+// start. See Electron issue #43824 and commit f6a46aa (which first removed the flag).
 
 function resolveIconPath(): string | null {
   const candidates = [
@@ -138,6 +120,7 @@ function toCaptureContext(raw: native.CaptureContext): CaptureContext {
     sourceType: raw.sourceType === 'monitor' || raw.sourceType === 'window' ? raw.sourceType : 'unknown',
     mediaName: raw.mediaName ?? null,
     videoNodeCount: raw.videoNodeCount,
+    screencastNodeId: raw.screencastNodeId ?? null,
   };
 }
 
@@ -234,6 +217,11 @@ function stopNativeCapture() {
   } catch (err) {
     console.error('Failed to stop audio metering:', err);
   }
+  try {
+    nativeLiveKit.stopVideoTrack();
+  } catch (err) {
+    console.error('Failed to stop native video capture:', err);
+  }
 }
 
 app.whenReady().then(() => {
@@ -245,15 +233,19 @@ app.whenReady().then(() => {
 
   // Auto-grant media so the renderer can open the virtual capture mic
   // without an interactive portal prompt after screenshare start.
-  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    if (permission === 'media' || permission === 'mediaKeySystem') {
+  session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => {
+    const url = wc?.getURL() ?? '';
+    const isApp = url.startsWith('file://') || url.startsWith('http://localhost:');
+    if ((permission === 'media' || permission === 'mediaKeySystem') && isApp) {
       callback(true);
       return;
     }
     callback(false);
   });
-  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
-    return permission === 'media' || permission === 'mediaKeySystem';
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => {
+    const url = wc?.getURL() ?? '';
+    const isApp = url.startsWith('file://') || url.startsWith('http://localhost:');
+    return (permission === 'media' || permission === 'mediaKeySystem') && isApp;
   });
 
   try {
@@ -290,6 +282,40 @@ app.whenReady().then(() => {
       });
   });
 
+  let audioDataCallbackRegistered = false;
+  let dmabufCallbackRegistered = false;
+
+  function registerDmabufCallback() {
+    if (dmabufCallbackRegistered) return;
+    try {
+      native.setDmabufCallback((_err: Error | null, arg: number[]) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        // arg = [fd, width, height, format, pts_lo, pts_hi]
+        nativeLiveKit.captureDmabufFrame(arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+      });
+      dmabufCallbackRegistered = true;
+    } catch (err) {
+      console.error('Failed to register dmabuf callback:', err);
+    }
+  }
+
+  function registerAudioDataCallback() {
+    if (audioDataCallbackRegistered) return;
+    try {
+      native.setAudioDataCallback((err: Error | null, arg: number[]) => {
+        if (err || !mainWindow || mainWindow.isDestroyed()) return;
+        try {
+          nativeLiveKit.feedPcm(arg);
+        } catch (_feedErr) {
+          // Room may not be connected yet — that's fine
+        }
+      });
+      audioDataCallbackRegistered = true;
+    } catch (err) {
+      console.error('Failed to register audio data callback:', err);
+    }
+  }
+
   // IPC Handlers
   ipcMain.handle('get-app-config', () => ({
     apiEndpoint: appConfig.apiEndpoint,
@@ -316,8 +342,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('start-audio-capture', (_event, targetId: number | string) => {
     try {
-      // Exclusive capture: ONLY the target application's audio is linked
-      // into the virtual capture sink; everything else is never captured.
+      registerAudioDataCallback();
       return native.startAudioCapture(targetId);
     } catch (err) {
       console.error('start-audio-capture IPC error:', err);
@@ -336,11 +361,29 @@ app.whenReady().then(() => {
 
   ipcMain.handle('switch-audio-capture', (_event, targetId: number | string) => {
     try {
-      // Switch the audio target on the fly without destroying the virtual capture
-      // node — the existing MediaStreamTrack stays alive and seamless.
       return native.switchAudioCapture(targetId);
     } catch (err) {
       console.error('switch-audio-capture IPC error:', err);
+      return false;
+    }
+  });
+
+  ipcMain.handle('connect-native-room', (_event, livekitUrl: string, token: string) => {
+    try {
+      nativeLiveKit.connectLivekitRoom(livekitUrl, token);
+      return true;
+    } catch (err) {
+      console.error('connect-native-room IPC error:', err);
+      return false;
+    }
+  });
+
+  ipcMain.handle('disconnect-native-room', () => {
+    try {
+      nativeLiveKit.disconnectLivekitRoom();
+      return true;
+    } catch (err) {
+      console.error('disconnect-native-room IPC error:', err);
       return false;
     }
   });
@@ -382,6 +425,19 @@ app.whenReady().then(() => {
   });
 
   const resolveAudioForWayland = async (nameHint: string | undefined): Promise<native.AudioApp | null> => {
+    // Ensure lastCaptureContext has DE info even before Layer 3 runs,
+    // so the renderer's fallback works if introspection fails entirely.
+    const detectedDe = detectDesktopEnvironment();
+    if (!lastCaptureContext || lastCaptureContext.de === 'unknown') {
+      lastCaptureContext = {
+        de: detectedDe,
+        sourceType: 'unknown',
+        mediaName: null,
+        videoNodeCount: 0,
+        screencastNodeId: null,
+      };
+    }
+
     // Layer 1: PipeWire introspection — retry as xdg-desktop-portal may lag.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -427,7 +483,13 @@ app.whenReady().then(() => {
       }
     } catch (err) {
       console.error('[resolve-audio-source] capture-context error:', err);
-      lastCaptureContext = { de: 'unknown', mediaName: null, sourceType: 'unknown', videoNodeCount: 0 };
+      lastCaptureContext = {
+        de: detectDesktopEnvironment(),
+        mediaName: null,
+        sourceType: 'unknown',
+        videoNodeCount: 0,
+        screencastNodeId: null,
+      };
     }
 
     console.log(
@@ -480,7 +542,131 @@ app.whenReady().then(() => {
     },
   );
 
+  ipcMain.handle('resolve-audio-app-by-name', async (_event, label: string): Promise<native.AudioApp | null> => {
+    try {
+      return native.resolveAudioAppByName(label);
+    } catch (err) {
+      console.error('resolve-audio-app-by-name error:', err);
+      return null;
+    }
+  });
+
   ipcMain.handle('get-capture-context', () => lastCaptureContext);
+
+  // ── Native Video Capture ─────────────────────────────────────────────
+  // Video frames are produced by native-rust's PipeWire pw_stream and
+  // delivered to native-livekit via the DMA-BUF callback bridge.
+  //
+  // WebRTCPipeWireCapturer is REQUIRED on Wayland: it enables Chromium's
+  // PipeWire backend so desktopCapturer.getSources() creates screencast
+  // nodes the Rust layer introspects for video + audio capture. DO NOT
+  // REMOVE — the capture pipeline has no other portal-trigger mechanism.
+  // (The flag runs in Chromium's renderer process; native-livekit's
+  // libwebrtc runs in the main process — separate address spaces.)
+
+  ipcMain.handle('list-screen-sources', () => {
+    try {
+      // Source enumeration moved out of native-livekit. On X11, Electron's
+      // desktopCapturer provides the source list; on Wayland, the portal
+      // picker is shown separately. Returning an empty list signals the
+      // renderer to show the portal picker.
+      return [];
+    } catch (err) {
+      console.error('list-screen-sources IPC error:', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle(
+    'start-native-capture',
+    async (
+      _event,
+      _sourceIndex: number,
+      config: { fps: number; width: number; height: number; videoCodec?: string },
+    ) => {
+      try {
+        // Activate the portal on Wayland to create the screencast
+        // PipeWire node. On X11, getSources() returns the native list
+        // without a portal prompt.
+        const sources = await desktopCapturer.getSources({ types: ['window', 'screen'] });
+        if (sources.length === 0) {
+          return { ok: false, error: 'No capture sources available' };
+        }
+        const source = sources.find((s) => s.id.startsWith('window')) ?? sources[0];
+        lastCapturedSourceName = source.name;
+        console.log(`[native-capture] portal source: "${source.name}"`);
+
+        // Discover the screencast node ID from PipeWire now that the
+        // portal has created it. On X11 there is no screencast node.
+        let nodeId: number | null = null;
+        if (isWayland) {
+          try {
+            const ctx = native.getCaptureContext();
+            nodeId = ctx.screencastNodeId ?? null;
+            lastCaptureContext = toCaptureContext(ctx);
+            console.log(`[native-capture] nodeId=${nodeId} de=${ctx.de} sourceType=${ctx.sourceType}`);
+          } catch (ctxErr) {
+            console.error('[native-capture] capture context error:', ctxErr);
+          }
+        }
+
+        nativeLiveKit.startVideoTrack({
+          width: config.width,
+          height: config.height,
+          fps: config.fps,
+          videoCodec: config.videoCodec ?? undefined,
+        });
+
+        if (nodeId !== null) {
+          registerDmabufCallback();
+          native.startVideoCapture(nodeId, config.width, config.height, config.fps);
+        }
+
+        return { ok: true, nodeId };
+      } catch (err) {
+        console.error('start-native-capture IPC error:', err);
+        return { ok: false, error: String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle('stop-video-capture', () => {
+    try {
+      return native.stopVideoCapture();
+    } catch (err) {
+      console.error('stop-video-capture IPC error:', err);
+      return false;
+    }
+  });
+
+  ipcMain.handle('stop-native-capture', () => {
+    try {
+      nativeLiveKit.stopVideoTrack();
+      native.stopVideoCapture();
+      return true;
+    } catch (err) {
+      console.error('stop-native-capture IPC error:', err);
+      return false;
+    }
+  });
+
+  ipcMain.handle('is-native-capture-active', () => {
+    try {
+      return nativeLiveKit.isVideoTrackActive();
+    } catch (err) {
+      console.error('is-native-capture-active IPC error:', err);
+      return false;
+    }
+  });
+
+  ipcMain.handle('get-spectator-count', () => {
+    try {
+      return nativeLiveKit.getSpectatorCount();
+    } catch (err) {
+      console.error('get-spectator-count IPC error:', err);
+      return 0;
+    }
+  });
 
   ipcMain.handle('clipboard-write-text', (_event, text: string) => {
     try {
