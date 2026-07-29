@@ -38,18 +38,13 @@ export interface AudioAppLevel {
   level: number;
 }
 
-export type AudioTargetId = number | '__system_audio__';
-
-export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1' | 'h265';
-
-export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['av1', 'h265', 'vp9', 'h264', 'vp8'];
+export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1';
 
 export const VIDEO_CODEC_LABEL_LK: Record<VideoCodec, string> = {
   vp8: 'VP8',
   h264: 'H.264',
   vp9: 'VP9',
   av1: 'AV1',
-  h265: 'HEVC (H.265)',
 };
 
 export type ResolutionPreset = '1080p' | '1440p' | '2160p';
@@ -73,7 +68,7 @@ export interface StreamSettings {
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   fps: 60,
   bitrateLimit: 20_000_000,
-  videoCodec: 'h265',
+  videoCodec: 'h264',
   resolution: '1080p',
   apiEndpoint: 'http://localhost:3001',
 };
@@ -106,3 +101,22 @@ export const fmtLoss = (pct: number | null): string => {
   if (pct < 0.1) return `${pct.toFixed(2)}%`;
   return `${pct.toFixed(1)}%`;
 };
+
+export function sanitizeStreamSettings(raw: unknown): StreamSettings {
+  const d = DEFAULT_STREAM_SETTINGS;
+  if (typeof raw !== 'object' || raw === null) return d;
+  const o = raw as Record<string, unknown>;
+  const num = (v: unknown, min: number, max: number, fallback: number): number =>
+    typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : fallback;
+  const codec = (v: unknown): VideoCodec =>
+    v === 'h264' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
+  const resolution = (v: unknown): ResolutionPreset =>
+    v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
+  return {
+    fps: num(o.fps, 1, 240, d.fps),
+    bitrateLimit: num(o.bitrateLimit, 100_000, 200_000_000, d.bitrateLimit),
+    videoCodec: codec(o.videoCodec),
+    resolution: resolution(o.resolution),
+    apiEndpoint: typeof o.apiEndpoint === 'string' && o.apiEndpoint.trim() !== '' ? o.apiEndpoint : d.apiEndpoint,
+  };
+}
