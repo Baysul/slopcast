@@ -24,6 +24,7 @@ napi-derive = "3"
 pipewire = "0.10.0"
 x11 = "2.21"
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -31,6 +32,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_ToolHelp",
@@ -44,6 +46,9 @@ windows-core = "0.62.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = "8"
+
+[profile.release]
+debug = 2
 
 [build-dependencies]
 napi-build = "2"

@@ -1,11 +1,15 @@
-//! KDE window UUID → PID resolution via the `KWin` scripting D-Bus interface.
+//! KDE window lookup via the `KWin` scripting D-Bus interface.
 //!
-//! `KWin` names its window screencast streams `kwin-screencast-<uuid>`, where the
-//! UUID is the `KWin` window's `internalId`. Window metadata (including the PID)
-//! is only exposed to `KWin`'s own scripts, so we load a one-shot script that
-//! finds the window and reports the PID back through a D-Bus method call to an
-//! object registered on our own bus name — the same mechanism `kdotool` uses,
-//! without the external binary dependency.
+//! `KWin` names its screencast streams `kwin-screencast-<objectName>`, where
+//! the object name is the window's `desktopFileName` for window captures and
+//! the output name (`DP-1`, `HDMI-A-1`, …) for monitor captures — never the
+//! window UUID (see `ScreencastManager::streamWindow`/`streamOutput`).
+//! Window metadata (PID, caption) is only exposed to `KWin`'s own scripts, so
+//! we load a one-shot script that finds the window by desktop file name
+//! (falling back to resource class for X11/XWayland clients) and reports the
+//! PID and caption back through a D-Bus method call to an object registered
+//! on our own bus name — the same mechanism `kdotool` uses, without the
+//! external binary dependency.
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -17,30 +21,40 @@ const HELPER_PATH: &str = "/org/slopcast/KWinHelper";
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 const KWIN_SCRIPT: &str = r#"
-var target = "__TARGET_UUID__";
+var target = "__TARGET_KEY__";
 var list = typeof workspace.windowList === "function" ? workspace.windowList() : workspace.clientList();
 for (var i = 0; i < list.length; i++) {
     var w = list[i];
-    var id = ("" + w.internalId).replace(/[{}]/g, "").toLowerCase();
-    if (id === target) {
-        callDBus("__BUS_NAME__", "/org/slopcast/KWinHelper", "org.slopcast.KWinHelper", "report", "" + w.pid);
+    var df = ("" + (w.desktopFileName || "")).toLowerCase();
+    var rc = ("" + (w.resourceClass || "")).toLowerCase();
+    if (df === target || rc === target) {
+        callDBus("__BUS_NAME__", "/org/slopcast/KWinHelper", "org.slopcast.KWinHelper", "report", w.pid + "\n" + w.caption);
         break;
     }
 }
 "#;
 
+/// A `KWin` window matched by desktop file name or resource class.
+pub(crate) struct WindowMatch {
+    pub pid: u32,
+    pub caption: String,
+}
+
 struct Helper {
-    tx: mpsc::Sender<u32>,
+    tx: mpsc::Sender<(u32, String)>,
 }
 
 #[interface(name = "org.slopcast.KWinHelper")]
 impl Helper {
-    // The PID travels as a string: KWin's `callDBus` maps JS numbers to varying
-    // D-Bus integer types, while a string always arrives as 's'.
+    // PID and caption travel as one string: KWin's `callDBus` maps JS numbers
+    // to varying D-Bus integer types, while a string always arrives as 's'.
     #[zbus(name = "report")]
-    fn report(&self, pid: &str) {
+    fn report(&self, payload: &str) {
+        let Some((pid, caption)) = payload.split_once('\n') else {
+            return;
+        };
         if let Ok(pid) = pid.parse::<u32>() {
-            let _ = self.tx.send(pid);
+            let _ = self.tx.send((pid, caption.to_string()));
         }
     }
 }
@@ -55,22 +69,23 @@ impl Drop for ScriptFile {
     }
 }
 
-/// Resolve the PID owning the `KWin` window with the given internal UUID.
-/// Best-effort: `None` on any D-Bus, scripting, or timeout failure.
-pub(crate) fn window_uuid_to_pid(uuid: &str) -> Option<u32> {
-    // The UUID is interpolated into JavaScript, so reject anything that could
+/// Resolve the `KWin` window whose desktop file name (or resource class)
+/// equals `key`. Best-effort: `None` on any D-Bus, scripting, or timeout
+/// failure.
+pub(crate) fn resolve_window(key: &str) -> Option<WindowMatch> {
+    // The key is interpolated into JavaScript, so reject anything that could
     // break out of the string literal.
-    if uuid.is_empty()
-        || !uuid
+    if key.is_empty()
+        || !key
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '{' | '}' | '-'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return None;
     }
-    let target = uuid.replace(['{', '}'], "").to_lowercase();
+    let target = key.to_lowercase();
 
     let conn = Connection::session().ok()?;
-    let (tx, rx) = mpsc::channel::<u32>();
+    let (tx, rx) = mpsc::channel::<(u32, String)>();
     conn.object_server().at(HELPER_PATH, Helper { tx }).ok()?;
     let bus_name = format!("org.slopcast.KWinHelper{}", std::process::id());
     conn.request_name(bus_name.as_str()).ok()?;
@@ -79,15 +94,15 @@ pub(crate) fn window_uuid_to_pid(uuid: &str) -> Option<u32> {
     let script_path = std::env::temp_dir().join(format!("{script_stem}.js"));
     let script = KWIN_SCRIPT
         .replace("__BUS_NAME__", &bus_name)
-        .replace("__TARGET_UUID__", &target);
+        .replace("__TARGET_KEY__", &target);
     std::fs::write(&script_path, script).ok()?;
     let _script_file = ScriptFile(script_path.clone());
 
     load_and_run_script(&conn, &script_path)?;
-    let pid = rx.recv_timeout(REPLY_TIMEOUT).ok();
+    let found = rx.recv_timeout(REPLY_TIMEOUT).ok();
 
     unload_script(&conn, &script_stem);
-    pid
+    found.map(|(pid, caption)| WindowMatch { pid, caption })
 }
 
 fn load_and_run_script(conn: &Connection, path: &std::path::Path) -> Option<()> {
