@@ -1,5 +1,6 @@
 use crate::{AudioApp, AudioAppLevel};
 use napi::Result as NapiResult;
+use napi::threadsafe_function::ThreadsafeFunction;
 use std::sync::Mutex;
 
 use screencapturekit::prelude::{
@@ -173,8 +174,16 @@ pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     None
 }
 
+pub fn get_capture_context() -> NapiResult<crate::CaptureContext> {
+    Err(napi::Error::from_reason(
+        "Capture context introspection is only available on Linux",
+    ))
+}
+
 pub fn start_audio_metering() -> NapiResult<bool> {
-    Ok(false)
+    Err(napi::Error::from_reason(
+        "Audio metering is only available on Linux",
+    ))
 }
 
 pub fn stop_audio_metering() -> NapiResult<bool> {
@@ -182,5 +191,37 @@ pub fn stop_audio_metering() -> NapiResult<bool> {
 }
 
 pub fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
+    Ok(Vec::new())
+}
+
+pub fn set_audio_data_callback(
+    _: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+) -> NapiResult<()> {
+    Ok(())
+}
+
+pub fn set_dmabuf_callback(
+    _: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
+) -> NapiResult<()> {
+    Ok(())
+}
+
+pub fn clear_dmabuf_callback() {}
+
+pub fn start_video_capture(_: u32, _: u32, _: u32, _: u32) -> NapiResult<bool> {
+    Err(napi::Error::from_reason(
+        "Video capture is not supported on macOS",
+    ))
+}
+
+pub fn stop_video_capture() -> NapiResult<bool> {
+    Ok(true)
+}
+
+pub fn is_video_capture_active() -> NapiResult<bool> {
+    Ok(false)
+}
+
+pub fn list_screen_sources() -> napi::Result<Vec<napi::Unknown<'static>>> {
     Ok(Vec::new())
 }

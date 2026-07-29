@@ -4,6 +4,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Either, Result as NapiResult};
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, S_OK, WAIT_OBJECT_0};
@@ -56,6 +57,9 @@ struct WasapiState {
 }
 
 static WASAPI_STATE: Mutex<Option<WasapiState>> = Mutex::new(None);
+
+static AUDIO_DATA_CALLBACK: Mutex<Option<std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>>> =
+    Mutex::new(None);
 
 fn napi_err(context: &str, e: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(format!("{context}: {e}"))
@@ -318,7 +322,33 @@ struct CaptureSession {
 }
 
 impl CaptureSession {
-    fn drain_packets(&self) -> Result<(), String> {
+    fn drain_packets(&self, tsfn: Option<&ThreadsafeFunction<Vec<i16>, ()>>) -> Result<(), String> {
+        // SAFETY: `capture_client` is a valid interface owned by this session;
+        // every buffer obtained is released before the next iteration.
+        let Some(tsfn) = tsfn else {
+            unsafe {
+                loop {
+                    let packet_frames = self
+                        .capture_client
+                        .GetNextPacketSize()
+                        .map_err(|e| format!("GetNextPacketSize: {e}"))?;
+                    if packet_frames == 0 {
+                        return Ok(());
+                    }
+                    let mut data: *mut u8 = std::ptr::null_mut();
+                    let mut frames: u32 = 0;
+                    let mut flags: u32 = 0;
+                    self.capture_client
+                        .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                        .map_err(|e| format!("GetBuffer: {e}"))?;
+                    self.capture_client
+                        .ReleaseBuffer(frames)
+                        .map_err(|e| format!("ReleaseBuffer: {e}"))?;
+                }
+            }
+        };
+        // Accumulate all available packets into one buffer to minimise IPC.
+        let mut all_frames = Vec::new();
         // SAFETY: `capture_client` is a valid interface owned by this session;
         // every buffer obtained is released before the next iteration.
         unsafe {
@@ -328,7 +358,7 @@ impl CaptureSession {
                     .GetNextPacketSize()
                     .map_err(|e| format!("GetNextPacketSize: {e}"))?;
                 if packet_frames == 0 {
-                    return Ok(());
+                    break;
                 }
                 let mut data: *mut u8 = std::ptr::null_mut();
                 let mut frames: u32 = 0;
@@ -336,14 +366,32 @@ impl CaptureSession {
                 self.capture_client
                     .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
                     .map_err(|e| format!("GetBuffer: {e}"))?;
+                let frame_bytes = frames as usize * BLOCK_ALIGN as usize;
+                let slice = std::slice::from_raw_parts(data, frame_bytes);
+                all_frames.extend_from_slice(slice);
                 self.capture_client
                     .ReleaseBuffer(frames)
                     .map_err(|e| format!("ReleaseBuffer: {e}"))?;
             }
         }
+        if !all_frames.is_empty() {
+            let i16_samples: Vec<i16> = all_frames
+                .chunks_exact(4)
+                .map(|c| {
+                    let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                    (f.clamp(-1.0, 1.0) * 32767.0).round() as i16
+                })
+                .collect();
+            let _ = tsfn.call(Ok(i16_samples), ThreadsafeFunctionCallMode::NonBlocking);
+        }
+        Ok(())
     }
 
-    fn run(&self, stop_event: HANDLE) -> Result<(), String> {
+    fn run(
+        &self,
+        stop_event: HANDLE,
+        tsfn: Option<&ThreadsafeFunction<Vec<i16>, ()>>,
+    ) -> Result<(), String> {
         let handles = [stop_event, self.audio_event];
         // SAFETY: both handles are valid for the duration of this call — the
         // stop event is owned by the capture state, the audio event by `self`.
@@ -354,7 +402,7 @@ impl CaptureSession {
                     return Ok(());
                 }
                 if ev.0 == WAIT_OBJECT_0.0 + 1 {
-                    self.drain_packets()?;
+                    self.drain_packets(tsfn)?;
                 } else {
                     return Err("WaitForMultipleObjects failed".into());
                 }
@@ -442,6 +490,7 @@ fn run_capture(
     target_pid: u32,
     stop_event_raw: usize,
     startup_tx: &Sender<Result<CaptureMode, String>>,
+    tsfn: Option<std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>>,
 ) -> Result<(), String> {
     // SAFETY: standard per-thread COM init on the dedicated capture thread;
     // balanced by CoUninitialize below on success.
@@ -465,7 +514,7 @@ fn run_capture(
         }
     };
 
-    let run_result = session.run(stop_event);
+    let run_result = session.run(stop_event, tsfn.as_deref());
     drop(session);
     if com_ok {
         // SAFETY: balances the successful CoInitializeEx at the top.
@@ -493,6 +542,16 @@ fn stop_capture_locked(state: &mut WasapiState) {
     state.target_pid = None;
 }
 
+pub fn set_audio_data_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+) -> NapiResult<()> {
+    let mut guard = AUDIO_DATA_CALLBACK
+        .lock()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    *guard = Some(callback);
+    Ok(())
+}
+
 pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
     let target_pid = match target_app_id {
         Either::A(label) => label
@@ -517,11 +576,16 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
         .map_err(|e| napi_err("CreateEventA", e))?;
     let stop_raw = stop_event.0 as usize;
 
+    let tsfn = AUDIO_DATA_CALLBACK
+        .lock()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+        .clone();
+
     let (tx, rx) = channel::<Result<CaptureMode, String>>();
     let join = std::thread::Builder::new()
         .name("wasapi-loopback-capture".into())
         .spawn(move || {
-            let _ = run_capture(target_pid, stop_raw, &tx);
+            let _ = run_capture(target_pid, stop_raw, &tx, tsfn);
         })
         .map_err(|e| {
             let _ = unsafe { CloseHandle(stop_event) };
@@ -600,6 +664,12 @@ pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     None
 }
 
+pub fn get_capture_context() -> NapiResult<crate::CaptureContext> {
+    Err(napi::Error::from_reason(
+        "Capture context introspection is only available on Linux",
+    ))
+}
+
 pub fn start_audio_metering() -> NapiResult<bool> {
     Ok(false)
 }
@@ -609,5 +679,31 @@ pub fn stop_audio_metering() -> NapiResult<bool> {
 }
 
 pub fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
+    Ok(Vec::new())
+}
+
+pub fn set_dmabuf_callback(
+    _: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
+) -> NapiResult<()> {
+    Ok(())
+}
+
+pub fn clear_dmabuf_callback() {}
+
+pub fn start_video_capture(_: u32, _: u32, _: u32, _: u32) -> NapiResult<bool> {
+    Err(napi::Error::from_reason(
+        "Video capture is not supported on Windows",
+    ))
+}
+
+pub fn stop_video_capture() -> NapiResult<bool> {
+    Ok(true)
+}
+
+pub fn is_video_capture_active() -> NapiResult<bool> {
+    Ok(false)
+}
+
+pub fn list_screen_sources() -> napi::Result<Vec<napi::Unknown<'static>>> {
     Ok(Vec::new())
 }

@@ -3,6 +3,7 @@
     reason = "napi-rs #[napi] function signatures must take ownership of Either/String params for JS type conversion"
 )]
 
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 
 #[cfg(target_os = "linux")]
@@ -27,12 +28,12 @@ mod unsupported_platform {
         ))
     }
 
-    pub fn stop_audio_capture() -> bool {
-        true
+    pub fn stop_audio_capture() -> napi::Result<bool> {
+        Ok(true)
     }
 
-    pub fn is_audio_capture_active() -> bool {
-        false
+    pub fn is_audio_capture_active() -> napi::Result<bool> {
+        Ok(false)
     }
 
     pub fn switch_audio_capture(_: &napi::Either<String, i32>) -> napi::Result<bool> {
@@ -59,12 +60,46 @@ mod unsupported_platform {
         Ok(false)
     }
 
-    pub fn stop_audio_metering() -> bool {
-        true
+    pub fn stop_audio_metering() -> napi::Result<bool> {
+        Ok(true)
     }
 
-    pub fn get_audio_levels() -> Vec<crate::AudioAppLevel> {
-        Vec::new()
+    pub fn get_audio_levels() -> napi::Result<Vec<crate::AudioAppLevel>> {
+        Ok(Vec::new())
+    }
+
+    pub fn set_audio_data_callback(
+        _: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+    ) -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn set_dmabuf_callback(
+        _: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
+    ) -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn clear_dmabuf_callback() -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn start_video_capture(_: u32, _: u32, _: u32, _: u32) -> napi::Result<bool> {
+        Err(napi::Error::from_reason(
+            "Video capture is not supported on this platform",
+        ))
+    }
+
+    pub fn stop_video_capture() -> napi::Result<bool> {
+        Ok(true)
+    }
+
+    pub fn is_video_capture_active() -> napi::Result<bool> {
+        Ok(false)
+    }
+
+    pub fn list_screen_sources() -> napi::Result<Vec<napi::Unknown<'static>>> {
+        Ok(Vec::new())
     }
 }
 
@@ -107,6 +142,7 @@ pub struct CaptureContext {
     pub media_name: Option<String>,
     pub video_node_count: i32,
     pub app: Option<AudioApp>,
+    pub screencast_node_id: Option<u32>,
 }
 
 pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
@@ -122,7 +158,28 @@ pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<Au
                 n.contains(first_word) || first_word.contains(&n)
             })
         })
+        // Wine/Proton games report `application.name=wine64-preloader` while
+        // the actual window title is the game name. Chromium-family browsers
+        // leave `media.name="Playback"` and rely on the track label carrying
+        // the window title. Match against `window_title` as a fallback for
+        // both.
+        .or_else(|| {
+            apps.iter().find(|a| {
+                a.window_title
+                    .as_deref()
+                    .is_some_and(|t| title_matches(t, &lower, first_word))
+            })
+        })
         .cloned()
+}
+
+fn title_matches(title: &str, lower: &str, first_word: &str) -> bool {
+    let tl = title.to_lowercase();
+    tl == lower
+        || lower.contains(&tl)
+        || tl.contains(lower)
+        || tl.contains(first_word)
+        || first_word.contains(&tl)
 }
 
 #[must_use]
@@ -161,7 +218,7 @@ pub fn start_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Re
 /// Returns an error if the capture state lock is poisoned.
 #[napi]
 pub fn stop_audio_capture() -> napi::Result<bool> {
-    Ok(platform::stop_audio_capture())
+    platform::stop_audio_capture()
 }
 
 /// Switches the active capture to a new target application.
@@ -184,7 +241,7 @@ pub fn switch_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::R
 /// Returns an error if the capture state lock is poisoned.
 #[napi]
 pub fn is_audio_capture_active() -> napi::Result<bool> {
-    Ok(platform::is_audio_capture_active())
+    platform::is_audio_capture_active()
 }
 
 /// Resolves the audio application for the given X11 window ID.
@@ -247,7 +304,7 @@ pub fn start_audio_metering() -> napi::Result<bool> {
 /// Returns an error if the meter state lock is poisoned.
 #[napi]
 pub fn stop_audio_metering() -> napi::Result<bool> {
-    Ok(platform::stop_audio_metering())
+    platform::stop_audio_metering()
 }
 
 /// Returns current audio level readings for all metered applications.
@@ -257,5 +314,118 @@ pub fn stop_audio_metering() -> napi::Result<bool> {
 /// Always returns `Ok`.
 #[napi]
 pub fn get_audio_levels() -> napi::Result<Vec<AudioAppLevel>> {
-    Ok(platform::get_audio_levels())
+    platform::get_audio_levels()
+}
+
+/// Registers a callback that receives converted PCM audio data as 16-bit
+/// signed integer samples (48 kHz, 2 channel). The conversion from F32LE
+/// happens in Rust before the callback fires.
+///
+/// # Errors
+///
+/// Returns an error if the platform module rejects the callback.
+#[napi]
+pub fn set_audio_data_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+) -> napi::Result<()> {
+    platform::set_audio_data_callback(callback)
+}
+
+/// Registers a callback for receiving DMA-BUF video frames from the PipeWire
+/// capture thread. Each frame is packed as `[fd, width, height, format, pts_lo, pts_hi]`.
+/// The callback owns the fd and must close it.
+#[napi]
+pub fn set_dmabuf_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
+) -> napi::Result<()> {
+    platform::set_dmabuf_callback(callback)
+}
+
+/// Clears the DMA-BUF callback. Frames produced after this call are dropped.
+#[napi]
+pub fn clear_dmabuf_callback() -> napi::Result<()> {
+    platform::clear_dmabuf_callback();
+    Ok(())
+}
+
+/// Starts PipeWire video capture from a screencast node.
+#[napi]
+pub fn start_video_capture(node_id: u32, width: u32, height: u32, fps: u32) -> napi::Result<bool> {
+    platform::start_video_capture(node_id, width, height, fps)
+}
+
+/// Stops the active PipeWire video capture session.
+#[napi]
+pub fn stop_video_capture() -> napi::Result<bool> {
+    platform::stop_video_capture()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(id: i32, name: &str, window_title: Option<&str>) -> AudioApp {
+        AudioApp {
+            id,
+            name: name.to_string(),
+            process_id: id.cast_unsigned().cast_signed(),
+            bundle_id: None,
+            window_title: window_title.map(str::to_string),
+            client_id: None,
+            media_title: None,
+        }
+    }
+
+    fn matched_id(apps: &[AudioApp], label: &str) -> Option<i32> {
+        find_best_audio_match(apps, label).map(|a| a.id)
+    }
+
+    #[test]
+    fn matches_exact_app_name() {
+        let apps = [app(1, "Spotify", None), app(2, "Firefox", None)];
+        assert_eq!(matched_id(&apps, "Spotify"), Some(1));
+    }
+
+    #[test]
+    fn matches_chromium_with_tab_title() {
+        // Brave tab title is "Brave - YouTube - Music Video" in the portal
+        // picker; the audio node's `application.name` is the binary name.
+        let apps = [app(1, "Brave", None), app(2, "Spotify", None)];
+        assert_eq!(matched_id(&apps, "Brave - YouTube - Music Video"), Some(1));
+    }
+
+    #[test]
+    fn matches_wine_proton_by_window_title() {
+        // Wine/Proton games expose audio under `wine64-preloader` while the
+        // window title carries the real game name. Track label coming from
+        // the portal is "Blue Archive".
+        let apps = [
+            app(1, "wine64-preloader", Some("Blue Archive")),
+            app(2, "Spotify", None),
+        ];
+        assert_eq!(matched_id(&apps, "Blue Archive"), Some(1));
+    }
+
+    #[test]
+    fn matches_chromium_by_first_word() {
+        // Brave's audio process is reported as `application.name="Brave"`.
+        // A portal track label of "Brave - YouTube - Music Video" picks the
+        // audio app because the label contains the app name.
+        let apps = [app(1, "Brave", None), app(2, "Spotify", None)];
+        assert_eq!(matched_id(&apps, "Brave - YouTube"), Some(1));
+    }
+
+    #[test]
+    fn returns_none_for_unrelated_label() {
+        let apps = [app(1, "Spotify", None), app(2, "Firefox", None)];
+        assert!(find_best_audio_match(&apps, "Blue Archive").is_none());
+    }
+
+    #[test]
+    fn prefers_exact_name_over_substring() {
+        // "Spotify" must win over "Spotify-cli" when the label is exactly
+        // "Spotify".
+        let apps = [app(1, "Spotify-cli", None), app(2, "Spotify", None)];
+        assert_eq!(matched_id(&apps, "Spotify"), Some(2));
+    }
 }

@@ -1,6 +1,8 @@
 use crate::{AudioApp, AudioAppLevel};
 mod kwin;
 mod mpris;
+mod video;
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi::{Either, Result as NapiResult};
 use pipewire::properties::{PropertiesBox, properties};
 use pipewire::registry::GlobalObject;
@@ -17,7 +19,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const CAPTURE_NODE_NAME: &str = "Slopcast-Window-Audio";
 const CAPTURE_NODE_DESCRIPTION: &str = "Slopcast-Window-Audio";
@@ -142,6 +144,7 @@ struct TargetSpec {
     pid: Option<u32>,
     binary: Option<String>,
     client_id: Option<u32>,
+    app_name: Option<String>,
     system_audio: bool,
 }
 
@@ -155,12 +158,20 @@ impl TargetSpec {
             self.binary.clone_from(&info.binary);
         }
         self.client_id = self.client_id.or(info.client_id);
+        if self.app_name.is_none() {
+            self.app_name.clone_from(&info.app_name);
+        }
     }
 
     fn matches(&self, node_id: u32, info: &AppNodeInfo) -> bool {
         Some(node_id) == self.node_id
             || self.client_id.is_some_and(|c| info.client_id == Some(c))
             || self.pid.is_some_and(|p| info.pid == Some(p))
+            || self.app_name.as_deref().is_some_and(|a| {
+                info.app_name
+                    .as_deref()
+                    .is_some_and(|i| i.eq_ignore_ascii_case(a))
+            })
             || self
                 .binary
                 .as_deref()
@@ -173,6 +184,7 @@ struct AppNodeInfo {
     pid: Option<u32>,
     binary: Option<String>,
     client_id: Option<u32>,
+    app_name: Option<String>,
 }
 
 impl AppNodeInfo {
@@ -189,10 +201,15 @@ impl AppNodeInfo {
             .get("client.id")
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|id| *id > 0);
+        let app_name = props
+            .get("application.name")
+            .map(str::to_string)
+            .filter(|n| !n.is_empty());
         Self {
             pid,
             binary,
             client_id,
+            app_name,
         }
     }
 
@@ -407,12 +424,6 @@ impl GraphTracker {
                 }
                 if info.pid.is_none_or(|p| p == 0) {
                     info.pid = info.fallback_pid();
-                }
-                if info.pid.is_none_or(|p| p == 0) {
-                    let name = props.get("application.name").unwrap_or("");
-                    if !name.is_empty() {
-                        info.pid = resolve_pid_by_name(name).map(i32::cast_unsigned);
-                    }
                 }
                 let our_pid = std::process::id() as u32;
                 let is_slopcast = info.pid.is_some_and(|p| p == our_pid)
@@ -867,6 +878,82 @@ fn run_capture_session(
 
     let _ = ready_tx.send(Ok(()));
 
+    let capture_node_id = shared
+        .lock()
+        .ok()
+        .and_then(|s| s.capture_node_id)
+        .unwrap_or(0);
+    let mut _pcm_stream: Option<StreamRc> = None;
+    let mut _pcm_listener: Option<StreamListener<()>> = None;
+
+    if capture_node_id != 0
+        && let Some(values) = create_audio_capture_format()
+        && let Some(pod) = Pod::from_bytes(&values)
+    {
+        let mut params = [pod];
+        if let Ok(stream) = StreamRc::new(
+            pw.core.clone(),
+            AUDIO_STREAM_NAME,
+            properties! {
+                "media.class" => "Stream/Input/Audio",
+                "node.name" => AUDIO_STREAM_NAME,
+                "node.description" => "Slopcast Audio Capture",
+                "node.dont-move" => "true",
+                "node.dont-reconnect" => "true",
+            },
+        ) {
+            let listener = stream
+                .add_local_listener_with_user_data(())
+                .process(move |s, ()| {
+                    let Some(mut buffer) = s.dequeue_buffer() else {
+                        return;
+                    };
+                    thread_local! {
+                        static PCM_SCRATCH: std::cell::RefCell<Vec<u8>> =
+                            std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES));
+                    }
+                    let mut all_bytes = PCM_SCRATCH.with(|v| v.take());
+                    all_bytes.clear();
+                    for data in buffer.datas_mut() {
+                        let start = data.chunk().offset() as usize;
+                        let size = data.chunk().size() as usize;
+                        let Some(bytes) = data.data() else {
+                            continue;
+                        };
+                        let end = start.saturating_add(size).min(bytes.len());
+                        let Some(slice) = bytes.get(start..end) else {
+                            continue;
+                        };
+                        all_bytes.extend_from_slice(slice);
+                    }
+                    if !all_bytes.is_empty() {
+                        invoke_audio_data_callback(all_bytes);
+                    }
+                    PCM_SCRATCH.with(|v| {
+                        let mut buf = v.replace(Vec::new());
+                        buf.clear();
+                        if buf.capacity() < MAX_AUDIO_FRAME_BYTES {
+                            buf.reserve(MAX_AUDIO_FRAME_BYTES);
+                        }
+                        *v.borrow_mut() = buf;
+                    });
+                })
+                .register()
+                .ok();
+            if let Err(e) = stream.connect(
+                pipewire::spa::utils::Direction::Input,
+                Some(capture_node_id),
+                StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+                &mut params,
+            ) {
+                eprintln!("[audio-capture] stream connect: {e}");
+            } else {
+                _pcm_stream = Some(stream);
+                _pcm_listener = listener;
+            }
+        }
+    }
+
     let mut metadata_watch: Option<(
         pipewire::metadata::Metadata,
         pipewire::metadata::MetadataListener,
@@ -876,7 +963,7 @@ fn run_capture_session(
     while !stop.load(Ordering::SeqCst) {
         pw.main_loop
             .loop_()
-            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+            .iterate(pipewire::loop_::Timeout::Infinite);
 
         while let Ok(new_target) = target_rx.try_recv() {
             tracker.borrow_mut().change_target(new_target, &pw.core);
@@ -900,6 +987,34 @@ fn run_capture_session(
             if let Ok(node) = create_capture_node(&pw.core, &layout) {
                 capture_node = Some(node);
                 capture_layout = layout;
+            }
+            // Reconnect the PCM stream to the new capture node so audio capture
+            // continues after a default-sink channel-layout change.
+            if let Some(ref stream) = _pcm_stream {
+                let node_id = shared
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.capture_node_id)
+                    .unwrap_or(0);
+                if node_id != 0
+                    && let Some(values) = create_audio_capture_format()
+                    && let Some(pod) = Pod::from_bytes(&values)
+                {
+                    let mut params = [pod];
+                    if stream
+                        .connect(
+                            pipewire::spa::utils::Direction::Input,
+                            Some(node_id),
+                            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+                            &mut params,
+                        )
+                        .is_err()
+                    {
+                        eprintln!(
+                            "[audio-capture] reconnect pcm_stream after layout change: failed"
+                        );
+                    }
+                }
             }
         }
     }
@@ -960,7 +1075,7 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
             })?
     };
 
-    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+    match ready_rx.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(())) => {}
         Ok(Err(reason)) => {
             stop.store(true, Ordering::SeqCst);
@@ -975,25 +1090,8 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
             ));
         }
     }
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if shared
-            .lock()
-            .ok()
-            .is_some_and(|s| s.capture_node_id.is_some())
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            stop.store(true, Ordering::SeqCst);
-            let _ = join.join();
-            return Err(napi::Error::from_reason(format!(
-                "Virtual source '{CAPTURE_NODE_NAME}' did not appear"
-            )));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    // The worker thread only sends ready after confirming capture_node_id,
+    // so the node is guaranteed available at this point. No need to poll.
 
     Ok(CaptureSession {
         stop,
@@ -1367,29 +1465,29 @@ pub(crate) fn switch_audio_capture(target_app_id: &Either<String, i32>) -> NapiR
     Ok(true)
 }
 
-pub(crate) fn stop_audio_capture() -> bool {
+pub(crate) fn stop_audio_capture() -> NapiResult<bool> {
     let Ok(mut state_guard) = CAPTURE_STATE.lock() else {
         eprintln!("[capture] state lock poisoned; nothing to stop");
-        return true;
+        return Ok(true);
     };
     if let Some(state) = state_guard.as_mut() {
         stop_session(state);
     }
-    true
+    Ok(true)
 }
 
-pub(crate) fn is_audio_capture_active() -> bool {
+pub(crate) fn is_audio_capture_active() -> NapiResult<bool> {
     let Ok(mut state_guard) = CAPTURE_STATE.lock() else {
         eprintln!("[capture] state lock poisoned; reporting inactive");
-        return false;
+        return Ok(false);
     };
     let Some(state) = state_guard.as_mut() else {
-        return false;
+        return Ok(false);
     };
     if state.session.as_ref().is_some_and(|s| s.join.is_finished()) {
         stop_session(state);
     }
-    state.is_active
+    Ok(state.is_active)
 }
 
 pub(crate) fn resolve_audio_app_for_x11_window(window_id: u32) -> Option<AudioApp> {
@@ -1400,7 +1498,14 @@ pub(crate) fn resolve_audio_app_for_x11_window(window_id: u32) -> Option<AudioAp
         return None;
     }
 
-    let atom_name = std::ffi::CString::new("_NET_WM_PID").ok()?;
+    let atom_name = match std::ffi::CString::new("_NET_WM_PID") {
+        Ok(name) => name,
+        Err(_) => {
+            // SAFETY: balances the XOpenDisplay above; display is valid.
+            unsafe { x11::xlib::XCloseDisplay(display) };
+            return None;
+        }
+    };
     // SAFETY: `display` is a valid open display and `atom_name` is a valid
     // NUL-terminated C string; both outlive the call.
     let atom = unsafe { x11::xlib::XInternAtom(display, atom_name.as_ptr(), 1) };
@@ -1501,31 +1606,100 @@ fn portal_window_name(props: &DictRef) -> Option<String> {
     None
 }
 
-fn is_kde_screencast_window(suffix: &str) -> bool {
+/// What a `kwin-screencast-<suffix>` stream captures, derived from the suffix.
+/// `KWin` names window streams after the window's desktop file name, monitor
+/// streams after the output (`DP-1`, `HDMI-A-1`, `eDP-1`, …), and region
+/// streams after the geometry (`x,y WxH`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KdeScreencast {
+    Window,
+    Monitor,
+    Region,
+}
+
+fn classify_kde_screencast(suffix: &str) -> KdeScreencast {
+    // An empty suffix is a window whose desktop file name is empty (or a
+    // restored portal session) — monitor and region names are never empty.
     if suffix.is_empty() {
-        return false;
+        return KdeScreencast::Window;
     }
-    let parts: Vec<&str> = suffix.split('-').collect();
-    if parts.len() < 2 {
-        return true;
+    if suffix.contains(',') {
+        return KdeScreencast::Region;
     }
-    !(parts[0].chars().all(|c| c.is_ascii_uppercase())
-        && parts[1].chars().all(|c| c.is_ascii_digit()))
+    // Output names end in a digit group after a dash (`DP-3`, `HDMI-A-1`),
+    // while desktop file names carry dots or underscores (`org.kde.dolphin`,
+    // `steam_app_default`) or no dash at all (`codium`, `signal`).
+    let output_like = suffix.split('-').nth(1).is_some()
+        && suffix
+            .rsplit('-')
+            .next()
+            .is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && !suffix.contains(['.', '_']);
+    if output_like {
+        KdeScreencast::Monitor
+    } else {
+        KdeScreencast::Window
+    }
 }
 
 fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     let suffix = media_name.strip_prefix("kwin-screencast-")?;
-    if !is_kde_screencast_window(suffix) {
+    // Empty suffix means KWin didn't encode a window identity (e.g. restored
+    // portal session with persist) — can't resolve any specific app. Monitors
+    // and regions never map to a single application.
+    if suffix.is_empty() || classify_kde_screencast(suffix) != KdeScreencast::Window {
         return None;
     }
     let apps = list_audio_applications().ok()?;
-    // KWin reports the exact PID over D-Bus; when the suffix is a window
-    // caption rather than a UUID this fails and name matching applies.
-    if let Some(pid) = kwin::window_uuid_to_pid(suffix).filter(|p| *p > 0)
-        && let Some(app) = apps.iter().find(|app| app.process_id == pid.cast_signed())
-    {
-        return Some(app.clone());
+    // The suffix is the captured window's desktop file name; KWin reports the
+    // owning PID and window caption for it over D-Bus.
+    if let Some(win) = kwin::resolve_window(suffix) {
+        // Layer 1: exact PID match — works when the audio stream's process
+        // owns the window (native apps, Wine/Proton games).
+        if let Some(app) = apps
+            .iter()
+            .find(|app| app.process_id == win.pid.cast_signed())
+        {
+            return Some(app.clone());
+        }
+        // Layer 2: the window process and the audio-streaming process differ
+        // (browsers route tab audio through a utility process). Match by the
+        // window process's name from /proc.
+        let comm = std::fs::read_to_string(format!("/proc/{}/comm", win.pid)).ok();
+        let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", win.pid)).ok();
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(ref comm) = comm {
+            let name = comm.trim();
+            if !name.is_empty() {
+                candidates.push(name.to_string());
+            }
+        }
+        if let Some(ref cmdline) = cmdline {
+            let binary = cmdline.split('\0').next().unwrap_or("").trim();
+            if !binary.is_empty()
+                && let Some(stem) = std::path::Path::new(binary)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                && !stem.is_empty()
+                && !candidates.iter().any(|c| c == stem)
+            {
+                candidates.push(stem.to_string());
+            }
+        }
+        for candidate in &candidates {
+            if let Some(app) = crate::find_best_audio_match(&apps, candidate) {
+                return Some(app);
+            }
+        }
+        // Layer 3: the window caption — a game's real title or a browser's
+        // tab title, which audio stream names often carry.
+        if !win.caption.is_empty()
+            && let Some(app) = crate::find_best_audio_match(&apps, &win.caption)
+        {
+            return Some(app);
+        }
     }
+    // Layer 4: the desktop file name itself ("spotify-launcher" ~ "Spotify").
     crate::find_best_audio_match(&apps, suffix)
 }
 
@@ -1536,8 +1710,11 @@ struct VideoScan {
     source_type: Option<&'static str>,
     media_name: Option<String>,
     video_node_count: u32,
-    kde_media_names: Vec<String>,
+    /// `(object.serial, media.name)` per KDE screencast node — the serial
+    /// orders streams by creation time.
+    kde_media_names: Vec<(u64, String)>,
     capture_names: Vec<String>,
+    screencast_node_id: Option<u32>,
 }
 
 fn inspect_video_graph() -> Option<VideoScan> {
@@ -1546,55 +1723,114 @@ fn inspect_video_graph() -> Option<VideoScan> {
     let registry = pw.core.get_registry().ok()?;
 
     let scan = Rc::new(RefCell::new(VideoScan::default()));
-    let scan_clone = scan.clone();
+    let bindings: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let bind_core = pw.core.clone();
+    let bind_registry: Rc<RefCell<Option<pipewire::registry::RegistryRc>>> =
+        Rc::new(RefCell::new(None));
+    let reg_cell = bind_registry.clone();
 
     let _reg_listener = registry
         .add_listener_local()
-        .global(move |global| {
-            let Some(props) = global.props else { return };
-            let media_class = props.get("media.class").unwrap_or("");
-            if !media_class.starts_with("Video/") && !media_class.starts_with("Stream/Output/Video")
-            {
-                return;
-            }
-            let mut scan = scan_clone.borrow_mut();
-            scan.video_node_count += 1;
-            let mn = props.get("media.name").unwrap_or("");
-            if !mn.is_empty() {
-                scan.media_name = Some(mn.into());
-            }
-            if let Some(suffix) = mn.strip_prefix("kwin-screencast-") {
-                scan.de = Some("kde");
-                scan.source_type = Some(if is_kde_screencast_window(suffix) {
-                    "window"
-                } else {
-                    "monitor"
-                });
-                if !scan.kde_media_names.iter().any(|s| s == mn) {
-                    scan.kde_media_names.push(mn.into());
+        .global({
+            let scan = scan.clone();
+            let bind_core = bind_core.clone();
+            let reg_cell = reg_cell.clone();
+            let bindings = bindings.clone();
+            move |global| {
+                let Some(props) = global.props else { return };
+                let media_class = props.get("media.class").unwrap_or("");
+                // Only producer/output nodes carry capture-source metadata;
+                // consumer nodes (Stream/Input/Video) are not relevant.
+                if !media_class.starts_with("Video/")
+                    && !media_class.starts_with("Stream/Output/Video")
+                {
+                    return;
                 }
-                return;
-            }
-            if props
-                .get("portal.screencast.application")
-                .is_some_and(|v| !v.is_empty())
-            {
-                scan.de = Some("gnome");
-            }
-            if let Some(name) = portal_window_name(props)
-                && !scan.capture_names.contains(&name)
-            {
-                scan.capture_names.push(name);
+                let scan_info = scan.clone();
+                let mut scan = scan.borrow_mut();
+                scan.video_node_count += 1;
+
+                let has_reg = reg_cell.borrow().is_some();
+                if !has_reg {
+                    *reg_cell.borrow_mut() = bind_core.get_registry_rc().ok();
+                }
+                let reg_binding = reg_cell.borrow();
+                let Some(reg) = reg_binding.as_ref() else {
+                    return;
+                };
+                let Ok(node) = reg.bind::<pipewire::node::Node, _>(global) else {
+                    return;
+                };
+                let media_class_owned: String = media_class.into();
+                let node_id = global.id;
+                let listener = node
+                    .add_listener_local()
+                    .info(move |info| {
+                        let Some(p) = info.props() else { return };
+                        let mut scan = scan_info.borrow_mut();
+                        let mn = p.get("media.name").unwrap_or("");
+                        if !mn.is_empty() {
+                            scan.media_name = Some(mn.into());
+                        }
+                        if let Some(suffix) = mn.strip_prefix("kwin-screencast-") {
+                            scan.de = Some("kde");
+                            scan.source_type = Some(match classify_kde_screencast(suffix) {
+                                KdeScreencast::Window => "window",
+                                KdeScreencast::Monitor => "monitor",
+                                KdeScreencast::Region => "region",
+                            });
+                            let serial = p
+                                .get("object.serial")
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(0);
+                            if !scan.kde_media_names.iter().any(|(_, s)| s == mn) {
+                                scan.kde_media_names.push((serial, mn.into()));
+                            }
+                            scan.screencast_node_id = Some(node_id);
+                            return;
+                        }
+                        if p.get("portal.screencast.application")
+                            .is_some_and(|v| !v.is_empty())
+                        {
+                            scan.de = Some("gnome");
+                            scan.source_type = Some("window");
+                            scan.screencast_node_id = Some(node_id);
+                        } else if media_class_owned == "Video/Source" && scan.source_type.is_none()
+                        {
+                            let has_app_meta =
+                                p.get("application.name").is_some_and(|v| !v.is_empty())
+                                    || p.get("pipewire.access.portal.app_id")
+                                        .is_some_and(|v| !v.is_empty())
+                                    || p.get("window.name").is_some_and(|v| !v.is_empty());
+                            if !has_app_meta {
+                                scan.source_type = Some("monitor");
+                            }
+                        }
+                        if let Some(name) = portal_window_name(p)
+                            && !scan.capture_names.contains(&name)
+                        {
+                            scan.capture_names.push(name);
+                        }
+                    })
+                    .register();
+                bindings.borrow_mut().push((node, listener));
             }
         })
         .register();
 
     sync_registry(&pw.core, &pw.main_loop);
+    // Second round for bound nodes to deliver their info events.
+    sync_registry(&pw.core, &pw.main_loop);
     Some(scan.take())
 }
 
 fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
-    for mn in &scan.kde_media_names {
+    // The stream the user just picked is the most recently created one;
+    // older `kwin-screencast` nodes may belong to other clients' captures.
+    let mut kde_names: Vec<&(u64, String)> = scan.kde_media_names.iter().collect();
+    kde_names.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    for (_, mn) in kde_names {
         if let Some(app) = resolve_kde_screencast_audio(mn) {
             return Some(app);
         }
@@ -1613,6 +1849,7 @@ pub(crate) fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
 pub(crate) fn get_capture_context() -> NapiResult<crate::CaptureContext> {
     let scan = inspect_video_graph()
         .ok_or_else(|| napi::Error::from_reason("PipeWire video node introspection failed"))?;
+    let node_id = scan.screencast_node_id;
     let app = resolve_from_video_scan(&scan);
     Ok(crate::CaptureContext {
         de: scan.de.unwrap_or("unknown").into(),
@@ -1620,6 +1857,7 @@ pub(crate) fn get_capture_context() -> NapiResult<crate::CaptureContext> {
         media_name: scan.media_name,
         video_node_count: scan.video_node_count.cast_signed(),
         app,
+        screencast_node_id: node_id,
     })
 }
 
@@ -1813,7 +2051,7 @@ fn run_meter_session(
     while !stop.load(Ordering::SeqCst) {
         pw.main_loop
             .loop_()
-            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+            .iterate(pipewire::loop_::Timeout::Infinite);
     }
 
     meters.borrow_mut().clear();
@@ -1865,31 +2103,31 @@ pub(crate) fn start_audio_metering() -> NapiResult<bool> {
     Ok(true)
 }
 
-pub(crate) fn stop_audio_metering() -> bool {
+pub(crate) fn stop_audio_metering() -> NapiResult<bool> {
     let Ok(mut guard) = METER_STATE.lock() else {
         eprintln!("[meter] state lock poisoned; nothing to stop");
-        return true;
+        return Ok(true);
     };
     if let Some(session) = guard.take() {
         session.stop.store(true, Ordering::SeqCst);
         let _ = session.join.join();
     }
-    true
+    Ok(true)
 }
 
-pub(crate) fn get_audio_levels() -> Vec<AudioAppLevel> {
+pub(crate) fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
     let Ok(guard) = METER_STATE.lock() else {
         eprintln!("[meter] state lock poisoned; reporting no levels");
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(session) = guard.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Ok(levels) = session.levels.lock() else {
         eprintln!("[meter] levels lock poisoned; reporting no levels");
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    levels
+    Ok(levels
         .iter()
         .map(|(id, level)| {
             let raw = f32::from_bits(level.load(Ordering::Relaxed));
@@ -1902,15 +2140,155 @@ pub(crate) fn get_audio_levels() -> Vec<AudioAppLevel> {
                 },
             }
         })
-        .collect()
+        .collect())
 }
+
+static AUDIO_DATA_CALLBACK: Mutex<Option<Arc<ThreadsafeFunction<Vec<i16>, ()>>>> = Mutex::new(None);
+
+pub(crate) fn set_audio_data_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+) -> napi::Result<()> {
+    let Ok(mut guard) = AUDIO_DATA_CALLBACK.lock() else {
+        return Err(napi::Error::from_reason("Lock poisoned"));
+    };
+    *guard = Some(callback);
+    Ok(())
+}
+
+fn invoke_audio_data_callback(data: Vec<u8>) {
+    let i16_samples: Vec<i16> = data
+        .chunks_exact(4)
+        .map(|c| {
+            let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            (f.clamp(-1.0, 1.0) * 32767.0).round() as i16
+        })
+        .collect();
+    let Ok(guard) = AUDIO_DATA_CALLBACK.lock() else {
+        return;
+    };
+    let Some(ref cb) = *guard else {
+        return;
+    };
+    let _ = cb.call(
+        Ok(i16_samples),
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+    );
+}
+
+fn create_audio_capture_format() -> Option<Vec<u8>> {
+    let mut audio_info = AudioInfoRaw::new();
+    audio_info.set_format(AudioFormat::F32LE);
+    let obj = Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties: audio_info.into(),
+    };
+    let serialized = pipewire::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(obj),
+    )
+    .ok()?;
+    Some(serialized.0.into_inner())
+}
+
+const MAX_AUDIO_FRAME_BYTES: usize = 192_000;
+const AUDIO_STREAM_NAME: &str = "slopcast-audio-capture";
+
+// ── DMA-BUF Video Frame Callback ─────────────────────────────────────────
+// Registered by the Electron main process to forward video frames from the
+// PipeWire capture thread to native-livekit's VideoTrackSource.
+static DMA_BUF_CALLBACK: Mutex<
+    Option<Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>>,
+> = Mutex::new(None);
+
+pub(crate) fn set_dmabuf_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
+) -> napi::Result<()> {
+    let Ok(mut guard) = DMA_BUF_CALLBACK.lock() else {
+        return Err(napi::Error::from_reason("Lock poisoned"));
+    };
+    *guard = Some(callback);
+    Ok(())
+}
+
+pub(crate) fn invoke_dmabuf_callback(fd: i32, width: i32, height: i32, format: i32, pts_ns: i64) {
+    let Ok(guard) = DMA_BUF_CALLBACK.lock() else {
+        return;
+    };
+    let Some(ref cb) = *guard else {
+        return;
+    };
+    let lo = (pts_ns & 0xFFFF_FFFF) as i32;
+    let hi = ((pts_ns >> 32) & 0xFFFF_FFFF) as i32;
+    let _ = cb.call(
+        Ok((fd, width, height, format, lo, hi)),
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+    );
+}
+
+pub(crate) fn clear_dmabuf_callback() {
+    if let Ok(mut guard) = DMA_BUF_CALLBACK.lock() {
+        *guard = None;
+    }
+}
+
+// ── Video Capture (Linux PipeWire) ──────────────────────────────────────
+
+pub(crate) use video::{start_video_capture, stop_video_capture};
 
 #[cfg(test)]
 mod tests {
+    use super::{KdeScreencast, classify_kde_screencast};
+
     #[test]
     fn test_spa_function_accessible() {
         // SAFETY: pure lookup into a static translation table; any channel
         // enum value is valid input.
         let _ = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(3) };
+    }
+
+    #[test]
+    fn classifies_kde_window_names() {
+        // KWin names window streams after the window's desktop file name.
+        for suffix in [
+            "codium",
+            "signal",
+            "discord",
+            "org.kde.dolphin",
+            "brave-origin",
+            "spotify-launcher",
+            "com.mitchellh.ghostty",
+            "io.ente.auth",
+            "gitbutler-tauri",
+            "steam_app_default",
+            // Window with no desktop file name at all.
+            "",
+        ] {
+            assert_eq!(
+                classify_kde_screencast(suffix),
+                KdeScreencast::Window,
+                "{suffix:?} must classify as a window"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_kde_monitor_names() {
+        // KWin names monitor streams after the output connector.
+        for suffix in ["DP-1", "DP-3", "HDMI-A-1", "eDP-1", "DVI-D-1", "Virtual-1"] {
+            assert_eq!(
+                classify_kde_screencast(suffix),
+                KdeScreencast::Monitor,
+                "{suffix:?} must classify as a monitor"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_kde_region_name() {
+        assert_eq!(
+            classify_kde_screencast("0,0 1920x1080"),
+            KdeScreencast::Region
+        );
     }
 }
