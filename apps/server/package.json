@@ -7,11 +7,13 @@
     "dev": "tsx watch src/index.ts",
     "test:e2e": "tsx src/e2e-test.ts",
     "prebuild": "pnpm --filter @slopcast/shared-types build",
+    "check": "tsc --noEmit",
     "build": "tsc"
   },
   "dependencies": {
     "@slopcast/shared-types": "workspace:*",
     "express": "5.2.1",
+    "express-rate-limit": "^8.6.1",
     "livekit-server-sdk": "^2.17.0"
   },
   "devDependencies": {
