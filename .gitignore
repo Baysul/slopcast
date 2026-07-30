@@ -11,6 +11,10 @@ packages/native-rust/index.js
 packages/native-rust/index.d.ts
 packages/native-rust/*.node
 
+# Auto-generated NAPI bindings
+packages/native-livekit/index.js
+packages/native-livekit/index.d.ts
+
 # Environment
 .env
 .env.local
