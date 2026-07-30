@@ -11,7 +11,10 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "isolatedModules": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "paths": {
+      "@/*": ["./src/renderer/*"]
+    }
   },
   "include": ["src/renderer/**/*"]
 }

@@ -1,12 +1,13 @@
 import path from 'node:path';
 import { loadConfig } from '@slopcast/shared-types/config';
+import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 const config = loadConfig();
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [tailwindcss(), react()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

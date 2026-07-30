@@ -8,7 +8,7 @@
   "main": "dist/main/index.js",
   "scripts": {
     "predev": "pnpm --filter @slopcast/native-rust build:debug",
-    "prebuild": "pnpm --filter @slopcast/shared-types build && pnpm --filter @slopcast/native-rust build",
+    "prebuild": "pnpm --filter @slopcast/shared-types build && pnpm --filter @slopcast/native-rust build && pnpm --filter @slopcast/native-livekit build",
     "dev": "pnpm build && electron .",
     "build": "tsc -p tsconfig.json && cp src/main/preload.js dist/main/preload.js && vite build",
     "build:main": "tsc -p tsconfig.json && cp src/main/preload.js dist/main/preload.js",
@@ -24,25 +24,29 @@
     "dist:win": "pnpm build && electron-builder build --win"
   },
   "dependencies": {
+    "@radix-ui/react-slot": "^1.3.3",
+    "@radix-ui/react-toast": "^1.2.23",
+    "@slopcast/native-livekit": "workspace:*",
     "@slopcast/native-rust": "workspace:*",
     "@slopcast/shared-types": "workspace:*",
+    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "livekit-client": "^2.21.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "tailwind-merge": "^2.6.0"
+    "tailwind-merge": "^3.0.0",
+    "tw-animate-css": "^1.2.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "autoprefixer": "^10.4.20",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.7",
-    "postcss": "^8.5.0",
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4.0.0",
     "typescript": "^7.0.0",
     "vite": "^6.0.0"
   }
