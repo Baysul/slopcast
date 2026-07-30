@@ -1,4 +1,4 @@
-import { Maximize, Minimize, Pause, Play, Radio, RefreshCw, Volume2, VolumeX } from 'lucide-react';
+import { AlertTriangle, Maximize, Minimize, Pause, Play, Radio, RefreshCw, Volume2, VolumeX } from 'lucide-react';
 import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { AudioVisualizer, unlockAudioContexts } from './AudioVisualizer';
@@ -8,7 +8,7 @@ import {
   type SpectatorTelemetry,
   SpectatorTelemetryBar,
 } from './SpectatorTelemetryBar';
-import { Button } from './ui/Button';
+import { Button } from './ui/button';
 
 interface VideoPlayerProps {
   mediaStream: MediaStream | null;
@@ -17,6 +17,8 @@ interface VideoPlayerProps {
   onResync?: () => void;
   fullBleed?: boolean;
   getStatsFn?: () => Promise<RTCStatsReport | null>;
+  decoderStalled?: boolean;
+  stalledCodec?: string | null;
 }
 
 const STATS_POLL_MS = 2000;
@@ -28,6 +30,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onResync,
   fullBleed,
   getStatsFn,
+  decoderStalled,
+  stalledCodec,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -246,6 +250,34 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </span>
             )}
           </button>
+        </div>
+      )}
+
+      {decoderStalled && isLive && hasVideoTrack && (
+        <div
+          data-decoder-stalled="true"
+          className="absolute inset-0 flex flex-col items-center justify-center bg-black/85 z-20 p-6"
+        >
+          <AlertTriangle className="w-8 h-8 text-amber-400 mb-3" />
+          <p className="text-sm font-medium text-white/90 mb-1">Video decoder issue</p>
+          <p className="text-xs text-white/50 mb-5 max-w-xs text-center">
+            {stalledCodec
+              ? `Receiving ${stalledCodec} packets but no frames are decoding. The stream may use an incompatible codec profile.`
+              : 'Receiving video data but frames are not displaying.'}
+          </p>
+          <div className="flex items-center gap-3">
+            {onResync && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onResync}
+                className="gap-2 border-amber-400/20 text-amber-300 hover:text-amber-200 hover:bg-amber-400/5"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Reconnect</span>
+              </Button>
+            )}
+          </div>
         </div>
       )}
 

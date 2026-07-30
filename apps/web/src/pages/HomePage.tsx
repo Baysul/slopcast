@@ -4,9 +4,9 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { SpectatorBanner } from '../components/SpectatorBanner';
-import { Button } from '../components/ui/Button';
-import { Card } from '../components/ui/Card';
-import { Input } from '../components/ui/Input';
+import { Button } from '../components/ui/button';
+import { Card } from '../components/ui/card';
+import { Input } from '../components/ui/input';
 
 export const HomePage: React.FC = () => {
   const [roomInput, setRoomInput] = useState('');
@@ -72,9 +72,15 @@ export const HomePage: React.FC = () => {
                 placeholder="e.g. abc-123-xyz"
                 value={roomInput}
                 onChange={(e) => handleInputChange(e.target.value)}
-                error={error}
-                className="bg-card/80 text-center font-mono text-base tracking-wide"
+                aria-invalid={!!error}
+                aria-describedby={error ? 'roomCode-error' : undefined}
+                className={`bg-card/80 text-center font-mono text-base tracking-wide ${error ? 'border-destructive focus-visible:ring-destructive' : ''}`}
               />
+              {error && (
+                <p id="roomCode-error" className="mt-1.5 text-xs text-destructive" role="alert">
+                  {error}
+                </p>
+              )}
             </div>
 
             <Button type="submit" size="lg" className="w-full gap-2" disabled={joining}>

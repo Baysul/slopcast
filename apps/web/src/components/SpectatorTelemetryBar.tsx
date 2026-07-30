@@ -12,6 +12,9 @@ export interface SpectatorTelemetry {
   hasVideo: boolean;
   hasAudio: boolean;
   quality: 'excellent' | 'degraded' | 'poor';
+  framesReceived: number;
+  packetsReceived: number;
+  decoderImplementation: string | null;
 }
 
 const TelemetryCell: React.FC<{
@@ -50,9 +53,11 @@ interface RTCStatLike {
   packetsReceived?: number;
   packetsLost?: number;
   framesReceived?: number;
+  framesDecoded?: number;
   frameWidth?: number;
   frameHeight?: number;
   mimeType?: string;
+  implementation?: string;
   freezeCount?: number;
   totalFreezesDuration?: number;
   pauseCount?: number;
@@ -61,7 +66,7 @@ interface RTCStatLike {
 
 interface StatsPrev {
   bytesReceived: number;
-  framesReceived: number;
+  framesDecoded: number;
   ts: number;
   init: boolean;
 }
@@ -75,6 +80,9 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
   let packetLossPct: number | null = null;
   let freezeCount = 0;
   let hasVideo = false;
+  let framesReceived = 0;
+  let packetsReceived = 0;
+  let decoderImplementation: string | null = null;
 
   for (const reportRaw of stats.values()) {
     const report = reportRaw as RTCStatLike;
@@ -94,7 +102,7 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
         const dt = (ts - prev.ts) / 1000;
         const db = (report.bytesReceived ?? 0) - prev.bytesReceived;
         if (db >= 0) videoBitrate = (db * 8) / dt;
-        const df = (report.framesReceived ?? 0) - prev.framesReceived;
+        const df = (report.framesDecoded ?? 0) - prev.framesDecoded;
         if (df >= 0) frameRate = df / dt;
       }
 
@@ -104,6 +112,14 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
       }
 
       freezeCount = report.freezeCount ?? 0;
+      framesReceived = report.framesDecoded ?? 0;
+      packetsReceived = report.packetsReceived ?? 0;
+    }
+
+    if (report.type === 'codec' && report.mimeType?.toUpperCase()?.includes('VIDEO')) {
+      if (report.implementation) {
+        decoderImplementation = report.implementation;
+      }
     }
   }
 
@@ -120,6 +136,9 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
     hasVideo,
     hasAudio,
     quality,
+    framesReceived,
+    packetsReceived,
+    decoderImplementation,
   };
 }
 
@@ -129,7 +148,7 @@ export function createStatsPrev(stats: RTCStatsReport): StatsPrev | null {
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
       return {
         bytesReceived: report.bytesReceived ?? 0,
-        framesReceived: report.framesReceived ?? 0,
+        framesDecoded: report.framesDecoded ?? 0,
         ts: report.timestamp ?? 0,
         init: true,
       };

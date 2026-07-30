@@ -12,8 +12,10 @@ import { Check, ChevronDown, ScreenShare } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AudioLevelMeter } from './components/ui/AudioLevelMeter';
-import { Badge } from './components/ui/Badge';
+import { Badge } from './components/ui/badge';
 import { primeAudioContext, ToastViewport, useToasts } from './components/ui/Toast';
 import './index.css';
 
@@ -1200,9 +1202,7 @@ export const PresenterApp: React.FC = () => {
         await loadAudioApps();
 
         const app = await attemptAutoResolve(
-          isWayland
-            ? { nameHint: videoTrack.label }
-            : { sourceId: selectedSourceId, nameHint: videoTrack.label },
+          isWayland ? { nameHint: videoTrack.label } : { sourceId: selectedSourceId, nameHint: videoTrack.label },
         );
         targetAudioId = app?.id ?? null;
       }
@@ -1292,6 +1292,32 @@ export const PresenterApp: React.FC = () => {
         screenShareEncoding: undefined,
         simulcast: false,
       });
+
+      if (videoCodec === 'h264') {
+        videoTrack.contentHint = 'motion';
+        try {
+          const publisher = (
+            room as {
+              engine?: {
+                pcManager?: { publisher?: { getLocalDescription(): RTCSessionDescription | null | undefined } };
+              };
+            }
+          ).engine?.pcManager?.publisher;
+          if (publisher) {
+            const desc = publisher.getLocalDescription();
+            if (desc) {
+              const h264Lines = desc.sdp
+                .split('\n')
+                .filter((line) => line.startsWith('a=fmtp:') && line.includes('profile-level-id'));
+              for (const line of h264Lines) {
+                console.log(`[SDP:send] H264 fmtp: ${line}`);
+              }
+            }
+          }
+        } catch {
+          console.log('[Presenter] SDP log skipped (no local description yet)');
+        }
+      }
 
       if (audioTrack) {
         await room.localParticipant.publishTrack(audioTrack, {
@@ -1387,13 +1413,6 @@ export const PresenterApp: React.FC = () => {
   };
   const disabledReason = startDisabledReason();
 
-  const shareButtonClass = ((): string => {
-    if (isSharing) {
-      return 'bg-destructive/90 hover:bg-destructive text-white';
-    }
-    return 'bg-safelight hover:bg-safelight-hover text-safelight-foreground';
-  })();
-
   return (
     <div className="min-h-screen flex flex-col">
       {/* ===== Sticky Header ===== */}
@@ -1419,13 +1438,7 @@ export const PresenterApp: React.FC = () => {
 
           <div className="shrink-0">
             {!roomCode ? (
-              <button
-                type="button"
-                onClick={handleCreateRoom}
-                className="px-5 py-2 bg-safelight text-safelight-foreground rounded-lg font-semibold text-sm hover:bg-safelight-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              >
-                Create Live Room
-              </button>
+              <Button onClick={handleCreateRoom}>Create Live Room</Button>
             ) : (
               <div className="flex items-center gap-2">
                 {spectatorCount > 0 && (
@@ -1433,23 +1446,15 @@ export const PresenterApp: React.FC = () => {
                     {spectatorCount} spectator{spectatorCount === 1 ? '' : 's'}
                   </span>
                 )}
-                <button
-                  type="button"
-                  onClick={handleCopyCode}
-                  className="flex items-center gap-2 bg-gray-900/80 border border-gray-800 px-3 py-1.5 rounded-lg text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background transition-colors"
-                >
+                <Button variant="secondary" size="sm" onClick={handleCopyCode} className="gap-2">
                   <span className="text-gray-400 font-mono">{roomCode}</span>
                   <span className="text-gray-200 bg-accent/50 px-2 py-0.5 rounded">
                     {copied === 'code' ? 'Copied' : 'Copy'}
                   </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCopyLink}
-                  className="bg-safelight text-safelight-foreground px-3 py-1.5 rounded-lg text-xs font-semibold hover:bg-safelight-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                >
+                </Button>
+                <Button size="sm" onClick={handleCopyLink}>
                   {copied === 'link' ? 'Link Copied!' : 'Copy Link'}
-                </button>
+                </Button>
               </div>
             )}
           </div>
@@ -1459,281 +1464,294 @@ export const PresenterApp: React.FC = () => {
       {/* ===== Main Content ===== */}
       <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
         {/* Screenshare Preview */}
-        <div className="bg-gray-900/80 border border-gray-800 rounded-xl overflow-hidden shadow-2xl">
-          <div className="relative bg-black aspect-video flex items-center justify-center">
-            <video
-              ref={previewVideoRef}
-              autoPlay
-              playsInline
-              muted
-              aria-label="Screen share preview"
-              className={`w-full h-full object-contain ${isSharing ? 'block' : 'hidden'}`}
-            />
-            {!isSharing && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-6">
-                <p className="text-sm text-gray-400 font-medium">No active screenshare</p>
-                <p className="text-xs text-gray-600 max-w-sm">
-                  Select a window below and start sharing. Audio is auto-detected.
-                </p>
-              </div>
-            )}
-            {isSharing && <StreamTelemetryBar telemetry={telemetry} />}
-          </div>
-        </div>
+        <Card className="overflow-hidden shadow-2xl">
+          <CardContent className="p-0">
+            <div className="relative bg-black aspect-video flex items-center justify-center">
+              <video
+                ref={previewVideoRef}
+                autoPlay
+                playsInline
+                muted
+                aria-label="Screen share preview"
+                className={`w-full h-full object-contain ${isSharing ? 'block' : 'hidden'}`}
+              />
+              {!isSharing && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-6">
+                  <p className="text-sm text-gray-400 font-medium">No active screenshare</p>
+                  <p className="text-xs text-gray-600 max-w-sm">
+                    Select a window below and start sharing. Audio is auto-detected.
+                  </p>
+                </div>
+              )}
+              {isSharing && <StreamTelemetryBar telemetry={telemetry} />}
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Controls Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {/* Window Audio Capture */}
-          <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-2">
-                Window Audio Capture
-                {autoDetectedApp && (
-                  <span className="text-[10px] font-normal text-safelight bg-safelight-glow px-2 py-0.5 rounded-full border border-safelight/30">
-                    Auto ✓
-                  </span>
-                )}
-              </h2>
-              <button
-                type="button"
-                onClick={loadAudioApps}
-                className="text-xs text-gray-500 hover:text-gray-300 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
-              >
-                Refresh
-              </button>
-            </div>
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-2">
+                  Window Audio Capture
+                  {autoDetectedApp && (
+                    <span className="text-[10px] font-normal text-safelight bg-safelight-glow px-2 py-0.5 rounded-full border border-safelight/30">
+                      Auto ✓
+                    </span>
+                  )}
+                </CardTitle>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={loadAudioApps}
+                  className="text-xs text-gray-500 hover:text-gray-300 h-auto px-2"
+                >
+                  Refresh
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-xs text-gray-500 leading-relaxed">
+                Auto-detected from your window selection. Click an app below to override — only that app's audio is
+                streamed. Select <strong className="text-gray-300">Desktop Audio</strong> to capture all system sound.
+              </p>
 
-            <p className="text-xs text-gray-500 leading-relaxed">
-              Auto-detected from your window selection. Click an app below to override — only that app's audio is
-              streamed. Select <strong className="text-gray-300">Desktop Audio</strong> to capture all system sound.
-            </p>
-
-            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-              {(() => {
-                const displayName = (app: AudioApp): string => app.name;
-                const groupSubLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string | null => {
-                  if (isDesktopAudio) return 'All system audio';
-                  const { members } = group;
-                  let label: string | undefined;
-                  for (const m of members) {
-                    if (m.mediaTitle) {
-                      label = m.mediaTitle;
-                      break;
-                    }
-                  }
-                  if (!label) {
+              <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                {(() => {
+                  const displayName = (app: AudioApp): string => app.name;
+                  const groupSubLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string | null => {
+                    if (isDesktopAudio) return 'All system audio';
+                    const { members } = group;
+                    let label: string | undefined;
                     for (const m of members) {
-                      if (m.windowTitle) {
-                        label = m.windowTitle;
+                      if (m.mediaTitle) {
+                        label = m.mediaTitle;
                         break;
                       }
                     }
-                  }
-                  if (label) {
-                    if (members.length > 1) return `${label} \u00B7 ${members.length} streams`;
-                    return label;
-                  }
-                  if (members.length > 1) return `${members.length} audio streams`;
-                  return null;
-                };
-
-                const pickerRowClass = (isSelected: boolean, isDesktopAudio: boolean): string => {
-                  if (isSelected && isDesktopAudio) {
-                    return 'bg-amber-950/40 border-amber-500/40 text-amber-200';
-                  }
-                  if (isSelected) {
-                    return 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200';
-                  }
-                  return 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300';
-                };
-
-                const renderBtn = (group: AudioAppGroup, isDesktopAudio: boolean) => {
-                  const { representative, members } = group;
-                  const isSelected = members.some((m) => m.id === selectedAudioAppId);
-                  const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
-                  const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
-                  const btnClass = `flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
-                    isSelected,
-                    isDesktopAudio,
-                  )}`;
-                  return (
-                    <button
-                      key={representative.id}
-                      type="button"
-                      onClick={() => {
-                        if (isSelected) {
-                          setAudioAppExplicitlySet(false);
-                          setSelectedAudioAppId(null);
-                          setAutoDetectedApp(null);
-                        } else {
-                          setAudioAppExplicitlySet(true);
-                          setSelectedAudioAppId(representative.id);
-                          setAutoDetectedApp(null);
+                    if (!label) {
+                      for (const m of members) {
+                        if (m.windowTitle) {
+                          label = m.windowTitle;
+                          break;
                         }
-                      }}
-                      className={btnClass}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-semibold truncate min-w-0">{displayName(representative)}</span>
-                          {!isDesktopAudio && <AudioLevelMeter level={level} />}
-                        </div>
-                        {(() => {
-                          const label = groupSubLabel(group, isDesktopAudio);
-                          if (!label) return null;
-                          return (
-                            <div className="flex items-center gap-2 mt-0.5">
-                              <span className="text-[10px] opacity-60">{label}</span>
-                              {isAutoDetected && (
-                                <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
-                                  auto
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })()}
-                      </div>
-                      {isSelected && (
-                        <Check
-                          className={`w-4 h-4 shrink-0 ${isDesktopAudio ? 'text-amber-300' : 'text-emerald-300'}`}
-                          aria-hidden="true"
-                        />
-                      )}
-                    </button>
-                  );
-                };
+                      }
+                    }
+                    if (label) {
+                      if (members.length > 1) return `${label} \u00B7 ${members.length} streams`;
+                      return label;
+                    }
+                    if (members.length > 1) return `${members.length} audio streams`;
+                    return null;
+                  };
 
-                const desktopAudio: AudioApp = {
-                  id: -1,
-                  name: 'Desktop Audio (All System Sound)',
-                  processId: 0,
-                  clientId: null,
-                  mediaTitle: null,
-                };
-                const items: React.ReactNode[] = [
-                  renderBtn({ representative: desktopAudio, members: [desktopAudio] }, true),
-                ];
-                if (audioAppGroups.length > 0) {
-                  items.push(<div key="divider" className="border-t border-gray-800 my-1.5" />);
-                  for (const group of audioAppGroups) {
-                    items.push(renderBtn(group, false));
-                  }
-                }
-                // The Desktop Audio row is always present, so items is never empty.
-                return items;
-              })()}
-            </div>
-          </div>
+                  const pickerRowClass = (isSelected: boolean, isDesktopAudio: boolean): string => {
+                    if (isSelected && isDesktopAudio) {
+                      return 'bg-amber-950/40 border-amber-500/40 text-amber-200';
+                    }
+                    if (isSelected) {
+                      return 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200';
+                    }
+                    return 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300';
+                  };
 
-          {/* Screenshare Source */}
-          <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-6 space-y-4">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Screenshare Source</h2>
-
-            {(() => {
-              if (isWayland) {
-                return (
-                  <div className="space-y-2 text-xs">
-                    <p className="text-gray-500 leading-relaxed">
-                      The system dialog (xdg-desktop-portal) will let you pick the window to share. Audio is
-                      auto-detected via PipeWire introspection.
-                    </p>
-                    {captureContext?.de === 'kde' && !autoDetectFailed && (
-                      <p className="text-gray-400 bg-gray-800/40 border border-gray-700/40 rounded-lg p-2.5 leading-relaxed">
-                        KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection
-                        fails, select an audio app manually.
-                      </p>
-                    )}
-                  </div>
-                );
-              }
-              return (
-                <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
-                  {desktopSources.map((source) => {
-                    const isSelected = source.id === selectedSourceId;
+                  const renderBtn = (group: AudioAppGroup, isDesktopAudio: boolean) => {
+                    const { representative, members } = group;
+                    const isSelected = members.some((m) => m.id === selectedAudioAppId);
+                    const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
+                    const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
+                    const btnClass = `flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
+                      isSelected,
+                      isDesktopAudio,
+                    )}`;
                     return (
                       <button
-                        key={source.id}
+                        key={representative.id}
                         type="button"
                         onClick={() => {
-                          setSelectedSourceId(source.id);
-                          void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
+                          if (isSelected) {
+                            setAudioAppExplicitlySet(false);
+                            setSelectedAudioAppId(null);
+                            setAutoDetectedApp(null);
+                          } else {
+                            setAudioAppExplicitlySet(true);
+                            setSelectedAudioAppId(representative.id);
+                            setAutoDetectedApp(null);
+                          }
                         }}
-                        aria-label={source.name}
-                        className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
-                          isSelected
-                            ? 'bg-gray-800/50 border-gray-600 ring-1 ring-gray-600/30'
-                            : 'bg-background/60 border-gray-800/60 hover:border-gray-700'
-                        }`}
+                        className={btnClass}
                       >
-                        <img
-                          src={source.thumbnail}
-                          alt=""
-                          className="w-full h-20 object-cover rounded"
-                          aria-hidden="true"
-                        />
-                        <span className="block font-medium truncate text-gray-300">{source.name}</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold truncate min-w-0">{displayName(representative)}</span>
+                            {!isDesktopAudio && <AudioLevelMeter level={level} />}
+                          </div>
+                          {(() => {
+                            const label = groupSubLabel(group, isDesktopAudio);
+                            if (!label) return null;
+                            return (
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <span className="text-[10px] opacity-60">{label}</span>
+                                {isAutoDetected && (
+                                  <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
+                                    auto
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                        {isSelected && (
+                          <Check
+                            className={`w-4 h-4 shrink-0 ${isDesktopAudio ? 'text-amber-300' : 'text-emerald-300'}`}
+                            aria-hidden="true"
+                          />
+                        )}
                       </button>
                     );
-                  })}
-                </div>
-              );
-            })()}
+                  };
 
-            {autoDetectFailed && captureContext?.de === 'kde' && (
-              <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 space-y-1">
-                <p className="text-xs font-semibold text-gray-200">KDE Audio Auto-Detection Failed</p>
-                <p className="text-[11px] text-gray-500 leading-relaxed">
-                  Select an audio app from the panel above, then stop and restart the screenshare.
-                </p>
+                  const desktopAudio: AudioApp = {
+                    id: -1,
+                    name: 'Desktop Audio (All System Sound)',
+                    processId: 0,
+                    clientId: null,
+                    mediaTitle: null,
+                  };
+                  const items: React.ReactNode[] = [
+                    renderBtn({ representative: desktopAudio, members: [desktopAudio] }, true),
+                  ];
+                  if (audioAppGroups.length > 0) {
+                    items.push(<div key="divider" className="border-t border-gray-800 my-1.5" />);
+                    for (const group of audioAppGroups) {
+                      items.push(renderBtn(group, false));
+                    }
+                  }
+                  // The Desktop Audio row is always present, so items is never empty.
+                  return items;
+                })()}
               </div>
-            )}
+            </CardContent>
+          </Card>
 
-            <button
-              type="button"
-              onClick={isSharing ? handleStopShare : handleStartShare}
-              disabled={!isSharing && !canStartShare}
-              title={isSharing ? 'Stop the broadcast and disconnect all spectators.' : undefined}
-              aria-describedby={disabledReason ? 'start-screenshare-hint' : undefined}
-              className={`w-full py-3 text-sm font-bold rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight focus-visible:ring-offset-2 focus-visible:ring-offset-background ${shareButtonClass}`}
-            >
-              {isSharing ? 'Stop Screenshare' : 'Start Screenshare'}
-            </button>
-            {disabledReason && (
-              <p id="start-screenshare-hint" className="text-[11px] text-gray-500 leading-relaxed">
-                {disabledReason}
-              </p>
-            )}
-          </div>
+          {/* Screenshare Source */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                Screenshare Source
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {(() => {
+                if (isWayland) {
+                  return (
+                    <div className="space-y-2 text-xs">
+                      <p className="text-gray-500 leading-relaxed">
+                        The system dialog (xdg-desktop-portal) will let you pick the window to share. Audio is
+                        auto-detected via PipeWire introspection.
+                      </p>
+                      {captureContext?.de === 'kde' && !autoDetectFailed && (
+                        <p className="text-gray-400 bg-gray-800/40 border border-gray-700/40 rounded-lg p-2.5 leading-relaxed">
+                          KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection
+                          fails, select an audio app manually.
+                        </p>
+                      )}
+                    </div>
+                  );
+                }
+                return (
+                  <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
+                    {desktopSources.map((source) => {
+                      const isSelected = source.id === selectedSourceId;
+                      return (
+                        <button
+                          key={source.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedSourceId(source.id);
+                            void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
+                          }}
+                          aria-label={source.name}
+                          className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                            isSelected
+                              ? 'bg-gray-800/50 border-gray-600 ring-1 ring-gray-600/30'
+                              : 'bg-background/60 border-gray-800/60 hover:border-gray-700'
+                          }`}
+                        >
+                          <img
+                            src={source.thumbnail}
+                            alt=""
+                            className="w-full h-20 object-cover rounded"
+                            aria-hidden="true"
+                          />
+                          <span className="block font-medium truncate text-gray-300">{source.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+
+              {autoDetectFailed && captureContext?.de === 'kde' && (
+                <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 space-y-1">
+                  <p className="text-xs font-semibold text-gray-200">KDE Audio Auto-Detection Failed</p>
+                  <p className="text-[11px] text-gray-500 leading-relaxed">
+                    Select an audio app from the panel above, then stop and restart the screenshare.
+                  </p>
+                </div>
+              )}
+
+              <Button
+                variant={isSharing ? 'destructive' : 'default'}
+                onClick={isSharing ? handleStopShare : handleStartShare}
+                disabled={!isSharing && !canStartShare}
+                className="w-full font-bold"
+              >
+                {isSharing ? 'Stop Screenshare' : 'Start Screenshare'}
+              </Button>
+              {disabledReason && (
+                <p id="start-screenshare-hint" className="text-[11px] text-gray-500 leading-relaxed">
+                  {disabledReason}
+                </p>
+              )}
+            </CardContent>
+          </Card>
         </div>
 
         {/* Stream Settings */}
-        <div className="bg-gray-900/80 border border-gray-800 rounded-xl">
-          <button
-            type="button"
-            onClick={() => setStreamSettingsOpen((v) => !v)}
-            className={`flex w-full items-center justify-between gap-3 px-6 pt-6 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-safelight/70 ${
-              streamSettingsOpen ? 'pb-0' : 'pb-6'
-            }`}
-            aria-expanded={streamSettingsOpen}
-          >
-            <div>
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Stream Settings</h2>
-              <p className="text-xs text-gray-500 leading-relaxed mt-1">
-                Changes apply in real time — no restart needed.
-              </p>
-            </div>
-            <ChevronDown
-              className={`size-4 shrink-0 text-gray-500 transition-transform duration-200 ${
-                streamSettingsOpen ? 'rotate-0' : '-rotate-90'
+        <Card>
+          <CardHeader className="pb-0">
+            <button
+              type="button"
+              onClick={() => setStreamSettingsOpen((v) => !v)}
+              className={`flex w-full items-center justify-between gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-safelight/70 ${
+                streamSettingsOpen ? 'pb-0' : 'pb-0'
               }`}
-            />
-          </button>
+              aria-expanded={streamSettingsOpen}
+            >
+              <div>
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  Stream Settings
+                </CardTitle>
+                <p className="text-xs text-gray-500 leading-relaxed mt-1">
+                  Changes apply in real time — no restart needed.
+                </p>
+              </div>
+              <ChevronDown
+                className={`size-4 shrink-0 text-gray-500 transition-transform duration-200 ${
+                  streamSettingsOpen ? 'rotate-0' : '-rotate-90'
+                }`}
+              />
+            </button>
+          </CardHeader>
           <div
             className={`overflow-hidden transition-all duration-200 ease-out ${
               streamSettingsOpen ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'
             }`}
           >
-            <div className="space-y-5 p-6">
+            <CardContent className="space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Video Codec */}
                 <div className="space-y-1.5">
@@ -1843,9 +1861,9 @@ export const PresenterApp: React.FC = () => {
                   className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background font-mono"
                 />
               </div>
-            </div>
+            </CardContent>
           </div>
-        </div>
+        </Card>
       </main>
 
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />

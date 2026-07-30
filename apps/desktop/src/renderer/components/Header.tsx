@@ -1,6 +1,6 @@
 import { ScreenShare } from 'lucide-react';
 import type React from 'react';
-import { Badge } from '../components/ui/Badge';
+import { Badge } from './ui/badge';
 
 export interface HeaderProps {
   roomCode: string;

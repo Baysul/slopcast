@@ -2,7 +2,7 @@ import { ArrowLeft, Check, Copy, ScreenShare } from 'lucide-react';
 import type React from 'react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Badge } from './ui/Badge';
+import { Badge } from './ui/badge';
 
 interface HeaderProps {
   roomCode?: string;

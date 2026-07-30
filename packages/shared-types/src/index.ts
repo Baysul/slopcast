@@ -40,6 +40,8 @@ export interface AudioAppLevel {
 
 export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1';
 
+export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['av1', 'vp9', 'h264', 'vp8'];
+
 export const VIDEO_CODEC_LABEL_LK: Record<VideoCodec, string> = {
   vp8: 'VP8',
   h264: 'H.264',
@@ -68,7 +70,7 @@ export interface StreamSettings {
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   fps: 60,
   bitrateLimit: 20_000_000,
-  videoCodec: 'h264',
+  videoCodec: 'vp8',
   resolution: '1080p',
   apiEndpoint: 'http://localhost:3001',
 };

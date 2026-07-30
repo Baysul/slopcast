@@ -4,17 +4,11 @@ import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { SpectatorBanner } from '../components/SpectatorBanner';
-import { Badge } from '../components/ui/Badge';
-import { Button } from '../components/ui/Button';
+import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
 import { VideoPlayer } from '../components/VideoPlayer';
 
 type StatusVariant = 'live' | 'disconnected' | 'info';
-
-const STATUS_BADGE_CLASS: Record<StatusVariant, string> = {
-  live: 'bg-safelight/15 border-safelight/25',
-  disconnected: 'bg-destructive/15 border-destructive/25',
-  info: 'bg-white/5 text-gray-400 border-white/10',
-};
 
 export const RoomPage: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -29,10 +23,17 @@ export const RoomPage: React.FC = () => {
   const [participantCount, setParticipantCount] = useState(0);
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [copied, setCopied] = useState(false);
+  const [decoderStalled, setDecoderStalled] = useState(false);
+  const [stalledCodec, setStalledCodec] = useState<string | null>(null);
 
   const roomRef = useRef<Room | null>(null);
   const connectGenRef = useRef(0);
   const managedStreamRef = useRef<MediaStream | null>(null);
+  const stallCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stallStartRef = useRef<number>(0);
+
+  const DECODER_STALL_THRESHOLD_MS = 8000;
+  const DECODER_STALL_CHECK_MS = 2000;
 
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href).catch((err) => {
@@ -53,6 +54,14 @@ export const RoomPage: React.FC = () => {
     setErrorMsg(null);
     setMediaStream(null);
     setParticipantCount(0);
+    setDecoderStalled(false);
+    setStalledCodec(null);
+
+    if (stallCheckRef.current) {
+      clearInterval(stallCheckRef.current);
+      stallCheckRef.current = null;
+    }
+    stallStartRef.current = 0;
 
     if (managedStreamRef.current) {
       managedStreamRef.current.getTracks().forEach((t) => {
@@ -78,6 +87,25 @@ export const RoomPage: React.FC = () => {
       setMediaStream(new MediaStream(managedStreamRef.current.getTracks()));
       setConnectionStatus('live');
       setStatusText('Live');
+
+      try {
+        const sub = (
+          room as { engine?: { pcManager?: { subscriber?: { getRemoteDescription(): RTCSessionDescription | null } } } }
+        ).engine?.pcManager?.subscriber;
+        if (sub) {
+          const desc = sub.getRemoteDescription();
+          if (desc) {
+            const h264Lines = desc.sdp
+              .split('\n')
+              .filter((line) => line.startsWith('a=fmtp:') && line.includes('profile-level-id'));
+            for (const line of h264Lines) {
+              console.log(`[SDP:recv] H264 remote fmtp: ${line}`);
+            }
+          }
+        }
+      } catch {
+        /* diagnostic-only */
+      }
     });
 
     room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
@@ -171,6 +199,10 @@ export const RoomPage: React.FC = () => {
     initializeConnection();
     return () => {
       connectGenRef.current += 1;
+      if (stallCheckRef.current) {
+        clearInterval(stallCheckRef.current);
+        stallCheckRef.current = null;
+      }
       if (managedStreamRef.current) {
         managedStreamRef.current.getTracks().forEach((t) => {
           t.stop();
@@ -184,6 +216,91 @@ export const RoomPage: React.FC = () => {
       }
     };
   }, [initializeConnection]);
+
+  useEffect(() => {
+    if (connectionStatus !== 'live') {
+      if (stallCheckRef.current) {
+        clearInterval(stallCheckRef.current);
+        stallCheckRef.current = null;
+      }
+      stallStartRef.current = 0;
+      setDecoderStalled(false);
+      setStalledCodec(null);
+      return;
+    }
+
+    stallStartRef.current = 0;
+
+    stallCheckRef.current = setInterval(async () => {
+      const room = roomRef.current;
+      if (!room) return;
+
+      const videoPub = room.remoteParticipants.values().next().value?.videoTrackPublications?.values().next().value;
+      const videoTrack = videoPub?.track;
+      if (!videoTrack) return;
+
+      const receiver = (videoTrack as { receiver?: RTCRtpReceiver }).receiver;
+      if (!receiver) return;
+
+      const stats = await receiver.getStats();
+      let packetsReceived = 0;
+      let framesDecoded = 0;
+      let codecMime: string | null = null;
+      let decoderImpl: string | null = null;
+
+      for (const reportRaw of stats.values()) {
+        const report = reportRaw as {
+          type: string;
+          kind?: string;
+          packetsReceived?: number;
+          framesDecoded?: number;
+          mimeType?: string;
+          implementation?: string;
+        };
+        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          packetsReceived = report.packetsReceived ?? 0;
+          framesDecoded = report.framesDecoded ?? 0;
+        }
+        if (report.type === 'codec' && report.mimeType?.toUpperCase()?.includes('VIDEO')) {
+          codecMime = report.mimeType ?? null;
+          decoderImpl = report.implementation ?? null;
+        }
+      }
+
+      if (packetsReceived > 0 && framesDecoded === 0) {
+        if (stallStartRef.current === 0) {
+          stallStartRef.current = Date.now();
+          console.warn(
+            `[Room] Decoder stall suspected: packets=${packetsReceived} framesDecoded=${framesDecoded} codec=${codecMime} impl=${decoderImpl}`,
+          );
+        }
+
+        if (Date.now() - stallStartRef.current >= DECODER_STALL_THRESHOLD_MS) {
+          setDecoderStalled(true);
+          if (codecMime) {
+            setStalledCodec(codecMime.replace(/^video\//i, '').toUpperCase());
+          }
+          console.error(
+            `[Room] Decoder stall confirmed after ${DECODER_STALL_THRESHOLD_MS}ms: ` +
+              `packets=${packetsReceived} framesDecoded=${framesDecoded} codec=${codecMime} impl=${decoderImpl}`,
+          );
+        }
+      } else if (framesDecoded > 0) {
+        stallStartRef.current = 0;
+        if (decoderStalled) {
+          setDecoderStalled(false);
+          setStalledCodec(null);
+        }
+      }
+    }, DECODER_STALL_CHECK_MS);
+
+    return () => {
+      if (stallCheckRef.current) {
+        clearInterval(stallCheckRef.current);
+        stallCheckRef.current = null;
+      }
+    };
+  }, [connectionStatus, decoderStalled]);
 
   const handleResync = () => initializeConnection();
 
@@ -203,6 +320,8 @@ export const RoomPage: React.FC = () => {
           statusText={statusText}
           onResync={handleResync}
           fullBleed
+          decoderStalled={decoderStalled}
+          stalledCodec={stalledCodec}
         />
       </div>
 
@@ -221,7 +340,7 @@ export const RoomPage: React.FC = () => {
             <span role="status" aria-live="polite" className="min-w-0">
               <Badge
                 variant={variant}
-                className={`min-w-0 max-w-[60vw] sm:max-w-[320px] shrink transition-colors duration-300 ${STATUS_BADGE_CLASS[variant]}`}
+                className="min-w-0 max-w-[60vw] sm:max-w-[320px] shrink transition-colors duration-300"
               >
                 {connectionStatus === 'live' && (
                   <span className="relative w-1.5 h-1.5 shrink-0" aria-hidden="true">

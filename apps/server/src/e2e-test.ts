@@ -59,6 +59,7 @@ interface TestResult {
   spectatorVideoPlaying: boolean;
   spectatorVideoWidth: number;
   spectatorVideoHeight: number;
+  decoderStallDetected: boolean;
   durationMs: number;
   retries: number;
   errors: string[];
@@ -92,6 +93,8 @@ const FATAL_PATTERNS = [
   /WebSocket is closed before the connection is established/,
   /iceConnectionState.*failed/i,
   /GPU process.*crash/i,
+  /Decoder stall confirmed/i,
+  /framesDecoded=0.*codec=/i,
 ];
 
 // ── Utility Helpers ────────────────────────────────────────────────────
@@ -375,6 +378,7 @@ async function runTest(): Promise<TestResult> {
     spectatorVideoPlaying: false,
     spectatorVideoWidth: 0,
     spectatorVideoHeight: 0,
+    decoderStallDetected: false,
     durationMs: 0,
     retries: 0,
     errors: [],
@@ -714,6 +718,21 @@ async function runTest(): Promise<TestResult> {
     // Additional stability wait to let stream settle.
     await new Promise((r) => setTimeout(r, 3000));
 
+    // Check spectator-side decoder stall detection.
+    try {
+      const stallHint = await spectatorPage.evaluate(() => {
+        const stallEl = document.querySelector('[data-decoder-stalled]');
+        return stallEl ? stallEl.getAttribute('data-decoder-stalled') : null;
+      });
+      if (stallHint === 'true') {
+        log('SPECTATOR', 'Decoder stall UI is visible — codec mismatch suspected');
+        result.decoderStallDetected = true;
+        result.errors.push('Spectator decoder stall detected (possible codec profile mismatch)');
+      }
+    } catch (err) {
+      log('SPECTATOR', `Decoder stall check failed: ${err}`);
+    }
+
     // ── Step 4: Diagnostic Validation ────────────────────────────────────
     log('TEST', '=== Step 4: Diagnostic Validation ===');
 
@@ -852,6 +871,7 @@ function printSummary(result: TestResult): void {
   log('SUMMARY', `Video Received:  ${result.spectatorVideoReceived}`);
   log('SUMMARY', `Video Playing:   ${result.spectatorVideoPlaying}`);
   log('SUMMARY', `Video Size:      ${result.spectatorVideoWidth}x${result.spectatorVideoHeight}`);
+  log('SUMMARY', `Decoder Stall:   ${result.decoderStallDetected}`);
   log('SUMMARY', `GPU:             ${result.gpuReport ? 'Retrieved' : 'Missing'}`);
   log('SUMMARY', `Console Errors:  ${result.consoleErrors.length}`);
   log('SUMMARY', `Errors:          ${result.errors.length}`);
