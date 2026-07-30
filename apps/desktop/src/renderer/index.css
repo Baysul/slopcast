@@ -28,18 +28,6 @@
   --color-ring: oklch(0.6594 0.1096 57.8);
   --color-body-text: oklch(0.8717 0.0093 258.3);
   --font-display: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --animate-toast-in: toast-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes toast-in {
-  0% {
-    opacity: 0;
-    transform: translateX(1rem) scale(0.96);
-  }
-  100% {
-    opacity: 1;
-    transform: translateX(0) scale(1);
-  }
 }
 
 @layer base {

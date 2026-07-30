@@ -14,9 +14,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Toaster } from '@/components/ui/sonner';
 import { AudioLevelMeter } from './components/ui/AudioLevelMeter';
 import { Badge } from './components/ui/badge';
-import { primeAudioContext, ToastViewport, useToasts } from './components/ui/Toast';
+import { notify, primeAudioContext } from './lib/toast';
 import './index.css';
 
 declare global {
@@ -477,7 +478,6 @@ export const PresenterApp: React.FC = () => {
   const [captureContext, setCaptureContext] = useState<CaptureContext | null>(null);
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
   const [telemetry, setTelemetry] = useState<StreamTelemetry>(idleTelemetry());
-  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   // ── Stream Settings (user-configurable encoder parameters) ───────────
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
@@ -561,22 +561,18 @@ export const PresenterApp: React.FC = () => {
         ?.saveStreamSettings(current)
         .then((ok) => {
           if (!ok) {
-            pushToast({
-              title: 'Settings save failed',
-              description: 'The settings file could not be written to disk.',
-              variant: 'error',
-            });
+            notify('error', 'Settings save failed', 'The settings file could not be written to disk.');
             return;
           }
           lastSavedSettingsRef.current = current;
-          pushToast({ title: 'Stream settings saved', variant: 'success' });
+          notify('success', 'Stream settings saved');
         })
         .catch((err: unknown) => {
           console.error('[Presenter] saveStreamSettings IPC failed:', err);
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint, pushToast]);
+  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint]);
 
   const captureAudioTrack = useCallback(async (targetId: number): Promise<MediaStreamTrack | null> => {
     const started = await window.electronAPI?.startAudioCapture(targetId);
@@ -650,15 +646,11 @@ export const PresenterApp: React.FC = () => {
         setAudioAppExplicitlySet(true);
       } catch (err) {
         console.error('[Presenter] audio switch failed:', err);
-        pushToast({
-          title: 'Audio switch failed',
-          description: 'Could not switch to the selected audio source.',
-          variant: 'error',
-        });
+        notify('error', 'Audio switch failed', 'Could not switch to the selected audio source.');
       }
     };
     void switchAudio();
-  }, [selectedAudioAppId, isSharing, replaceAudioTrack, pushToast]);
+  }, [selectedAudioAppId, isSharing, replaceAudioTrack]);
 
   // Push live encoder parameter updates via the published track's sender.
   useEffect(() => {
@@ -1134,7 +1126,7 @@ export const PresenterApp: React.FC = () => {
     } catch (err) {
       console.error('Failed to create room:', err);
       const message = err instanceof Error ? err.message : 'Failed to create room';
-      pushToast({ title: 'Room creation failed', description: message, variant: 'error' });
+      notify('error', 'Room creation failed', message);
     }
   };
 
@@ -1222,11 +1214,7 @@ export const PresenterApp: React.FC = () => {
           targetAudioId = -1;
           console.log('[Presenter] No specific app resolved — using system audio (desktop audio fallback)');
         } else {
-          pushToast({
-            title: 'No audio detected',
-            description: 'Sharing video only. Select an audio app and restart to include audio.',
-            variant: 'info',
-          });
+          notify('info', 'No audio detected', 'Sharing video only. Select an audio app and restart to include audio.');
         }
       } else {
         setAutoDetectFailed(false);
@@ -1239,11 +1227,7 @@ export const PresenterApp: React.FC = () => {
           audioAppIdRef.current = targetAudioId;
         } catch (err) {
           console.error('Audio capture failed (continuing video-only):', err);
-          pushToast({
-            title: 'Audio unavailable',
-            description: 'Sharing video only — the selected audio source could not be captured.',
-            variant: 'info',
-          });
+          notify('info', 'Audio unavailable', 'Sharing video only — the selected audio source could not be captured.');
         }
       }
 
@@ -1333,7 +1317,7 @@ export const PresenterApp: React.FC = () => {
     } catch (err: unknown) {
       console.error('Failed to capture screen:', err);
       const message = err instanceof Error ? err.message : 'Unknown capture error';
-      pushToast({ title: 'Screenshare failed to start', description: message, variant: 'error' });
+      notify('error', 'Screenshare failed to start', message);
       if (window.electronAPI) {
         await window.electronAPI.stopAudioCapture();
       }
@@ -1391,7 +1375,7 @@ export const PresenterApp: React.FC = () => {
     if (ok) {
       flashCopied('link');
     } else {
-      pushToast({ title: 'Copy failed', description: 'Room link could not be copied.', variant: 'error' });
+      notify('error', 'Copy failed', 'Room link could not be copied.');
     }
   };
 
@@ -1401,7 +1385,7 @@ export const PresenterApp: React.FC = () => {
     if (ok) {
       flashCopied('code');
     } else {
-      pushToast({ title: 'Copy failed', description: 'Room code could not be copied.', variant: 'error' });
+      notify('error', 'Copy failed', 'Room code could not be copied.');
     }
   };
 
@@ -1866,7 +1850,7 @@ export const PresenterApp: React.FC = () => {
         </Card>
       </main>
 
-      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+      <Toaster />
     </div>
   );
 };

@@ -1,8 +1,8 @@
 import type { AudioApp, ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS, RESOLUTION_DIMENSIONS, VIDEO_CODEC_LABEL_LK } from '@slopcast/shared-types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { primeAudioContext, useToasts } from '../components/ui/Toast';
 import { AUDIO_APPS_POLL_MS, SETTINGS_SAVE_DEBOUNCE_MS, streamSettingsEqual } from '../constants';
+import { notify, primeAudioContext } from '../lib/toast';
 import type { StreamTelemetry } from '../telemetry/types';
 import { idleTelemetry } from '../telemetry/types';
 import type { CaptureContext, DesktopSource } from '../types';
@@ -33,7 +33,6 @@ export function usePresenter() {
   const [captureContext, setCaptureContext] = useState<CaptureContext | null>(null);
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
   const [telemetry, setTelemetry] = useState<StreamTelemetry>(idleTelemetry());
-  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
 
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
   const [streamFps, setStreamFps] = useState(DEFAULT_STREAM_SETTINGS.fps);
@@ -100,22 +99,18 @@ export function usePresenter() {
         ?.saveStreamSettings(current)
         .then((ok) => {
           if (!ok) {
-            pushToast({
-              title: 'Settings save failed',
-              description: 'The settings file could not be written to disk.',
-              variant: 'error',
-            });
+            notify('error', 'Settings save failed', 'The settings file could not be written to disk.');
             return;
           }
           lastSavedSettingsRef.current = current;
-          pushToast({ title: 'Stream settings saved', variant: 'success' });
+          notify('success', 'Stream settings saved');
         })
         .catch((err: unknown) => {
           console.error('[Presenter] saveStreamSettings IPC failed:', err);
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint, pushToast]);
+  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint]);
 
   useEffect(() => {
     if (!isSharing) return;
@@ -139,15 +134,11 @@ export function usePresenter() {
         setAudioAppExplicitlySet(true);
       } catch (err) {
         console.error('[Presenter] audio switch failed:', err);
-        pushToast({
-          title: 'Audio switch failed',
-          description: 'Could not switch to the selected audio source.',
-          variant: 'error',
-        });
+        notify('error', 'Audio switch failed', 'Could not switch to the selected audio source.');
       }
     };
     void switchAudio();
-  }, [selectedAudioAppId, isSharing, pushToast]);
+  }, [selectedAudioAppId, isSharing]);
 
   // Preview video binding — uses a canvas placeholder since video is
   // published natively by the Rust module, not by the renderer.
@@ -374,7 +365,7 @@ export function usePresenter() {
     } catch (err) {
       console.error('Failed to create room:', err);
       const message = err instanceof Error ? err.message : 'Failed to create room';
-      pushToast({ title: 'Room creation failed', description: message, variant: 'error' });
+      notify('error', 'Room creation failed', message);
     }
   };
 
@@ -448,17 +439,9 @@ export function usePresenter() {
       if (isMonitor || isKdeOrUnknown) {
         setAutoDetectFailed(false);
         targetAudioId = -1;
-        pushToast({
-          title: 'System audio',
-          description: 'No app matched — capturing all desktop audio.',
-          variant: 'info',
-        });
+        notify('info', 'System audio', 'No app matched — capturing all desktop audio.');
       } else {
-        pushToast({
-          title: 'No audio detected',
-          description: 'Sharing video only. Select an audio app and restart to include audio.',
-          variant: 'info',
-        });
+        notify('info', 'No audio detected', 'Sharing video only. Select an audio app and restart to include audio.');
       }
     } else {
       setAutoDetectFailed(false);
@@ -473,11 +456,7 @@ export function usePresenter() {
       audioAppIdRef.current = targetAudioId;
     } catch (err) {
       console.error('Audio capture failed (continuing video-only):', err);
-      pushToast({
-        title: 'Audio unavailable',
-        description: 'Sharing video only — the selected audio source could not be captured.',
-        variant: 'info',
-      });
+      notify('info', 'Audio unavailable', 'Sharing video only — the selected audio source could not be captured.');
     }
   };
 
@@ -515,7 +494,7 @@ export function usePresenter() {
     } catch (err: unknown) {
       console.error('Failed to capture screen:', err);
       const message = err instanceof Error ? err.message : 'Unknown capture error';
-      pushToast({ title: 'Screenshare failed to start', description: message, variant: 'error' });
+      notify('error', 'Screenshare failed to start', message);
       if (window.electronAPI) {
         await window.electronAPI.stopAudioCapture();
       }
@@ -564,7 +543,7 @@ export function usePresenter() {
     if (ok) {
       flashCopied('link');
     } else {
-      pushToast({ title: 'Copy failed', description: 'Room link could not be copied.', variant: 'error' });
+      notify('error', 'Copy failed', 'Room link could not be copied.');
     }
   };
 
@@ -574,7 +553,7 @@ export function usePresenter() {
     if (ok) {
       flashCopied('code');
     } else {
-      pushToast({ title: 'Copy failed', description: 'Room code could not be copied.', variant: 'error' });
+      notify('error', 'Copy failed', 'Room code could not be copied.');
     }
   };
 
@@ -614,7 +593,6 @@ export function usePresenter() {
     captureContext,
     autoDetectFailed,
     telemetry,
-    toasts,
     streamSettingsOpen,
     streamFps,
     bitrateLimit,
@@ -642,7 +620,5 @@ export function usePresenter() {
     canStartShare,
     disabledReason,
     shareButtonClass,
-    pushToast,
-    dismissToast,
   };
 }
