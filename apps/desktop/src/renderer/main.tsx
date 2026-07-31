@@ -26,6 +26,7 @@ import { AudioLevelMeter } from './components/audio/AudioLevelMeter';
 import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
 import { Badge } from './components/ui/badge';
 import { notify, primeAudioContext } from './lib/toast';
+import { type AudioAppGroup, groupAudioApps } from './utils/audio-grouping';
 import './index.css';
 
 declare global {
@@ -81,34 +82,6 @@ async function copyText(text: string): Promise<boolean> {
     console.error('copyText failed:', err);
     return false;
   }
-}
-
-interface AudioAppGroup {
-  representative: AudioApp;
-  members: AudioApp[];
-}
-
-// All streams belonging to the same PipeWire client (or same app name when no
-// client id is available) are collapsed into a single picker row. This gives
-// predictable per-application audio capture on every platform — Windows and
-// macOS also target apps, not individual streams. MPRIS now-playing titles
-// (where available) or the first member's PipeWire window title is shown as
-// the row's subtitle instead of a process ID.
-function groupAudioApps(apps: AudioApp[]): AudioAppGroup[] {
-  const groups: AudioAppGroup[] = [];
-  const identityMap = new Map<string, AudioAppGroup>();
-  for (const app of apps) {
-    const key = app.clientId != null && app.clientId > 0 ? `c:${app.clientId}` : `n:${app.name.toLowerCase()}`;
-    const existing = identityMap.get(key);
-    if (existing) {
-      existing.members.push(app);
-      continue;
-    }
-    const group: AudioAppGroup = { representative: app, members: [app] };
-    groups.push(group);
-    identityMap.set(key, group);
-  }
-  return groups;
 }
 
 interface DesktopSource {
