@@ -1,4 +1,11 @@
-import type { AudioApp, AudioAppLevel, ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
+import type {
+  AudioApp,
+  AudioAppLevel,
+  ResolutionPreset,
+  StreamSettings,
+  VideoCodec,
+  VideoSourceType,
+} from '@slopcast/shared-types';
 import {
   codecLabel,
   DEFAULT_STREAM_SETTINGS,
@@ -8,14 +15,15 @@ import {
   VIDEO_CODEC_PRIORITY,
 } from '@slopcast/shared-types';
 import { Room, RoomEvent, Track } from 'livekit-client';
-import { Check, ChevronDown, ScreenShare } from 'lucide-react';
+import { Check, ChevronDown, ScreenShare, TriangleAlert, X } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Toaster } from '@/components/ui/sonner';
-import { AudioLevelMeter } from './components/ui/AudioLevelMeter';
+import { AudioLevelMeter } from './components/audio/AudioLevelMeter';
+import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
 import { Badge } from './components/ui/badge';
 import { notify, primeAudioContext } from './lib/toast';
 import './index.css';
@@ -38,6 +46,7 @@ declare global {
       getCaptureContext: () => Promise<CaptureContext | null>;
       getStreamSettings: () => Promise<StreamSettings>;
       saveStreamSettings: (settings: StreamSettings) => Promise<boolean>;
+      selectVideoFile: () => Promise<{ filePath: string; fileName: string } | null>;
     };
   }
 }
@@ -138,7 +147,9 @@ const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
   a.bitrateLimit === b.bitrateLimit &&
   a.videoCodec === b.videoCodec &&
   a.resolution === b.resolution &&
-  a.apiEndpoint === b.apiEndpoint;
+  a.apiEndpoint === b.apiEndpoint &&
+  a.sourceType === b.sourceType &&
+  a.videoFilePath === b.videoFilePath;
 
 interface CodecInfo {
   codec: VideoCodec;
@@ -352,10 +363,10 @@ const TelemetryCell: React.FC<{
   sub?: React.ReactNode;
   degrade?: boolean;
 }> = ({ label, value, sub, degrade }) => (
-  <div className="flex flex-col gap-0.5 min-w-0 shrink-0">
+  <div className="flex flex-col gap-1 min-w-0 shrink-0">
     <span
-      className={`text-[9px] font-semibold uppercase tracking-[0.1em] leading-none ${
-        degrade ? 'text-destructive/75' : 'text-gray-500'
+      className={`text-xs font-semibold uppercase tracking-wider leading-none ${
+        degrade ? 'text-destructive/75' : 'text-muted-foreground'
       }`}
     >
       {label}
@@ -363,27 +374,28 @@ const TelemetryCell: React.FC<{
     <span className="flex items-baseline gap-1.5 leading-none">
       <span
         className={`text-sm font-mono font-semibold tabular-nums leading-none ${
-          degrade ? 'text-destructive' : 'text-gray-100'
+          degrade ? 'text-destructive' : 'text-foreground'
         }`}
       >
+        {degrade && <TriangleAlert className="inline size-3 mr-1 -mt-0.5" aria-hidden="true" />}
         {value}
       </span>
-      {sub != null && <span className="text-[10px] font-mono tabular-nums leading-none text-gray-600">{sub}</span>}
+      {sub != null && <span className="text-xs font-mono tabular-nums leading-none text-caption-text">{sub}</span>}
     </span>
   </div>
 );
 
 const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
   if (!t.hasAudio) {
-    return <span className="text-sm font-mono font-semibold leading-none text-gray-600">video only</span>;
+    return <span className="text-sm font-mono font-semibold leading-none text-caption-text">video only</span>;
   }
   return (
     <span className="flex items-baseline gap-1.5 leading-none">
-      <span className="text-sm font-mono font-semibold tabular-nums leading-none text-gray-100">
-        {t.audioCodec ?? '—'}
+      <span className="text-sm font-mono font-semibold tabular-nums leading-none text-foreground">
+        {t.audioCodec ?? '\u2014'}
       </span>
       {t.audioBitrate != null && (
-        <span className="text-[10px] font-mono tabular-nums leading-none text-gray-500">
+        <span className="text-xs font-mono tabular-nums leading-none text-muted-foreground">
           {fmtBitrate(t.audioBitrate)}
         </span>
       )}
@@ -410,8 +422,8 @@ const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetr
         <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
           {/* On-Air */}
           <div className="flex items-center gap-1.5 shrink-0">
-            <span className="w-2 h-2 rounded-full bg-safelight animate-pulse" />
-            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-safelight">On Air</span>
+            <span className="w-2 h-2 rounded-full bg-safelight motion-safe:animate-pulse" />
+            <span className="text-xs font-semibold uppercase tracking-wider text-safelight">On Air</span>
           </div>
 
           <TelemetryCell
@@ -425,8 +437,8 @@ const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetr
           <TelemetryCell label="Loss" value={fmtLoss(t.packetLossPct)} degrade={lossDegrade} />
 
           {/* Audio */}
-          <div className="flex flex-col gap-0.5 shrink-0 min-w-0">
-            <span className="text-[9px] font-semibold uppercase tracking-[0.1em] leading-none text-gray-500">
+          <div className="flex flex-col gap-1 shrink-0 min-w-0">
+            <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
               Audio
             </span>
             <AudioTelemetryValue telemetry={t} />
@@ -438,15 +450,15 @@ const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetr
           <div className="flex items-end gap-3 shrink-0">
             <div className="flex flex-col items-end gap-1">
               <Sparkline data={t.bitrateHistory} />
-              <span className="text-[9px] uppercase tracking-[0.1em] text-gray-600 leading-none">
+              <span className="text-xs uppercase tracking-wider text-caption-text leading-none">
                 {t.bitrateHistory.length > 0 ? `bitrate · last ${t.bitrateHistory.length}s` : 'awaiting uplink'}
               </span>
             </div>
-            <div className="flex flex-col gap-0.5 items-end">
-              <span className="text-[9px] font-semibold uppercase tracking-[0.1em] leading-none text-gray-500">
+            <div className="flex flex-col gap-1 items-end">
+              <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
                 Elapsed
               </span>
-              <span className="text-xs font-mono font-semibold tabular-nums leading-none text-gray-300">
+              <span className="text-xs font-mono font-semibold tabular-nums leading-none text-foreground">
                 {fmtDuration(t.elapsedMs)}
               </span>
             </div>
@@ -472,12 +484,24 @@ export const PresenterApp: React.FC = () => {
   const [desktopSources, setDesktopSources] = useState<DesktopSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>('');
   const [isSharing, setIsSharing] = useState<boolean>(false);
+  const [isCreatingRoom, setIsCreatingRoom] = useState(false);
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [copied, setCopied] = useState<'link' | 'code' | null>(null);
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
   const [spectatorCount, setSpectatorCount] = useState(0);
   const [captureContext, setCaptureContext] = useState<CaptureContext | null>(null);
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
   const [telemetry, setTelemetry] = useState<StreamTelemetry>(idleTelemetry());
+
+  // ── Video file streaming ─────────────────────────────────────────────
+  const [selectedSourceType, setSelectedSourceType] = useState<VideoSourceType>('screen');
+  const [selectedVideoFilePath, setSelectedVideoFilePath] = useState<string | null>(null);
+  const [selectedVideoFileName, setSelectedVideoFileName] = useState<string | null>(null);
+  const [videoFileLoop, setVideoFileLoop] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoIsPlaying, setVideoIsPlaying] = useState(false);
+  const [videoFileError, setVideoFileError] = useState<string | null>(null);
 
   // ── Stream Settings (user-configurable encoder parameters) ───────────
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
@@ -517,6 +541,10 @@ export const PresenterApp: React.FC = () => {
   const settingsHydratedRef = useRef(false);
   const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
 
+  const videoFileRef = useRef<HTMLVideoElement | null>(null);
+  const videoFileAudioCtxRef = useRef<AudioContext | null>(null);
+  const videoFileTimeUpdateRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   useEffect(() => {
     isSharingRef.current = isSharing;
   }, [isSharing]);
@@ -552,6 +580,8 @@ export const PresenterApp: React.FC = () => {
       videoCodec,
       resolution,
       apiEndpoint,
+      sourceType: selectedSourceType,
+      videoFilePath: selectedVideoFilePath ?? undefined,
     };
     const last = lastSavedSettingsRef.current;
     if (last && streamSettingsEqual(last, current)) return;
@@ -572,7 +602,7 @@ export const PresenterApp: React.FC = () => {
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint]);
+  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint, selectedSourceType, selectedVideoFilePath]);
 
   const captureAudioTrack = useCallback(async (targetId: number): Promise<MediaStreamTrack | null> => {
     const started = await window.electronAPI?.startAudioCapture(targetId);
@@ -751,6 +781,12 @@ export const PresenterApp: React.FC = () => {
         setVideoCodec(savedOk ? saved.videoCodec : bestCodec);
         setResolution(saved.resolution);
         setApiEndpoint(saved.apiEndpoint);
+        if (saved.sourceType) setSelectedSourceType(saved.sourceType);
+        if (saved.videoFilePath) {
+          setSelectedVideoFilePath(saved.videoFilePath);
+          const name = saved.videoFilePath.split(/[\\/]/).pop() ?? null;
+          setSelectedVideoFileName(name);
+        }
         settingsHydratedRef.current = true;
       }
       loadAudioApps();
@@ -1054,6 +1090,8 @@ export const PresenterApp: React.FC = () => {
   };
 
   const handleCreateRoom = async () => {
+    if (isCreatingRoom) return;
+    setIsCreatingRoom(true);
     primeAudioContext();
 
     const oldRoom = liveKitRoomRef.current;
@@ -1115,6 +1153,10 @@ export const PresenterApp: React.FC = () => {
       });
       lkRoom.on(RoomEvent.Disconnected, () => {
         if (liveKitRoomRef.current === lkRoom) {
+          notify('error', 'Room disconnected', 'The connection to the room was lost. Create a new room to continue.');
+          if (isSharingRef.current) {
+            handleStopShare().catch((err) => console.warn('Stop share after disconnect failed:', err));
+          }
           setRoomCode('');
           setShareUrl('');
           setSpectatorCount(0);
@@ -1122,15 +1164,149 @@ export const PresenterApp: React.FC = () => {
         }
       });
 
-      await lkRoom.connect(resolvedLivekitUrl, token);
+      await lkRoom.connect(resolvedLivekitUrl, token, {
+        rtcConfig: { iceServers: [{ urls: ['stun:localhost:7880'] }] },
+      });
     } catch (err) {
       console.error('Failed to create room:', err);
       const message = err instanceof Error ? err.message : 'Failed to create room';
       notify('error', 'Room creation failed', message);
+    } finally {
+      setIsCreatingRoom(false);
     }
   };
 
+  // video-file playback, which delivers its audio directly from
+  // MediaStream.captureStream() instead of PipeWire.
+  const preCheckVideoFile = useCallback((filePath: string) => {
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    if (!ext) return;
+    const mimeMap: Record<string, string[]> = {
+      mp4: ['video/mp4; codecs="avc1.42E01E,mp4a.40.2"'],
+      webm: ['video/webm; codecs="vp8,vorbis"', 'video/webm; codecs="vp9,opus"'],
+      ogg: ['video/ogg; codecs="theora,vorbis"'],
+      ogv: ['video/ogg; codecs="theora,vorbis"'],
+    };
+    const types = mimeMap[ext];
+    if (!types) {
+      setVideoFileError(`Unsupported file type (.${ext}). Try converting to MP4 with H.264 video and AAC audio.`);
+      return;
+    }
+    const video = document.createElement('video');
+    const any = types.some((t) => video.canPlayType(t) === 'probably');
+    if (any) {
+      setVideoFileError(null);
+      return;
+    }
+    const maybe = types.some((t) => video.canPlayType(t) === 'maybe');
+    if (maybe) {
+      setVideoFileError(null);
+      return;
+    }
+    setVideoFileError(
+      `This .${ext} file may not play in Chromium. Convert to MP4 with H.264 video and AAC audio for best compatibility.`,
+    );
+  }, []);
+
+  const captureVideoTrackFromFile = async (
+    filePath: string,
+  ): Promise<{ videoTrack: MediaStreamTrack; audioTrack: MediaStreamTrack | null }> => {
+    const video = document.createElement('video');
+    video.preload = 'auto';
+    video.loop = videoFileLoop;
+    video.muted = false;
+
+    let audioCtx: AudioContext | null = null;
+    let sourceNode: MediaElementAudioSourceNode | null = null;
+
+    const setupLocalAudio = () => {
+      if (audioCtx) return;
+      audioCtx = new AudioContext();
+      void audioCtx.resume();
+      sourceNode = audioCtx.createMediaElementSource(video);
+      sourceNode.connect(audioCtx.destination);
+      videoFileAudioCtxRef.current = audioCtx;
+    };
+
+    video.src = `local-media://${filePath}`;
+
+    await new Promise<void>((resolve, reject) => {
+      video.onloadedmetadata = () => resolve();
+      video.onerror = () => {
+        const err = video.error;
+        const ext = filePath.split('.').pop()?.toLowerCase() ?? 'unknown';
+        const codeMessages: Record<number, string> = {
+          1: 'Video file could not be loaded. The format or codec may not be supported.',
+          2: 'Video file could not be loaded. The server returned an error.',
+          3: 'Video playback was aborted.',
+          4: `Video file is not supported. Try converting to MP4 with H.264 video and AAC audio.`,
+        };
+        const codeDetail = err ? (codeMessages[err.code] ?? `Video error (code ${err.code})`) : '';
+        const mediaErrDetail = err?.message ? ` MediaError: ${err.message}` : '';
+        const detail = `${codeDetail}${mediaErrDetail} (file: ${filePath.split('/').pop() ?? filePath}, type: .${ext})`;
+        reject(new Error(detail));
+      };
+    });
+
+    // Wire up the AudioContext graph BEFORE the priming play to avoid an audible glitch
+    setupLocalAudio();
+
+    // Start playback silently to prime the decoder, then pause
+    await video.play();
+    video.pause();
+    video.currentTime = 0;
+
+    setVideoDuration(video.duration);
+    videoFileRef.current = video;
+
+    if (videoFileTimeUpdateRef.current) clearInterval(videoFileTimeUpdateRef.current);
+    videoFileTimeUpdateRef.current = setInterval(() => {
+      if (videoFileRef.current) {
+        setVideoCurrentTime(videoFileRef.current.currentTime);
+        setVideoIsPlaying(!videoFileRef.current.paused);
+      }
+    }, 250);
+
+    let alreadyStopped = false;
+
+    video.addEventListener('ended', () => {
+      setVideoCurrentTime(video.duration);
+      setVideoIsPlaying(false);
+      if (!video.loop) {
+        if (!alreadyStopped) {
+          alreadyStopped = true;
+          handleStopShare();
+          notify('info', 'Stream ended', 'The video file has finished playing.');
+        }
+      }
+    });
+
+    video.addEventListener('error', () => {
+      const errMsg = video.error?.message ?? 'Unknown playback error';
+      setVideoFileError(errMsg);
+      if (!alreadyStopped) {
+        alreadyStopped = true;
+        handleStopShare();
+        notify('error', 'Playback error', errMsg);
+      }
+    });
+
+    const stream = video.captureStream();
+    const videoTrack = stream.getVideoTracks()[0];
+    const audioTrack = stream.getAudioTracks()[0] ?? null;
+
+    if (!videoTrack) {
+      throw new Error('captureStream() produced no video track');
+    }
+
+    videoTrack.contentHint = 'motion';
+
+    return { videoTrack, audioTrack };
+  };
+
   // Wayland uses xdg-desktop-portal; X11 uses the in-app source picker.
+  // Video-file case is handled directly in handleStartShare — it returns
+  // both video+audio tracks and creates side effects (AudioContext, interval).
   const captureVideoTrack = async (): Promise<MediaStreamTrack> => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
     if (isWayland) {
@@ -1186,6 +1362,61 @@ export const PresenterApp: React.FC = () => {
   const handleStartShare = async () => {
     primeAudioContext();
     try {
+      // ── Video file streaming — captureStream() provides both tracks ──
+      if (selectedSourceType === 'video-file') {
+        if (!selectedVideoFilePath) {
+          notify('error', 'No file selected', 'Please select a video file first.');
+          return;
+        }
+
+        const { videoTrack, audioTrack } = await captureVideoTrackFromFile(selectedVideoFilePath);
+
+        const tracks = audioTrack ? [videoTrack, audioTrack] : [videoTrack];
+        const stream = new MediaStream(tracks);
+        localStreamRef.current = stream;
+        setPreviewStream(stream);
+
+        videoTrack.onended = () => handleStopShare();
+
+        const room = liveKitRoomRef.current;
+        if (!room) {
+          throw new Error('Not connected to a room');
+        }
+
+        for (const pub of room.localParticipant.trackPublications.values()) {
+          const t = pub.track;
+          if (t) await room.localParticipant.unpublishTrack(t);
+        }
+
+        statsPrevRef.current = { vBytes: 0, vFrames: 0, vTs: 0, vInit: false, aBytes: 0, aTs: 0, aInit: false };
+
+        await room.localParticipant.publishTrack(videoTrack, {
+          source: Track.Source.ScreenShare,
+          screenShareEncoding: undefined,
+          simulcast: false,
+        });
+
+        if (audioTrack) {
+          await room.localParticipant.publishTrack(audioTrack, {
+            source: Track.Source.ScreenShareAudio,
+          });
+        }
+
+        setIsSharing(true);
+        isSharingRef.current = true;
+        setTelemetry({ ...idleTelemetry(), live: true });
+        startTelemetryPolling();
+
+        const fileVideo = videoFileRef.current;
+        if (fileVideo) {
+          fileVideo.currentTime = 0;
+          await fileVideo.play();
+          setVideoIsPlaying(true);
+        }
+        return;
+      }
+
+      // ── Screen capture — getDisplayMedia / getUserMedia ──────────────
       const videoTrack = await captureVideoTrack();
 
       let targetAudioId: number | null = selectedAudioAppId;
@@ -1321,10 +1552,44 @@ export const PresenterApp: React.FC = () => {
       if (window.electronAPI) {
         await window.electronAPI.stopAudioCapture();
       }
+      // Clean up video-file resources if any were created before the failure
+      if (videoFileAudioCtxRef.current) {
+        void videoFileAudioCtxRef.current.close();
+        videoFileAudioCtxRef.current = null;
+      }
+      if (videoFileTimeUpdateRef.current) {
+        clearInterval(videoFileTimeUpdateRef.current);
+        videoFileTimeUpdateRef.current = null;
+      }
+      if (videoFileRef.current) {
+        videoFileRef.current.pause();
+        videoFileRef.current.removeAttribute('src');
+        videoFileRef.current.load();
+        videoFileRef.current = null;
+      }
     }
   };
 
   const handleStopShare = async () => {
+    // ── Clean up video file playback ─────────────────────────────────────
+    if (videoFileTimeUpdateRef.current) {
+      clearInterval(videoFileTimeUpdateRef.current);
+      videoFileTimeUpdateRef.current = null;
+    }
+    if (videoFileRef.current) {
+      videoFileRef.current.pause();
+      videoFileRef.current.removeAttribute('src');
+      videoFileRef.current.load();
+      videoFileRef.current = null;
+    }
+    if (videoFileAudioCtxRef.current) {
+      void videoFileAudioCtxRef.current.close();
+      videoFileAudioCtxRef.current = null;
+    }
+    setVideoIsPlaying(false);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+
     const stream = localStreamRef.current;
     if (stream) {
       for (const track of stream.getTracks()) {
@@ -1361,6 +1626,7 @@ export const PresenterApp: React.FC = () => {
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
     setAutoDetectFailed(false);
+    setVideoFileError(null);
   };
 
   const flashCopied = (kind: 'link' | 'code') => {
@@ -1389,10 +1655,15 @@ export const PresenterApp: React.FC = () => {
     }
   };
 
-  const canStartShare = !!roomCode && !isSharing && (isWayland || !!selectedSourceId);
+  const canStartShare =
+    !!roomCode &&
+    !isSharing &&
+    (isWayland || !!selectedSourceId || (selectedSourceType === 'video-file' && !!selectedVideoFilePath));
   const startDisabledReason = (): string | null => {
     if (isSharing || canStartShare) return null;
     if (!roomCode) return 'Create a live room to start sharing.';
+    if (selectedSourceType === 'video-file' && !selectedVideoFilePath)
+      return 'Select a video file above to start streaming.';
     return 'Select a window above to start sharing.';
   };
   const disabledReason = startDisabledReason();
@@ -1400,39 +1671,30 @@ export const PresenterApp: React.FC = () => {
   return (
     <div className="min-h-screen flex flex-col">
       {/* ===== Sticky Header ===== */}
-      <header className="sticky top-0 z-10 border-b border-gray-800 bg-background/80 backdrop-blur-md">
+      <header className="sticky top-0 z-10 border-b border-border bg-background/80 backdrop-blur-md">
         <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
-            <span className="p-2 bg-secondary rounded-xl text-body-text shrink-0">
+            <span className="p-2 bg-safelight/10 rounded-xl text-safelight shrink-0">
               <ScreenShare className="w-5 h-5" aria-hidden="true" />
             </span>
-            <h1 className="text-lg font-bold text-gray-100 shrink-0 tracking-tight">Slopcast</h1>
-            {isSharing && (
-              <span role="status" aria-live="polite">
-                <Badge variant="live">
-                  <span className="relative w-1.5 h-1.5 shrink-0" aria-hidden="true">
-                    <span className="absolute inset-0 rounded-full bg-safelight animate-ping opacity-75" />
-                    <span className="absolute inset-0 rounded-full bg-safelight" />
-                  </span>
-                  LIVE
-                </Badge>
-              </span>
-            )}
+            <h1 className="text-xl font-bold text-foreground shrink-0 leading-tight tracking-tight">Slopcast</h1>
           </div>
 
           <div className="shrink-0">
             {!roomCode ? (
-              <Button onClick={handleCreateRoom}>Create Live Room</Button>
+              <Button onClick={handleCreateRoom} disabled={isCreatingRoom}>
+                {isCreatingRoom ? 'Creating Room...' : 'Create Live Room'}
+              </Button>
             ) : (
               <div className="flex items-center gap-2">
                 {spectatorCount > 0 && (
-                  <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium text-muted-foreground bg-gray-900/80 border border-accent shrink-0 tabular-nums">
+                  <Badge variant="info" className="hidden sm:inline-flex tabular-nums">
                     {spectatorCount} spectator{spectatorCount === 1 ? '' : 's'}
-                  </span>
+                  </Badge>
                 )}
                 <Button variant="secondary" size="sm" onClick={handleCopyCode} className="gap-2">
-                  <span className="text-gray-400 font-mono">{roomCode}</span>
-                  <span className="text-gray-200 bg-accent/50 px-2 py-0.5 rounded">
+                  <span className="text-muted-foreground font-mono">{roomCode}</span>
+                  <span className="text-foreground bg-accent/50 px-2 py-1 rounded-md">
                     {copied === 'code' ? 'Copied' : 'Copy'}
                   </span>
                 </Button>
@@ -1446,6 +1708,11 @@ export const PresenterApp: React.FC = () => {
       </header>
 
       {/* ===== Main Content ===== */}
+      {/* First-launch onboarding — dismissible, non-blocking */}
+      <div className="max-w-5xl mx-auto w-full px-6 pt-6">
+        <WelcomeBanner />
+      </div>
+
       <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
         {/* Screenshare Preview */}
         <Card className="overflow-hidden shadow-2xl">
@@ -1460,11 +1727,39 @@ export const PresenterApp: React.FC = () => {
                 className={`w-full h-full object-contain ${isSharing ? 'block' : 'hidden'}`}
               />
               {!isSharing && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center px-6">
-                  <p className="text-sm text-gray-400 font-medium">No active screenshare</p>
-                  <p className="text-xs text-gray-600 max-w-sm">
-                    Select a window below and start sharing. Audio is auto-detected.
-                  </p>
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-6">
+                  {!roomCode ? (
+                    <>
+                      <span className="p-3 rounded-full bg-safelight/10 mb-1 motion-safe:animate-pulse">
+                        <ScreenShare className="size-7 text-safelight/60" aria-hidden="true" />
+                      </span>
+                      <p className="text-sm text-foreground font-semibold">Ready to stream</p>
+                      <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
+                        Create a live room to get a shareable link, then select your source and go live.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <span className="p-3 rounded-full bg-secondary mb-1">
+                        <ScreenShare className="size-7 text-muted-foreground" aria-hidden="true" />
+                      </span>
+                      <p className="text-sm text-foreground font-semibold">
+                        {canStartShare ? 'Ready to go live' : 'Select a source to begin'}
+                      </p>
+                      <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
+                        {canStartShare
+                          ? 'Click Start Screenshare below to begin broadcasting.'
+                          : 'Choose a window, screen, or video file in the Screenshare Source panel.'}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleCopyLink}
+                        className="mt-1 inline-flex items-center gap-1.5 text-xs font-medium text-safelight hover:text-safelight-hover transition-colors focus:outline-none focus-visible:underline"
+                      >
+                        {copied === 'link' ? 'Link copied' : `Copy link — ${roomCode}`}
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
               {isSharing && <StreamTelemetryBar telemetry={telemetry} />}
@@ -1478,10 +1773,10 @@ export const PresenterApp: React.FC = () => {
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-2">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
                   Window Audio Capture
                   {autoDetectedApp && (
-                    <span className="text-[10px] font-normal text-safelight bg-safelight-glow px-2 py-0.5 rounded-full border border-safelight/30">
+                    <span className="text-xs font-normal text-safelight bg-safelight-glow px-2 py-1 rounded-full border border-safelight/30">
                       Auto ✓
                     </span>
                   )}
@@ -1490,16 +1785,16 @@ export const PresenterApp: React.FC = () => {
                   variant="ghost"
                   size="sm"
                   onClick={loadAudioApps}
-                  className="text-xs text-gray-500 hover:text-gray-300 h-auto px-2"
+                  className="text-xs text-muted-foreground hover:text-foreground h-auto px-2"
                 >
                   Refresh
                 </Button>
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <p className="text-xs text-gray-500 leading-relaxed">
+              <p className="text-sm text-muted-foreground leading-relaxed">
                 Auto-detected from your window selection. Click an app below to override — only that app's audio is
-                streamed. Select <strong className="text-gray-300">Desktop Audio</strong> to capture all system sound.
+                streamed. Select <strong className="text-foreground">Desktop Audio</strong> to capture all system sound.
               </p>
 
               <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
@@ -1531,29 +1826,27 @@ export const PresenterApp: React.FC = () => {
                     return null;
                   };
 
-                  const pickerRowClass = (isSelected: boolean, isDesktopAudio: boolean): string => {
-                    if (isSelected && isDesktopAudio) {
-                      return 'bg-amber-950/40 border-amber-500/40 text-amber-200';
-                    }
+                  const pickerRowClass = (isSelected: boolean): string => {
                     if (isSelected) {
-                      return 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200';
+                      return 'bg-safelight-glow border-safelight/30 text-safelight';
                     }
-                    return 'bg-background/60 border-gray-800/60 text-gray-400 hover:border-gray-700 hover:text-gray-300';
+                    return 'bg-background/60 border-border hover:border-input hover:text-foreground';
                   };
 
-                  const renderBtn = (group: AudioAppGroup, isDesktopAudio: boolean) => {
+                  const renderBtn = (group: AudioAppGroup) => {
                     const { representative, members } = group;
+                    const isDesktopAudio = representative.id === -1;
                     const isSelected = members.some((m) => m.id === selectedAudioAppId);
                     const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
                     const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
-                    const btnClass = `flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
+                    const btnClass = `flex items-center justify-between p-3 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
                       isSelected,
-                      isDesktopAudio,
                     )}`;
                     return (
                       <button
                         key={representative.id}
                         type="button"
+                        aria-pressed={isSelected}
                         onClick={() => {
                           if (isSelected) {
                             setAudioAppExplicitlySet(false);
@@ -1577,9 +1870,9 @@ export const PresenterApp: React.FC = () => {
                             if (!label) return null;
                             return (
                               <div className="flex items-center gap-2 mt-0.5">
-                                <span className="text-[10px] opacity-60">{label}</span>
+                                <span className="text-xs opacity-60">{label}</span>
                                 {isAutoDetected && (
-                                  <span className="text-[10px] bg-safelight-glow text-safelight/80 px-1.5 py-0.5 rounded-full">
+                                  <span className="text-xs bg-safelight-glow text-safelight/80 px-2 py-1 rounded-full">
                                     auto
                                   </span>
                                 )}
@@ -1587,12 +1880,7 @@ export const PresenterApp: React.FC = () => {
                             );
                           })()}
                         </div>
-                        {isSelected && (
-                          <Check
-                            className={`w-4 h-4 shrink-0 ${isDesktopAudio ? 'text-amber-300' : 'text-emerald-300'}`}
-                            aria-hidden="true"
-                          />
-                        )}
+                        {isSelected && <Check className="w-4 h-4 shrink-0 text-safelight" aria-hidden="true" />}
                       </button>
                     );
                   };
@@ -1605,12 +1893,12 @@ export const PresenterApp: React.FC = () => {
                     mediaTitle: null,
                   };
                   const items: React.ReactNode[] = [
-                    renderBtn({ representative: desktopAudio, members: [desktopAudio] }, true),
+                    renderBtn({ representative: desktopAudio, members: [desktopAudio] }),
                   ];
                   if (audioAppGroups.length > 0) {
-                    items.push(<div key="divider" className="border-t border-gray-800 my-1.5" />);
+                    items.push(<div key="divider" className="border-t border-border my-1.5" />);
                     for (const group of audioAppGroups) {
-                      items.push(renderBtn(group, false));
+                      items.push(renderBtn(group));
                     }
                   }
                   // The Desktop Audio row is always present, so items is never empty.
@@ -1623,21 +1911,68 @@ export const PresenterApp: React.FC = () => {
           {/* Screenshare Source */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Screenshare Source
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* ── Video file source ──────────────────────────────── */}
+              <div className="flex gap-2">
+                <Button
+                  variant={selectedSourceType === 'video-file' ? 'default' : 'outline'}
+                  size="sm"
+                  className="flex-1"
+                  onClick={async () => {
+                    const result = await window.electronAPI?.selectVideoFile();
+                    if (result) {
+                      setSelectedSourceType('video-file');
+                      setSelectedVideoFilePath(result.filePath);
+                      setSelectedVideoFileName(result.fileName);
+                      setVideoFileError(null);
+                      setSelectedSourceId('');
+                      preCheckVideoFile(result.filePath);
+                    }
+                  }}
+                  onContextMenu={(e) => {
+                    if (selectedVideoFilePath) {
+                      e.preventDefault();
+                      setSelectedSourceType('screen');
+                      setSelectedVideoFilePath(null);
+                      setSelectedVideoFileName(null);
+                      setVideoFileError(null);
+                    }
+                  }}
+                >
+                  {selectedVideoFileName ? `Selected: ${selectedVideoFileName}` : 'Stream Video File...'}
+                </Button>
+                {selectedVideoFilePath && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="px-2"
+                    onClick={() => {
+                      setSelectedSourceType('screen');
+                      setSelectedVideoFilePath(null);
+                      setSelectedVideoFileName(null);
+                      setVideoFileError(null);
+                    }}
+                    aria-label="Deselect video file"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
+
               {(() => {
                 if (isWayland) {
                   return (
-                    <div className="space-y-2 text-xs">
-                      <p className="text-gray-500 leading-relaxed">
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground leading-relaxed">
                         The system dialog (xdg-desktop-portal) will let you pick the window to share. Audio is
                         auto-detected via PipeWire introspection.
                       </p>
                       {captureContext?.de === 'kde' && !autoDetectFailed && (
-                        <p className="text-gray-400 bg-gray-800/40 border border-gray-700/40 rounded-lg p-2.5 leading-relaxed">
+                        <p className="text-sm text-muted-foreground bg-secondary border border-border rounded-lg p-3 leading-relaxed">
                           KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection
                           fails, select an audio app manually.
                         </p>
@@ -1655,22 +1990,25 @@ export const PresenterApp: React.FC = () => {
                           type="button"
                           onClick={() => {
                             setSelectedSourceId(source.id);
+                            setSelectedSourceType('screen');
+                            setSelectedVideoFilePath(null);
+                            setSelectedVideoFileName(null);
                             void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
                           }}
                           aria-label={source.name}
                           className={`p-2 rounded-lg border cursor-pointer transition-all text-xs text-center space-y-1.5 w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                             isSelected
-                              ? 'bg-gray-800/50 border-gray-600 ring-1 ring-gray-600/30'
-                              : 'bg-background/60 border-gray-800/60 hover:border-gray-700'
+                              ? 'bg-secondary border-input ring-1 ring-input/30'
+                              : 'bg-background/60 border-border hover:border-input'
                           }`}
                         >
                           <img
                             src={source.thumbnail}
                             alt=""
-                            className="w-full h-20 object-cover rounded"
+                            className="w-full h-20 object-cover rounded-md"
                             aria-hidden="true"
                           />
-                          <span className="block font-medium truncate text-gray-300">{source.name}</span>
+                          <span className="block font-medium truncate text-foreground">{source.name}</span>
                         </button>
                       );
                     })}
@@ -1679,24 +2017,57 @@ export const PresenterApp: React.FC = () => {
               })()}
 
               {autoDetectFailed && captureContext?.de === 'kde' && (
-                <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 space-y-1">
-                  <p className="text-xs font-semibold text-gray-200">KDE Audio Auto-Detection Failed</p>
-                  <p className="text-[11px] text-gray-500 leading-relaxed">
+                <div className="bg-secondary border border-border rounded-lg p-3 space-y-1">
+                  <p className="text-xs font-semibold text-foreground">KDE Audio Auto-Detection Failed</p>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
                     Select an audio app from the panel above, then stop and restart the screenshare.
                   </p>
                 </div>
               )}
 
-              <Button
-                variant={isSharing ? 'destructive' : 'default'}
-                onClick={isSharing ? handleStopShare : handleStartShare}
-                disabled={!isSharing && !canStartShare}
-                className="w-full font-bold"
-              >
-                {isSharing ? 'Stop Screenshare' : 'Start Screenshare'}
-              </Button>
+              {isSharing ? (
+                <div className="space-y-2">
+                  {!showStopConfirm ? (
+                    <Button variant="destructive" onClick={() => setShowStopConfirm(true)} className="w-full font-bold">
+                      Stop Screenshare
+                    </Button>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground text-center">
+                        {spectatorCount > 0
+                          ? `${spectatorCount} spectator${spectatorCount === 1 ? '' : 's'} watching. Stop streaming?`
+                          : 'Stop the stream?'}
+                      </p>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="destructive"
+                          onClick={() => {
+                            setShowStopConfirm(false);
+                            handleStopShare();
+                          }}
+                          className="flex-1 font-bold"
+                        >
+                          Stop
+                        </Button>
+                        <Button variant="secondary" onClick={() => setShowStopConfirm(false)} className="flex-1">
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Button
+                  variant="default"
+                  onClick={handleStartShare}
+                  disabled={!canStartShare}
+                  className="w-full font-bold"
+                >
+                  Start Screenshare
+                </Button>
+              )}
               {disabledReason && (
-                <p id="start-screenshare-hint" className="text-[11px] text-gray-500 leading-relaxed">
+                <p id="start-screenshare-hint" className="text-sm text-muted-foreground leading-relaxed">
                   {disabledReason}
                 </p>
               )}
@@ -1704,27 +2075,89 @@ export const PresenterApp: React.FC = () => {
           </Card>
         </div>
 
+        {/* Video Controls — shown when sharing a video file */}
+        {isSharing && selectedSourceType === 'video-file' && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Video Controls
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {videoFileError && <p className="text-xs text-destructive">{videoFileError}</p>}
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const v = videoFileRef.current;
+                    if (!v) return;
+                    if (v.paused) {
+                      v.play().catch((err: unknown) => console.warn('Video play failed:', err));
+                    } else {
+                      v.pause();
+                    }
+                  }}
+                >
+                  {videoIsPlaying ? 'Pause' : 'Play'}
+                </Button>
+                <div className="flex-1">
+                  <input
+                    type="range"
+                    min={0}
+                    max={videoDuration || 0}
+                    step={0.1}
+                    value={videoCurrentTime}
+                    onChange={(e) => {
+                      const v = videoFileRef.current;
+                      if (v) v.currentTime = Number(e.target.value);
+                    }}
+                    className="w-full h-1.5 bg-secondary rounded-lg appearance-none cursor-pointer accent-safelight"
+                    aria-label="Seek position"
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground mt-1 tabular-nums">
+                    <span>{fmtDuration(videoCurrentTime * 1000)}</span>
+                    <span>{fmtDuration(videoDuration * 1000)}</span>
+                  </div>
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={videoFileLoop}
+                  onChange={(e) => {
+                    setVideoFileLoop(e.target.checked);
+                    if (videoFileRef.current) {
+                      videoFileRef.current.loop = e.target.checked;
+                    }
+                  }}
+                  className="rounded accent-safelight"
+                />
+                Loop video
+              </label>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Stream Settings */}
         <Card>
-          <CardHeader className="pb-0">
+          <CardHeader className="pb-4">
             <button
               type="button"
               onClick={() => setStreamSettingsOpen((v) => !v)}
-              className={`flex w-full items-center justify-between gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-safelight/70 ${
-                streamSettingsOpen ? 'pb-0' : 'pb-0'
-              }`}
+              className="flex w-full items-center justify-between gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-safelight/70"
               aria-expanded={streamSettingsOpen}
             >
               <div>
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   Stream Settings
                 </CardTitle>
-                <p className="text-xs text-gray-500 leading-relaxed mt-1">
+                <p className="text-sm text-muted-foreground leading-relaxed mt-1">
                   Changes apply in real time — no restart needed.
                 </p>
               </div>
               <ChevronDown
-                className={`size-4 shrink-0 text-gray-500 transition-transform duration-200 ${
+                className={`size-4 shrink-0 text-muted-foreground transition-transform duration-200 ${
                   streamSettingsOpen ? 'rotate-0' : '-rotate-90'
                 }`}
               />
@@ -1741,7 +2174,7 @@ export const PresenterApp: React.FC = () => {
                 <div className="space-y-1.5">
                   <label
                     htmlFor="stream-codec"
-                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
                   >
                     Video Codec
                   </label>
@@ -1749,7 +2182,7 @@ export const PresenterApp: React.FC = () => {
                     id="stream-codec"
                     value={videoCodec}
                     onChange={(e) => setVideoCodec(e.target.value as VideoCodec)}
-                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
                   >
                     {availableCodecs.map((info) => (
                       <option key={info.codec} value={info.codec}>
@@ -1763,7 +2196,7 @@ export const PresenterApp: React.FC = () => {
                 <div className="space-y-1.5">
                   <label
                     htmlFor="stream-resolution"
-                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
                   >
                     Resolution
                   </label>
@@ -1771,7 +2204,7 @@ export const PresenterApp: React.FC = () => {
                     id="stream-resolution"
                     value={resolution}
                     onChange={(e) => setResolution(e.target.value as ResolutionPreset)}
-                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
                   >
                     <option value="1080p">1080p (Full HD)</option>
                     <option value="1440p">1440p (QHD)</option>
@@ -1785,7 +2218,7 @@ export const PresenterApp: React.FC = () => {
                 <div className="space-y-1.5">
                   <label
                     htmlFor="stream-fps"
-                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
                   >
                     Frame Rate
                   </label>
@@ -1793,7 +2226,7 @@ export const PresenterApp: React.FC = () => {
                     id="stream-fps"
                     value={streamFps}
                     onChange={(e) => setStreamFps(Number(e.target.value))}
-                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
                   >
                     <option value={15}>15 fps</option>
                     <option value={24}>24 fps</option>
@@ -1806,7 +2239,7 @@ export const PresenterApp: React.FC = () => {
                 <div className="space-y-1.5">
                   <label
                     htmlFor="stream-bitrate"
-                    className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
                   >
                     Bitrate Limit
                   </label>
@@ -1814,7 +2247,7 @@ export const PresenterApp: React.FC = () => {
                     id="stream-bitrate"
                     value={bitrateLimit}
                     onChange={(e) => setBitrateLimit(Number(e.target.value))}
-                    className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
+                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
                   >
                     <option value={1_000_000}>1 Mbps</option>
                     <option value={2_000_000}>2 Mbps</option>
@@ -1832,17 +2265,17 @@ export const PresenterApp: React.FC = () => {
               <div className="space-y-1.5">
                 <label
                   htmlFor="api-endpoint"
-                  className="block text-[10px] font-semibold uppercase tracking-[0.05em] text-gray-500"
+                  className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
                 >
                   API Endpoint
                 </label>
                 <input
                   id="api-endpoint"
-                  type="text"
+                  type="url"
                   value={apiEndpoint}
                   onChange={(e) => setApiEndpoint(e.target.value)}
                   placeholder="http://localhost:3001"
-                  className="w-full rounded-lg bg-background/90 border border-gray-800 text-sm text-gray-200 py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background font-mono"
+                  className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background font-mono"
                 />
               </div>
             </CardContent>
