@@ -1180,9 +1180,7 @@ export const PresenterApp: React.FC = () => {
         }
       });
 
-      await lkRoom.connect(resolvedLivekitUrl, token, {
-        rtcConfig: { iceServers: [{ urls: ['stun:localhost:7880'] }] },
-      });
+      await lkRoom.connect(resolvedLivekitUrl, token);
     } catch (err) {
       console.error('Failed to create room:', err);
       const message = err instanceof Error ? err.message : 'Failed to create room';
