@@ -1843,6 +1843,8 @@ export const PresenterApp: React.FC = () => {
           setStreamFps={setStreamFps}
           bitrateLimit={bitrateLimit}
           setBitrateLimit={setBitrateLimit}
+          apiEndpoint={apiEndpoint}
+          setApiEndpoint={setApiEndpoint}
         />
       </main>
 

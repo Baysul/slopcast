@@ -24,6 +24,8 @@ export interface StreamSettingsPanelProps {
   setStreamFps: (fps: number) => void;
   bitrateLimit: number;
   setBitrateLimit: (bitrate: number) => void;
+  apiEndpoint?: string;
+  setApiEndpoint?: (endpoint: string) => void;
 }
 
 export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = ({
@@ -39,6 +41,8 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = ({
   setStreamFps,
   bitrateLimit,
   setBitrateLimit,
+  apiEndpoint,
+  setApiEndpoint,
 }) => {
   const openClass = streamSettingsOpen ? 'rotate-0' : '-rotate-90';
   const containerClass = streamSettingsOpen ? 'max-h-[600px] opacity-100 mt-4' : 'max-h-0 opacity-0 overflow-hidden';
@@ -80,33 +84,36 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = ({
 
             <div className="space-y-1.5">
               <label htmlFor="select-resolution" className="text-xs font-medium text-foreground block">
-                Target Resolution
+                Resolution
               </label>
               <select
                 id="select-resolution"
                 value={resolution}
                 onChange={(e) => setResolution(e.target.value as ResolutionPreset)}
-                className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-safelight"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
               >
-                <option value="1080p">1080p (1920×1080)</option>
-                <option value="720p">720p (1280×720)</option>
-                <option value="480p">480p (854×480)</option>
+                <option value="1080p">1080p (Full HD)</option>
+                <option value="1440p">1440p (QHD)</option>
+                <option value="2160p">4K (Ultra HD)</option>
               </select>
             </div>
+          </div>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label htmlFor="select-fps" className="text-xs font-medium text-foreground block">
-                Target Frame Rate
+                Frame Rate
               </label>
               <select
                 id="select-fps"
                 value={streamFps}
                 onChange={(e) => setStreamFps(Number(e.target.value))}
-                className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-safelight"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
               >
-                <option value={60}>60 FPS</option>
-                <option value={30}>30 FPS</option>
-                <option value={15}>15 FPS</option>
+                <option value={15}>15 fps</option>
+                <option value={24}>24 fps</option>
+                <option value={30}>30 fps</option>
+                <option value={60}>60 fps</option>
               </select>
             </div>
 
@@ -118,15 +125,36 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = ({
                 id="select-bitrate"
                 value={bitrateLimit}
                 onChange={(e) => setBitrateLimit(Number(e.target.value))}
-                className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-safelight"
+                className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
               >
-                <option value={8_000_000}>8.0 Mbps</option>
-                <option value={6_000_000}>6.0 Mbps</option>
-                <option value={4_000_000}>4.0 Mbps</option>
-                <option value={2_500_000}>2.5 Mbps</option>
+                <option value={1_000_000}>1 Mbps</option>
+                <option value={2_000_000}>2 Mbps</option>
+                <option value={4_000_000}>4 Mbps</option>
+                <option value={6_000_000}>6 Mbps</option>
+                <option value={10_000_000}>10 Mbps</option>
+                <option value={20_000_000}>20 Mbps</option>
+                <option value={30_000_000}>30 Mbps</option>
+                <option value={50_000_000}>50 Mbps</option>
+                <option value={80_000_000}>80 Mbps</option>
               </select>
             </div>
           </div>
+
+          {setApiEndpoint && (
+            <div className="space-y-1.5">
+              <label htmlFor="api-endpoint" className="text-xs font-medium text-foreground block">
+                API Endpoint
+              </label>
+              <input
+                id="api-endpoint"
+                type="url"
+                value={apiEndpoint ?? 'http://localhost:3001'}
+                onChange={(e) => setApiEndpoint(e.target.value)}
+                placeholder="http://localhost:3001"
+                className="w-full rounded-lg bg-secondary border border-border text-xs text-foreground py-2 px-3 focus:outline-none focus:ring-2 focus:ring-safelight font-mono"
+              />
+            </div>
+          )}
         </CardContent>
       </div>
     </Card>
