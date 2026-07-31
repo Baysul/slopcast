@@ -1,0 +1,7 @@
+localhost {
+  reverse_proxy / slopcast-web:3000
+
+  reverse_proxy /api/* slopcast-server:3001
+  reverse_proxy /health slopcast-server:3001
+  reverse_proxy /ws slopcast-server:3001
+}

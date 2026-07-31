@@ -96,8 +96,9 @@ export LIVEKIT_API_SECRET=your-api-secret
 docker compose up -d
 ```
 
-The API server is exposed on port `3001`, the web client on port `3000`. By default, the web
-container's `API_ENDPOINT` points to the server container directly.
+The web client (`slopcast-web`) serves the SPA on port `3000` and the API server
+(`slopcast-server`) runs on port `3001`. Caddy is the public entry point on ports 80 and 443,
+reverse-proxying `/` to the web container and `/api/*`, `/health`, `/ws` to the server.
 
 ### Reverse proxy (production)
 
@@ -106,8 +107,7 @@ server. The examples below use a single domain like `app.example.com`.
 
 #### Nginx
 
-Place the built web app files at `/var/www/slopcast-web` (or mount them from the
-`slopcast-web` container) and create `/etc/nginx/nginx.conf`:
+Create `/etc/nginx/nginx.conf`:
 
 ```nginx
 http {
@@ -115,11 +115,12 @@ http {
     listen 80;
     server_name app.example.com;
 
-    root /var/www/slopcast-web;
-    index index.html;
-
     location / {
-      try_files $uri $uri/ /index.html;
+      proxy_pass http://127.0.0.1:3000;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location /api/ {
@@ -171,9 +172,7 @@ Create a `Caddyfile`:
 
 ```
 app.example.com {
-  root * /var/www/slopcast-web
-  try_files {path} /index.html
-  file_server
+  reverse_proxy / 127.0.0.1:3000
 
   reverse_proxy /api/* 127.0.0.1:3001
   reverse_proxy /health 127.0.0.1:3001
@@ -184,15 +183,19 @@ app.example.com {
 Caddy provisions TLS certificates automatically via Let's Encrypt / ZeroSSL when the
 domain's DNS points to the server. No extra HTTPS configuration is needed.
 
-To run Caddy in Docker with the Docker Compose setup (uncomment the `caddy` service in
-`docker-compose.yml`) and place the `Caddyfile` alongside:
+To run Caddy in Docker with the Docker Compose setup, uncomment the `caddy` service in
+`docker-compose.yml` and place the `Caddyfile` alongside. When Caddy runs inside Docker Compose,
+it uses the container service names (`slopcast-web:3000`, `slopcast-server:3001`) instead of
+localhost:
 
-```yaml
-# docker-compose.yml additions:
-volumes:
-  - ./Caddyfile:/etc/caddy/Caddyfile:ro
-  - caddy_data:/data
-  - caddy_config:/config
+```
+app.example.com {
+  reverse_proxy / slopcast-web:3000
+
+  reverse_proxy /api/* slopcast-server:3001
+  reverse_proxy /health slopcast-server:3001
+  reverse_proxy /ws slopcast-server:3001
+}
 ```
 
 ## Project structure
