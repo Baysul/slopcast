@@ -420,7 +420,7 @@ pub struct VideoFileInfo {
 /// bytes in RGBA order. An empty `Vec<u8>` signals end-of-file.
 #[napi]
 pub fn set_video_frame_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+    callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
 ) -> napi::Result<()> {
     video_file::ffmpeg::set_video_frame_callback(callback)
 }
@@ -430,7 +430,7 @@ pub fn set_video_frame_callback(
 /// stereo interleaved samples at 48 kHz. An empty `Vec<u8>` signals EOF.
 #[napi]
 pub fn set_audio_frame_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+    callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
 ) -> napi::Result<()> {
     video_file::ffmpeg::set_audio_frame_callback(callback)
 }

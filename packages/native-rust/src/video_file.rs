@@ -3,6 +3,7 @@ pub(crate) mod ffmpeg {
     use ffmpeg_next::frame;
     use ffmpeg_next::media::Type;
     use ffmpeg_next::software::scaling::{Context as ScalerContext, Flags};
+    use napi::bindgen_prelude::Buffer;
     use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -17,13 +18,13 @@ pub(crate) mod ffmpeg {
 
     static VIDEO_FILE_STATE: Mutex<Option<VideoFileSession>> = Mutex::new(None);
 
-    static VIDEO_FRAME_CALLBACK: Mutex<Option<Arc<ThreadsafeFunction<Vec<u8>, ()>>>> =
+    static VIDEO_FRAME_CALLBACK: Mutex<Option<Arc<ThreadsafeFunction<Buffer, ()>>>> =
         Mutex::new(None);
-    static AUDIO_FRAME_CALLBACK: Mutex<Option<Arc<ThreadsafeFunction<Vec<u8>, ()>>>> =
+    static AUDIO_FRAME_CALLBACK: Mutex<Option<Arc<ThreadsafeFunction<Buffer, ()>>>> =
         Mutex::new(None);
 
     pub(crate) fn set_video_frame_callback(
-        callback: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+        callback: std::sync::Arc<ThreadsafeFunction<Buffer, ()>>,
     ) -> napi::Result<()> {
         let Ok(mut guard) = VIDEO_FRAME_CALLBACK.lock() else {
             return Err(napi::Error::from_reason("Lock poisoned"));
@@ -33,7 +34,7 @@ pub(crate) mod ffmpeg {
     }
 
     pub(crate) fn set_audio_frame_callback(
-        callback: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+        callback: std::sync::Arc<ThreadsafeFunction<Buffer, ()>>,
     ) -> napi::Result<()> {
         let Ok(mut guard) = AUDIO_FRAME_CALLBACK.lock() else {
             return Err(napi::Error::from_reason("Lock poisoned"));
@@ -49,7 +50,10 @@ pub(crate) mod ffmpeg {
         let Some(ref cb) = *guard else {
             return;
         };
-        let _ = cb.call(Ok(rgba), ThreadsafeFunctionCallMode::NonBlocking);
+        let _ = cb.call(
+            Ok(Buffer::from(rgba)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
     }
 
     fn invoke_audio_callback(pcm: Vec<u8>) {
@@ -59,7 +63,10 @@ pub(crate) mod ffmpeg {
         let Some(ref cb) = *guard else {
             return;
         };
-        let _ = cb.call(Ok(pcm), ThreadsafeFunctionCallMode::NonBlocking);
+        let _ = cb.call(
+            Ok(Buffer::from(pcm)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
     }
 
     #[derive(Debug, Clone)]
@@ -70,10 +77,215 @@ pub(crate) mod ffmpeg {
         pub has_audio: bool,
     }
 
+    fn percent_decode_str(s: &str) -> String {
+        let mut bytes = Vec::with_capacity(s.len());
+        let s_bytes = s.as_bytes();
+        let mut i = 0;
+        while i < s_bytes.len() {
+            if s_bytes[i] == b'%' && i + 2 < s_bytes.len() {
+                if let Ok(hex) = u8::from_str_radix(
+                    std::str::from_utf8(&s_bytes[i + 1..i + 3]).unwrap_or(""),
+                    16,
+                ) {
+                    bytes.push(hex);
+                    i += 3;
+                    continue;
+                }
+            }
+            bytes.push(s_bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    fn normalize_ffmpeg_path(path: &str) -> String {
+        let mut target = path;
+        if let Some(stripped) = target.strip_prefix("file://") {
+            target = stripped;
+            if let Some(no_host) = target.strip_prefix("localhost") {
+                target = no_host;
+            } else if let Some(no_host) = target.strip_prefix("127.0.0.1") {
+                target = no_host;
+            }
+        } else if let Some(stripped) = target.strip_prefix("file:") {
+            target = stripped;
+        }
+
+        let unencoded = percent_decode_str(target);
+        let p = std::path::Path::new(&unencoded);
+        if p.exists() {
+            if unencoded.len() >= 2 && unencoded.as_bytes()[1] == b':' {
+                let drive = unencoded.chars().next().unwrap_or_default();
+                if drive.is_ascii_alphabetic() {
+                    let normalized_slashes = unencoded.replace('\\', "/");
+                    return format!("file:{normalized_slashes}");
+                }
+            }
+            return unencoded;
+        }
+
+        if unencoded.len() >= 2 && unencoded.as_bytes()[1] == b':' {
+            let drive = unencoded.chars().next().unwrap_or_default();
+            if drive.is_ascii_alphabetic() {
+                let normalized_slashes = unencoded.replace('\\', "/");
+                return format!("file:{normalized_slashes}");
+            }
+        }
+
+        unencoded
+    }
+
+    fn open_ffmpeg_input_custom_io(
+        path: &str,
+    ) -> Result<ffmpeg_next::format::context::Input, String> {
+        use ffmpeg_next::ffi::*;
+        use std::ffi::CString;
+        use std::io::{Read, Seek, SeekFrom};
+        use std::ptr;
+
+        let normalized = normalize_ffmpeg_path(path);
+        let file = std::fs::File::open(&normalized)
+            .map_err(|e| format!("std::fs::File::open({normalized}) failed: {e}"))?;
+
+        struct CustomIo {
+            file: std::fs::File,
+        }
+
+        let custom_io = Box::new(CustomIo { file });
+        let opaque = Box::into_raw(custom_io) as *mut std::ffi::c_void;
+
+        // SAFETY: opaque is a valid raw pointer to CustomIo, and buf is a valid writable buffer allocated by FFmpeg
+        unsafe extern "C" fn read_cb(
+            opaque: *mut std::ffi::c_void,
+            buf: *mut u8,
+            buf_size: i32,
+        ) -> i32 {
+            if opaque.is_null() || buf.is_null() || buf_size <= 0 {
+                return -1;
+            }
+            // SAFETY: opaque was created from Box::into_raw and is valid for the duration of CustomIo
+            let custom_io = unsafe { &mut *(opaque as *mut CustomIo) };
+            // SAFETY: buf is allocated by FFmpeg with at least buf_size bytes
+            let slice = unsafe { std::slice::from_raw_parts_mut(buf, buf_size as usize) };
+            match custom_io.file.read(slice) {
+                Ok(0) => AVERROR_EOF,
+                Ok(n) => n as i32,
+                Err(_) => -1,
+            }
+        }
+
+        // SAFETY: opaque is a valid raw pointer to CustomIo
+        unsafe extern "C" fn seek_cb(
+            opaque: *mut std::ffi::c_void,
+            offset: i64,
+            whence: i32,
+        ) -> i64 {
+            if opaque.is_null() {
+                return -1;
+            }
+            // SAFETY: opaque was created from Box::into_raw and is valid for the duration of CustomIo
+            let custom_io = unsafe { &mut *(opaque as *mut CustomIo) };
+
+            // AVSEEK_SIZE check
+            if whence & AVSEEK_SIZE != 0 {
+                if let Ok(meta) = custom_io.file.metadata() {
+                    return meta.len() as i64;
+                }
+                return -1;
+            }
+
+            let seek_from = match whence & 0xff {
+                0 => SeekFrom::Start(offset as u64), // SEEK_SET
+                1 => SeekFrom::Current(offset),      // SEEK_CUR
+                2 => SeekFrom::End(offset),          // SEEK_END
+                _ => return -1,
+            };
+
+            match custom_io.file.seek(seek_from) {
+                Ok(pos) => pos as i64,
+                Err(_) => -1,
+            }
+        }
+
+        let buffer_size = 32768;
+        let buffer = unsafe { av_malloc(buffer_size) as *mut u8 };
+        if buffer.is_null() {
+            unsafe {
+                let _ = Box::from_raw(opaque as *mut CustomIo);
+            }
+            return Err("Failed to allocate AVIO buffer".to_string());
+        }
+
+        let avio_ctx = unsafe {
+            avio_alloc_context(
+                buffer,
+                buffer_size as i32,
+                0, // read-only
+                opaque,
+                Some(read_cb),
+                None, // write
+                Some(seek_cb),
+            )
+        };
+
+        if avio_ctx.is_null() {
+            unsafe {
+                av_free(buffer as *mut _);
+                let _ = Box::from_raw(opaque as *mut CustomIo);
+            }
+            return Err("Failed to allocate AVIOContext".to_string());
+        }
+
+        let mut ps = unsafe { avformat_alloc_context() };
+        if ps.is_null() {
+            unsafe {
+                avio_context_free(&mut (avio_ctx as *mut _));
+                let _ = Box::from_raw(opaque as *mut CustomIo);
+            }
+            return Err("Failed to allocate AVFormatContext".to_string());
+        }
+
+        unsafe {
+            (*ps).pb = avio_ctx;
+            // AVFMT_FLAG_CUSTOM_IO so FFmpeg knows pb was custom allocated
+            (*ps).flags |= AVFMT_FLAG_CUSTOM_IO;
+        }
+
+        let c_path =
+            CString::new(normalized.clone()).unwrap_or_else(|_| CString::new("custom_io").unwrap());
+
+        let res = unsafe {
+            avformat_open_input(&mut ps, c_path.as_ptr(), ptr::null_mut(), ptr::null_mut())
+        };
+
+        if res < 0 {
+            unsafe {
+                avformat_free_context(ps);
+                avio_context_free(&mut (avio_ctx as *mut _));
+                let _ = Box::from_raw(opaque as *mut CustomIo);
+            }
+            return Err(format!("avformat_open_input failed: code {res}"));
+        }
+
+        let res_stream = unsafe { avformat_find_stream_info(ps, ptr::null_mut()) };
+        if res_stream < 0 {
+            unsafe {
+                avformat_close_input(&mut ps);
+                let _ = Box::from_raw(opaque as *mut CustomIo);
+            }
+            return Err(format!(
+                "avformat_find_stream_info failed: code {res_stream}"
+            ));
+        }
+
+        Ok(unsafe { ffmpeg_next::format::context::Input::wrap(ps) })
+    }
+
     pub(crate) fn probe_file(path: &str) -> Result<FileInfo, String> {
         ffmpeg_next::init().map_err(|e| format!("ffmpeg init: {e}"))?;
+        let _ = ffmpeg_next::format::network::init();
         let ictx =
-            ffmpeg_next::format::input(&path).map_err(|e| format!("Cannot open input: {e}"))?;
+            open_ffmpeg_input_custom_io(path).map_err(|e| format!("Cannot open input: {e}"))?;
 
         let mut video_stream = None;
         let mut audio_stream = None;
@@ -113,6 +325,7 @@ pub(crate) mod ffmpeg {
         stop_playback();
 
         ffmpeg_next::init().map_err(|e| format!("ffmpeg init: {e}"))?;
+        let _ = ffmpeg_next::format::network::init();
 
         let stop = Arc::new(AtomicBool::new(false));
         let seek_target = Arc::new(Mutex::new(None::<i64>));
@@ -124,7 +337,7 @@ pub(crate) mod ffmpeg {
         let path_owned = path.to_string();
 
         let join = thread::spawn(move || {
-            let mut ictx = match ffmpeg_next::format::input(&path_owned) {
+            let mut ictx = match open_ffmpeg_input_custom_io(&path_owned) {
                 Ok(ctx) => ctx,
                 Err(e) => {
                     eprintln!("Cannot open input: {e}");
@@ -145,6 +358,14 @@ pub(crate) mod ffmpeg {
             };
             let video_stream_index = input.index();
             let audio_stream_index = ictx.streams().best(Type::Audio).map(|s| s.index());
+
+            let fps = input.avg_frame_rate();
+            let frame_delay = if fps.denominator() > 0 && fps.numerator() > 0 {
+                let secs = fps.denominator() as f64 / fps.numerator() as f64;
+                std::time::Duration::from_secs_f64(secs.clamp(0.016, 0.2))
+            } else {
+                std::time::Duration::from_millis(33)
+            };
 
             let context =
                 match ffmpeg_next::codec::context::Context::from_parameters(input.parameters()) {
@@ -195,6 +416,34 @@ pub(crate) mod ffmpeg {
                 audio_ctx.decoder().audio().ok()
             });
 
+            let mut audio_resampler = audio_decoder.as_ref().and_then(|dec| {
+                ffmpeg_next::software::resampling::Context::get(
+                    dec.format(),
+                    dec.channel_layout(),
+                    dec.rate(),
+                    ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
+                    ffmpeg_next::channel_layout::ChannelLayout::STEREO,
+                    48000,
+                )
+                .ok()
+            });
+
+            let (video_tx, video_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+            let video_stop = stop_clone.clone();
+            let video_emitter_join = thread::spawn(move || {
+                while let Ok(packed) = video_rx.recv() {
+                    if video_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let frame_start = std::time::Instant::now();
+                    invoke_video_callback(packed);
+                    let elapsed = frame_start.elapsed();
+                    if let Some(remaining) = frame_delay.checked_sub(elapsed) {
+                        thread::sleep(remaining);
+                    }
+                }
+            });
+
             let mut decoded = frame::Video::empty();
             let mut aframe = frame::Audio::empty();
 
@@ -203,17 +452,19 @@ pub(crate) mod ffmpeg {
                     break;
                 }
 
-                if paused_clone.load(Ordering::Relaxed) {
-                    thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
-                }
-
+                let mut did_seek = false;
                 {
                     let mut seek = seek_target_clone.lock().unwrap();
                     if let Some(ts_ms) = seek.take() {
                         let seek_ts = ts_ms * (ffmpeg_next::ffi::AV_TIME_BASE as i64) / 1000;
                         let _ = ictx.seek(seek_ts, seek_ts..);
+                        did_seek = true;
                     }
+                }
+
+                if paused_clone.load(Ordering::Relaxed) && !did_seek {
+                    thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
                 }
 
                 let packet_result = ictx.packets().next();
@@ -249,7 +500,9 @@ pub(crate) mod ffmpeg {
                                 }
 
                                 if !packed.is_empty() {
-                                    invoke_video_callback(packed);
+                                    if video_tx.send(packed).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                         } else if Some(stream.index()) == audio_stream_index {
@@ -268,50 +521,21 @@ pub(crate) mod ffmpeg {
                                     }
 
                                     if aframe.samples() > 0 {
-                                        let samples: usize =
-                                            aframe.samples().try_into().unwrap_or(0);
-                                        let channels: usize =
-                                            aframe.channels().try_into().unwrap_or(2);
-                                        let mut interleaved = Vec::with_capacity(samples * 2 * 2);
-
-                                        if aframe.is_planar() {
-                                            for i in 0..samples {
-                                                for ch in 0..channels.min(2) {
-                                                    let val = if ch < aframe.planes() {
-                                                        let plane_data = aframe.data(ch);
-                                                        let sample_bytes =
-                                                            &plane_data[i * 4..i * 4 + 4];
-                                                        f32::from_le_bytes(
-                                                            sample_bytes
-                                                                .try_into()
-                                                                .unwrap_or_default(),
-                                                        )
-                                                    } else {
-                                                        0.0f32
-                                                    };
-                                                    let s16 = (val.clamp(-1.0, 1.0) * 32767.0)
-                                                        .round()
-                                                        as i16;
-                                                    interleaved
-                                                        .extend_from_slice(&s16.to_le_bytes());
+                                        if let Some(ref mut resampler) = audio_resampler {
+                                            let mut resampled = frame::Audio::empty();
+                                            if resampler.run(&aframe, &mut resampled).is_ok() {
+                                                if resampled.samples() > 0 {
+                                                    let data = resampled.data(0);
+                                                    let bytes_needed =
+                                                        (resampled.samples() * 4) as usize;
+                                                    let byte_len = bytes_needed.min(data.len());
+                                                    if byte_len > 0 {
+                                                        invoke_audio_callback(
+                                                            data[..byte_len].to_vec(),
+                                                        );
+                                                    }
                                                 }
                                             }
-                                        } else {
-                                            let data = aframe.data(0);
-                                            let byte_size = samples * channels.min(2) * 4;
-                                            let byte_size = byte_size.min(data.len());
-                                            for chunk in data[..byte_size].chunks_exact(4) {
-                                                let f = f32::from_le_bytes(
-                                                    chunk.try_into().unwrap_or_default(),
-                                                );
-                                                let s16 =
-                                                    (f.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-                                                interleaved.extend_from_slice(&s16.to_le_bytes());
-                                            }
-                                        }
-
-                                        if !interleaved.is_empty() {
-                                            invoke_audio_callback(interleaved);
                                         }
                                     }
                                 }
@@ -320,6 +544,9 @@ pub(crate) mod ffmpeg {
                     }
                 }
             }
+
+            drop(video_tx);
+            let _ = video_emitter_join.join();
 
             invoke_video_callback(Vec::new());
             invoke_audio_callback(Vec::new());
@@ -377,10 +604,31 @@ pub(crate) mod ffmpeg {
             false
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_probe_real_file_variants() {
+            let paths = [
+                "/tmp/test_sample.mp4",
+                "file:/tmp/test_sample.mp4",
+                "file:///tmp/test_sample.mp4",
+                "file://localhost/tmp/test_sample.mp4",
+            ];
+            for path in paths {
+                let res = probe_file(path);
+                println!("probe_file({path}) -> {:?}", res);
+                assert!(res.is_ok(), "probe_file({path}) failed: {:?}", res);
+            }
+        }
+    }
 }
 
 #[cfg(not(feature = "ffmpeg"))]
 pub(crate) mod ffmpeg {
+    use napi::bindgen_prelude::Buffer;
     use napi::threadsafe_function::ThreadsafeFunction;
     use std::sync::Arc;
 
@@ -393,7 +641,7 @@ pub(crate) mod ffmpeg {
     }
 
     pub(crate) fn set_video_frame_callback(
-        _callback: Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+        _callback: Arc<ThreadsafeFunction<Buffer, ()>>,
     ) -> napi::Result<()> {
         Err(napi::Error::from_reason(
             "FFmpeg is not available (build without ffmpeg feature)",
@@ -401,7 +649,7 @@ pub(crate) mod ffmpeg {
     }
 
     pub(crate) fn set_audio_frame_callback(
-        _callback: Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+        _callback: Arc<ThreadsafeFunction<Buffer, ()>>,
     ) -> napi::Result<()> {
         Err(napi::Error::from_reason(
             "FFmpeg is not available (build without ffmpeg feature)",
