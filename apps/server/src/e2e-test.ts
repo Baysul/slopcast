@@ -508,9 +508,8 @@ async function runTest(): Promise<TestResult> {
     log('ELECTRON', 'Clicked "Create Live Room"');
 
     // Wait for room code to appear (replaces the Create button).
-    // The code span is the only font-mono element with text-gray-400; other
-    // font-mono spans (telemetry) use different gray shades.
-    const roomCodeSpan = page.locator('span.font-mono.text-gray-400');
+    // The code span is the font-mono element with text-muted-foreground.
+    const roomCodeSpan = page.locator('span.font-mono.text-muted-foreground');
     await roomCodeSpan.waitFor({ state: 'visible', timeout: ROOM_CREATE_TIMEOUT_MS });
     const roomCode = ((await roomCodeSpan.textContent()) ?? '').trim();
     result.roomCode = roomCode;
