@@ -39,6 +39,7 @@ export function initRoutes(
   };
 
   router.get('/health', health);
+  router.get('/api/health', health);
 
   router.post('/api/rooms', async (req, res) => {
     const origin = req.headers['x-client-origin'];
