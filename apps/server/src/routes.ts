@@ -11,9 +11,15 @@ function toWsUrl(url: string): string {
   return url.replace(/^http(s?):\/\//, 'ws$1://');
 }
 
-export function initRoutes(host: string, apiKey: string, apiSecret: string, websiteUrl: string): Router {
+export function initRoutes(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  websiteUrl: string,
+  clientUrl?: string,
+): Router {
   const roomClient = new RoomServiceClient(host, apiKey, apiSecret);
-  const livekitWsUrl = toWsUrl(host);
+  const livekitWsUrl = toWsUrl(clientUrl ?? host);
 
   const router = createRouter();
 

@@ -55,7 +55,15 @@ app.use((req, res, next) => {
 
 app.use('/api/rooms', roomCreateLimiter);
 app.use('/api/rooms/:code/token', spectatorTokenLimiter);
-app.use(initRoutes(config.livekitUrl, config.livekitApiKey, config.livekitApiSecret, config.websiteUrl));
+app.use(
+  initRoutes(
+    config.livekitUrl,
+    config.livekitApiKey,
+    config.livekitApiSecret,
+    config.websiteUrl,
+    process.env.LIVEKIT_CLIENT_URL || undefined,
+  ),
+);
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('Unhandled server error:', err);
