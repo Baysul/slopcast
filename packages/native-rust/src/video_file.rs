@@ -87,9 +87,8 @@ pub(crate) mod ffmpeg {
         }
 
         let video = video_stream.ok_or_else(|| "No video stream found".to_string())?;
-        let context =
-            ffmpeg_next::codec::context::Context::from_parameters(video.parameters())
-                .map_err(|e| format!("Decoder params: {e}"))?;
+        let context = ffmpeg_next::codec::context::Context::from_parameters(video.parameters())
+            .map_err(|e| format!("Decoder params: {e}"))?;
         let decoder = context.decoder();
         let vid = decoder
             .video()
@@ -147,17 +146,16 @@ pub(crate) mod ffmpeg {
             let video_stream_index = input.index();
             let audio_stream_index = ictx.streams().best(Type::Audio).map(|s| s.index());
 
-            let context = match ffmpeg_next::codec::context::Context::from_parameters(
-                input.parameters(),
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Video decoder params: {e}");
-                    invoke_video_callback(Vec::new());
-                    invoke_audio_callback(Vec::new());
-                    return;
-                }
-            };
+            let context =
+                match ffmpeg_next::codec::context::Context::from_parameters(input.parameters()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Video decoder params: {e}");
+                        invoke_video_callback(Vec::new());
+                        invoke_audio_callback(Vec::new());
+                        return;
+                    }
+                };
             let mut decoder = match context.decoder().video() {
                 Ok(d) => d,
                 Err(e) => {
@@ -191,10 +189,9 @@ pub(crate) mod ffmpeg {
 
             let mut audio_decoder = audio_stream_index.and_then(|_| {
                 let audio_input = ictx.streams().best(Type::Audio)?;
-                let audio_ctx = ffmpeg_next::codec::context::Context::from_parameters(
-                    audio_input.parameters(),
-                )
-                .ok()?;
+                let audio_ctx =
+                    ffmpeg_next::codec::context::Context::from_parameters(audio_input.parameters())
+                        .ok()?;
                 audio_ctx.decoder().audio().ok()
             });
 
@@ -248,8 +245,7 @@ pub(crate) mod ffmpeg {
                                     Vec::with_capacity(row_bytes * src_height as usize);
                                 for row in 0..src_height as usize {
                                     let offset = row * linesize;
-                                    packed
-                                        .extend_from_slice(&data[offset..offset + row_bytes]);
+                                    packed.extend_from_slice(&data[offset..offset + row_bytes]);
                                 }
 
                                 if !packed.is_empty() {
@@ -276,16 +272,15 @@ pub(crate) mod ffmpeg {
                                             aframe.samples().try_into().unwrap_or(0);
                                         let channels: usize =
                                             aframe.channels().try_into().unwrap_or(2);
-                                        let mut interleaved =
-                                            Vec::with_capacity(samples * 2 * 2);
+                                        let mut interleaved = Vec::with_capacity(samples * 2 * 2);
 
                                         if aframe.is_planar() {
                                             for i in 0..samples {
                                                 for ch in 0..channels.min(2) {
                                                     let val = if ch < aframe.planes() {
                                                         let plane_data = aframe.data(ch);
-                                                        let sample_bytes = &plane_data
-                                                            [i * 4..i * 4 + 4];
+                                                        let sample_bytes =
+                                                            &plane_data[i * 4..i * 4 + 4];
                                                         f32::from_le_bytes(
                                                             sample_bytes
                                                                 .try_into()
@@ -294,28 +289,24 @@ pub(crate) mod ffmpeg {
                                                     } else {
                                                         0.0f32
                                                     };
-                                                    let s16 =
-                                                        (val.clamp(-1.0, 1.0) * 32767.0)
-                                                            .round() as i16;
+                                                    let s16 = (val.clamp(-1.0, 1.0) * 32767.0)
+                                                        .round()
+                                                        as i16;
                                                     interleaved
                                                         .extend_from_slice(&s16.to_le_bytes());
                                                 }
                                             }
                                         } else {
                                             let data = aframe.data(0);
-                                            let byte_size =
-                                                samples * channels.min(2) * 4;
+                                            let byte_size = samples * channels.min(2) * 4;
                                             let byte_size = byte_size.min(data.len());
-                                            for chunk in
-                                                data[..byte_size].chunks_exact(4)
-                                            {
+                                            for chunk in data[..byte_size].chunks_exact(4) {
                                                 let f = f32::from_le_bytes(
                                                     chunk.try_into().unwrap_or_default(),
                                                 );
-                                                let s16 = (f.clamp(-1.0, 1.0) * 32767.0)
-                                                    .round() as i16;
-                                                interleaved
-                                                    .extend_from_slice(&s16.to_le_bytes());
+                                                let s16 =
+                                                    (f.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+                                                interleaved.extend_from_slice(&s16.to_le_bytes());
                                             }
                                         }
 

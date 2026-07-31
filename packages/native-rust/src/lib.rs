@@ -439,8 +439,7 @@ pub fn set_audio_frame_callback(
 /// track availability without starting playback.
 #[napi]
 pub fn probe_video_file(path: String) -> napi::Result<VideoFileInfo> {
-    let info = video_file::ffmpeg::probe_file(&path)
-        .map_err(|e| napi::Error::from_reason(e))?;
+    let info = video_file::ffmpeg::probe_file(&path).map_err(|e| napi::Error::from_reason(e))?;
     Ok(VideoFileInfo {
         width: info.width,
         height: info.height,
@@ -453,8 +452,7 @@ pub fn probe_video_file(path: String) -> napi::Result<VideoFileInfo> {
 /// audio frames through the registered callbacks.
 #[napi]
 pub fn start_video_file_playback(path: String) -> napi::Result<()> {
-    video_file::ffmpeg::start_playback(&path)
-        .map_err(|e| napi::Error::from_reason(e))
+    video_file::ffmpeg::start_playback(&path).map_err(|e| napi::Error::from_reason(e))
 }
 
 /// Stops active FFmpeg video file playback and joins the decode thread.
