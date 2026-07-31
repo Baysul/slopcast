@@ -167,13 +167,19 @@ pub(crate) mod ffmpeg {
     impl std::ops::Deref for CustomInputContext {
         type Target = ffmpeg_next::format::context::Input;
         fn deref(&self) -> &Self::Target {
-            self.input.as_ref().unwrap()
+            match self.input.as_ref() {
+                Some(i) => i,
+                None => unreachable!("CustomInputContext input is initialized on creation"),
+            }
         }
     }
 
     impl std::ops::DerefMut for CustomInputContext {
         fn deref_mut(&mut self) -> &mut Self::Target {
-            self.input.as_mut().unwrap()
+            match self.input.as_mut() {
+                Some(i) => i,
+                None => unreachable!("CustomInputContext input is initialized on creation"),
+            }
         }
     }
 
@@ -303,8 +309,7 @@ pub(crate) mod ffmpeg {
             (*ps).flags |= AVFMT_FLAG_CUSTOM_IO;
         }
 
-        let c_path =
-            CString::new(normalized.clone()).unwrap_or_else(|_| CString::new("custom_io").unwrap());
+        let c_path = CString::new(normalized.clone()).unwrap_or_else(|_| c"custom_io".to_owned());
 
         // SAFETY: `ps` is a valid in/out pointer to an owned AVFormatContext and
         // `c_path` is a valid NUL-terminated C string with a static probe options arg.
@@ -514,7 +519,10 @@ pub(crate) mod ffmpeg {
 
                 let mut did_seek = false;
                 {
-                    let mut seek = seek_target_clone.lock().unwrap();
+                    let mut seek = match seek_target_clone.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                     if let Some(ts_ms) = seek.take() {
                         let seek_ts = ts_ms * (ffmpeg_next::ffi::AV_TIME_BASE as i64) / 1000;
                         let _ = ictx.seek(seek_ts, seek_ts..);

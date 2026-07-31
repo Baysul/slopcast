@@ -50,7 +50,7 @@ struct NativeLiveKit {
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
     room_connected: Arc<AtomicBool>,
     spectator_count: Arc<AtomicU32>,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Held for NativeLiveKit struct lifecycle")]
     video_source: Arc<Mutex<Option<NativeVideoSource>>>,
     video_active: Arc<AtomicBool>,
     _stop: tokio::sync::oneshot::Sender<()>,
@@ -101,10 +101,13 @@ pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
     let handle = std::thread::Builder::new()
         .name("lk-worker".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("Tokio runtime");
+            else {
+                eprintln!("[livekit] Failed to build tokio runtime");
+                return;
+            };
 
             rt.block_on(async {
                 if let Err(e) =
@@ -395,7 +398,9 @@ async fn handle_start_video(
         }
     }
 
-    *video_source.lock().unwrap() = Some(source.clone());
+    if let Ok(mut guard) = video_source.lock() {
+        *guard = Some(source.clone());
+    }
     video_active.store(true, Ordering::SeqCst);
 }
 
@@ -404,7 +409,9 @@ async fn handle_stop_video(
     video_source: &Arc<Mutex<Option<NativeVideoSource>>>,
     video_active: &Arc<AtomicBool>,
 ) {
-    video_source.lock().unwrap().take();
+    if let Ok(mut guard) = video_source.lock() {
+        guard.take();
+    }
     video_active.store(false, Ordering::SeqCst);
 
     let publications: Vec<_> = room

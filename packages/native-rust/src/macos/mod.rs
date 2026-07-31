@@ -218,10 +218,12 @@ pub fn stop_video_capture() -> NapiResult<bool> {
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn is_video_capture_active() -> NapiResult<bool> {
     Ok(false)
 }
 
+#[allow(dead_code)]
 pub fn list_screen_sources() -> napi::Result<Vec<napi::Unknown<'static>>> {
     Ok(Vec::new())
 }
