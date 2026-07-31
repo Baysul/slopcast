@@ -1,0 +1,44 @@
+# Example LiveKit config for a Slopcast-dedicated LiveKit SFU
+# co-located with an existing Element/Synapse LiveKit instance on the same host.
+#
+# This config assumes the Element LiveKit uses defaults:
+#   port: 7880, rtc.tcp_port: 7881, port_range_start: 50100, port_range_end: 50200, redis db: 0
+#
+# Required DNS: slopkit.example.com → VPS IP
+# Required ports on firewall: 7883/TCP, 50300-50400/UDP (add 443/TCP + 80/TCP for Caddy)
+#
+# Caddy: add to Caddyfile:
+#   slopkit.example.com {
+#       reverse_proxy localhost:7882
+#   }
+#
+# Slopcast server env:
+#   LIVEKIT_CLIENT_URL=wss://slopkit.example.com
+#   (config: livekitUrl=ws://localhost:7882, livekitApiKey=slopcast)
+
+port: 7882
+rtc:
+  tcp_port: 7883
+  port_range_start: 50300
+  port_range_end: 50400
+  use_external_ip: true
+  enable_loopback_candidate: false
+  turn_servers:
+    - host: turn.example.com
+      port: 5349
+      protocol: tls
+      secret: "[your-coturn-static-auth-secret]"
+
+keys:
+  slopcast: "<openssl rand -hex 32>"
+
+redis:
+  address: localhost:6379
+  db: 1
+
+room:
+  auto_create: true
+  empty_timeout: 300
+
+logging:
+  level: info
