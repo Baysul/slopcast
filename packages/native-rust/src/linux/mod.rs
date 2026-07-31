@@ -66,7 +66,7 @@ fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::M
         }
         main_loop
             .loop_()
-            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
     }
 }
 
@@ -866,7 +866,7 @@ fn run_capture_session(
     for _ in 0..100 {
         pw.main_loop
             .loop_()
-            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
         if shared
             .lock()
             .ok()
@@ -963,7 +963,7 @@ fn run_capture_session(
     while !stop.load(Ordering::SeqCst) {
         pw.main_loop
             .loop_()
-            .iterate(pipewire::loop_::Timeout::Infinite);
+            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
 
         while let Ok(new_target) = target_rx.try_recv() {
             tracker.borrow_mut().change_target(new_target, &pw.core);
@@ -1049,7 +1049,7 @@ fn run_capture_session(
             }
             pw.main_loop
                 .loop_()
-                .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(10)));
+                .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
         }
     }
 
@@ -2051,7 +2051,7 @@ fn run_meter_session(
     while !stop.load(Ordering::SeqCst) {
         pw.main_loop
             .loop_()
-            .iterate(pipewire::loop_::Timeout::Infinite);
+            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
     }
 
     meters.borrow_mut().clear();
@@ -2143,10 +2143,12 @@ pub(crate) fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
         .collect())
 }
 
-static AUDIO_DATA_CALLBACK: Mutex<Option<Arc<ThreadsafeFunction<Vec<i16>, ()>>>> = Mutex::new(None);
+static AUDIO_DATA_CALLBACK: Mutex<
+    Option<Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>>,
+> = Mutex::new(None);
 
 pub(crate) fn set_audio_data_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+    callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
 ) -> napi::Result<()> {
     let Ok(mut guard) = AUDIO_DATA_CALLBACK.lock() else {
         return Err(napi::Error::from_reason("Lock poisoned"));
@@ -2156,13 +2158,13 @@ pub(crate) fn set_audio_data_callback(
 }
 
 fn invoke_audio_data_callback(data: Vec<u8>) {
-    let i16_samples: Vec<i16> = data
-        .chunks_exact(4)
-        .map(|c| {
-            let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-            (f.clamp(-1.0, 1.0) * 32767.0).round() as i16
-        })
-        .collect();
+    // PipeWire delivers f32 LE frames; we downmix to packed i16 LE bytes so the
+    // N-API boundary transfers one binary buffer instead of ~960 JS numbers.
+    let mut i16_bytes = Vec::with_capacity(data.len() / 2);
+    for chunk in data.chunks_exact(4) {
+        let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        i16_bytes.extend_from_slice(&((f.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
+    }
     let Ok(guard) = AUDIO_DATA_CALLBACK.lock() else {
         return;
     };
@@ -2170,7 +2172,7 @@ fn invoke_audio_data_callback(data: Vec<u8>) {
         return;
     };
     let _ = cb.call(
-        Ok(i16_samples),
+        Ok(napi::bindgen_prelude::Buffer::from(i16_bytes)),
         napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
     );
 }

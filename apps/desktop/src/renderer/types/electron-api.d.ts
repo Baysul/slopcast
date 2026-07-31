@@ -27,7 +27,7 @@ declare global {
       listScreenSources: () => Promise<Array<{ id: string; title: string; displayId: number }>>;
       startNativeCapture: (
         sourceIndex: number,
-        config: { fps: number; width: number; height: number; videoCodec: string },
+        config: { fps: number; width: number; height: number; videoCodec?: string },
       ) => Promise<{ ok: boolean; nodeId: number | null; error?: string }>;
       startVideoCapture: (nodeId: number, width: number, height: number, fps: number) => Promise<boolean>;
       stopVideoCapture: () => Promise<boolean>;
@@ -35,6 +35,15 @@ declare global {
       isNativeCaptureActive: () => Promise<boolean>;
       getSpectatorCount: () => Promise<number>;
       selectVideoFile: () => Promise<{ filePath: string; fileName: string } | null>;
+      probeVideoFile: (
+        filePath: string,
+      ) => Promise<{ width: number; height: number; durationMs: number; hasAudio: boolean } | null>;
+      startVideoFile: (filePath: string) => Promise<boolean>;
+      stopVideoFile: () => Promise<boolean>;
+      seekVideoFile: (tsMs: number) => Promise<boolean>;
+      pauseVideoFile: (paused: boolean) => Promise<boolean>;
+      onVideoFileFrame: (cb: (data: Uint8Array | null) => void) => () => void;
+      onVideoFileAudio: (cb: (data: Uint8Array | null) => void) => () => void;
     };
   }
 }

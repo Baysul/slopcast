@@ -58,8 +58,9 @@ struct WasapiState {
 
 static WASAPI_STATE: Mutex<Option<WasapiState>> = Mutex::new(None);
 
-static AUDIO_DATA_CALLBACK: Mutex<Option<std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>>> =
-    Mutex::new(None);
+static AUDIO_DATA_CALLBACK: Mutex<
+    Option<std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>>,
+> = Mutex::new(None);
 
 fn napi_err(context: &str, e: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(format!("{context}: {e}"))
@@ -76,11 +77,14 @@ fn os_build_number() -> Option<u32> {
 
 fn snapshot_process_names() -> HashMap<u32, String> {
     let mut map = HashMap::new();
+    // SAFETY: INVALID_HANDLE_VALUE is returned on failure and checked below.
     let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
         return map;
     };
+    // SAFETY: all-zero is a valid PROCESSENTRY32W bit pattern.
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+    // SAFETY: `snapshot` is a valid open handle and `entry` a correctly sized buffer.
     if unsafe { Process32FirstW(snapshot, &mut entry).is_ok() } {
         loop {
             let end = entry
@@ -90,11 +94,13 @@ fn snapshot_process_names() -> HashMap<u32, String> {
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
             map.insert(entry.th32ProcessID, name);
+            // SAFETY: same invariants as Process32FirstW; failure signals end of enumeration.
             if unsafe { Process32NextW(snapshot, &mut entry).is_err() } {
                 break;
             }
         }
     }
+    // SAFETY: `snapshot` was successfully created above and is closed exactly once here.
     let _ = unsafe { CloseHandle(snapshot) };
     map
 }
@@ -322,7 +328,10 @@ struct CaptureSession {
 }
 
 impl CaptureSession {
-    fn drain_packets(&self, tsfn: Option<&ThreadsafeFunction<Vec<i16>, ()>>) -> Result<(), String> {
+    fn drain_packets(
+        &self,
+        tsfn: Option<&ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
+    ) -> Result<(), String> {
         // SAFETY: `capture_client` is a valid interface owned by this session;
         // every buffer obtained is released before the next iteration.
         let Some(tsfn) = tsfn else {
@@ -375,14 +384,19 @@ impl CaptureSession {
             }
         }
         if !all_frames.is_empty() {
-            let i16_samples: Vec<i16> = all_frames
-                .chunks_exact(4)
-                .map(|c| {
-                    let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                    (f.clamp(-1.0, 1.0) * 32767.0).round() as i16
-                })
-                .collect();
-            let _ = tsfn.call(Ok(i16_samples), ThreadsafeFunctionCallMode::NonBlocking);
+            // Pack i16 LE samples into one binary buffer to avoid per-sample
+            // JS number boxing across the N-API boundary.
+            let mut i16_bytes = Vec::with_capacity(all_frames.len() / 2);
+            for chunk in all_frames.chunks_exact(4) {
+                let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                i16_bytes.extend_from_slice(
+                    &((f.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes(),
+                );
+            }
+            let _ = tsfn.call(
+                Ok(napi::bindgen_prelude::Buffer::from(i16_bytes)),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
         }
         Ok(())
     }
@@ -390,7 +404,7 @@ impl CaptureSession {
     fn run(
         &self,
         stop_event: HANDLE,
-        tsfn: Option<&ThreadsafeFunction<Vec<i16>, ()>>,
+        tsfn: Option<&ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
     ) -> Result<(), String> {
         let handles = [stop_event, self.audio_event];
         // SAFETY: both handles are valid for the duration of this call — the
@@ -413,6 +427,9 @@ impl CaptureSession {
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
+        // SAFETY: `self.client` is a valid IAudioClient (never moved out of this
+        // struct) and `self.audio_event` a valid HANDLE created in
+        // build_capture_session; both are still alive here and used exactly once.
         unsafe {
             let _ = self.client.Stop();
             let _ = CloseHandle(self.audio_event);
@@ -490,7 +507,7 @@ fn run_capture(
     target_pid: u32,
     stop_event_raw: usize,
     startup_tx: &Sender<Result<CaptureMode, String>>,
-    tsfn: Option<std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>>,
+    tsfn: Option<std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>>,
 ) -> Result<(), String> {
     // SAFETY: standard per-thread COM init on the dedicated capture thread;
     // balanced by CoUninitialize below on success.
@@ -526,12 +543,16 @@ fn run_capture(
 fn stop_capture_locked(state: &mut WasapiState) {
     state.is_active = false;
     if let Some(raw) = state.stop_event_raw.take() {
+        // SAFETY: `raw` was created by CreateEventA in start_audio_capture, is
+        // only signalled here, and is still a valid handle before the join and close.
         unsafe {
             let _ = SetEvent(HANDLE(raw as *mut std::ffi::c_void));
         }
         if let Some(join) = state.capture_thread.take() {
             let _ = join.join();
         }
+        // SAFETY: the capture thread has joined, so the event is no longer referenced
+        // by it and is closed exactly once here.
         unsafe {
             let _ = CloseHandle(HANDLE(raw as *mut std::ffi::c_void));
         }
@@ -543,7 +564,7 @@ fn stop_capture_locked(state: &mut WasapiState) {
 }
 
 pub fn set_audio_data_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+    callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
 ) -> NapiResult<()> {
     let mut guard = AUDIO_DATA_CALLBACK
         .lock()
@@ -572,6 +593,8 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
     });
     stop_capture_locked(state);
 
+    // SAFETY: null attribute pointer and name are valid; the returned handle is
+    // closed on every exit path (success paths own it via stop_event_raw).
     let stop_event = unsafe { CreateEventA(None, false, false, PCSTR::null()) }
         .map_err(|e| napi_err("CreateEventA", e))?;
     let stop_raw = stop_event.0 as usize;
@@ -588,6 +611,7 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
             let _ = run_capture(target_pid, stop_raw, &tx, tsfn);
         })
         .map_err(|e| {
+            // SAFETY: the thread never started, so this is the only owner of the handle.
             let _ = unsafe { CloseHandle(stop_event) };
             napi_err("Failed to spawn WASAPI thread", e)
         })?;
@@ -603,12 +627,17 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
         }
         Ok(Err(e)) => {
             let _ = join.join();
+            // SAFETY: the capture thread has exited, so no other code references
+            // the event; this is the final owner, closed exactly once.
             let _ = unsafe { CloseHandle(stop_event) };
             Err(napi_error("WASAPI startup", e))
         }
         Err(_) => {
+            // SAFETY: the event handle is still valid; signalling wakes the capture
+            // thread so it can observe the stop request and exit.
             let _ = unsafe { SetEvent(stop_event) };
             let _ = join.join();
+            // SAFETY: after join the thread no longer touches the event; closed once.
             let _ = unsafe { CloseHandle(stop_event) };
             Err(napi::Error::from_reason("WASAPI startup timed out"))
         }

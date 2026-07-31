@@ -23,7 +23,17 @@ export function initRoutes(
 
   const router = createRouter();
 
-  const allocatedCodes = new Set<string>();
+  const allocatedCodes = new Map<string, number>();
+  const ROOM_CODE_TTL_MS = 24 * 60 * 60 * 1000;
+
+  const sweepExpiredCodes = () => {
+    const now = Date.now();
+    for (const [code, createdAt] of allocatedCodes.entries()) {
+      if (now - createdAt > ROOM_CODE_TTL_MS) {
+        allocatedCodes.delete(code);
+      }
+    }
+  };
 
   const health = async (
     _req: unknown,
@@ -48,11 +58,13 @@ export function initRoutes(
       return;
     }
 
+    sweepExpiredCodes();
+
     let code: string;
     do {
       code = generateRoomCode();
     } while (allocatedCodes.has(code));
-    allocatedCodes.add(code);
+    allocatedCodes.set(code, Date.now());
 
     try {
       const active = await roomClient.listRooms();
@@ -62,7 +74,7 @@ export function initRoutes(
         do {
           code = generateRoomCode();
         } while (allocatedCodes.has(code));
-        allocatedCodes.add(code);
+        allocatedCodes.set(code, Date.now());
       }
       if (names.has(code)) {
         allocatedCodes.delete(code);

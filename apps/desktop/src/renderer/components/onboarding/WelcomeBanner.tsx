@@ -7,7 +7,7 @@ export const WelcomeBanner: React.FC = () => {
   const { completed, dismiss } = useOnboarding();
   const [visible, setVisible] = useState(false);
   const [exiting, setExiting] = useState(false);
-  const dismissTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
     if (!completed) {

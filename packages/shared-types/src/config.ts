@@ -35,12 +35,13 @@ export function loadConfig(): AppConfig {
     livekitApiSecret: envLivekitApiSecret || 'secret',
   };
 
+  let config = defaults;
   const configPath = findConfigFile();
 
   if (configPath) {
     try {
       const fileConfig = JSON.parse(readFileSync(configPath, 'utf-8')) as Partial<AppConfig>;
-      const resolved: AppConfig = {
+      config = {
         serverPort: envServerPort || fileConfig.serverPort || defaults.serverPort,
         webPort: envWebPort || fileConfig.webPort || defaults.webPort,
         apiEndpoint:
@@ -53,11 +54,16 @@ export function loadConfig(): AppConfig {
         livekitApiKey: envLivekitApiKey || fileConfig.livekitApiKey || defaults.livekitApiKey,
         livekitApiSecret: envLivekitApiSecret || fileConfig.livekitApiSecret || defaults.livekitApiSecret,
       };
-      return resolved;
     } catch {
       console.error('Failed to parse slopcast.config.json, using env/defaults');
     }
   }
 
-  return defaults;
+  if (process.env.NODE_ENV === 'production') {
+    if (config.livekitApiKey === 'devkey' || config.livekitApiSecret === 'secret') {
+      throw new Error('Production environment requires custom LIVEKIT_API_KEY and LIVEKIT_API_SECRET');
+    }
+  }
+
+  return config;
 }

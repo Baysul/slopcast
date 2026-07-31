@@ -71,7 +71,7 @@ mod unsupported_platform {
     }
 
     pub fn set_audio_data_callback(
-        _: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+        _: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
     ) -> napi::Result<()> {
         Ok(())
     }
@@ -372,7 +372,7 @@ pub fn get_audio_levels() -> napi::Result<Vec<AudioAppLevel>> {
 /// Returns an error if the platform module rejects the callback.
 #[napi]
 pub fn set_audio_data_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+    callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
 ) -> napi::Result<()> {
     platform::set_audio_data_callback(callback)
 }

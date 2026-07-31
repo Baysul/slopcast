@@ -310,6 +310,7 @@ export const RoomPage: React.FC = () => {
     return 'disconnected';
   };
   const variant = statusVariant();
+  const CopyIcon = copied ? Check : Copy;
 
   return (
     <div className="min-h-screen bg-background text-foreground relative">
@@ -364,7 +365,7 @@ export const RoomPage: React.FC = () => {
             title="Copy room link"
             className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
           >
-            {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            <CopyIcon className="w-4 h-4" />
           </button>
         </div>
       </div>

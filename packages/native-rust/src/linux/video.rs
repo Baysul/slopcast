@@ -166,7 +166,7 @@ fn run_video_capture(
     while !stop.load(Ordering::SeqCst) {
         pw.main_loop
             .loop_()
-            .iterate(pipewire::loop_::Timeout::Infinite);
+            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
     }
 }
 

@@ -7,6 +7,7 @@
   "private": true,
   "main": "dist/main/index.js",
   "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "predev": "pnpm --filter @slopcast/native-rust build:debug",
     "prebuild": "pnpm --filter @slopcast/shared-types build && pnpm --filter @slopcast/native-rust build && pnpm --filter @slopcast/native-livekit build",
     "dev": "pnpm build && electron .",

@@ -195,7 +195,7 @@ pub fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
 }
 
 pub fn set_audio_data_callback(
-    _: std::sync::Arc<ThreadsafeFunction<Vec<i16>, ()>>,
+    _: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
 ) -> NapiResult<()> {
     Ok(())
 }

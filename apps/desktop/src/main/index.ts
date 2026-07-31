@@ -17,6 +17,7 @@ import {
   nativeImage,
   protocol,
   session,
+  shell,
 } from 'electron';
 
 const appConfig = loadConfig();
@@ -186,8 +187,29 @@ function createWindow() {
     },
   });
 
-  mainWindow.webContents.on('console-message', (_e, _level, message) => {
-    console.log(`[renderer] ${message}`);
+  mainWindow.webContents.on('console-message', (event, _level, message) => {
+    const msg =
+      typeof event === 'object' && event && 'message' in event
+        ? (event as { message: string }).message
+        : String(message ?? '');
+    if (msg) console.log(`[renderer] ${msg}`);
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https:') || url.startsWith('http:')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+    if (!isDev || (process.env.VITE_DEV_SERVER_URL && !url.startsWith(process.env.VITE_DEV_SERVER_URL))) {
+      event.preventDefault();
+      if (url.startsWith('https:') || url.startsWith('http:')) {
+        shell.openExternal(url);
+      }
+    }
   });
 
   Menu.setApplicationMenu(
@@ -277,7 +299,7 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => {
     const url = wc?.getURL() ?? '';
     const isApp = url.startsWith('file://') || url.startsWith('http://localhost:');
-    if ((permission === 'media' || permission === 'mediaKeySystem') && isApp) {
+    if ((permission === 'media' || permission === 'display-capture' || permission === 'mediaKeySystem') && isApp) {
       callback(true);
       return;
     }
@@ -286,7 +308,10 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionCheckHandler((wc, permission) => {
     const url = wc?.getURL() ?? '';
     const isApp = url.startsWith('file://') || url.startsWith('http://localhost:');
-    return (permission === 'media' || permission === 'mediaKeySystem') && isApp;
+    return (
+      (permission === 'media' || (permission as string) === 'display-capture' || permission === 'mediaKeySystem') &&
+      isApp
+    );
   });
 
   try {
@@ -307,8 +332,10 @@ app.whenReady().then(() => {
       .getSources({ types: ['window', 'screen'] })
       .then((sources) => {
         if (sources.length === 0) {
-          console.error('desktopCapturer returned no sources');
-          callback({});
+          console.warn(
+            '[setDisplayMediaRequestHandler] desktopCapturer returned 0 sources, using default screen fallback',
+          );
+          callback({ video: { id: 'screen:0:0', name: 'Entire Screen' } as Electron.DesktopCapturerSource });
           return;
         }
         // Prefer a window source: this app shares windows, not full screens.
@@ -318,8 +345,8 @@ app.whenReady().then(() => {
         callback({ video: source });
       })
       .catch((err) => {
-        console.error('getSources failed:', err);
-        callback({});
+        console.error('[setDisplayMediaRequestHandler] getSources failed, using fallback:', err);
+        callback({ video: { id: 'screen:0:0', name: 'Entire Screen' } as Electron.DesktopCapturerSource });
       });
   });
 
@@ -332,7 +359,13 @@ app.whenReady().then(() => {
       native.setDmabufCallback((_err: Error | null, arg: number[]) => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
         // arg = [fd, width, height, format, pts_lo, pts_hi]
-        nativeLiveKit.captureDmabufFrame(arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+        // The fd is owned by PipeWire's buffer pool (webrtc-sys never closes it),
+        // so on failure we simply skip the frame; never close it here.
+        try {
+          nativeLiveKit.captureDmabufFrame(arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+        } catch (frameErr) {
+          console.error('captureDmabufFrame error:', frameErr);
+        }
       });
       dmabufCallbackRegistered = true;
     } catch (err) {
@@ -343,7 +376,7 @@ app.whenReady().then(() => {
   function registerAudioDataCallback() {
     if (audioDataCallbackRegistered) return;
     try {
-      native.setAudioDataCallback((err: Error | null, arg: number[]) => {
+      native.setAudioDataCallback((err: Error | null, arg: Buffer) => {
         if (err || !mainWindow || mainWindow.isDestroyed()) return;
         try {
           nativeLiveKit.feedPcm(arg);
@@ -730,8 +763,9 @@ app.whenReady().then(() => {
   protocol.handle('local-media', async (request) => {
     let filePath: string;
     try {
-      const url = new URL(request.url);
-      filePath = fileURLToPath(url);
+      const rawUrl = request.url;
+      const fileUrl = rawUrl.replace(/^local-media:\/\//, 'file://');
+      filePath = fileURLToPath(fileUrl);
     } catch {
       return new Response('Bad Request', { status: 400 });
     }
@@ -751,8 +785,33 @@ app.whenReady().then(() => {
         '.webm': 'video/webm',
         '.ogg': 'video/ogg',
         '.ogv': 'video/ogg',
+        '.mkv': 'video/x-matroska',
+        '.mov': 'video/quicktime',
       };
       const contentType = mimeTypes[ext] ?? 'video/mp4';
+
+      const rangeHeader = request.headers.get('Range');
+      if (rangeHeader) {
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          const end = match[2] ? parseInt(match[2], 10) : fileStat.size - 1;
+          if (start < fileStat.size && end < fileStat.size && start <= end) {
+            const chunkLength = end - start + 1;
+            const stream = createReadStream(resolvedPath, { start, end });
+            return new Response(stream as unknown as ReadableStream, {
+              status: 206,
+              headers: {
+                'Content-Type': contentType,
+                'Content-Length': String(chunkLength),
+                'Content-Range': `bytes ${start}-${end}/${fileStat.size}`,
+                'Accept-Ranges': 'bytes',
+              },
+            });
+          }
+        }
+      }
+
       return new Response(createReadStream(resolvedPath) as unknown as ReadableStream, {
         status: 200,
         headers: {
@@ -823,7 +882,12 @@ app.whenReady().then(() => {
   ipcMain.handle('probe-video-file', async (_e, filePath: string) => {
     try {
       const resolved = resolveFilePath(filePath);
-      return native.probeVideoFile(resolved);
+      const realResolved = realpathSync(resolved);
+      if (!allowedFilePaths.has(realResolved)) {
+        console.warn('probe-video-file: path not in allowedFilePaths:', realResolved);
+        return null;
+      }
+      return native.probeVideoFile(realResolved);
     } catch (err) {
       console.error('probe-video-file IPC error:', err, 'for filePath:', filePath);
       return null;
@@ -833,23 +897,28 @@ app.whenReady().then(() => {
   ipcMain.handle('start-video-file', async (_e, filePath: string) => {
     try {
       const resolved = resolveFilePath(filePath);
-      native.setVideoFrameCallback((_err: Error | null, buf: Buffer | null) => {
+      const realResolved = realpathSync(resolved);
+      if (!allowedFilePaths.has(realResolved)) {
+        console.warn('start-video-file: path not in allowedFilePaths:', realResolved);
+        return false;
+      }
+      const sendFrame = (channel: 'video:frame' | 'video:audio', buf: Buffer | null) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
         if (buf && buf.length > 0) {
-          mainWindow?.webContents.send('video:frame', buf);
+          mainWindow.webContents.send(channel, buf);
         } else {
-          mainWindow?.webContents.send('video:frame', null);
+          mainWindow.webContents.send(channel, null);
         }
+      };
+      native.setVideoFrameCallback((_err: Error | null, buf: Buffer | null) => {
+        sendFrame('video:frame', buf);
       });
 
       native.setAudioFrameCallback((_err: Error | null, buf: Buffer | null) => {
-        if (buf && buf.length > 0) {
-          mainWindow?.webContents.send('video:audio', buf);
-        } else {
-          mainWindow?.webContents.send('video:audio', null);
-        }
+        sendFrame('video:audio', buf);
       });
 
-      native.startVideoFilePlayback(resolved);
+      native.startVideoFilePlayback(realResolved);
       return true;
     } catch (err) {
       console.error('start-video-file IPC error:', err, 'for filePath:', filePath);

@@ -135,9 +135,49 @@ pub(crate) mod ffmpeg {
         unencoded
     }
 
-    fn open_ffmpeg_input_custom_io(
-        path: &str,
-    ) -> Result<ffmpeg_next::format::context::Input, String> {
+    struct CustomIo {
+        file: std::fs::File,
+    }
+
+    pub(crate) struct CustomInputContext {
+        input: Option<ffmpeg_next::format::context::Input>,
+        avio_ctx: *mut ffmpeg_next::ffi::AVIOContext,
+        opaque: *mut CustomIo,
+    }
+
+    impl Drop for CustomInputContext {
+        fn drop(&mut self) {
+            self.input.take();
+            // SAFETY: `avio_ctx` and `opaque` are owned by this struct: avio_ctx
+            // came from avio_alloc_context (and is intentionally not freed by
+            // avformat_close_input because AVFMT_FLAG_CUSTOM_IO is set) and
+            // `opaque` from Box::into_raw. Each is freed exactly once here.
+            unsafe {
+                if !self.avio_ctx.is_null() {
+                    ffmpeg_next::ffi::avio_context_free(&mut self.avio_ctx);
+                }
+                if !self.opaque.is_null() {
+                    let _ = Box::from_raw(self.opaque);
+                    self.opaque = std::ptr::null_mut();
+                }
+            }
+        }
+    }
+
+    impl std::ops::Deref for CustomInputContext {
+        type Target = ffmpeg_next::format::context::Input;
+        fn deref(&self) -> &Self::Target {
+            self.input.as_ref().unwrap()
+        }
+    }
+
+    impl std::ops::DerefMut for CustomInputContext {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.input.as_mut().unwrap()
+        }
+    }
+
+    fn open_ffmpeg_input_custom_io(path: &str) -> Result<CustomInputContext, String> {
         use ffmpeg_next::ffi::*;
         use std::ffi::CString;
         use std::io::{Read, Seek, SeekFrom};
@@ -147,12 +187,8 @@ pub(crate) mod ffmpeg {
         let file = std::fs::File::open(&normalized)
             .map_err(|e| format!("std::fs::File::open({normalized}) failed: {e}"))?;
 
-        struct CustomIo {
-            file: std::fs::File,
-        }
-
         let custom_io = Box::new(CustomIo { file });
-        let opaque = Box::into_raw(custom_io) as *mut std::ffi::c_void;
+        let opaque = Box::into_raw(custom_io);
 
         // SAFETY: opaque is a valid raw pointer to CustomIo, and buf is a valid writable buffer allocated by FFmpeg
         unsafe extern "C" fn read_cb(
@@ -208,20 +244,27 @@ pub(crate) mod ffmpeg {
         }
 
         let buffer_size = 32768;
+        // SAFETY: av_malloc returns either a valid writable buffer of buffer_size
+        // bytes or null (checked immediately below).
         let buffer = unsafe { av_malloc(buffer_size) as *mut u8 };
         if buffer.is_null() {
+            // SAFETY: this is the unique owner of the opaque allocation and it is
+            // reclaimed exactly once here.
             unsafe {
-                let _ = Box::from_raw(opaque as *mut CustomIo);
+                let _ = Box::from_raw(opaque);
             }
             return Err("Failed to allocate AVIO buffer".to_string());
         }
 
+        // SAFETY: `buffer`/`opaque` are valid and owned by the returned AVIOContext;
+        // the read/seek callbacks are safe for the reasons documented on their own
+        // SAFETY comments and live as long as the context.
         let avio_ctx = unsafe {
             avio_alloc_context(
                 buffer,
                 buffer_size as i32,
                 0, // read-only
-                opaque,
+                opaque as *mut std::ffi::c_void,
                 Some(read_cb),
                 None, // write
                 Some(seek_cb),
@@ -229,22 +272,31 @@ pub(crate) mod ffmpeg {
         };
 
         if avio_ctx.is_null() {
+            // SAFETY: avio_alloc_context failed, so it never took ownership;
+            // `buffer` is freed and `opaque` reclaimed exactly once each.
             unsafe {
                 av_free(buffer as *mut _);
-                let _ = Box::from_raw(opaque as *mut CustomIo);
+                let _ = Box::from_raw(opaque);
             }
             return Err("Failed to allocate AVIOContext".to_string());
         }
 
+        let mut ctx = CustomInputContext {
+            input: None,
+            avio_ctx,
+            opaque,
+        };
+
+        // SAFETY: avformat_alloc_context returns a null pointer on failure (checked
+        // below) and an owned context otherwise, which is wrapped/freed on all paths.
         let mut ps = unsafe { avformat_alloc_context() };
         if ps.is_null() {
-            unsafe {
-                avio_context_free(&mut (avio_ctx as *mut _));
-                let _ = Box::from_raw(opaque as *mut CustomIo);
-            }
             return Err("Failed to allocate AVFormatContext".to_string());
         }
 
+        // SAFETY: `ps` is valid and owned by ctx; assigning our custom avio_ctx and
+        // flagging CUSTOM_IO makes close_input skip freeing pb, keeping the pointer
+        // valid until ctx's Drop runs.
         unsafe {
             (*ps).pb = avio_ctx;
             // AVFMT_FLAG_CUSTOM_IO so FFmpeg knows pb was custom allocated
@@ -254,31 +306,39 @@ pub(crate) mod ffmpeg {
         let c_path =
             CString::new(normalized.clone()).unwrap_or_else(|_| CString::new("custom_io").unwrap());
 
+        // SAFETY: `ps` is a valid in/out pointer to an owned AVFormatContext and
+        // `c_path` is a valid NUL-terminated C string with a static probe options arg.
         let res = unsafe {
             avformat_open_input(&mut ps, c_path.as_ptr(), ptr::null_mut(), ptr::null_mut())
         };
 
         if res < 0 {
+            // SAFETY: on failure avformat_open_input leaves `ps` unmodified and owned
+            // by us; it is freed exactly once here (pb/opaque freed by ctx's Drop).
             unsafe {
                 avformat_free_context(ps);
-                avio_context_free(&mut (avio_ctx as *mut _));
-                let _ = Box::from_raw(opaque as *mut CustomIo);
             }
             return Err(format!("avformat_open_input failed: code {res}"));
         }
 
+        // SAFETY: `ps` is now owned by the open format context and is a valid pointer
+        // for stream-info probing.
         let res_stream = unsafe { avformat_find_stream_info(ps, ptr::null_mut()) };
         if res_stream < 0 {
+            // SAFETY: with AVFMT_FLAG_CUSTOM_IO close_input frees the format context
+            // but keeps pb alive; pb and opaque are freed by ctx's Drop below.
             unsafe {
                 avformat_close_input(&mut ps);
-                let _ = Box::from_raw(opaque as *mut CustomIo);
             }
             return Err(format!(
                 "avformat_find_stream_info failed: code {res_stream}"
             ));
         }
 
-        Ok(unsafe { ffmpeg_next::format::context::Input::wrap(ps) })
+        // SAFETY: `ps` is a valid, fully-opened AVFormatContext; wrap takes sole
+        // ownership and frees it (via avformat_close_input) when the Input drops.
+        ctx.input = Some(unsafe { ffmpeg_next::format::context::Input::wrap(ps) });
+        Ok(ctx)
     }
 
     pub(crate) fn probe_file(path: &str) -> Result<FileInfo, String> {

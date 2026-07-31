@@ -1,67 +1,33 @@
-import type {
-  AudioApp,
-  AudioAppLevel,
-  ResolutionPreset,
-  StreamSettings,
-  VideoCodec,
-  VideoSourceType,
-} from '@slopcast/shared-types';
+import type { AudioApp, ResolutionPreset, StreamSettings, VideoCodec, VideoSourceType } from '@slopcast/shared-types';
 import {
   codecLabel,
   DEFAULT_STREAM_SETTINGS,
-  fmtBitrate,
-  fmtLoss,
   RESOLUTION_DIMENSIONS,
   VIDEO_CODEC_PRIORITY,
 } from '@slopcast/shared-types';
-import { Room, RoomEvent, Track } from 'livekit-client';
-import { Check, ChevronDown, Pause, Play, ScreenShare, TriangleAlert, X } from 'lucide-react';
+import { Track } from 'livekit-client';
+import { Pause, Play, ScreenShare, X } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Toaster } from '@/components/ui/sonner';
-import { AudioLevelMeter } from './components/audio/AudioLevelMeter';
+import { AudioAppPicker } from './components/audio/AudioAppPicker';
 import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
+import { type CodecInfo, StreamSettingsPanel } from './components/settings/StreamSettingsPanel';
+import {
+  fmtDuration,
+  idleTelemetry,
+  type StreamTelemetry,
+  StreamTelemetryBar,
+} from './components/telemetry/StreamTelemetryBar';
 import { Badge } from './components/ui/badge';
+import { useLiveKitRoom } from './hooks/useLiveKitRoom';
 import { notify, primeAudioContext } from './lib/toast';
-import { type AudioAppGroup, groupAudioApps } from './utils/audio-grouping';
+import { groupAudioApps } from './utils/audio-grouping';
+import './types/electron-api.d.ts';
 import './index.css';
-
-declare global {
-  interface Window {
-    electronAPI?: {
-      getAppConfig: () => Promise<{ apiEndpoint: string; livekitUrl: string }>;
-      getPlatformInfo: () => Promise<{ platform: string; isWayland: boolean }>;
-      getAudioApps: () => Promise<AudioApp[]>;
-      startAudioCapture: (targetId: number) => Promise<boolean>;
-      stopAudioCapture: () => Promise<boolean>;
-      switchAudioCapture: (targetId: number) => Promise<boolean>;
-      startAudioMetering: () => Promise<boolean>;
-      stopAudioMetering: () => Promise<boolean>;
-      getAudioLevels: () => Promise<AudioAppLevel[]>;
-      getDesktopSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
-      clipboardWriteText: (text: string) => Promise<boolean>;
-      resolveAudioSource: (opts?: { sourceId?: string; nameHint?: string }) => Promise<AudioApp | null>;
-      getCaptureContext: () => Promise<CaptureContext | null>;
-      getStreamSettings: () => Promise<StreamSettings>;
-      saveStreamSettings: (settings: StreamSettings) => Promise<boolean>;
-      getOnboardingCompleted: () => Promise<boolean>;
-      setOnboardingCompleted: () => Promise<boolean>;
-      selectVideoFile: () => Promise<{ filePath: string; fileName: string } | null>;
-      probeVideoFile: (
-        filePath: string,
-      ) => Promise<{ width: number; height: number; durationMs: number; hasAudio: boolean } | null>;
-      startVideoFile: (filePath: string) => Promise<boolean>;
-      stopVideoFile: () => Promise<boolean>;
-      seekVideoFile: (tsMs: number) => Promise<boolean>;
-      pauseVideoFile: (paused: boolean) => Promise<boolean>;
-      onVideoFileFrame: (cb: (data: Buffer | null) => void) => () => void;
-      onVideoFileAudio: (cb: (data: Buffer | null) => void) => () => void;
-    };
-  }
-}
 
 interface CaptureContext {
   de: 'unknown' | 'kde' | 'gnome';
@@ -135,17 +101,8 @@ const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
   a.sourceType === b.sourceType &&
   a.videoFilePath === b.videoFilePath;
 
-interface CodecInfo {
-  codec: VideoCodec;
-  label: string;
-  hardware: boolean;
-  recommended: boolean;
-}
-
 const KNOWN_VIDEO_CODECS: Record<string, { codec: VideoCodec; label: string }> = {
   'VIDEO/AV1': { codec: 'av1', label: 'AV1' },
-  'VIDEO/H265': { codec: 'h265', label: 'HEVC (H.265)' },
-  'VIDEO/HEVC': { codec: 'h265', label: 'HEVC (H.265)' },
   'VIDEO/H264': { codec: 'h264', label: 'H.264' },
   'VIDEO/VP9': { codec: 'vp9', label: 'VP9' },
   'VIDEO/VP8': { codec: 'vp8', label: 'VP8' },
@@ -160,7 +117,6 @@ const WEBCODECS_PROBE_CODECS: Record<VideoCodec, string[]> = {
   h264: ['avc1.640028', 'avc1.4D4028', 'avc1.42E028'],
   vp9: ['vp09.00.40.08', 'vp09.00.41.08'],
   av1: ['av01.0.08M.08', 'av01.0.09M.08'],
-  h265: ['hev1.1.6.L120.B0', 'hvc1.1.6.L120.B0', 'hev1.2.4.L120.B0', 'hvc1.2.4.L120.B0'],
 };
 
 const sortByEncodingEfficiency = (codecs: CodecInfo[]): CodecInfo[] => {
@@ -221,46 +177,6 @@ const codecOptionSuffix = (info: CodecInfo): string => {
   return info.hardware ? 'Hardware' : 'Software';
 };
 
-interface StreamTelemetry {
-  live: boolean;
-  updatedAt: number;
-  videoCodec: string | null;
-  videoEncoder: string | null;
-  width: number | null;
-  height: number | null;
-  frameRate: number | null;
-  targetFrameRate: number | null;
-  videoBitrate: number | null; // bps, rolling-smoothed for display
-  audioCodec: string | null;
-  audioBitrate: number | null; // bps
-  hasAudio: boolean;
-  packetLossPct: number | null;
-  roundTripTimeMs: number | null;
-  bitrateHistory: number[]; // raw Mbps samples, feeds the sparkline
-  elapsedMs: number;
-  spectatorCount: number;
-}
-
-const idleTelemetry = (): StreamTelemetry => ({
-  live: false,
-  updatedAt: 0,
-  videoCodec: null,
-  videoEncoder: null,
-  width: null,
-  height: null,
-  frameRate: null,
-  targetFrameRate: null,
-  videoBitrate: null,
-  audioCodec: null,
-  audioBitrate: null,
-  hasAudio: false,
-  packetLossPct: null,
-  roundTripTimeMs: null,
-  bitrateHistory: [],
-  elapsedMs: 0,
-  spectatorCount: 0,
-});
-
 interface StatsPrev {
   vBytes: number;
   vFrames: number;
@@ -289,173 +205,7 @@ interface RTCStatLike {
   frameHeight?: number;
 }
 
-const fmtDuration = (ms: number): string => {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const pad = (n: number) => n.toString().padStart(2, '0');
-  return `${pad(h)}:${pad(m)}:${pad(s)}`;
-};
-
-const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> = ({
-  data,
-  width = 88,
-  height = 22,
-}) => {
-  let points = '';
-  if (data.length >= 2) {
-    const max = Math.max(...data);
-    const min = Math.min(...data, 0);
-    const span = Math.max(max - min, 0.001);
-    const step = width / (data.length - 1);
-    points = data
-      .map((v, i) => {
-        const x = i * step;
-        const y = height - ((v - min) / span) * (height - 3) - 1.5;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(' ');
-  }
-  return (
-    <svg
-      width={width}
-      height={height}
-      viewBox={`0 0 ${width} ${height}`}
-      className="block text-safelight"
-      aria-hidden="true"
-      preserveAspectRatio="none"
-    >
-      {points && (
-        <polyline
-          points={points}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.5}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      )}
-    </svg>
-  );
-};
-
-const TelemetryCell: React.FC<{
-  label: string;
-  value: React.ReactNode;
-  sub?: React.ReactNode;
-  degrade?: boolean;
-}> = ({ label, value, sub, degrade }) => (
-  <div className="flex flex-col gap-1 min-w-0 shrink-0">
-    <span
-      className={`text-xs font-semibold uppercase tracking-wider leading-none ${
-        degrade ? 'text-destructive/75' : 'text-muted-foreground'
-      }`}
-    >
-      {label}
-    </span>
-    <span className="flex items-baseline gap-1.5 leading-none">
-      <span
-        className={`text-sm font-mono font-semibold tabular-nums leading-none ${
-          degrade ? 'text-destructive' : 'text-foreground'
-        }`}
-      >
-        {degrade && <TriangleAlert className="inline size-3 mr-1 -mt-0.5" aria-hidden="true" />}
-        {value}
-      </span>
-      {sub != null && <span className="text-xs font-mono tabular-nums leading-none text-caption-text">{sub}</span>}
-    </span>
-  </div>
-);
-
-const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
-  if (!t.hasAudio) {
-    return <span className="text-sm font-mono font-semibold leading-none text-caption-text">video only</span>;
-  }
-  return (
-    <span className="flex items-baseline gap-1.5 leading-none">
-      <span className="text-sm font-mono font-semibold tabular-nums leading-none text-foreground">
-        {t.audioCodec ?? '\u2014'}
-      </span>
-      {t.audioBitrate != null && (
-        <span className="text-xs font-mono tabular-nums leading-none text-muted-foreground">
-          {fmtBitrate(t.audioBitrate)}
-        </span>
-      )}
-    </span>
-  );
-};
-
-const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
-  const fpsDegrade = t.frameRate != null && t.targetFrameRate != null && t.frameRate < t.targetFrameRate * 0.75;
-  const lossDegrade = t.packetLossPct != null && t.packetLossPct > 1;
-  let fpsValue = '—';
-  let fpsSub: string | undefined;
-  if (t.frameRate != null) {
-    fpsValue = `${Math.round(t.frameRate)} fps`;
-  }
-  if (t.targetFrameRate != null) {
-    fpsSub = `/ ${Math.round(t.targetFrameRate)}`;
-  }
-
-  return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 select-none">
-      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/75 to-transparent" />
-      <div className="relative px-4 pt-12 pb-3">
-        <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
-          {/* On-Air */}
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span className="w-2 h-2 rounded-full bg-safelight motion-safe:animate-pulse" />
-            <span className="text-xs font-semibold uppercase tracking-wider text-safelight">On Air</span>
-          </div>
-
-          <TelemetryCell
-            label="Codec"
-            value={t.videoCodec ?? '—'}
-            sub={t.videoEncoder ? `· ${t.videoEncoder}` : undefined}
-          />
-          <TelemetryCell label="Resolution" value={t.width && t.height ? `${t.width}×${t.height}` : '—'} />
-          <TelemetryCell label="Frame Rate" value={fpsValue} sub={fpsSub} degrade={fpsDegrade} />
-          <TelemetryCell label="Bitrate" value={fmtBitrate(t.videoBitrate)} />
-          <TelemetryCell label="Loss" value={fmtLoss(t.packetLossPct)} degrade={lossDegrade} />
-
-          {/* Audio */}
-          <div className="flex flex-col gap-1 shrink-0 min-w-0">
-            <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
-              Audio
-            </span>
-            <AudioTelemetryValue telemetry={t} />
-          </div>
-
-          <div className="grow basis-0 min-w-0" />
-
-          {/* Right: bitrate sparkline + elapsed clock */}
-          <div className="flex items-end gap-3 shrink-0">
-            <div className="flex flex-col items-end gap-1">
-              <Sparkline data={t.bitrateHistory} />
-              <span className="text-xs uppercase tracking-wider text-caption-text leading-none">
-                {t.bitrateHistory.length > 0 ? `bitrate · last ${t.bitrateHistory.length}s` : 'awaiting uplink'}
-              </span>
-            </div>
-            <div className="flex flex-col gap-1 items-end">
-              <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
-                Elapsed
-              </span>
-              <span className="text-xs font-mono font-semibold tabular-nums leading-none text-foreground">
-                {fmtDuration(t.elapsedMs)}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 export const PresenterApp: React.FC = () => {
-  const [roomCode, setRoomCode] = useState<string>('');
-  const [shareUrl, setShareUrl] = useState<string>('');
   const [apiEndpoint, setApiEndpoint] = useState<string>('http://localhost:3001');
   const [livekitUrl, setLivekitUrl] = useState<string>('');
   const [isWayland, setIsWayland] = useState<boolean>(false);
@@ -468,11 +218,9 @@ export const PresenterApp: React.FC = () => {
   const [desktopSources, setDesktopSources] = useState<DesktopSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>('');
   const [isSharing, setIsSharing] = useState<boolean>(false);
-  const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [copied, setCopied] = useState<'link' | 'code' | null>(null);
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
-  const [spectatorCount, setSpectatorCount] = useState(0);
   const [captureContext, setCaptureContext] = useState<CaptureContext | null>(null);
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
   const [telemetry, setTelemetry] = useState<StreamTelemetry>(idleTelemetry());
@@ -520,7 +268,19 @@ export const PresenterApp: React.FC = () => {
   });
   const [resolution, setResolution] = useState<ResolutionPreset>(DEFAULT_STREAM_SETTINGS.resolution);
 
-  const liveKitRoomRef = useRef<Room | null>(null);
+  const {
+    roomCode,
+    shareUrl,
+    spectatorCount,
+    isCreatingRoom,
+    liveKitRoomRef,
+    createRoom: createLiveKitRoom,
+  } = useLiveKitRoom({
+    apiEndpoint,
+    livekitUrl,
+    videoCodec,
+  });
+
   const localStreamRef = useRef<MediaStream | null>(null);
   const isSharingRef = useRef(false);
   const roomCodeRef = useRef('');
@@ -651,20 +411,23 @@ export const PresenterApp: React.FC = () => {
     throw new Error('Virtual capture source did not appear as an audio input device');
   }, []);
 
-  const replaceAudioTrack = useCallback(async (targetId: number): Promise<void> => {
-    const room = liveKitRoomRef.current;
-    if (!room) return;
+  const replaceAudioTrack = useCallback(
+    async (targetId: number): Promise<void> => {
+      const room = liveKitRoomRef.current;
+      if (!room) return;
 
-    // Tell Rust to switch which application's audio is linked into the
-    // virtual capture node. The node itself stays alive, the existing
-    // MediaStreamTrack continues producing audio — the content seamlessly
-    // changes to the new target's audio.
-    const switched = await window.electronAPI?.switchAudioCapture(targetId);
-    if (!switched) {
-      throw new Error('Native audio target switch failed');
-    }
-    audioAppIdRef.current = targetId;
-  }, []);
+      // Tell Rust to switch which application's audio is linked into the
+      // virtual capture node. The node itself stays alive, the existing
+      // MediaStreamTrack continues producing audio — the content seamlessly
+      // changes to the new target's audio.
+      const switched = await window.electronAPI?.switchAudioCapture(targetId);
+      if (!switched) {
+        throw new Error('Native audio target switch failed');
+      }
+      audioAppIdRef.current = targetId;
+    },
+    [liveKitRoomRef],
+  );
 
   // Real-time audio source switching while sharing.
   useEffect(() => {
@@ -735,7 +498,7 @@ export const PresenterApp: React.FC = () => {
       }
     };
     void update();
-  }, [streamFps, bitrateLimit, isSharing, replaceAudioTrack]);
+  }, [streamFps, bitrateLimit, isSharing, replaceAudioTrack, liveKitRoomRef]);
 
   // Bind the live capture stream to the local preview <video>.
   useEffect(() => {
@@ -811,7 +574,7 @@ export const PresenterApp: React.FC = () => {
         telemetryPollRef.current = null;
       }
     };
-  }, [loadAudioApps, loadDesktopSources]);
+  }, [loadAudioApps, loadDesktopSources, liveKitRoomRef]);
 
   // Keep the audio source list fresh. listAudioApplications() is a read-only
   // PipeWire enumeration on a throwaway connection — it never touches the
@@ -1059,7 +822,6 @@ export const PresenterApp: React.FC = () => {
 
         setTelemetry((p) => ({
           live: true,
-          updatedAt: Date.now(),
           videoCodec: videoCodecLabel ?? p.videoCodec,
           videoEncoder: videoEnc ?? p.videoEncoder,
           width: encWidth ?? width,
@@ -1071,7 +833,7 @@ export const PresenterApp: React.FC = () => {
           audioBitrate: audioBps ?? p.audioBitrate,
           hasAudio,
           packetLossPct: lossPct,
-          roundTripTimeMs: rttMs ?? p.roundTripTimeMs,
+          rttMs: rttMs ?? p.rttMs,
           bitrateHistory: bitrateHistoryRef.current,
           elapsedMs,
           spectatorCount,
@@ -1101,88 +863,12 @@ export const PresenterApp: React.FC = () => {
   };
 
   const handleCreateRoom = async () => {
-    if (isCreatingRoom) return;
-    setIsCreatingRoom(true);
-    primeAudioContext();
-
-    const oldRoom = liveKitRoomRef.current;
-    if (oldRoom) {
-      oldRoom.removeAllListeners();
-      oldRoom.disconnect();
-      liveKitRoomRef.current = null;
-    }
-
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
     setSelectedAudioAppId(null);
     setAutoDetectFailed(false);
 
-    try {
-      const res = await fetch(`${apiEndpoint}/api/rooms`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Client-Origin': 'desktop' },
-      });
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({ error: 'Unknown server error' }))) as { error?: string };
-        throw new Error(err.error ?? `Server returned ${res.status}`);
-      }
-      const room = (await res.json()) as { code: string; shareUrl: string; token: string; livekitUrl: string };
-      const code = room.code;
-      const url = room.shareUrl;
-      const token = room.token;
-      const apiLivekitUrl = room.livekitUrl;
-      const resolvedLivekitUrl = livekitUrl || apiLivekitUrl;
-
-      roomCodeRef.current = code;
-      setRoomCode(code);
-      setShareUrl(url);
-      setSpectatorCount(0);
-
-      void copyText(url).then((ok) => {
-        if (ok) {
-          setCopied('link');
-          setTimeout(() => setCopied(null), 2500);
-        }
-      });
-
-      const lkRoom = new Room({
-        publishDefaults: {
-          videoCodec,
-        },
-      });
-      liveKitRoomRef.current = lkRoom;
-
-      lkRoom.on(RoomEvent.ParticipantConnected, (participant) => {
-        if (!participant.isLocal) {
-          setSpectatorCount(lkRoom.remoteParticipants.size);
-        }
-      });
-      lkRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
-        if (!participant.isLocal) {
-          setSpectatorCount(lkRoom.remoteParticipants.size);
-        }
-      });
-      lkRoom.on(RoomEvent.Disconnected, () => {
-        if (liveKitRoomRef.current === lkRoom) {
-          notify('error', 'Room disconnected', 'The connection to the room was lost. Create a new room to continue.');
-          if (isSharingRef.current) {
-            handleStopShare().catch((err) => console.warn('Stop share after disconnect failed:', err));
-          }
-          setRoomCode('');
-          setShareUrl('');
-          setSpectatorCount(0);
-          liveKitRoomRef.current = null;
-        }
-      });
-
-      await lkRoom.connect(resolvedLivekitUrl, token);
-    } catch (err) {
-      console.error('Failed to create room:', err);
-      const message = err instanceof Error ? err.message : 'Failed to create room';
-      notify('error', 'Room creation failed', message);
-    } finally {
-      setIsCreatingRoom(false);
-    }
+    await createLiveKitRoom();
   };
 
   // video-file playback, which delivers its audio directly from
@@ -1247,7 +933,7 @@ export const PresenterApp: React.FC = () => {
             numberOfChannels: 2,
             numberOfFrames: samples,
             timestamp: tsUs,
-            data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length),
+            data: new Uint8Array(buf.buffer, buf.byteOffset, buf.length) as BufferSource,
           });
           audioWriter?.write(audioData).catch(console.error);
           audioData.close();
@@ -1305,7 +991,7 @@ export const PresenterApp: React.FC = () => {
         numberOfChannels: 2,
         numberOfFrames: samples,
         timestamp: tsUs,
-        data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length),
+        data: new Uint8Array(buf.buffer, buf.byteOffset, buf.length) as BufferSource,
       });
       audioWriter.write(audioData).catch(console.error);
       audioData.close();
@@ -1631,6 +1317,16 @@ export const PresenterApp: React.FC = () => {
       if (window.electronAPI) {
         await window.electronAPI.stopAudioCapture();
       }
+      // Stop any tracks acquired before the failure (getDisplayMedia/getUserMedia)
+      // so the OS capture indicator and hardware are released.
+      const failedStream = localStreamRef.current;
+      if (failedStream) {
+        for (const track of failedStream.getTracks()) {
+          track.stop();
+        }
+        localStreamRef.current = null;
+      }
+      setPreviewStream(null);
       // Clean up video-file resources if any were created before the failure
       if (videoFileGenRef.current) {
         videoFileGenRef.current.cleanup();
@@ -1857,143 +1553,19 @@ export const PresenterApp: React.FC = () => {
         {/* Controls Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {/* Window Audio Capture */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
-                  Window Audio Capture
-                  {autoDetectedApp && (
-                    <span className="text-xs font-normal text-safelight bg-safelight-glow px-2 py-1 rounded-full border border-safelight/30">
-                      Auto ✓
-                    </span>
-                  )}
-                </CardTitle>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={loadAudioApps}
-                  className="text-xs text-muted-foreground hover:text-foreground h-auto px-2"
-                >
-                  Refresh
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                Auto-detected from your window selection. Click an app below to override — only that app's audio is
-                streamed. Select <strong className="text-foreground">Desktop Audio</strong> to capture all system sound.
-              </p>
-
-              <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                {(() => {
-                  const displayName = (app: AudioApp): string => app.name;
-                  const groupSubLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string | null => {
-                    if (isDesktopAudio) return 'All system audio';
-                    const { members } = group;
-                    let label: string | undefined;
-                    for (const m of members) {
-                      if (m.mediaTitle) {
-                        label = m.mediaTitle;
-                        break;
-                      }
-                    }
-                    if (!label) {
-                      for (const m of members) {
-                        if (m.windowTitle) {
-                          label = m.windowTitle;
-                          break;
-                        }
-                      }
-                    }
-                    if (label) {
-                      if (members.length > 1) return `${label} \u00B7 ${members.length} streams`;
-                      return label;
-                    }
-                    if (members.length > 1) return `${members.length} audio streams`;
-                    return null;
-                  };
-
-                  const pickerRowClass = (isSelected: boolean): string => {
-                    if (isSelected) {
-                      return 'bg-safelight-glow border-safelight/30 text-safelight';
-                    }
-                    return 'bg-background/60 border-border hover:border-input hover:text-foreground';
-                  };
-
-                  const renderBtn = (group: AudioAppGroup) => {
-                    const { representative, members } = group;
-                    const isDesktopAudio = representative.id === -1;
-                    const isSelected = members.some((m) => m.id === selectedAudioAppId);
-                    const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
-                    const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
-                    const btnClass = `flex items-center justify-between p-3 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
-                      isSelected,
-                    )}`;
-                    return (
-                      <button
-                        key={representative.id}
-                        type="button"
-                        aria-pressed={isSelected}
-                        onClick={() => {
-                          if (isSelected) {
-                            setAudioAppExplicitlySet(false);
-                            setSelectedAudioAppId(null);
-                            setAutoDetectedApp(null);
-                          } else {
-                            setAudioAppExplicitlySet(true);
-                            setSelectedAudioAppId(representative.id);
-                            setAutoDetectedApp(null);
-                          }
-                        }}
-                        className={btnClass}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold truncate min-w-0">{displayName(representative)}</span>
-                            {!isDesktopAudio && <AudioLevelMeter level={level} />}
-                          </div>
-                          {(() => {
-                            const label = groupSubLabel(group, isDesktopAudio);
-                            if (!label) return null;
-                            return (
-                              <div className="flex items-center gap-2 mt-0.5">
-                                <span className="text-xs opacity-60">{label}</span>
-                                {isAutoDetected && (
-                                  <span className="text-xs bg-safelight-glow text-safelight/80 px-2 py-1 rounded-full">
-                                    auto
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })()}
-                        </div>
-                        {isSelected && <Check className="w-4 h-4 shrink-0 text-safelight" aria-hidden="true" />}
-                      </button>
-                    );
-                  };
-
-                  const desktopAudio: AudioApp = {
-                    id: -1,
-                    name: 'Desktop Audio (All System Sound)',
-                    processId: 0,
-                    clientId: null,
-                    mediaTitle: null,
-                  };
-                  const items: React.ReactNode[] = [
-                    renderBtn({ representative: desktopAudio, members: [desktopAudio] }),
-                  ];
-                  if (audioAppGroups.length > 0) {
-                    items.push(<div key="divider" className="border-t border-border my-1.5" />);
-                    for (const group of audioAppGroups) {
-                      items.push(renderBtn(group));
-                    }
-                  }
-                  // The Desktop Audio row is always present, so items is never empty.
-                  return items;
-                })()}
-              </div>
-            </CardContent>
-          </Card>
+          <AudioAppPicker
+            audioApps={audioApps}
+            audioAppGroups={audioAppGroups}
+            selectedAudioAppId={selectedAudioAppId}
+            autoDetectedApp={autoDetectedApp}
+            audioLevels={audioLevels}
+            onSelectApp={(appId, explicit) => {
+              setAudioAppExplicitlySet(explicit ?? true);
+              setSelectedAudioAppId(appId);
+              if (!explicit) setAutoDetectedApp(null);
+            }}
+            onRefresh={loadAudioApps}
+          />
 
           {/* Screenshare Source */}
           <Card>
@@ -2258,147 +1830,20 @@ export const PresenterApp: React.FC = () => {
         )}
 
         {/* Stream Settings */}
-        <Card>
-          <CardHeader className="pb-4">
-            <button
-              type="button"
-              onClick={() => setStreamSettingsOpen((v) => !v)}
-              className="flex w-full items-center justify-between gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-safelight/70"
-              aria-expanded={streamSettingsOpen}
-            >
-              <div>
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Stream Settings
-                </CardTitle>
-                <p className="text-sm text-muted-foreground leading-relaxed mt-1">
-                  Changes apply in real time — no restart needed.
-                </p>
-              </div>
-              <ChevronDown
-                className={`size-4 shrink-0 text-muted-foreground transition-transform duration-200 ${
-                  streamSettingsOpen ? 'rotate-0' : '-rotate-90'
-                }`}
-              />
-            </button>
-          </CardHeader>
-          <div
-            className={`overflow-hidden transition-all duration-200 ease-out ${
-              streamSettingsOpen ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'
-            }`}
-          >
-            <CardContent className="space-y-5">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Video Codec */}
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="stream-codec"
-                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-                  >
-                    Video Codec
-                  </label>
-                  <select
-                    id="stream-codec"
-                    value={videoCodec}
-                    onChange={(e) => setVideoCodec(e.target.value as VideoCodec)}
-                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
-                  >
-                    {availableCodecs.map((info) => (
-                      <option key={info.codec} value={info.codec}>
-                        {info.label} ({codecOptionSuffix(info)})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Resolution */}
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="stream-resolution"
-                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-                  >
-                    Resolution
-                  </label>
-                  <select
-                    id="stream-resolution"
-                    value={resolution}
-                    onChange={(e) => setResolution(e.target.value as ResolutionPreset)}
-                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
-                  >
-                    <option value="1080p">1080p (Full HD)</option>
-                    <option value="1440p">1440p (QHD)</option>
-                    <option value="2160p">4K (Ultra HD)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                {/* Frame Rate */}
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="stream-fps"
-                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-                  >
-                    Frame Rate
-                  </label>
-                  <select
-                    id="stream-fps"
-                    value={streamFps}
-                    onChange={(e) => setStreamFps(Number(e.target.value))}
-                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
-                  >
-                    <option value={15}>15 fps</option>
-                    <option value={24}>24 fps</option>
-                    <option value={30}>30 fps</option>
-                    <option value={60}>60 fps</option>
-                  </select>
-                </div>
-
-                {/* Bitrate Limit */}
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="stream-bitrate"
-                    className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-                  >
-                    Bitrate Limit
-                  </label>
-                  <select
-                    id="stream-bitrate"
-                    value={bitrateLimit}
-                    onChange={(e) => setBitrateLimit(Number(e.target.value))}
-                    className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background cursor-pointer"
-                  >
-                    <option value={1_000_000}>1 Mbps</option>
-                    <option value={2_000_000}>2 Mbps</option>
-                    <option value={4_000_000}>4 Mbps</option>
-                    <option value={6_000_000}>6 Mbps</option>
-                    <option value={10_000_000}>10 Mbps</option>
-                    <option value={20_000_000}>20 Mbps</option>
-                    <option value={30_000_000}>30 Mbps</option>
-                    <option value={50_000_000}>50 Mbps</option>
-                    <option value={80_000_000}>80 Mbps</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="api-endpoint"
-                  className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-                >
-                  API Endpoint
-                </label>
-                <input
-                  id="api-endpoint"
-                  type="url"
-                  value={apiEndpoint}
-                  onChange={(e) => setApiEndpoint(e.target.value)}
-                  placeholder="http://localhost:3001"
-                  className="w-full rounded-lg bg-background/90 border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background font-mono"
-                />
-              </div>
-            </CardContent>
-          </div>
-        </Card>
+        <StreamSettingsPanel
+          streamSettingsOpen={streamSettingsOpen}
+          setStreamSettingsOpen={setStreamSettingsOpen}
+          videoCodec={videoCodec}
+          setVideoCodec={setVideoCodec}
+          availableCodecs={availableCodecs}
+          codecOptionSuffix={codecOptionSuffix}
+          resolution={resolution}
+          setResolution={setResolution}
+          streamFps={streamFps}
+          setStreamFps={setStreamFps}
+          bitrateLimit={bitrateLimit}
+          setBitrateLimit={setBitrateLimit}
+        />
       </main>
 
       <Toaster />

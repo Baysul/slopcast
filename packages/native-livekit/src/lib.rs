@@ -154,11 +154,13 @@ pub fn is_livekit_room_connected() -> bool {
 // ── NAPI: Audio PCM Feed ─────────────────────────────────────────────────
 
 #[napi]
-pub fn feed_pcm(pcm: Vec<i32>) -> NapiResult<()> {
+pub fn feed_pcm(pcm: napi::bindgen_prelude::Buffer) -> NapiResult<()> {
     with_guard(|state| {
+        // PCM arrives packed as i16 LE bytes from the capture native module.
         let samples: Vec<i16> = pcm
-            .into_iter()
-            .map(|s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+            .as_ref()
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         state
             .pcm_tx
