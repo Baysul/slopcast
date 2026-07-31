@@ -22,6 +22,8 @@ declare global {
       getCaptureContext: () => Promise<CaptureContext | null>;
       getStreamSettings: () => Promise<StreamSettings>;
       saveStreamSettings: (settings: StreamSettings) => Promise<boolean>;
+      getOnboardingCompleted: () => Promise<boolean>;
+      setOnboardingCompleted: () => Promise<boolean>;
       listScreenSources: () => Promise<Array<{ id: string; title: string; displayId: number }>>;
       startNativeCapture: (
         sourceIndex: number,

@@ -53,7 +53,9 @@ const detectDesktopEnvironment = (): CaptureContext['de'] => {
 const STREAM_SETTINGS_FILE = 'stream-settings.json';
 let streamSettingsCache: StreamSettings | null = null;
 
-const streamSettingsPath = (): string => path.join(app.getPath('userData'), STREAM_SETTINGS_FILE);
+const userDataFile = (filename: string): string => path.join(app.getPath('userData'), filename);
+
+const streamSettingsPath = (): string => userDataFile(STREAM_SETTINGS_FILE);
 
 function loadStreamSettings(): StreamSettings {
   if (streamSettingsCache) return streamSettingsCache;
@@ -78,6 +80,30 @@ function saveStreamSettings(raw: unknown): boolean {
     return true;
   } catch (err) {
     console.error(`Failed to write ${STREAM_SETTINGS_FILE}:`, err);
+    return false;
+  }
+}
+
+// ── Onboarding State Persistence ────────────────────────────────────────
+const ONBOARDING_FILE = 'onboarding.json';
+
+function isOnboardingCompleted(): boolean {
+  const file = userDataFile(ONBOARDING_FILE);
+  if (!existsSync(file)) return false;
+  try {
+    const data = JSON.parse(readFileSync(file, 'utf-8'));
+    return data?.completed === true;
+  } catch {
+    return false;
+  }
+}
+
+function setOnboardingCompleted(): boolean {
+  try {
+    writeFileSync(userDataFile(ONBOARDING_FILE), JSON.stringify({ completed: true }), 'utf-8');
+    return true;
+  } catch (err) {
+    console.error(`Failed to write ${ONBOARDING_FILE}:`, err);
     return false;
   }
 }
@@ -340,6 +366,10 @@ app.whenReady().then(() => {
   ipcMain.handle('get-stream-settings', () => loadStreamSettings());
 
   ipcMain.handle('save-stream-settings', (_event, raw: unknown) => saveStreamSettings(raw));
+
+  ipcMain.handle('get-onboarding-completed', () => isOnboardingCompleted());
+
+  ipcMain.handle('set-onboarding-completed', () => setOnboardingCompleted());
 
   ipcMain.handle('get-platform-info', () => ({
     platform: process.platform,

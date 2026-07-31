@@ -1,12 +1,13 @@
 import { ArrowRight, ScreenShare, Users, X } from 'lucide-react';
 import type React from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useOnboarding } from '@/hooks/useOnboarding';
 
 export const WelcomeBanner: React.FC = () => {
   const { completed, dismiss } = useOnboarding();
   const [visible, setVisible] = useState(false);
   const [exiting, setExiting] = useState(false);
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
     if (!completed) {
@@ -16,28 +17,39 @@ export const WelcomeBanner: React.FC = () => {
     return undefined;
   }, [completed]);
 
-  const handleDismiss = useCallback(() => {
-    setExiting(true);
+  useEffect(() => {
+    return () => {
+      if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
+    };
   }, []);
 
-  const handleAnimationEnd = useCallback(() => {
-    if (exiting) {
-      dismiss();
-    }
-  }, [exiting, dismiss]);
+  const handleDismiss = useCallback(() => {
+    setExiting(true);
+    dismissTimerRef.current = setTimeout(() => dismiss(), 600);
+  }, [dismiss]);
+
+  const handleTransitionEnd = useCallback(
+    (e: React.TransitionEvent) => {
+      if (e.propertyName === 'max-height' && exiting) {
+        if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
+        dismiss();
+      }
+    },
+    [exiting, dismiss],
+  );
 
   if (completed && !exiting) return null;
 
   return (
     <div
-      onAnimationEnd={handleAnimationEnd}
+      onTransitionEnd={handleTransitionEnd}
       className={`relative overflow-hidden transition-all duration-500 ease-out ${
         exiting ? 'max-h-0 opacity-0 mb-0' : 'max-h-[500px] opacity-100 mb-8'
       } ${!visible && !exiting ? 'max-h-0 opacity-0 mb-0' : ''}`}
       aria-hidden={exiting || !visible}
     >
-      <div className="rounded-xl border border-border bg-gradient-to-br from-[#111827]/95 via-[#111827]/90 to-[#0f172a]/95 backdrop-blur-md overflow-hidden">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-safelight/3 rounded-full blur-3xl -translate-y-1/2 translate-x-1/4 pointer-events-none" />
+      <div className="rounded-lg border border-border bg-gradient-to-br from-secondary/80 via-secondary/80 to-background/95 backdrop-blur-md overflow-hidden">
+        <div className="absolute top-0 right-0 w-64 h-64 bg-safelight/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/4 pointer-events-none" />
 
         <button
           type="button"

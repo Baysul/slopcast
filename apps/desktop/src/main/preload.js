@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCaptureContext: () => ipcRenderer.invoke('get-capture-context'),
   getStreamSettings: () => ipcRenderer.invoke('get-stream-settings'),
   saveStreamSettings: (settings) => ipcRenderer.invoke('save-stream-settings', settings),
+  getOnboardingCompleted: () => ipcRenderer.invoke('get-onboarding-completed'),
+  setOnboardingCompleted: () => ipcRenderer.invoke('set-onboarding-completed'),
   listScreenSources: () => ipcRenderer.invoke('list-screen-sources'),
   startNativeCapture: (sourceIndex, config) => ipcRenderer.invoke('start-native-capture', sourceIndex, config),
   startVideoCapture: (nodeId, width, height, fps) =>
