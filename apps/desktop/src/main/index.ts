@@ -801,37 +801,58 @@ app.whenReady().then(() => {
     return { filePath: resolved, fileName: path.basename(resolved) };
   });
 
+  function resolveFilePath(inputPath: string): string {
+    if (!inputPath) return inputPath;
+    let target = inputPath;
+    if (target.startsWith('file://')) {
+      try {
+        target = fileURLToPath(target);
+      } catch {
+        // Fall back to inputPath
+      }
+    } else if (target.startsWith('local-media://')) {
+      try {
+        target = fileURLToPath(target.replace('local-media://', 'file://'));
+      } catch {
+        // Fall back to inputPath
+      }
+    }
+    return path.resolve(target);
+  }
+
   ipcMain.handle('probe-video-file', async (_e, filePath: string) => {
     try {
-      return native.probeVideoFile(filePath);
+      const resolved = resolveFilePath(filePath);
+      return native.probeVideoFile(resolved);
     } catch (err) {
-      console.error('probe-video-file IPC error:', err);
+      console.error('probe-video-file IPC error:', err, 'for filePath:', filePath);
       return null;
     }
   });
 
   ipcMain.handle('start-video-file', async (_e, filePath: string) => {
     try {
-      native.setVideoFrameCallback((_err: unknown, data: Uint8Array) => {
-        if (data.length > 0) {
-          mainWindow?.webContents.send('video:frame', Buffer.from(data));
+      const resolved = resolveFilePath(filePath);
+      native.setVideoFrameCallback((_err: Error | null, buf: Buffer | null) => {
+        if (buf && buf.length > 0) {
+          mainWindow?.webContents.send('video:frame', buf);
         } else {
           mainWindow?.webContents.send('video:frame', null);
         }
       });
 
-      native.setAudioFrameCallback((_err: unknown, data: Uint8Array) => {
-        if (data.length > 0) {
-          mainWindow?.webContents.send('video:audio', Buffer.from(data));
+      native.setAudioFrameCallback((_err: Error | null, buf: Buffer | null) => {
+        if (buf && buf.length > 0) {
+          mainWindow?.webContents.send('video:audio', buf);
         } else {
           mainWindow?.webContents.send('video:audio', null);
         }
       });
 
-      native.startVideoFilePlayback(filePath);
+      native.startVideoFilePlayback(resolved);
       return true;
     } catch (err) {
-      console.error('start-video-file IPC error:', err);
+      console.error('start-video-file IPC error:', err, 'for filePath:', filePath);
       return false;
     }
   });
