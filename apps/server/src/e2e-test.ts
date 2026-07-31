@@ -566,15 +566,15 @@ async function runTest(): Promise<TestResult> {
       log('ELECTRON', '"Start Screenshare" button not found or not available');
     }
 
-    // Give stream time to start. The header shows a role="status" LIVE badge
+    // Give stream time to start. The "Stop Screenshare" button appears
     // only while sharing — poll it for up to STREAM_TIMEOUT_MS.
     {
       const deadline = Date.now() + STREAM_TIMEOUT_MS;
       let isLive = false;
       log('ELECTRON', `Waiting for streaming to start (timeout ${STREAM_TIMEOUT_MS}ms)...`);
       while (Date.now() < deadline) {
-        const liveBadge = page.locator('header [role="status"]', { hasText: 'LIVE' });
-        if ((await liveBadge.count()) > 0) {
+        const stopButton = page.getByRole('button', { name: 'Stop Screenshare' });
+        if ((await stopButton.count()) > 0) {
           isLive = true;
           break;
         }
