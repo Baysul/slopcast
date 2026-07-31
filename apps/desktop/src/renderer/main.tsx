@@ -15,7 +15,7 @@ import {
   VIDEO_CODEC_PRIORITY,
 } from '@slopcast/shared-types';
 import { Room, RoomEvent, Track } from 'livekit-client';
-import { Check, ChevronDown, ScreenShare, TriangleAlert, X } from 'lucide-react';
+import { Check, ChevronDown, Pause, Play, ScreenShare, TriangleAlert, X } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -487,6 +487,27 @@ export const PresenterApp: React.FC = () => {
   const [videoIsPlaying, setVideoIsPlaying] = useState(false);
   const [videoFileError, setVideoFileError] = useState<string | null>(null);
 
+  const [timelineHoverTime, setTimelineHoverTime] = useState<number | null>(null);
+  const [timelineHoverRatio, setTimelineHoverRatio] = useState<number>(0);
+
+  const videoCurrentTimeRef = useRef(0);
+  const videoIsPlayingRef = useRef(false);
+  const videoDurationRef = useRef(0);
+  const videoFileLoopRef = useRef(false);
+  const lastTickWallMsRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    videoIsPlayingRef.current = videoIsPlaying;
+  }, [videoIsPlaying]);
+
+  useEffect(() => {
+    videoDurationRef.current = videoDuration;
+  }, [videoDuration]);
+
+  useEffect(() => {
+    videoFileLoopRef.current = videoFileLoop;
+  }, [videoFileLoop]);
+
   // ── Stream Settings (user-configurable encoder parameters) ───────────
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
   const [streamFps, setStreamFps] = useState(DEFAULT_STREAM_SETTINGS.fps);
@@ -722,9 +743,10 @@ export const PresenterApp: React.FC = () => {
     if (!el) return;
     el.srcObject = previewStream;
     if (previewStream) {
+      el.muted = selectedSourceType !== 'video-file';
       el.play().catch(() => console.warn('Video autoplay blocked until user gesture'));
     }
-  }, [previewStream]);
+  }, [previewStream, selectedSourceType]);
 
   const loadAudioApps = useCallback(async () => {
     if (window.electronAPI) {
@@ -1203,6 +1225,9 @@ export const PresenterApp: React.FC = () => {
     let earlyAudioData: Uint8Array[] = [];
     let audioGeneratorReady = false;
 
+    const startWallUs = performance.now() * 1000;
+    let totalAudioSamples = 0;
+
     const createAudioGenerator = () => {
       if (audioGeneratorReady) return;
       audioGenerator = new MediaStreamTrackGenerator({ kind: 'audio' });
@@ -1213,19 +1238,22 @@ export const PresenterApp: React.FC = () => {
       let audioFrameIdx = 0;
       for (const buf of earlyAudioData) {
         if (buf.length >= 4) {
-          const samples = buf.length / 4;
+          const samples = Math.floor(buf.length / 4);
+          const tsUs = Math.round((audioFrameIdx / 48000) * 1_000_000);
+          audioFrameIdx += samples;
           const audioData = new AudioData({
             format: 's16',
             sampleRate: 48000,
             numberOfChannels: 2,
-            numberOfFrames: Math.floor(samples),
-            timestamp: Math.round(((audioFrameIdx * samples) / 48000) * 1_000_000),
+            numberOfFrames: samples,
+            timestamp: tsUs,
             data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length),
           });
           audioWriter?.write(audioData).catch(console.error);
-          audioFrameIdx += Math.floor(samples);
+          audioData.close();
         }
       }
+      totalAudioSamples += audioFrameIdx;
       earlyAudioData = [];
     };
 
@@ -1238,11 +1266,12 @@ export const PresenterApp: React.FC = () => {
 
       if (width === null || height === null) return;
 
+      const elapsedUs = Math.round(performance.now() * 1000 - startWallUs);
       const frame = new VideoFrame(new Uint8Array(data), {
         format: 'RGBA',
         codedWidth: width,
         codedHeight: height,
-        timestamp: 0,
+        timestamp: Math.max(0, elapsedUs),
       });
       videoWriter.write(frame).catch(console.error);
       frame.close();
@@ -1264,16 +1293,22 @@ export const PresenterApp: React.FC = () => {
       if (!audioWriter || data.length < 4) return;
 
       const buf = new Uint8Array(data);
-      const samples = buf.length / 4;
+      const samples = Math.floor(buf.length / 4);
+      if (samples === 0) return;
+
+      const tsUs = Math.round((totalAudioSamples / 48000) * 1_000_000);
+      totalAudioSamples += samples;
+
       const audioData = new AudioData({
         format: 's16',
         sampleRate: 48000,
         numberOfChannels: 2,
-        numberOfFrames: Math.floor(samples),
-        timestamp: 0,
+        numberOfFrames: samples,
+        timestamp: tsUs,
         data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length),
       });
       audioWriter.write(audioData).catch(console.error);
+      audioData.close();
     });
 
     // Probe to get dimensions
@@ -1290,17 +1325,47 @@ export const PresenterApp: React.FC = () => {
     const started = await window.electronAPI.startVideoFile(filePath);
     if (!started) throw new Error('Failed to start FFmpeg video file playback');
 
-    setVideoDuration(info.durationMs / 1000);
+    const durSec = info.durationMs / 1000;
+    setVideoDuration(durSec);
+    videoDurationRef.current = durSec;
     setVideoIsPlaying(true);
+    videoIsPlayingRef.current = true;
+    videoCurrentTimeRef.current = 0;
+    setVideoCurrentTime(0);
+    lastTickWallMsRef.current = performance.now();
 
-    // Poll for position (we estimate from wall clock since
-    // FFmpeg decode runs in its own thread)
     if (videoFileTimeUpdateRef.current) clearInterval(videoFileTimeUpdateRef.current);
-    const startWallMs = Date.now();
     videoFileTimeUpdateRef.current = setInterval(() => {
-      const elapsed = (Date.now() - startWallMs) / 1000;
-      setVideoCurrentTime(elapsed);
-    }, 250);
+      if (!lastTickWallMsRef.current) {
+        lastTickWallMsRef.current = performance.now();
+        return;
+      }
+      const now = performance.now();
+      const delta = (now - lastTickWallMsRef.current) / 1000;
+      lastTickWallMsRef.current = now;
+
+      if (videoIsPlayingRef.current) {
+        let nextTime = videoCurrentTimeRef.current + delta;
+        const dur = videoDurationRef.current;
+        if (dur > 0 && nextTime >= dur) {
+          if (videoFileLoopRef.current) {
+            nextTime = 0;
+            if (window.electronAPI) {
+              window.electronAPI.seekVideoFile(0);
+            }
+          } else {
+            nextTime = dur;
+            setVideoIsPlaying(false);
+            videoIsPlayingRef.current = false;
+            if (window.electronAPI) {
+              window.electronAPI.pauseVideoFile(true);
+            }
+          }
+        }
+        videoCurrentTimeRef.current = nextTime;
+        setVideoCurrentTime(nextTime);
+      }
+    }, 100);
 
     // Add a cleanup record for handleStopShare to use
     const cleanup = () => {
@@ -1591,6 +1656,9 @@ export const PresenterApp: React.FC = () => {
     if (window.electronAPI) {
       await window.electronAPI.stopVideoFile();
     }
+    videoIsPlayingRef.current = false;
+    videoCurrentTimeRef.current = 0;
+    videoDurationRef.current = 0;
     setVideoIsPlaying(false);
     setVideoCurrentTime(0);
     setVideoDuration(0);
@@ -1727,10 +1795,20 @@ export const PresenterApp: React.FC = () => {
                 ref={previewVideoRef}
                 autoPlay
                 playsInline
-                muted
+                muted={selectedSourceType !== 'video-file'}
                 aria-label="Screen share preview"
                 className={`w-full h-full object-contain ${isSharing ? 'block' : 'hidden'}`}
               />
+              {isSharing && selectedSourceType === 'video-file' && !videoIsPlaying && (
+                <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px] flex flex-col items-center justify-center gap-3 pointer-events-none z-10">
+                  <div className="p-4 rounded-full bg-background/80 text-foreground border border-border/60 shadow-xl flex items-center justify-center">
+                    <Pause className="w-10 h-10 text-safelight fill-safelight/20" aria-hidden="true" />
+                  </div>
+                  <span className="text-xs font-bold tracking-widest uppercase text-foreground bg-background/90 px-3.5 py-1.5 rounded-full border border-border/60 shadow-md">
+                    PAUSED
+                  </span>
+                </div>
+              )}
               {!isSharing && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-6">
                   {!roomCode ? (
@@ -1752,9 +1830,13 @@ export const PresenterApp: React.FC = () => {
                         {canStartShare ? 'Ready to go live' : 'Select a source to begin'}
                       </p>
                       <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
-                        {canStartShare
-                          ? 'Click Start Screenshare below to begin broadcasting.'
-                          : 'Choose a window, screen, or video file in the Screenshare Source panel.'}
+                        {(() => {
+                          if (!canStartShare)
+                            return 'Choose a window, screen, or video file in the Screenshare Source panel.';
+                          if (selectedSourceType === 'video-file')
+                            return 'Click Start Streaming below to begin broadcasting.';
+                          return 'Click Start Screenshare below to begin broadcasting.';
+                        })()}
                       </p>
                       <button
                         type="button"
@@ -1922,11 +2004,11 @@ export const PresenterApp: React.FC = () => {
             </CardHeader>
             <CardContent className="space-y-4">
               {/* ── Video file source ──────────────────────────────── */}
-              <div className="flex gap-2">
+              <div className="flex gap-2 min-w-0 max-w-full">
                 <Button
                   variant={selectedSourceType === 'video-file' ? 'default' : 'outline'}
                   size="sm"
-                  className="flex-1"
+                  className="flex-1 min-w-0 max-w-full overflow-hidden"
                   onClick={async () => {
                     const result = await window.electronAPI?.selectVideoFile();
                     if (result) {
@@ -1948,13 +2030,15 @@ export const PresenterApp: React.FC = () => {
                     }
                   }}
                 >
-                  {selectedVideoFileName ? `Selected: ${selectedVideoFileName}` : 'Stream Video File...'}
+                  <span className="truncate max-w-full block">
+                    {selectedVideoFileName ? `Selected: ${selectedVideoFileName}` : 'Stream Video File...'}
+                  </span>
                 </Button>
                 {selectedVideoFilePath && (
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="px-2"
+                    className="px-2 shrink-0"
                     onClick={() => {
                       setSelectedSourceType('screen');
                       setSelectedVideoFilePath(null);
@@ -1970,20 +2054,17 @@ export const PresenterApp: React.FC = () => {
 
               {(() => {
                 if (isWayland) {
-                  return (
-                    <div className="space-y-2">
-                      <p className="text-sm text-muted-foreground leading-relaxed">
-                        The system dialog (xdg-desktop-portal) will let you pick the window to share. Audio is
-                        auto-detected via PipeWire introspection.
-                      </p>
-                      {captureContext?.de === 'kde' && !autoDetectFailed && (
+                  if (captureContext?.de === 'kde' && !autoDetectFailed) {
+                    return (
+                      <div className="space-y-2">
                         <p className="text-sm text-muted-foreground bg-secondary border border-border rounded-lg p-3 leading-relaxed">
                           KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection
                           fails, select an audio app manually.
                         </p>
-                      )}
-                    </div>
-                  );
+                      </div>
+                    );
+                  }
+                  return null;
                 }
                 return (
                   <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
@@ -2034,7 +2115,7 @@ export const PresenterApp: React.FC = () => {
                 <div className="space-y-2">
                   {!showStopConfirm ? (
                     <Button variant="destructive" onClick={() => setShowStopConfirm(true)} className="w-full font-bold">
-                      Stop Screenshare
+                      {selectedSourceType === 'video-file' ? 'Stop Streaming' : 'Stop Screenshare'}
                     </Button>
                   ) : (
                     <div className="space-y-2">
@@ -2068,7 +2149,7 @@ export const PresenterApp: React.FC = () => {
                   disabled={!canStartShare}
                   className="w-full font-bold"
                 >
-                  Start Screenshare
+                  {selectedSourceType === 'video-file' ? 'Start Streaming' : 'Start Screenshare'}
                 </Button>
               )}
               {disabledReason && (
@@ -2099,24 +2180,57 @@ export const PresenterApp: React.FC = () => {
                     if (videoIsPlaying) {
                       await window.electronAPI.pauseVideoFile(true);
                       setVideoIsPlaying(false);
+                      videoIsPlayingRef.current = false;
                     } else {
                       await window.electronAPI.pauseVideoFile(false);
+                      lastTickWallMsRef.current = performance.now();
                       setVideoIsPlaying(true);
+                      videoIsPlayingRef.current = true;
                     }
                   }}
+                  className="gap-1.5 shrink-0"
                 >
-                  {videoIsPlaying ? 'Pause' : 'Play'}
+                  {videoIsPlaying ? (
+                    <>
+                      <Pause className="w-4 h-4 text-safelight" aria-hidden="true" /> Pause
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 text-safelight" aria-hidden="true" /> Play
+                    </>
+                  )}
                 </Button>
-                <div className="flex-1">
+                <div className="relative flex-1 group">
+                  {timelineHoverTime !== null && videoDuration > 0 && (
+                    <div
+                      className="absolute -top-8 -translate-x-1/2 bg-popover text-popover-foreground text-xs font-mono px-2 py-0.5 rounded shadow-md border border-border pointer-events-none tabular-nums z-20 whitespace-nowrap"
+                      style={{ left: `${timelineHoverRatio * 100}%` }}
+                    >
+                      {fmtDuration(timelineHoverTime * 1000)}
+                    </div>
+                  )}
                   <input
                     type="range"
                     min={0}
                     max={videoDuration || 0}
                     step={0.1}
                     value={videoCurrentTime}
+                    onMouseMove={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      if (rect.width > 0 && videoDuration > 0) {
+                        const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                        setTimelineHoverRatio(ratio);
+                        setTimelineHoverTime(ratio * videoDuration);
+                      }
+                    }}
+                    onMouseLeave={() => setTimelineHoverTime(null)}
                     onChange={(e) => {
+                      const newTime = Number(e.target.value);
+                      videoCurrentTimeRef.current = newTime;
+                      setVideoCurrentTime(newTime);
+                      lastTickWallMsRef.current = performance.now();
                       if (window.electronAPI) {
-                        window.electronAPI.seekVideoFile(Number(e.target.value) * 1000);
+                        window.electronAPI.seekVideoFile(newTime * 1000);
                       }
                     }}
                     className="w-full h-1.5 bg-secondary rounded-lg appearance-none cursor-pointer accent-safelight"
