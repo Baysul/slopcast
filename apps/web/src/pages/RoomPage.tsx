@@ -312,7 +312,7 @@ export const RoomPage: React.FC = () => {
   const variant = statusVariant();
 
   return (
-    <div className="min-h-screen bg-black text-gray-100 relative">
+    <div className="min-h-screen bg-background text-foreground relative">
       <div className="absolute inset-0 z-10">
         <VideoPlayer
           mediaStream={mediaStream}
@@ -333,7 +333,7 @@ export const RoomPage: React.FC = () => {
               onClick={() => navigate('/')}
               aria-label="Leave room"
               title="Leave room"
-              className="p-2 text-gray-400 hover:text-gray-100 hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+              className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
@@ -352,7 +352,7 @@ export const RoomPage: React.FC = () => {
               </Badge>
             </span>
             {participantCount > 0 && (
-              <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium text-gray-400 bg-black/40 border border-white/10 backdrop-blur-md shrink-0">
+              <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium text-muted-foreground bg-black/40 border border-white/10 backdrop-blur-md shrink-0">
                 {participantCount} spectator{participantCount !== 1 ? 's' : ''}
               </span>
             )}
@@ -362,7 +362,7 @@ export const RoomPage: React.FC = () => {
             onClick={copyLink}
             aria-label={copied ? 'Link copied' : 'Copy room link'}
             title="Copy room link"
-            className="p-2 text-gray-400 hover:text-gray-100 hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+            className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
           >
             {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
           </button>
@@ -377,7 +377,7 @@ export const RoomPage: React.FC = () => {
         <div className="fixed bottom-6 inset-x-0 flex justify-center px-4 z-30 pointer-events-none">
           <div
             role="alert"
-            className="bg-black/80 border border-destructive/25 text-destructive px-4 py-3 rounded-xl flex items-center gap-3 flex-wrap max-w-[90vw] sm:max-w-md backdrop-blur-md pointer-events-auto shadow-lg"
+            className="bg-black/80 border border-destructive/25 text-destructive px-4 py-3 rounded-lg flex items-center gap-3 flex-wrap max-w-[90vw] sm:max-w-md backdrop-blur-md pointer-events-auto shadow-lg"
           >
             <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
             <span className="text-xs font-medium min-w-0 flex-1">{errorMsg}</span>

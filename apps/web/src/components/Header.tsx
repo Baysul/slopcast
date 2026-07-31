@@ -53,7 +53,7 @@ export const Header: React.FC<HeaderProps> = ({ roomCode, shareUrl, status = 'co
             </Link>
           )}
           <Link to="/" className="flex items-center gap-2.5 group">
-            <div className="p-2 bg-secondary rounded-xl text-body-text group-hover:text-foreground transition-colors">
+            <div className="p-2 bg-secondary rounded-lg text-body-text group-hover:text-foreground transition-colors">
               <ScreenShare className="w-5 h-5" />
             </div>
             <span className="font-bold text-base text-foreground tracking-tight">Slopcast</span>

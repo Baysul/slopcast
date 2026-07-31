@@ -12,7 +12,7 @@ export const SpectatorBanner: React.FC<{ compact?: boolean }> = ({ compact }) =>
     );
   }
   return (
-    <div className="w-full max-w-2xl mt-6 flex items-center justify-center gap-2.5 rounded-xl border border-border/60 bg-card/60 px-4 py-3">
+    <div className="w-full max-w-2xl mt-6 flex items-center justify-center gap-2.5 rounded-lg border border-border/60 bg-card/60 px-4 py-3">
       <Monitor className="w-4 h-4 shrink-0 text-muted-foreground" aria-hidden="true" />
       <p className="text-xs text-muted-foreground leading-relaxed text-center">
         Web spectators can view screenshares. To host or share your screen, please open the Desktop App.

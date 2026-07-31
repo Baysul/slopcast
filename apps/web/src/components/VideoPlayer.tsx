@@ -258,7 +258,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           data-decoder-stalled="true"
           className="absolute inset-0 flex flex-col items-center justify-center bg-black/85 z-20 p-6"
         >
-          <AlertTriangle className="w-8 h-8 text-amber-400 mb-3" />
+          <AlertTriangle className="w-8 h-8 text-safelight mb-3" />
           <p className="text-sm font-medium text-white/90 mb-1">Video decoder issue</p>
           <p className="text-xs text-white/50 mb-5 max-w-xs text-center">
             {stalledCodec
@@ -271,7 +271,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 variant="outline"
                 size="sm"
                 onClick={onResync}
-                className="gap-2 border-amber-400/20 text-amber-300 hover:text-amber-200 hover:bg-amber-400/5"
+                className="gap-2 border-safelight/20 text-safelight hover:text-safelight-hover hover:bg-safelight/10"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Reconnect</span>
@@ -304,7 +304,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <button
                 type="button"
                 onClick={toggleMute}
-                className="text-white/60 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded"
+                className="text-white/60 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded-md"
                 title={isMuted ? 'Unmute' : 'Mute'}
                 aria-label={isMuted ? 'Unmute' : 'Mute'}
               >
