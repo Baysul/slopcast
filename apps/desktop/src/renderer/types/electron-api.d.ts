@@ -32,6 +32,7 @@ declare global {
       stopNativeCapture: () => Promise<boolean>;
       isNativeCaptureActive: () => Promise<boolean>;
       getSpectatorCount: () => Promise<number>;
+      selectVideoFile: () => Promise<{ filePath: string; fileName: string } | null>;
     };
   }
 }

@@ -1,10 +1,23 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as nativeLiveKit from '@slopcast/native-livekit';
 import * as native from '@slopcast/native-rust';
 import { type StreamSettings, sanitizeStreamSettings } from '@slopcast/shared-types';
 import { loadConfig } from '@slopcast/shared-types/config';
-import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, nativeImage, session } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  desktopCapturer,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  protocol,
+  session,
+} from 'electron';
 
 const appConfig = loadConfig();
 
@@ -20,6 +33,8 @@ interface CaptureContext {
 }
 
 let lastCaptureContext: CaptureContext | null = null;
+
+const allowedFilePaths = new Set<string>();
 
 const isWayland =
   process.platform === 'linux' && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY);
@@ -676,6 +691,62 @@ app.whenReady().then(() => {
       console.error('clipboard-write-text IPC error:', err);
       return false;
     }
+  });
+
+  // ── Local media protocol ──────────────────────────────────────────────
+  // Chromium's sandbox blocks file:// access from the renderer. A custom
+  // protocol lets the renderer play back video files the user selected
+  // through the file dialog, with a session-scoped allowlist for security.
+  protocol.handle('local-media', async (request) => {
+    let filePath: string;
+    try {
+      const url = new URL(request.url);
+      filePath = fileURLToPath(url);
+    } catch {
+      return new Response('Bad Request', { status: 400 });
+    }
+    const resolvedPath = realpathSync(filePath);
+    if (!allowedFilePaths.has(resolvedPath)) {
+      return new Response('Forbidden', { status: 403 });
+    }
+    const homeDir = app.getPath('home');
+    if (!resolvedPath.startsWith(homeDir + path.sep) && resolvedPath !== homeDir) {
+      return new Response('Forbidden', { status: 403 });
+    }
+    try {
+      const fileStat = await stat(resolvedPath);
+      const ext = path.extname(resolvedPath).toLowerCase();
+      const mimeTypes: Record<string, string> = {
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+        '.ogg': 'video/ogg',
+        '.ogv': 'video/ogg',
+      };
+      const contentType = mimeTypes[ext] ?? 'video/mp4';
+      return new Response(createReadStream(resolvedPath) as unknown as ReadableStream, {
+        status: 200,
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(fileStat.size),
+          'Accept-Ranges': 'bytes',
+        },
+      });
+    } catch {
+      return new Response('Not Found', { status: 404 });
+    }
+  });
+
+  ipcMain.handle('select-video-file', async () => {
+    if (!mainWindow) return null;
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'Video Files', extensions: ['mp4', 'webm', 'ogg', 'ogv'] }],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    const resolved = realpathSync(result.filePaths[0]);
+    allowedFilePaths.clear();
+    allowedFilePaths.add(resolved);
+    return { filePath: resolved, fileName: path.basename(resolved) };
   });
 
   createWindow();

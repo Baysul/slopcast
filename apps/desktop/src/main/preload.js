@@ -27,4 +27,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopNativeCapture: () => ipcRenderer.invoke('stop-native-capture'),
   isNativeCaptureActive: () => ipcRenderer.invoke('is-native-capture-active'),
   getSpectatorCount: () => ipcRenderer.invoke('get-spectator-count'),
+  selectVideoFile: () => ipcRenderer.invoke('select-video-file'),
 });
