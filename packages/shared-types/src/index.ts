@@ -49,9 +49,11 @@ export const VIDEO_CODEC_LABEL_LK: Record<VideoCodec, string> = {
   av1: 'AV1',
 };
 
-export type ResolutionPreset = '1080p' | '1440p' | '2160p';
+export type ResolutionPreset = '480p' | '720p' | '1080p' | '1440p' | '2160p';
 
 export const RESOLUTION_DIMENSIONS: Record<ResolutionPreset, { width: number; height: number }> = {
+  '480p': { width: 854, height: 480 },
+  '720p': { width: 1280, height: 720 },
   '1080p': { width: 1920, height: 1080 },
   '1440p': { width: 2560, height: 1440 },
   '2160p': { width: 3840, height: 2160 },
@@ -125,7 +127,7 @@ export function sanitizeStreamSettings(raw: unknown): StreamSettings {
   const codec = (v: unknown): VideoCodec =>
     v === 'h264' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
   const resolution = (v: unknown): ResolutionPreset =>
-    v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
+    v === '480p' || v === '720p' || v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
   const sourceType = (v: unknown): VideoSourceType => (v === 'screen' || v === 'video-file' ? v : 'screen');
   return {
     fps: num(o.fps, 1, 240, d.fps),

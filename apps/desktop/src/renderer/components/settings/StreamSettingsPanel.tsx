@@ -92,6 +92,8 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = ({
                 onChange={(e) => setResolution(e.target.value as ResolutionPreset)}
                 className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
               >
+                <option value="480p">480p (SD)</option>
+                <option value="720p">720p (HD)</option>
                 <option value="1080p">1080p (Full HD)</option>
                 <option value="1440p">1440p (QHD)</option>
                 <option value="2160p">4K (Ultra HD)</option>
