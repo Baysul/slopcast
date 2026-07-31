@@ -1,6 +1,7 @@
 import type { AudioApp } from '@slopcast/shared-types';
 import { Check } from 'lucide-react';
 import type React from 'react';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { type AudioAppGroup, groupAudioApps } from '../../utils/audio-grouping';
 import { AudioLevelMeter } from './AudioLevelMeter';
@@ -11,7 +12,7 @@ export interface AudioAppPickerProps {
   selectedAudioAppId: number | null;
   autoDetectedApp?: AudioApp | null;
   audioLevels: ReadonlyMap<number, number>;
-  onSelectApp: (appId: number, explicit?: boolean) => void;
+  onSelectApp: (appId: number | null, explicit?: boolean) => void;
   onRefresh?: () => void;
   disabled?: boolean;
 }
@@ -20,91 +21,140 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = ({
   audioApps,
   audioAppGroups,
   selectedAudioAppId,
-  onSelectApp,
+  autoDetectedApp,
   audioLevels,
+  onSelectApp,
+  onRefresh,
   disabled = false,
 }) => {
   const groups = audioAppGroups ?? groupAudioApps(audioApps);
 
-  const getGroupLevel = (group: AudioAppGroup): number => {
-    let max = 0;
-    for (const member of group.members) {
-      const lvl = audioLevels.get(member.id) ?? 0;
-      if (lvl > max) max = lvl;
-    }
-    return max;
-  };
+  const displayName = (app: AudioApp): string => app.name;
 
-  const getGroupTitle = (group: AudioAppGroup): string => {
-    const rep = group.representative;
-    if (rep.mediaTitle) return rep.mediaTitle;
-    if (rep.windowTitle) return rep.windowTitle;
-    return rep.name;
-  };
-
-  const getGroupSubtitle = (group: AudioAppGroup): string | null => {
-    const rep = group.representative;
-    if (rep.mediaTitle || rep.windowTitle) {
-      return rep.name;
+  const groupSubLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string | null => {
+    if (isDesktopAudio) return 'All system audio';
+    const { members } = group;
+    let label: string | undefined;
+    for (const m of members) {
+      if (m.mediaTitle) {
+        label = m.mediaTitle;
+        break;
+      }
     }
-    if (group.members.length > 1) {
-      return `${group.members.length} audio streams`;
+    if (!label) {
+      for (const m of members) {
+        if (m.windowTitle) {
+          label = m.windowTitle;
+          break;
+        }
+      }
     }
+    if (label) {
+      if (members.length > 1) return `${label} \u00B7 ${members.length} streams`;
+      return label;
+    }
+    if (members.length > 1) return `${members.length} audio streams`;
     return null;
   };
 
-  return (
-    <Card className="border-border/60 bg-card/60 backdrop-blur-sm shadow-xl">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold flex items-center justify-between">
-          <span>Audio Target</span>
-          <span className="text-xs font-normal text-muted-foreground">
-            {groups.length} active application{groups.length === 1 ? '' : 's'}
-          </span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-          {groups.map((group) => {
-            const isSelected = selectedAudioAppId === group.representative.id;
-            const level = getGroupLevel(group);
-            const title = getGroupTitle(group);
-            const subtitle = getGroupSubtitle(group);
+  const pickerRowClass = (isSelected: boolean): string => {
+    if (isSelected) {
+      return 'bg-safelight-glow border-safelight/30 text-safelight';
+    }
+    return 'bg-background/60 border-border hover:border-input hover:text-foreground';
+  };
 
-            const cardStyle = isSelected
-              ? 'bg-safelight/10 border-safelight/40 text-foreground'
-              : 'bg-secondary/40 border-border/40 text-muted-foreground hover:bg-secondary/80 hover:text-foreground';
+  const renderBtn = (group: AudioAppGroup) => {
+    const { representative, members } = group;
+    const isDesktopAudio = representative.id === -1;
+    const isSelected = members.some((m) => m.id === selectedAudioAppId);
+    const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
+    const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
+    const btnClass = `flex items-center justify-between p-3 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
+      isSelected,
+    )} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`;
 
+    return (
+      <button
+        key={representative.id}
+        type="button"
+        disabled={disabled}
+        aria-pressed={isSelected}
+        onClick={() => {
+          if (isSelected) {
+            onSelectApp(null, false);
+          } else {
+            onSelectApp(representative.id, true);
+          }
+        }}
+        className={btnClass}
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold truncate min-w-0">{displayName(representative)}</span>
+            {!isDesktopAudio && <AudioLevelMeter level={level} />}
+          </div>
+          {(() => {
+            const label = groupSubLabel(group, isDesktopAudio);
+            if (!label) return null;
             return (
-              <button
-                type="button"
-                key={group.representative.id}
-                disabled={disabled}
-                onClick={() => onSelectApp(group.representative.id, true)}
-                className={`w-full text-left p-2.5 rounded-lg border transition-all flex items-center justify-between gap-3 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 ${cardStyle} ${
-                  disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
-                }`}
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <span
-                    className={`shrink-0 w-4 h-4 rounded-full flex items-center justify-center border ${
-                      isSelected ? 'border-safelight bg-safelight text-background' : 'border-muted-foreground/30'
-                    }`}
-                  >
-                    {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" aria-hidden="true" />}
-                  </span>
-                  <div className="min-w-0">
-                    <p className="font-medium truncate leading-tight text-foreground">{title}</p>
-                    {subtitle && <p className="text-[10px] text-muted-foreground truncate mt-0.5">{subtitle}</p>}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <AudioLevelMeter level={level} />
-                </div>
-              </button>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className="text-xs opacity-60">{label}</span>
+                {isAutoDetected && (
+                  <span className="text-xs bg-safelight-glow text-safelight/80 px-2 py-1 rounded-full">auto</span>
+                )}
+              </div>
             );
-          })}
+          })()}
+        </div>
+        {isSelected && <Check className="w-4 h-4 shrink-0 text-safelight" aria-hidden="true" />}
+      </button>
+    );
+  };
+
+  const desktopAudio: AudioApp = {
+    id: -1,
+    name: 'Desktop Audio (All System Sound)',
+    processId: 0,
+    clientId: null,
+    mediaTitle: null,
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+            Window Audio Capture
+            {autoDetectedApp && (
+              <span className="text-xs font-normal text-safelight bg-safelight-glow px-2 py-1 rounded-full border border-safelight/30">
+                Auto ✓
+              </span>
+            )}
+          </CardTitle>
+          {onRefresh && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={disabled}
+              onClick={onRefresh}
+              className="text-xs text-muted-foreground hover:text-foreground h-auto px-2"
+            >
+              Refresh
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          Auto-detected from your window selection. Click an app below to override — only that app's audio is streamed.
+          Select <strong className="text-foreground">Desktop Audio</strong> to capture all system sound.
+        </p>
+
+        <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+          {renderBtn({ representative: desktopAudio, members: [desktopAudio] })}
+          {groups.length > 0 && <div className="border-t border-border my-1.5" />}
+          {groups.map((group) => renderBtn(group))}
         </div>
       </CardContent>
     </Card>
