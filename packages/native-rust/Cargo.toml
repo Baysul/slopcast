@@ -19,6 +19,11 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
+ffmpeg-next = { version = "8", optional = true }
+
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["dep:ffmpeg-next"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.10.0"

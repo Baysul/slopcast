@@ -6,6 +6,8 @@
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 
+mod video_file;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -100,6 +102,50 @@ mod unsupported_platform {
 
     pub fn list_screen_sources() -> napi::Result<Vec<napi::Unknown<'static>>> {
         Ok(Vec::new())
+    }
+
+    pub fn set_video_frame_callback(
+        _: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+    ) -> napi::Result<()> {
+        Err(napi::Error::from_reason(
+            "Native video file decode is not supported on this platform",
+        ))
+    }
+
+    pub fn set_audio_frame_callback(
+        _: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+    ) -> napi::Result<()> {
+        Err(napi::Error::from_reason(
+            "Native video file decode is not supported on this platform",
+        ))
+    }
+
+    pub fn probe_video_file(_: String) -> napi::Result<crate::VideoFileInfo> {
+        Err(napi::Error::from_reason(
+            "Native video file decode is not supported on this platform",
+        ))
+    }
+
+    pub fn start_video_file_playback(_: String) -> napi::Result<()> {
+        Err(napi::Error::from_reason(
+            "Native video file decode is not supported on this platform",
+        ))
+    }
+
+    pub fn stop_video_file_playback() -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn seek_video_file_playback(_: i64) -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn set_video_file_paused(_: bool) -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn is_video_file_playback_active() -> napi::Result<bool> {
+        Ok(false)
     }
 }
 
@@ -358,6 +404,84 @@ pub fn start_video_capture(node_id: u32, width: u32, height: u32, fps: u32) -> n
 #[napi]
 pub fn stop_video_capture() -> napi::Result<bool> {
     platform::stop_video_capture()
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct VideoFileInfo {
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: i64,
+    pub has_audio: bool,
+}
+
+/// Registers a callback that receives decoded RGBA video frames from the
+/// FFmpeg video file decoder. Each `Vec<u8>` contains `width * height * 4`
+/// bytes in RGBA order. An empty `Vec<u8>` signals end-of-file.
+#[napi]
+pub fn set_video_frame_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+) -> napi::Result<()> {
+    video_file::ffmpeg::set_video_frame_callback(callback)
+}
+
+/// Registers a callback that receives decoded PCM audio from the FFmpeg
+/// video file decoder. Each `Vec<u8>` contains signed 16-bit little-endian
+/// stereo interleaved samples at 48 kHz. An empty `Vec<u8>` signals EOF.
+#[napi]
+pub fn set_audio_frame_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<Vec<u8>, ()>>,
+) -> napi::Result<()> {
+    video_file::ffmpeg::set_audio_frame_callback(callback)
+}
+
+/// Probes a video file path and returns its dimensions, duration, and audio
+/// track availability without starting playback.
+#[napi]
+pub fn probe_video_file(path: String) -> napi::Result<VideoFileInfo> {
+    let info = video_file::ffmpeg::probe_file(&path)
+        .map_err(|e| napi::Error::from_reason(e))?;
+    Ok(VideoFileInfo {
+        width: info.width,
+        height: info.height,
+        duration_ms: info.duration_ms,
+        has_audio: info.has_audio,
+    })
+}
+
+/// Starts FFmpeg-based video file playback, delivering decoded video and
+/// audio frames through the registered callbacks.
+#[napi]
+pub fn start_video_file_playback(path: String) -> napi::Result<()> {
+    video_file::ffmpeg::start_playback(&path)
+        .map_err(|e| napi::Error::from_reason(e))
+}
+
+/// Stops active FFmpeg video file playback and joins the decode thread.
+#[napi]
+pub fn stop_video_file_playback() -> napi::Result<()> {
+    video_file::ffmpeg::stop_playback();
+    Ok(())
+}
+
+/// Seeks the active playback to a given timestamp in milliseconds.
+#[napi]
+pub fn seek_video_file_playback(ts_ms: i64) -> napi::Result<()> {
+    video_file::ffmpeg::seek_playback(ts_ms);
+    Ok(())
+}
+
+/// Pauses or resumes active video file playback.
+#[napi]
+pub fn set_video_file_paused(paused: bool) -> napi::Result<()> {
+    video_file::ffmpeg::set_playback_paused(paused);
+    Ok(())
+}
+
+/// Returns `true` if a video file playback session is currently active.
+#[napi]
+pub fn is_video_file_playback_active() -> napi::Result<bool> {
+    Ok(video_file::ffmpeg::is_playback_active())
 }
 
 #[cfg(test)]

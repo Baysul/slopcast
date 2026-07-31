@@ -46,7 +46,18 @@ declare global {
       getCaptureContext: () => Promise<CaptureContext | null>;
       getStreamSettings: () => Promise<StreamSettings>;
       saveStreamSettings: (settings: StreamSettings) => Promise<boolean>;
+      getOnboardingCompleted: () => Promise<boolean>;
+      setOnboardingCompleted: () => Promise<boolean>;
       selectVideoFile: () => Promise<{ filePath: string; fileName: string } | null>;
+      probeVideoFile: (
+        filePath: string,
+      ) => Promise<{ width: number; height: number; durationMs: number; hasAudio: boolean } | null>;
+      startVideoFile: (filePath: string) => Promise<boolean>;
+      stopVideoFile: () => Promise<boolean>;
+      seekVideoFile: (tsMs: number) => Promise<boolean>;
+      pauseVideoFile: (paused: boolean) => Promise<boolean>;
+      onVideoFileFrame: (cb: (data: Buffer | null) => void) => () => void;
+      onVideoFileAudio: (cb: (data: Buffer | null) => void) => () => void;
     };
   }
 }
@@ -541,9 +552,14 @@ export const PresenterApp: React.FC = () => {
   const settingsHydratedRef = useRef(false);
   const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
 
-  const videoFileRef = useRef<HTMLVideoElement | null>(null);
-  const videoFileAudioCtxRef = useRef<AudioContext | null>(null);
   const videoFileTimeUpdateRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const videoFileGenRef = useRef<{
+    video: MediaStreamTrackGenerator;
+    audio: MediaStreamTrackGenerator | null;
+    videoWriter: WritableStreamDefaultWriter<VideoFrame>;
+    audioWriter: WritableStreamDefaultWriter<AudioData> | null;
+    cleanup: () => void;
+  } | null>(null);
 
   useEffect(() => {
     isSharingRef.current = isSharing;
@@ -1178,130 +1194,163 @@ export const PresenterApp: React.FC = () => {
 
   // video-file playback, which delivers its audio directly from
   // MediaStream.captureStream() instead of PipeWire.
-  const preCheckVideoFile = useCallback((filePath: string) => {
-    const ext = filePath.split('.').pop()?.toLowerCase();
-    if (!ext) return;
-    const mimeMap: Record<string, string[]> = {
-      mp4: ['video/mp4; codecs="avc1.42E01E,mp4a.40.2"'],
-      webm: ['video/webm; codecs="vp8,vorbis"', 'video/webm; codecs="vp9,opus"'],
-      ogg: ['video/ogg; codecs="theora,vorbis"'],
-      ogv: ['video/ogg; codecs="theora,vorbis"'],
-    };
-    const types = mimeMap[ext];
-    if (!types) {
-      setVideoFileError(`Unsupported file type (.${ext}). Try converting to MP4 with H.264 video and AAC audio.`);
+  const preCheckVideoFile = useCallback(async (filePath: string) => {
+    if (!window.electronAPI?.probeVideoFile) {
+      setVideoFileError('FFmpeg is not available (video file playback not supported)');
       return;
     }
-    const video = document.createElement('video');
-    const any = types.some((t) => video.canPlayType(t) === 'probably');
-    if (any) {
+    try {
+      const info = await window.electronAPI.probeVideoFile(filePath);
+      if (!info) {
+        setVideoFileError(`Cannot open file. The format may be unsupported or the file is corrupt.`);
+        return;
+      }
       setVideoFileError(null);
-      return;
+      setVideoDuration(info.durationMs / 1000);
+    } catch {
+      setVideoFileError(`Cannot open file. The format may be unsupported or the file is corrupt.`);
     }
-    const maybe = types.some((t) => video.canPlayType(t) === 'maybe');
-    if (maybe) {
-      setVideoFileError(null);
-      return;
-    }
-    setVideoFileError(
-      `This .${ext} file may not play in Chromium. Convert to MP4 with H.264 video and AAC audio for best compatibility.`,
-    );
   }, []);
 
   const captureVideoTrackFromFile = async (
     filePath: string,
   ): Promise<{ videoTrack: MediaStreamTrack; audioTrack: MediaStreamTrack | null }> => {
-    const video = document.createElement('video');
-    video.preload = 'auto';
-    video.loop = videoFileLoop;
-    video.muted = false;
-
-    let audioCtx: AudioContext | null = null;
-    let sourceNode: MediaElementAudioSourceNode | null = null;
-
-    const setupLocalAudio = () => {
-      if (audioCtx) return;
-      audioCtx = new AudioContext();
-      void audioCtx.resume();
-      sourceNode = audioCtx.createMediaElementSource(video);
-      sourceNode.connect(audioCtx.destination);
-      videoFileAudioCtxRef.current = audioCtx;
-    };
-
-    video.src = `local-media://${filePath}`;
-
-    await new Promise<void>((resolve, reject) => {
-      video.onloadedmetadata = () => resolve();
-      video.onerror = () => {
-        const err = video.error;
-        const ext = filePath.split('.').pop()?.toLowerCase() ?? 'unknown';
-        const codeMessages: Record<number, string> = {
-          1: 'Video file could not be loaded. The format or codec may not be supported.',
-          2: 'Video file could not be loaded. The server returned an error.',
-          3: 'Video playback was aborted.',
-          4: `Video file is not supported. Try converting to MP4 with H.264 video and AAC audio.`,
-        };
-        const codeDetail = err ? (codeMessages[err.code] ?? `Video error (code ${err.code})`) : '';
-        const mediaErrDetail = err?.message ? ` MediaError: ${err.message}` : '';
-        const detail = `${codeDetail}${mediaErrDetail} (file: ${filePath.split('/').pop() ?? filePath}, type: .${ext})`;
-        reject(new Error(detail));
-      };
-    });
-
-    // Wire up the AudioContext graph BEFORE the priming play to avoid an audible glitch
-    setupLocalAudio();
-
-    // Start playback silently to prime the decoder, then pause
-    await video.play();
-    video.pause();
-    video.currentTime = 0;
-
-    setVideoDuration(video.duration);
-    videoFileRef.current = video;
-
-    if (videoFileTimeUpdateRef.current) clearInterval(videoFileTimeUpdateRef.current);
-    videoFileTimeUpdateRef.current = setInterval(() => {
-      if (videoFileRef.current) {
-        setVideoCurrentTime(videoFileRef.current.currentTime);
-        setVideoIsPlaying(!videoFileRef.current.paused);
-      }
-    }, 250);
-
-    let alreadyStopped = false;
-
-    video.addEventListener('ended', () => {
-      setVideoCurrentTime(video.duration);
-      setVideoIsPlaying(false);
-      if (!video.loop) {
-        if (!alreadyStopped) {
-          alreadyStopped = true;
-          handleStopShare();
-          notify('info', 'Stream ended', 'The video file has finished playing.');
-        }
-      }
-    });
-
-    video.addEventListener('error', () => {
-      const errMsg = video.error?.message ?? 'Unknown playback error';
-      setVideoFileError(errMsg);
-      if (!alreadyStopped) {
-        alreadyStopped = true;
-        handleStopShare();
-        notify('error', 'Playback error', errMsg);
-      }
-    });
-
-    const stream = video.captureStream();
-    const videoTrack = stream.getVideoTracks()[0];
-    const audioTrack = stream.getAudioTracks()[0] ?? null;
-
-    if (!videoTrack) {
-      throw new Error('captureStream() produced no video track');
+    if (!window.electronAPI) {
+      throw new Error('Electron API not available');
     }
 
-    videoTrack.contentHint = 'motion';
+    const videoGenerator = new MediaStreamTrackGenerator({ kind: 'video' });
+    const videoWriter = videoGenerator.writable.getWriter();
+    let audioWriter: WritableStreamDefaultWriter<AudioData> | null = null;
+    let audioGenerator: MediaStreamTrackGenerator | null = null;
+    let width: number | null = null;
+    let height: number | null = null;
 
-    return { videoTrack, audioTrack };
+    // Try to pre-create the audio generator — we create it eagerly if the
+    // FFmpeg thread produces audio before the first video frame (which is
+    // how many files are structured).
+    let earlyAudioData: Uint8Array[] = [];
+    let audioGeneratorReady = false;
+
+    const createAudioGenerator = () => {
+      if (audioGeneratorReady) return;
+      audioGenerator = new MediaStreamTrackGenerator({ kind: 'audio' });
+      audioWriter = audioGenerator.writable.getWriter();
+      audioGeneratorReady = true;
+
+      // Flush any early audio data
+      let audioFrameIdx = 0;
+      for (const buf of earlyAudioData) {
+        if (buf.length >= 4) {
+          const samples = buf.length / 4;
+          const audioData = new AudioData({
+            format: 's16',
+            sampleRate: 48000,
+            numberOfChannels: 2,
+            numberOfFrames: Math.floor(samples),
+            timestamp: Math.round(((audioFrameIdx * samples) / 48000) * 1_000_000),
+            data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length),
+          });
+          audioWriter?.write(audioData).catch(console.error);
+          audioFrameIdx += Math.floor(samples);
+        }
+      }
+      earlyAudioData = [];
+    };
+
+    const unsubFrame = window.electronAPI.onVideoFileFrame((data) => {
+      if (!data) {
+        videoWriter.close().catch(console.error);
+        audioWriter?.close().catch(console.error);
+        return;
+      }
+
+      if (width === null || height === null) return;
+
+      const frame = new VideoFrame(new Uint8Array(data), {
+        format: 'RGBA',
+        codedWidth: width,
+        codedHeight: height,
+        timestamp: 0,
+      });
+      videoWriter.write(frame).catch(console.error);
+      frame.close();
+    });
+
+    const unsubAudio = window.electronAPI.onVideoFileAudio((data) => {
+      if (!data) {
+        audioWriter?.close().catch(console.error);
+        return;
+      }
+
+      if (!audioGeneratorReady) {
+        if (data.length > 0) {
+          earlyAudioData.push(data);
+        }
+        return;
+      }
+
+      if (!audioWriter || data.length < 4) return;
+
+      const buf = new Uint8Array(data);
+      const samples = buf.length / 4;
+      const audioData = new AudioData({
+        format: 's16',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        numberOfFrames: Math.floor(samples),
+        timestamp: 0,
+        data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length),
+      });
+      audioWriter.write(audioData).catch(console.error);
+    });
+
+    // Probe to get dimensions
+    const info = await window.electronAPI.probeVideoFile(filePath);
+    if (!info) throw new Error('Failed to probe video file');
+    width = info.width;
+    height = info.height;
+
+    // Create audio generator if the file has audio
+    if (info.hasAudio) {
+      createAudioGenerator();
+    }
+
+    const started = await window.electronAPI.startVideoFile(filePath);
+    if (!started) throw new Error('Failed to start FFmpeg video file playback');
+
+    setVideoDuration(info.durationMs / 1000);
+    setVideoIsPlaying(true);
+
+    // Poll for position (we estimate from wall clock since
+    // FFmpeg decode runs in its own thread)
+    if (videoFileTimeUpdateRef.current) clearInterval(videoFileTimeUpdateRef.current);
+    const startWallMs = Date.now();
+    videoFileTimeUpdateRef.current = setInterval(() => {
+      const elapsed = (Date.now() - startWallMs) / 1000;
+      setVideoCurrentTime(elapsed);
+    }, 250);
+
+    // Add a cleanup record for handleStopShare to use
+    const cleanup = () => {
+      videoWriter.close().catch(console.error);
+      audioWriter?.close().catch(console.error);
+      unsubFrame();
+      unsubAudio();
+    };
+
+    videoFileGenRef.current = {
+      video: videoGenerator,
+      audio: audioGenerator,
+      videoWriter,
+      audioWriter,
+      cleanup,
+    };
+
+    return {
+      videoTrack: videoGenerator,
+      audioTrack: audioGenerator,
+    };
   };
 
   // Wayland uses xdg-desktop-portal; X11 uses the in-app source picker.
@@ -1407,12 +1456,6 @@ export const PresenterApp: React.FC = () => {
         setTelemetry({ ...idleTelemetry(), live: true });
         startTelemetryPolling();
 
-        const fileVideo = videoFileRef.current;
-        if (fileVideo) {
-          fileVideo.currentTime = 0;
-          await fileVideo.play();
-          setVideoIsPlaying(true);
-        }
         return;
       }
 
@@ -1553,38 +1596,29 @@ export const PresenterApp: React.FC = () => {
         await window.electronAPI.stopAudioCapture();
       }
       // Clean up video-file resources if any were created before the failure
-      if (videoFileAudioCtxRef.current) {
-        void videoFileAudioCtxRef.current.close();
-        videoFileAudioCtxRef.current = null;
+      if (videoFileGenRef.current) {
+        videoFileGenRef.current.cleanup();
+        videoFileGenRef.current = null;
       }
       if (videoFileTimeUpdateRef.current) {
         clearInterval(videoFileTimeUpdateRef.current);
         videoFileTimeUpdateRef.current = null;
-      }
-      if (videoFileRef.current) {
-        videoFileRef.current.pause();
-        videoFileRef.current.removeAttribute('src');
-        videoFileRef.current.load();
-        videoFileRef.current = null;
       }
     }
   };
 
   const handleStopShare = async () => {
     // ── Clean up video file playback ─────────────────────────────────────
+    if (videoFileGenRef.current) {
+      videoFileGenRef.current.cleanup();
+      videoFileGenRef.current = null;
+    }
     if (videoFileTimeUpdateRef.current) {
       clearInterval(videoFileTimeUpdateRef.current);
       videoFileTimeUpdateRef.current = null;
     }
-    if (videoFileRef.current) {
-      videoFileRef.current.pause();
-      videoFileRef.current.removeAttribute('src');
-      videoFileRef.current.load();
-      videoFileRef.current = null;
-    }
-    if (videoFileAudioCtxRef.current) {
-      void videoFileAudioCtxRef.current.close();
-      videoFileAudioCtxRef.current = null;
+    if (window.electronAPI) {
+      await window.electronAPI.stopVideoFile();
     }
     setVideoIsPlaying(false);
     setVideoCurrentTime(0);
@@ -2089,13 +2123,14 @@ export const PresenterApp: React.FC = () => {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => {
-                    const v = videoFileRef.current;
-                    if (!v) return;
-                    if (v.paused) {
-                      v.play().catch((err: unknown) => console.warn('Video play failed:', err));
+                  onClick={async () => {
+                    if (!window.electronAPI) return;
+                    if (videoIsPlaying) {
+                      await window.electronAPI.pauseVideoFile(true);
+                      setVideoIsPlaying(false);
                     } else {
-                      v.pause();
+                      await window.electronAPI.pauseVideoFile(false);
+                      setVideoIsPlaying(true);
                     }
                   }}
                 >
@@ -2109,8 +2144,9 @@ export const PresenterApp: React.FC = () => {
                     step={0.1}
                     value={videoCurrentTime}
                     onChange={(e) => {
-                      const v = videoFileRef.current;
-                      if (v) v.currentTime = Number(e.target.value);
+                      if (window.electronAPI) {
+                        window.electronAPI.seekVideoFile(Number(e.target.value) * 1000);
+                      }
                     }}
                     className="w-full h-1.5 bg-secondary rounded-lg appearance-none cursor-pointer accent-safelight"
                     aria-label="Seek position"
@@ -2127,9 +2163,6 @@ export const PresenterApp: React.FC = () => {
                   checked={videoFileLoop}
                   onChange={(e) => {
                     setVideoFileLoop(e.target.checked);
-                    if (videoFileRef.current) {
-                      videoFileRef.current.loop = e.target.checked;
-                    }
                   }}
                   className="rounded accent-safelight"
                 />

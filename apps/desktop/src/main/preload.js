@@ -28,4 +28,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isNativeCaptureActive: () => ipcRenderer.invoke('is-native-capture-active'),
   getSpectatorCount: () => ipcRenderer.invoke('get-spectator-count'),
   selectVideoFile: () => ipcRenderer.invoke('select-video-file'),
+  probeVideoFile: (filePath) => ipcRenderer.invoke('probe-video-file', filePath),
+  startVideoFile: (filePath) => ipcRenderer.invoke('start-video-file', filePath),
+  stopVideoFile: () => ipcRenderer.invoke('stop-video-file'),
+  seekVideoFile: (tsMs) => ipcRenderer.invoke('seek-video-file', tsMs),
+  pauseVideoFile: (paused) => ipcRenderer.invoke('pause-video-file', paused),
+  onVideoFileFrame: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('video:frame', handler);
+    return () => ipcRenderer.removeListener('video:frame', handler);
+  },
+  onVideoFileAudio: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on('video:audio', handler);
+    return () => ipcRenderer.removeListener('video:audio', handler);
+  },
 });
