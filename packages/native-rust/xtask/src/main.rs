@@ -36,6 +36,10 @@ fn check_targets() {
     for &target in cross_targets {
         let mut cmd = Command::new("cargo");
         cmd.arg("check").arg("--target").arg(target);
+        // ffmpeg-sys-next links against system FFmpeg libraries that only
+        // exist for the host platform, so cross-target checks must run
+        // without the ffmpeg feature (the stubs take over).
+        cmd.arg("--no-default-features");
         if target.contains("apple") {
             cmd.env("DOCS_RS", "1");
         }
