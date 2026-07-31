@@ -27,7 +27,7 @@
   --color-input: oklch(0.3729 0.0306 259.7);
   --color-ring: oklch(0.6594 0.1096 57.8);
   --color-body-text: oklch(0.8717 0.0093 258.3);
-  --font-display: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --color-caption-text: oklch(0.52 0.02 260);
 }
 
 @layer base {
@@ -46,14 +46,14 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #090d16;
+  background: var(--color-background);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1f2937;
+  background: var(--color-border);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #374151;
+  background: var(--color-accent);
 }

@@ -7,15 +7,15 @@ import { fmtDuration } from './types';
 
 const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
   if (!t.hasAudio) {
-    return <span className="text-sm font-mono font-semibold leading-none text-gray-600">video only</span>;
+    return <span className="text-sm font-mono font-semibold leading-none text-caption-text">video only</span>;
   }
   return (
     <span className="flex items-baseline gap-1.5 leading-none">
-      <span className="text-sm font-mono font-semibold tabular-nums leading-none text-gray-100">
+      <span className="text-sm font-mono font-semibold tabular-nums leading-none text-foreground">
         {t.audioCodec ?? '\u2014'}
       </span>
       {t.audioBitrate != null && (
-        <span className="text-[10px] font-mono tabular-nums leading-none text-gray-500">
+        <span className="text-xs font-mono tabular-nums leading-none text-muted-foreground">
           {fmtBitrate(t.audioBitrate)}
         </span>
       )}
@@ -42,7 +42,7 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ t
         <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
           <div className="flex items-center gap-1.5 shrink-0">
             <span className="w-2 h-2 rounded-full bg-safelight animate-pulse" />
-            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-safelight">On Air</span>
+            <span className="text-xs font-semibold uppercase tracking-wider text-safelight">On Air</span>
           </div>
 
           <TelemetryCell
@@ -56,7 +56,7 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ t
           <TelemetryCell label="Loss" value={fmtLoss(t.packetLossPct)} degrade={lossDegrade} />
 
           <div className="flex flex-col gap-0.5 shrink-0 min-w-0">
-            <span className="text-[9px] font-semibold uppercase tracking-[0.1em] leading-none text-gray-500">
+            <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
               Audio
             </span>
             <AudioTelemetryValue telemetry={t} />
@@ -67,15 +67,15 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ t
           <div className="flex items-end gap-3 shrink-0">
             <div className="flex flex-col items-end gap-1">
               <Sparkline data={t.bitrateHistory} />
-              <span className="text-[9px] uppercase tracking-[0.1em] text-gray-600 leading-none">
+              <span className="text-xs uppercase tracking-wider text-caption-text leading-none">
                 {t.bitrateHistory.length > 0 ? `bitrate \u00B7 last ${t.bitrateHistory.length}s` : 'awaiting uplink'}
               </span>
             </div>
             <div className="flex flex-col gap-0.5 items-end">
-              <span className="text-[9px] font-semibold uppercase tracking-[0.1em] leading-none text-gray-500">
+              <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
                 Elapsed
               </span>
-              <span className="text-xs font-mono font-semibold tabular-nums leading-none text-gray-300">
+              <span className="text-xs font-mono font-semibold tabular-nums leading-none text-foreground">
                 {fmtDuration(t.elapsedMs)}
               </span>
             </div>
