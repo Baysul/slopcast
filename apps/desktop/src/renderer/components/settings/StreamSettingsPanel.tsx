@@ -3,6 +3,7 @@ import { codecLabel } from '@slopcast/shared-types';
 import { ChevronDown } from 'lucide-react';
 import type React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 
 export interface CodecInfo {
   codec: VideoCodec;
@@ -205,13 +206,13 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = ({
               >
                 API Endpoint
               </label>
-              <input
+              <Input
                 id="api-endpoint"
                 type="url"
                 value={apiEndpoint ?? 'http://localhost:3001'}
                 onChange={(e) => setApiEndpoint(e.target.value)}
                 placeholder="http://localhost:3001"
-                className="w-full rounded-lg bg-secondary border border-border text-sm text-foreground py-2 px-3 focus:outline-none focus:ring-2 focus:ring-safelight"
+                className="w-full bg-secondary text-sm text-foreground"
               />
             </div>
           )}

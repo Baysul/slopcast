@@ -1,0 +1,155 @@
+import type { ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
+import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
+import { useEffect, useRef, useState } from 'react';
+import { notify } from '../lib/toast';
+import type { CodecInfo } from '../utils/codecs';
+import { detectSupportedCodecs, probeCodecHardware } from '../utils/codecs';
+
+const SETTINGS_SAVE_DEBOUNCE_MS = 800;
+
+const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
+  a.fps === b.fps &&
+  a.bitrateLimit === b.bitrateLimit &&
+  a.videoCodec === b.videoCodec &&
+  a.resolution === b.resolution &&
+  a.apiEndpoint === b.apiEndpoint;
+
+export interface UseStreamSettingsReturn {
+  apiEndpoint: string;
+  setApiEndpoint: React.Dispatch<React.SetStateAction<string>>;
+  livekitUrl: string;
+  setLivekitUrl: React.Dispatch<React.SetStateAction<string>>;
+  streamSettingsOpen: boolean;
+  setStreamSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  streamFps: number;
+  setStreamFps: React.Dispatch<React.SetStateAction<number>>;
+  bitrateLimit: number;
+  setBitrateLimit: React.Dispatch<React.SetStateAction<number>>;
+  availableCodecs: CodecInfo[];
+  setAvailableCodecs: React.Dispatch<React.SetStateAction<CodecInfo[]>>;
+  videoCodec: VideoCodec;
+  setVideoCodec: React.Dispatch<React.SetStateAction<VideoCodec>>;
+  resolution: ResolutionPreset;
+  setResolution: React.Dispatch<React.SetStateAction<ResolutionPreset>>;
+  streamFpsRef: React.RefObject<number>;
+  bitrateLimitRef: React.RefObject<number>;
+  resolutionRef: React.RefObject<ResolutionPreset>;
+  settingsHydrated: boolean;
+}
+
+export function useStreamSettings(): UseStreamSettingsReturn {
+  const [apiEndpoint, setApiEndpoint] = useState<string>('http://localhost:3001');
+  const [livekitUrl, setLivekitUrl] = useState<string>('');
+  const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
+  const [streamFps, setStreamFps] = useState(DEFAULT_STREAM_SETTINGS.fps);
+  const [bitrateLimit, setBitrateLimit] = useState(DEFAULT_STREAM_SETTINGS.bitrateLimit);
+  const [availableCodecs, setAvailableCodecs] = useState<CodecInfo[]>(() => detectSupportedCodecs());
+  const [videoCodec, setVideoCodec] = useState<VideoCodec>(() => {
+    const top = availableCodecs[0]?.codec ?? 'h264';
+    const saved = DEFAULT_STREAM_SETTINGS.videoCodec;
+    return availableCodecs.some((c) => c.codec === saved) ? saved : top;
+  });
+  const [resolution, setResolution] = useState<ResolutionPreset>(DEFAULT_STREAM_SETTINGS.resolution);
+
+  const streamFpsRef = useRef(streamFps);
+  const bitrateLimitRef = useRef(bitrateLimit);
+  const resolutionRef = useRef(resolution);
+
+  const settingsHydratedRef = useRef(false);
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
+  const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
+
+  useEffect(() => {
+    streamFpsRef.current = streamFps;
+  }, [streamFps]);
+
+  useEffect(() => {
+    bitrateLimitRef.current = bitrateLimit;
+  }, [bitrateLimit]);
+
+  useEffect(() => {
+    resolutionRef.current = resolution;
+  }, [resolution]);
+
+  // Initial config and settings load
+  useEffect(() => {
+    (async () => {
+      if (!window.electronAPI) return;
+
+      const config = await window.electronAPI.getAppConfig();
+      if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
+      if (config.livekitUrl) setLivekitUrl(config.livekitUrl);
+
+      const codecs = await probeCodecHardware(detectSupportedCodecs());
+      setAvailableCodecs(codecs);
+
+      // Persisted settings take precedence over config-file defaults.
+      const saved = await window.electronAPI.getStreamSettings();
+      lastSavedSettingsRef.current = saved;
+      setStreamFps(saved.fps);
+      setBitrateLimit(saved.bitrateLimit);
+      const bestCodec = codecs[0]?.codec ?? 'h264';
+      const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
+      const hydratedCodec = savedOk ? saved.videoCodec : bestCodec;
+      setVideoCodec(hydratedCodec);
+      setResolution(saved.resolution);
+      setApiEndpoint(saved.apiEndpoint);
+      settingsHydratedRef.current = true;
+      setSettingsHydrated(true);
+    })();
+  }, []);
+
+  // Persist stream settings to disk (debounced).
+  useEffect(() => {
+    if (!settingsHydratedRef.current) return;
+    const current: StreamSettings = {
+      fps: streamFps,
+      bitrateLimit,
+      videoCodec,
+      resolution,
+      apiEndpoint,
+    };
+    const last = lastSavedSettingsRef.current;
+    if (last && streamSettingsEqual(last, current)) return;
+
+    const timer = setTimeout(() => {
+      void window.electronAPI
+        ?.saveStreamSettings(current)
+        .then((ok) => {
+          if (!ok) {
+            notify('error', 'Settings save failed', 'The settings file could not be written to disk.');
+            return;
+          }
+          lastSavedSettingsRef.current = current;
+          notify('success', 'Stream settings saved');
+        })
+        .catch((err: unknown) => {
+          console.error('[useStreamSettings] saveStreamSettings IPC failed:', err);
+        });
+    }, SETTINGS_SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint]);
+
+  return {
+    apiEndpoint,
+    setApiEndpoint,
+    livekitUrl,
+    setLivekitUrl,
+    streamSettingsOpen,
+    setStreamSettingsOpen,
+    streamFps,
+    setStreamFps,
+    bitrateLimit,
+    setBitrateLimit,
+    availableCodecs,
+    setAvailableCodecs,
+    videoCodec,
+    setVideoCodec,
+    resolution,
+    setResolution,
+    streamFpsRef,
+    bitrateLimitRef,
+    resolutionRef,
+    settingsHydrated,
+  };
+}
