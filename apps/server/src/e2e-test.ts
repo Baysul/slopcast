@@ -106,7 +106,7 @@ function log(prefix: string, msg: string): void {
 
 function killPort(port: number): void {
   try {
-    if (process.platform === 'linux' || process.platform === 'darwin') {
+    if (process.platform === 'linux') {
       execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'pipe' });
     } else if (process.platform === 'win32') {
       execSync(`netstat -ano | findstr :${port}`, { stdio: 'pipe' });
@@ -259,10 +259,6 @@ function findSpotifyProcess(): boolean {
       const out = execSync('pgrep -x spotify 2>/dev/null || true', { encoding: 'utf-8' }).trim();
       return out.length > 0;
     }
-    if (process.platform === 'darwin') {
-      const out = execSync('pgrep -x Spotify 2>/dev/null || true', { encoding: 'utf-8' }).trim();
-      return out.length > 0;
-    }
     if (process.platform === 'win32') {
       const out = execSync('tasklist /FI "IMAGENAME eq Spotify.exe" 2>nul', { encoding: 'utf-8' });
       return out.includes('Spotify.exe');
@@ -277,10 +273,6 @@ function launchSpotify(): boolean {
   try {
     if (process.platform === 'linux') {
       execSync('nohup spotify >/dev/null 2>&1 &', { stdio: 'ignore', timeout: 3000 });
-      return true;
-    }
-    if (process.platform === 'darwin') {
-      execSync('open -a Spotify', { stdio: 'ignore', timeout: 3000 });
       return true;
     }
     if (process.platform === 'win32') {
