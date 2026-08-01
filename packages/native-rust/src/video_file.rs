@@ -9,8 +9,58 @@ pub(crate) mod ffmpeg {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    struct HwAccelContext {
+        device_ctx: *mut ffmpeg_next::ffi::AVBufferRef,
+        pix_fmt: ffmpeg_next::ffi::AVPixelFormat,
+    }
+
+    impl Drop for HwAccelContext {
+        fn drop(&mut self) {
+            if !self.device_ctx.is_null() {
+                // SAFETY: self.device_ctx is a valid AVBufferRef allocated by
+                // av_hwdevice_ctx_create and owned by HwAccelContext.
+                unsafe {
+                    ffmpeg_next::ffi::av_buffer_unref(&mut self.device_ctx);
+                }
+            }
+        }
+    }
+
+    // SAFETY: hw_get_format conforms to FFmpeg get_format callback signature
+    unsafe extern "C" fn hw_get_format(
+        ctx: *mut ffmpeg_next::ffi::AVCodecContext,
+        pix_fmts: *const ffmpeg_next::ffi::AVPixelFormat,
+    ) -> ffmpeg_next::ffi::AVPixelFormat {
+        if ctx.is_null() || pix_fmts.is_null() {
+            return ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_NONE;
+        }
+
+        // SAFETY: (*ctx).opaque is set to a valid pointer to target_pix_fmt during decoder init
+        let target_fmt = unsafe {
+            if (*ctx).opaque.is_null() {
+                ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_NONE
+            } else {
+                *((*ctx).opaque.cast::<ffmpeg_next::ffi::AVPixelFormat>())
+            }
+        };
+
+        let mut p = pix_fmts;
+        // SAFETY: p points to a null-terminated array of AVPixelFormat ending with AV_PIX_FMT_NONE
+        while unsafe { *p } != ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            if unsafe { *p } == target_fmt {
+                return target_fmt;
+            }
+            // SAFETY: advancing pointer in null-terminated AVPixelFormat array
+            p = unsafe { p.add(1) };
+        }
+
+        // SAFETY: fallback to default software format offered by decoder
+        unsafe { *pix_fmts }
+    }
+
     struct VideoFileSession {
         stop: Arc<AtomicBool>,
+        loop_enabled: Arc<AtomicBool>,
         join: Option<thread::JoinHandle<()>>,
         seek_target: Arc<Mutex<Option<i64>>>,
         paused: Arc<AtomicBool>,
@@ -349,34 +399,81 @@ pub(crate) mod ffmpeg {
     pub(crate) fn probe_file(path: &str) -> Result<FileInfo, String> {
         ffmpeg_next::init().map_err(|e| format!("ffmpeg init: {e}"))?;
         let _ = ffmpeg_next::format::network::init();
-        let ictx =
+        let mut ictx =
             open_ffmpeg_input_custom_io(path).map_err(|e| format!("Cannot open input: {e}"))?;
 
-        let mut video_stream = None;
-        let mut audio_stream = None;
+        let mut video_index = None;
+        let mut audio_index = None;
+        let mut vstream_duration = 0;
+        let mut vstream_time_base = ffmpeg_next::Rational(0, 1);
 
         for stream in ictx.streams() {
             match stream.parameters().medium() {
-                Type::Video if video_stream.is_none() => video_stream = Some(stream),
-                Type::Audio if audio_stream.is_none() => audio_stream = Some(stream),
+                Type::Video if video_index.is_none() => {
+                    video_index = Some(stream.index());
+                    vstream_duration = stream.duration();
+                    vstream_time_base = stream.time_base();
+                }
+                Type::Audio if audio_index.is_none() => {
+                    audio_index = Some(stream.index());
+                }
                 _ => {}
             }
         }
 
-        let video = video_stream.ok_or_else(|| "No video stream found".to_string())?;
-        let context = ffmpeg_next::codec::context::Context::from_parameters(video.parameters())
-            .map_err(|e| format!("Decoder params: {e}"))?;
-        let decoder = context.decoder();
-        let vid = decoder
-            .video()
-            .map_err(|e| format!("Video decoder open: {e}"))?;
+        let video_index = video_index.ok_or_else(|| "No video stream found".to_string())?;
+        let stream = ictx
+            .stream(video_index)
+            .ok_or_else(|| "Video stream not found".to_string())?;
+        let mut width = unsafe { (*stream.parameters().as_ptr()).width as u32 };
+        let mut height = unsafe { (*stream.parameters().as_ptr()).height as u32 };
 
-        let width = vid.width();
-        let height = vid.height();
+        // If width/height is 0 from container metadata (e.g. WebM VP8/VP9/AV1),
+        // try decoding packets until the first video frame to obtain actual dimensions.
+        if width == 0 || height == 0 {
+            if let Ok(context) =
+                ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())
+            {
+                if let Ok(mut vid) = context.decoder().video() {
+                    let mut decoded = frame::Video::empty();
+                    let mut packet_count = 0;
+                    for (st, packet) in ictx.packets() {
+                        packet_count += 1;
+                        if packet_count > 200 {
+                            break;
+                        }
+                        if st.index() == video_index {
+                            if vid.send_packet(&packet).is_ok() {
+                                if vid.receive_frame(&mut decoded).is_ok() {
+                                    width = decoded.width();
+                                    height = decoded.height();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-        let duration_ms = ictx.duration() as i64 * 1000 / ffmpeg_next::ffi::AV_TIME_BASE as i64;
+        let max_dim = width.max(height);
+        if max_dim > 1920 {
+            let scale = 1920.0 / max_dim as f32;
+            width = ((width as f32 * scale) as u32) & !1;
+            height = ((height as f32 * scale) as u32) & !1;
+        }
 
-        let has_audio = audio_stream.is_some();
+        let mut duration_ms = ictx.duration() as i64 * 1000 / ffmpeg_next::ffi::AV_TIME_BASE as i64;
+        if duration_ms <= 0 && vstream_duration > 0 && vstream_time_base.denominator() > 0 {
+            duration_ms = (vstream_duration as f64
+                * (vstream_time_base.numerator() as f64 / vstream_time_base.denominator() as f64)
+                * 1000.0) as i64;
+        }
+        if duration_ms < 0 {
+            duration_ms = 0;
+        }
+
+        let has_audio = audio_index.is_some();
 
         Ok(FileInfo {
             width,
@@ -386,17 +483,19 @@ pub(crate) mod ffmpeg {
         })
     }
 
-    pub(crate) fn start_playback(path: &str) -> Result<(), String> {
+    pub(crate) fn start_playback(path: &str, loop_enabled: bool) -> Result<(), String> {
         stop_playback();
 
         ffmpeg_next::init().map_err(|e| format!("ffmpeg init: {e}"))?;
         let _ = ffmpeg_next::format::network::init();
 
         let stop = Arc::new(AtomicBool::new(false));
+        let loop_flag = Arc::new(AtomicBool::new(loop_enabled));
         let seek_target = Arc::new(Mutex::new(None::<i64>));
         let paused = Arc::new(AtomicBool::new(false));
 
         let stop_clone = stop.clone();
+        let loop_clone = loop_flag.clone();
         let seek_target_clone = seek_target.clone();
         let paused_clone = paused.clone();
         let path_owned = path.to_string();
@@ -424,7 +523,10 @@ pub(crate) mod ffmpeg {
             let video_stream_index = input.index();
             let audio_stream_index = ictx.streams().best(Type::Audio).map(|s| s.index());
 
-            let fps = input.avg_frame_rate();
+            let mut fps = input.avg_frame_rate();
+            if fps.denominator() == 0 || fps.numerator() == 0 {
+                fps = input.rate();
+            }
             let frame_delay = if fps.denominator() > 0 && fps.numerator() > 0 {
                 let secs = fps.denominator() as f64 / fps.numerator() as f64;
                 std::time::Duration::from_secs_f64(secs.clamp(0.016, 0.2))
@@ -432,7 +534,7 @@ pub(crate) mod ffmpeg {
                 std::time::Duration::from_millis(33)
             };
 
-            let context =
+            let mut context =
                 match ffmpeg_next::codec::context::Context::from_parameters(input.parameters()) {
                     Ok(c) => c,
                     Err(e) => {
@@ -442,6 +544,83 @@ pub(crate) mod ffmpeg {
                         return;
                     }
                 };
+
+            let mut hw_accel: Option<HwAccelContext> = None;
+            let mut target_pix_fmt = ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_NONE;
+
+            // SAFETY: context.as_ptr() returns a valid AVCodecContext pointer
+            let codec_ptr = unsafe { (*context.as_ptr()).codec };
+            if !codec_ptr.is_null() {
+                let mut i = 0;
+                loop {
+                    // SAFETY: query hardware configs supported for the video codec
+                    let config = unsafe { ffmpeg_next::ffi::avcodec_get_hw_config(codec_ptr, i) };
+                    if config.is_null() {
+                        break;
+                    }
+                    // SAFETY: reading fields of valid AVCodecHWConfig pointer
+                    let methods = unsafe { (*config).methods };
+                    if (methods
+                        & (ffmpeg_next::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32))
+                        != 0
+                    {
+                        // SAFETY: reading device_type and pix_fmt from valid AVCodecHWConfig pointer
+                        let dev_type = unsafe { (*config).device_type };
+                        let pix_fmt = unsafe { (*config).pix_fmt };
+                        let mut buf_ref: *mut ffmpeg_next::ffi::AVBufferRef = std::ptr::null_mut();
+                        // SAFETY: attempt to create hardware device context for candidate dev_type
+                        let ret = unsafe {
+                            ffmpeg_next::ffi::av_hwdevice_ctx_create(
+                                &mut buf_ref,
+                                dev_type,
+                                std::ptr::null(),
+                                std::ptr::null_mut(),
+                                0,
+                            )
+                        };
+                        if ret == 0 && !buf_ref.is_null() {
+                            // SAFETY: retrieve human-readable device type name for log
+                            let type_name_ptr =
+                                unsafe { ffmpeg_next::ffi::av_hwdevice_get_type_name(dev_type) };
+                            let type_name = if type_name_ptr.is_null() {
+                                "unknown"
+                            } else {
+                                // SAFETY: convert C string to str
+                                unsafe {
+                                    std::ffi::CStr::from_ptr(type_name_ptr)
+                                        .to_str()
+                                        .unwrap_or("unknown")
+                                }
+                            };
+                            eprintln!(
+                                "[Native Rust FFmpeg] HWAccel enabled using {type_name} device context"
+                            );
+                            hw_accel = Some(HwAccelContext {
+                                device_ctx: buf_ref,
+                                pix_fmt,
+                            });
+                            target_pix_fmt = pix_fmt;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+
+            if let Some(ref hw) = hw_accel {
+                // SAFETY: context.as_mut_ptr() returns a valid mutable AVCodecContext pointer
+                let codec_ctx_mut = unsafe { context.as_mut_ptr() };
+                // SAFETY: attach hw_device_ctx and get_format callback to AVCodecContext prior to opening decoder
+                unsafe {
+                    (*codec_ctx_mut).hw_device_ctx = ffmpeg_next::ffi::av_buffer_ref(hw.device_ctx);
+                    (*codec_ctx_mut).opaque = (&target_pix_fmt
+                        as *const ffmpeg_next::ffi::AVPixelFormat)
+                        .cast_mut()
+                        .cast();
+                    (*codec_ctx_mut).get_format = Some(hw_get_format);
+                }
+            }
+
             let mut decoder = match context.decoder().video() {
                 Ok(d) => d,
                 Err(e) => {
@@ -452,26 +631,8 @@ pub(crate) mod ffmpeg {
                 }
             };
 
-            let src_width = decoder.width();
-            let src_height = decoder.height();
-
-            let mut scaler = match ScalerContext::get(
-                decoder.format(),
-                src_width,
-                src_height,
-                ffmpeg_next::format::Pixel::RGBA,
-                src_width,
-                src_height,
-                Flags::BILINEAR,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Scaler init: {e}");
-                    invoke_video_callback(Vec::new());
-                    invoke_audio_callback(Vec::new());
-                    return;
-                }
-            };
+            let mut scaler: Option<ScalerContext> = None;
+            let mut scaler_info: Option<(ffmpeg_next::format::Pixel, u32, u32, u32, u32)> = None;
 
             let mut audio_decoder = audio_stream_index.and_then(|_| {
                 let audio_input = ictx.streams().best(Type::Audio)?;
@@ -481,36 +642,34 @@ pub(crate) mod ffmpeg {
                 audio_ctx.decoder().audio().ok()
             });
 
-            let mut audio_resampler = audio_decoder.as_ref().and_then(|dec| {
-                ffmpeg_next::software::resampling::Context::get(
-                    dec.format(),
-                    dec.channel_layout(),
-                    dec.rate(),
-                    ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
-                    ffmpeg_next::channel_layout::ChannelLayout::STEREO,
-                    48000,
-                )
-                .ok()
-            });
+            let mut audio_resampler: Option<ffmpeg_next::software::resampling::Context> = None;
+            let mut audio_resampler_info: Option<(ffmpeg_next::format::Sample, u32, i32)> = None;
 
             let (video_tx, video_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
             let video_stop = stop_clone.clone();
             let video_emitter_join = thread::spawn(move || {
+                let mut next_target = std::time::Instant::now() + frame_delay;
                 while let Ok(packed) = video_rx.recv() {
                     if video_stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    let frame_start = std::time::Instant::now();
                     invoke_video_callback(packed);
-                    let elapsed = frame_start.elapsed();
-                    if let Some(remaining) = frame_delay.checked_sub(elapsed) {
-                        thread::sleep(remaining);
+                    let now = std::time::Instant::now();
+                    if next_target > now {
+                        thread::sleep(next_target - now);
+                        next_target += frame_delay;
+                    } else {
+                        next_target = std::time::Instant::now() + frame_delay;
                     }
                 }
             });
 
             let mut decoded = frame::Video::empty();
             let mut aframe = frame::Audio::empty();
+
+            let mut playback_start = std::time::Instant::now();
+            let mut audio_samples_sent: u64 = 0;
+            let mut video_frames_sent: u64 = 0;
 
             loop {
                 if stop_clone.load(Ordering::Relaxed) {
@@ -525,19 +684,61 @@ pub(crate) mod ffmpeg {
                     };
                     if let Some(ts_ms) = seek.take() {
                         let seek_ts = ts_ms * (ffmpeg_next::ffi::AV_TIME_BASE as i64) / 1000;
-                        let _ = ictx.seek(seek_ts, seek_ts..);
+                        let _ = ictx.seek(seek_ts, ..);
+                        decoder.flush();
+                        if let Some(ref mut ad) = audio_decoder {
+                            ad.flush();
+                        }
+                        audio_resampler = None;
+                        audio_resampler_info = None;
+                        let valid_ts = ts_ms.max(0) as f64;
+                        audio_samples_sent = ((valid_ts / 1000.0) * 48000.0) as u64;
+                        let fps_val = fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
+                        video_frames_sent = ((valid_ts / 1000.0) * fps_val) as u64;
+                        playback_start = std::time::Instant::now()
+                            - std::time::Duration::from_millis(valid_ts as u64);
                         did_seek = true;
                     }
                 }
 
                 if paused_clone.load(Ordering::Relaxed) && !did_seek {
                     thread::sleep(std::time::Duration::from_millis(5));
+                    let cur_stream_sec = if audio_stream_index.is_some() {
+                        audio_samples_sent as f64 / 48000.0
+                    } else {
+                        let fps_val = fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
+                        video_frames_sent as f64 / fps_val
+                    };
+                    playback_start = std::time::Instant::now()
+                        - std::time::Duration::from_secs_f64(cur_stream_sec);
                     continue;
                 }
 
                 let packet_result = ictx.packets().next();
                 match packet_result {
-                    None => break,
+                    None => {
+                        if loop_clone.load(Ordering::Relaxed) {
+                            if ictx.seek(0, ..).is_err() {
+                                if let Ok(new_ctx) = open_ffmpeg_input_custom_io(&path_owned) {
+                                    ictx = new_ctx;
+                                } else {
+                                    break;
+                                }
+                            }
+                            decoder.flush();
+                            if let Some(ref mut ad) = audio_decoder {
+                                ad.flush();
+                            }
+                            audio_resampler = None;
+                            audio_resampler_info = None;
+                            audio_samples_sent = 0;
+                            video_frames_sent = 0;
+                            playback_start = std::time::Instant::now();
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
                     Some((stream, packet)) => {
                         if stream.index() == video_stream_index {
                             if decoder.send_packet(&packet).is_err() {
@@ -552,24 +753,122 @@ pub(crate) mod ffmpeg {
                                     Err(_) => break,
                                 }
 
-                                let mut rgb_frame = frame::Video::empty();
-                                if scaler.run(&decoded, &mut rgb_frame).is_err() {
+                                // SAFETY: decoded.as_ptr() returns a valid AVFrame pointer
+                                let is_hw_frame = hw_accel.as_ref().is_some_and(|hw| unsafe {
+                                    (*decoded.as_ptr()).format == hw.pix_fmt as std::os::raw::c_int
+                                });
+
+                                let mut sw_frame = frame::Video::empty();
+                                let src_frame = if is_hw_frame {
+                                    // SAFETY: transfer decoded frame from GPU VRAM to system RAM
+                                    let transfer_res = unsafe {
+                                        ffmpeg_next::ffi::av_hwframe_transfer_data(
+                                            sw_frame.as_mut_ptr(),
+                                            decoded.as_ptr(),
+                                            0,
+                                        )
+                                    };
+                                    if transfer_res == 0 {
+                                        &sw_frame
+                                    } else {
+                                        &decoded
+                                    }
+                                } else {
+                                    &decoded
+                                };
+
+                                let cur_fmt = src_frame.format();
+                                let cur_w = src_frame.width();
+                                let cur_h = src_frame.height();
+                                if cur_w == 0 || cur_h == 0 {
                                     continue;
                                 }
 
+                                let max_dim = cur_w.max(cur_h);
+                                let (out_w, out_h) = if max_dim > 1920 {
+                                    let scale = 1920.0 / max_dim as f32;
+                                    (
+                                        ((cur_w as f32 * scale) as u32) & !1,
+                                        ((cur_h as f32 * scale) as u32) & !1,
+                                    )
+                                } else {
+                                    (cur_w, cur_h)
+                                };
+
+                                if scaler.is_none()
+                                    || scaler_info != Some((cur_fmt, cur_w, cur_h, out_w, out_h))
+                                {
+                                    match ScalerContext::get(
+                                        cur_fmt,
+                                        cur_w,
+                                        cur_h,
+                                        ffmpeg_next::format::Pixel::RGBA,
+                                        out_w,
+                                        out_h,
+                                        Flags::FAST_BILINEAR,
+                                    ) {
+                                        Ok(s) => {
+                                            scaler = Some(s);
+                                            scaler_info =
+                                                Some((cur_fmt, cur_w, cur_h, out_w, out_h));
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Scaler init error: {e}");
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                let Some(ref mut s) = scaler else {
+                                    continue;
+                                };
+
+                                let mut rgb_frame = frame::Video::empty();
+                                if s.run(src_frame, &mut rgb_frame).is_err() {
+                                    continue;
+                                };
+
                                 let data = rgb_frame.data(0);
                                 let linesize = rgb_frame.stride(0);
-                                let row_bytes = (src_width * 4) as usize;
-                                let mut packed =
-                                    Vec::with_capacity(row_bytes * src_height as usize);
-                                for row in 0..src_height as usize {
-                                    let offset = row * linesize;
-                                    packed.extend_from_slice(&data[offset..offset + row_bytes]);
+                                let row_bytes = (out_w * 4) as usize;
+                                let total_bytes = row_bytes * out_h as usize;
+                                let mut packed = Vec::with_capacity(total_bytes);
+
+                                if linesize == row_bytes && total_bytes <= data.len() {
+                                    packed.extend_from_slice(&data[..total_bytes]);
+                                } else {
+                                    for row in 0..out_h as usize {
+                                        let offset = row * linesize;
+                                        if offset + row_bytes <= data.len() {
+                                            packed.extend_from_slice(
+                                                &data[offset..offset + row_bytes],
+                                            );
+                                        }
+                                    }
                                 }
 
                                 if !packed.is_empty() {
-                                    if video_tx.send(packed).is_err() {
-                                        break;
+                                    video_frames_sent += 1;
+                                    let shared_buf =
+                                        crate::video_ring::get_or_create_shared_buffer();
+                                    if let Some((slot_idx, _, _)) =
+                                        shared_buf.write_frame(out_w, out_h, |slot| {
+                                            let copy_len = packed.len().min(slot.len());
+                                            slot[..copy_len].copy_from_slice(&packed[..copy_len]);
+                                        })
+                                    {
+                                        crate::invoke_shared_video_callback(
+                                            crate::SharedFrameMetadata {
+                                                slot_index: slot_idx as u32,
+                                                width: out_w,
+                                                height: out_h,
+                                                timestamp_us: 0,
+                                            },
+                                        );
+                                    } else if video_tx.try_send(packed).is_err() {
+                                        if stop_clone.load(Ordering::Relaxed) {
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -589,6 +888,44 @@ pub(crate) mod ffmpeg {
                                     }
 
                                     if aframe.samples() > 0 {
+                                        let cur_fmt = aframe.format();
+                                        let cur_rate = aframe.rate();
+                                        let cur_channels = aframe.channels() as i32;
+
+                                        if audio_resampler.is_none()
+                                            || audio_resampler_info
+                                                != Some((cur_fmt, cur_rate, cur_channels))
+                                        {
+                                            let in_layout = if aframe.channel_layout().is_empty() {
+                                                ffmpeg_next::channel_layout::ChannelLayout::default(
+                                                    cur_channels,
+                                                )
+                                            } else {
+                                                aframe.channel_layout()
+                                            };
+
+                                            match ffmpeg_next::software::resampling::Context::get(
+                                                cur_fmt,
+                                                in_layout,
+                                                cur_rate,
+                                                ffmpeg_next::format::Sample::I16(
+                                                    ffmpeg_next::format::sample::Type::Packed,
+                                                ),
+                                                ffmpeg_next::channel_layout::ChannelLayout::STEREO,
+                                                48000,
+                                            ) {
+                                                Ok(r) => {
+                                                    audio_resampler = Some(r);
+                                                    audio_resampler_info =
+                                                        Some((cur_fmt, cur_rate, cur_channels));
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("Audio resampler init error: {e}");
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
                                         if let Some(ref mut resampler) = audio_resampler {
                                             let mut resampled = frame::Audio::empty();
                                             if resampler.run(&aframe, &mut resampled).is_ok() {
@@ -598,6 +935,8 @@ pub(crate) mod ffmpeg {
                                                         (resampled.samples() * 4) as usize;
                                                     let byte_len = bytes_needed.min(data.len());
                                                     if byte_len > 0 {
+                                                        audio_samples_sent +=
+                                                            resampled.samples() as u64;
                                                         invoke_audio_callback(
                                                             data[..byte_len].to_vec(),
                                                         );
@@ -607,6 +946,23 @@ pub(crate) mod ffmpeg {
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        // Real-time pacing: ensure playback stays within 50ms of wall-clock time
+                        let stream_sec = if audio_stream_index.is_some() {
+                            audio_samples_sent as f64 / 48000.0
+                        } else {
+                            let fps_val =
+                                fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
+                            video_frames_sent as f64 / fps_val
+                        };
+                        let elapsed_sec = playback_start.elapsed().as_secs_f64();
+                        if stream_sec > elapsed_sec + 0.05 {
+                            let ahead_ms =
+                                (((stream_sec - elapsed_sec - 0.05) * 1000.0) as u64).min(50);
+                            if ahead_ms > 0 {
+                                std::thread::sleep(std::time::Duration::from_millis(ahead_ms));
                             }
                         }
                     }
@@ -622,6 +978,7 @@ pub(crate) mod ffmpeg {
 
         let session = VideoFileSession {
             stop,
+            loop_enabled: loop_flag,
             join: Some(join),
             seek_target,
             paused,
@@ -636,12 +993,16 @@ pub(crate) mod ffmpeg {
     }
 
     pub(crate) fn stop_playback() {
-        if let Ok(mut guard) = VIDEO_FILE_STATE.lock() {
-            if let Some(session) = guard.take() {
-                session.stop.store(true, Ordering::Relaxed);
-                if let Some(join) = session.join {
-                    let _ = join.join();
-                }
+        let session = if let Ok(mut guard) = VIDEO_FILE_STATE.lock() {
+            guard.take()
+        } else {
+            None
+        };
+
+        if let Some(mut session) = session {
+            session.stop.store(true, Ordering::Relaxed);
+            if let Some(join) = session.join.take() {
+                let _ = join.join();
             }
         }
     }
@@ -661,6 +1022,14 @@ pub(crate) mod ffmpeg {
         if let Ok(guard) = VIDEO_FILE_STATE.lock() {
             if let Some(ref session) = *guard {
                 session.paused.store(paused, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(crate) fn set_playback_loop(loop_enabled: bool) {
+        if let Ok(guard) = VIDEO_FILE_STATE.lock() {
+            if let Some(ref session) = *guard {
+                session.loop_enabled.store(loop_enabled, Ordering::Relaxed);
             }
         }
     }
@@ -689,6 +1058,21 @@ pub(crate) mod ffmpeg {
                 let res = probe_file(path);
                 println!("probe_file({path}) -> {:?}", res);
                 assert!(res.is_ok(), "probe_file({path}) failed: {:?}", res);
+            }
+        }
+
+        #[test]
+        fn test_dragon_mp4() {
+            let path = "/home/basil/Downloads/dragon.mp4";
+            if std::path::Path::new(path).exists() {
+                let info = probe_file(path).unwrap();
+                println!("dragon.mp4 info: {:?}", info);
+                let start_res = start_playback(path, true);
+                println!("start_playback res: {:?}", start_res);
+                assert!(start_res.is_ok());
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                stop_playback();
+                println!("dragon.mp4 played 2s successfully!");
             }
         }
     }
@@ -728,7 +1112,7 @@ pub(crate) mod ffmpeg {
         Err("FFmpeg is not available (build without ffmpeg feature)".to_string())
     }
 
-    pub(crate) fn start_playback(_path: &str) -> Result<(), String> {
+    pub(crate) fn start_playback(_path: &str, _loop_enabled: bool) -> Result<(), String> {
         Err("FFmpeg is not available (build without ffmpeg feature)".to_string())
     }
 
@@ -737,6 +1121,8 @@ pub(crate) mod ffmpeg {
     pub(crate) fn seek_playback(_ts_ms: i64) {}
 
     pub(crate) fn set_playback_paused(_paused: bool) {}
+
+    pub(crate) fn set_playback_loop(_loop_enabled: bool) {}
 
     pub(crate) fn is_playback_active() -> bool {
         false

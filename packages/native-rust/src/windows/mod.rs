@@ -4,7 +4,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi::{Either, Result as NapiResult};
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, S_OK, WAIT_OBJECT_0};
@@ -330,11 +330,11 @@ struct CaptureSession {
 impl CaptureSession {
     fn drain_packets(
         &self,
-        tsfn: Option<&ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
+        _tsfn: Option<&ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
     ) -> Result<(), String> {
         // SAFETY: `capture_client` is a valid interface owned by this session;
         // every buffer obtained is released before the next iteration.
-        let Some(tsfn) = tsfn else {
+        if _tsfn.is_none() {
             unsafe {
                 loop {
                     let packet_frames = self
@@ -393,10 +393,7 @@ impl CaptureSession {
                     &((f.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes(),
                 );
             }
-            let _ = tsfn.call(
-                Ok(napi::bindgen_prelude::Buffer::from(i16_bytes)),
-                ThreadsafeFunctionCallMode::NonBlocking,
-            );
+            crate::audio_ring::push_pcm_bytes(&i16_bytes);
         }
         Ok(())
     }
@@ -541,6 +538,7 @@ fn run_capture(
 }
 
 fn stop_capture_locked(state: &mut WasapiState) {
+    crate::audio_ring::stop_audio_ring();
     state.is_active = false;
     if let Some(raw) = state.stop_event_raw.take() {
         // SAFETY: `raw` was created by CreateEventA in start_audio_capture, is
@@ -574,6 +572,7 @@ pub fn set_audio_data_callback(
 }
 
 pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
+    crate::audio_ring::start_audio_ring();
     let target_pid = match target_app_id {
         Either::A(label) => label
             .parse::<u32>()

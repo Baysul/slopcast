@@ -1059,6 +1059,7 @@ fn run_capture_session(
 }
 
 fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
+    crate::audio_ring::start_audio_ring();
     let shared = Arc::new(Mutex::new(SessionShared::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -1101,6 +1102,7 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
 }
 
 fn stop_session(state: &mut CaptureState) {
+    crate::audio_ring::stop_audio_ring();
     if let Some(session) = state.session.take() {
         session.stop.store(true, Ordering::SeqCst);
         let _ = session.join.join();
@@ -2165,16 +2167,7 @@ fn invoke_audio_data_callback(data: Vec<u8>) {
         let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         i16_bytes.extend_from_slice(&((f.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
     }
-    let Ok(guard) = AUDIO_DATA_CALLBACK.lock() else {
-        return;
-    };
-    let Some(ref cb) = *guard else {
-        return;
-    };
-    let _ = cb.call(
-        Ok(napi::bindgen_prelude::Buffer::from(i16_bytes)),
-        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-    );
+    crate::audio_ring::push_pcm_bytes(&i16_bytes);
 }
 
 fn create_audio_capture_format() -> Option<Vec<u8>> {

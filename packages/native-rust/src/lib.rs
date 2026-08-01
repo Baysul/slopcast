@@ -5,8 +5,11 @@
 
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
+use std::sync::Mutex;
 
+mod audio_ring;
 mod video_file;
+mod video_ring;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -126,7 +129,7 @@ mod unsupported_platform {
         ))
     }
 
-    pub fn start_video_file_playback(_: String) -> napi::Result<()> {
+    pub fn start_video_file_playback(_: String, _: Option<bool>) -> napi::Result<()> {
         Err(napi::Error::from_reason(
             "Native video file decode is not supported on this platform",
         ))
@@ -141,6 +144,10 @@ mod unsupported_platform {
     }
 
     pub fn set_video_file_paused(_: bool) -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn set_video_file_loop(_: bool) -> napi::Result<()> {
         Ok(())
     }
 
@@ -374,6 +381,7 @@ pub fn get_audio_levels() -> napi::Result<Vec<AudioAppLevel>> {
 pub fn set_audio_data_callback(
     callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
 ) -> napi::Result<()> {
+    audio_ring::set_audio_data_callback(callback.clone())?;
     platform::set_audio_data_callback(callback)
 }
 
@@ -451,8 +459,9 @@ pub fn probe_video_file(path: String) -> napi::Result<VideoFileInfo> {
 /// Starts FFmpeg-based video file playback, delivering decoded video and
 /// audio frames through the registered callbacks.
 #[napi]
-pub fn start_video_file_playback(path: String) -> napi::Result<()> {
-    video_file::ffmpeg::start_playback(&path).map_err(|e| napi::Error::from_reason(e))
+pub fn start_video_file_playback(path: String, loop_enabled: Option<bool>) -> napi::Result<()> {
+    video_file::ffmpeg::start_playback(&path, loop_enabled.unwrap_or(true))
+        .map_err(|e| napi::Error::from_reason(e))
 }
 
 /// Stops active FFmpeg video file playback and joins the decode thread.
@@ -476,10 +485,60 @@ pub fn set_video_file_paused(paused: bool) -> napi::Result<()> {
     Ok(())
 }
 
+/// Dynamic toggle for looping the active video file playback.
+#[napi]
+pub fn set_video_file_loop(loop_enabled: bool) -> napi::Result<()> {
+    video_file::ffmpeg::set_playback_loop(loop_enabled);
+    Ok(())
+}
+
 /// Returns `true` if a video file playback session is currently active.
 #[napi]
 pub fn is_video_file_playback_active() -> napi::Result<bool> {
     Ok(video_file::ffmpeg::is_playback_active())
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SharedFrameMetadata {
+    pub slot_index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_us: i64,
+}
+
+static SHARED_VIDEO_CALLBACK: Mutex<
+    Option<std::sync::Arc<ThreadsafeFunction<SharedFrameMetadata, ()>>>,
+> = Mutex::new(None);
+
+#[napi]
+pub fn set_shared_video_frame_callback(
+    callback: std::sync::Arc<ThreadsafeFunction<SharedFrameMetadata, ()>>,
+) -> napi::Result<()> {
+    let Ok(mut guard) = SHARED_VIDEO_CALLBACK.lock() else {
+        return Err(napi::Error::from_reason("Lock poisoned"));
+    };
+    *guard = Some(callback);
+    Ok(())
+}
+
+pub fn invoke_shared_video_callback(meta: SharedFrameMetadata) {
+    let Ok(guard) = SHARED_VIDEO_CALLBACK.lock() else {
+        return;
+    };
+    let Some(ref cb) = *guard else {
+        return;
+    };
+    let _ = cb.call(
+        Ok(meta),
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+    );
+}
+
+#[napi]
+pub fn get_shared_video_buffer() -> napi::bindgen_prelude::Buffer {
+    let buf = video_ring::get_or_create_shared_buffer();
+    napi::bindgen_prelude::Buffer::from(buf.as_slice())
 }
 
 #[cfg(test)]

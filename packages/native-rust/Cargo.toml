@@ -20,6 +20,8 @@ crate-type = ["cdylib"]
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
 ffmpeg-next = { version = "8", optional = true }
+ringbuf = "0.4"
+crossbeam-channel = "0.5"
 
 [features]
 default = ["ffmpeg"]
