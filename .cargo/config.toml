@@ -1,8 +1,7 @@
 [target.'cfg(target_env = "msvc")']
 rustflags = [
-  "-C", "target-feature=-crt-static",
-  "-C", "link-arg=/NODEFAULTLIB:libcmt",
-  "-C", "link-arg=/NODEFAULTLIB:libcpmt",
-  "-C", "link-arg=/NODEFAULTLIB:libcmtd",
-  "-C", "link-arg=/NODEFAULTLIB:libcpmtd",
+  "-C", "link-arg=/NODEFAULTLIB:msvcrt",
+  "-C", "link-arg=/NODEFAULTLIB:msvcrtd",
+  "-C", "link-arg=/NODEFAULTLIB:msvcprt",
+  "-C", "link-arg=/NODEFAULTLIB:msvcprtd",
 ]
