@@ -222,8 +222,8 @@ packages/
 | Platform | Requirements |
 |----------|-------------|
 | **All** | [Rust toolchain](https://rustup.rs) (stable), C++20 compiler |
-| **Linux** | [PipeWire](https://pipewire.org/) (`libpipewire-0.3-dev`), `xdg-desktop-portal` (Wayland) |
-| **macOS** | Xcode Command Line Tools (`xcode-select --install`) |
+| **Linux** | [PipeWire](https://pipewire.org/) (`libpipewire-0.3-dev`), `xdg-desktop-portal` (Wayland), FFmpeg dev headers (`libavcodec-dev`, `libavformat-dev`, `libavutil-dev`, `libswscale-dev`, `libavdevice-dev`, `libavfilter-dev`, `libswresample-dev`, `pkg-config`, `clang`) |
+| **macOS** | Xcode Command Line Tools (`xcode-select --install`), `ffmpeg`, `pkg-config` |
 | **Windows** | MSVC 2022+ (Build Tools for Visual Studio) |
 
 The native Rust module (`packages/native-rust`) is compiled via napi-rs and linked into the Electron main process. A C++20-capable toolchain is required (gcc >= 10, clang >= 10, or MSVC 2022+).
