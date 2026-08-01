@@ -6,12 +6,18 @@
     clippy::used_underscore_binding,
     reason = "clippy warns on room_events even though it must be bound for the receiver"
 )]
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "NAPI exported functions return NapiResult without explicit rustdoc error sections"
+)]
 
 use napi::Result as NapiResult;
 use napi_derive::napi;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwapOption;
 use livekit::options::{TrackPublishOptions, VideoCodec};
 use livekit::prelude::*;
 use livekit::track::{LocalTrack, LocalVideoTrack, TrackSource};
@@ -43,21 +49,21 @@ enum WorkerCmd {
     Shutdown,
 }
 
-// ── Singleton ────────────────────────────────────────────────────────────
+// ── Singleton & Statics ──────────────────────────────────────────────────
 
 struct NativeLiveKit {
     pcm_tx: tokio::sync::mpsc::UnboundedSender<Vec<i16>>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
-    room_connected: Arc<AtomicBool>,
-    spectator_count: Arc<AtomicU32>,
-    #[allow(dead_code, reason = "Held for NativeLiveKit struct lifecycle")]
-    video_source: Arc<Mutex<Option<NativeVideoSource>>>,
-    video_active: Arc<AtomicBool>,
     _stop: tokio::sync::oneshot::Sender<()>,
     _join: std::thread::JoinHandle<()>,
 }
 
 static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
+
+static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
+static SPECTATOR_COUNT: AtomicU32 = AtomicU32::new(0);
+static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
+static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
 
 fn with_guard<F, R>(f: F) -> NapiResult<R>
 where
@@ -85,18 +91,14 @@ pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
         ));
     }
 
+    ROOM_CONNECTED.store(false, Ordering::Relaxed);
+    SPECTATOR_COUNT.store(0, Ordering::Relaxed);
+    VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+    VIDEO_SOURCE.store(None);
+
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let video_source = Arc::new(Mutex::new(None));
-    let video_active = Arc::new(AtomicBool::new(false));
-    let room_connected = Arc::new(AtomicBool::new(false));
-    let spectator_count = Arc::new(AtomicU32::new(0));
-
-    let vs = video_source.clone();
-    let va = video_active.clone();
-    let rc = room_connected.clone();
-    let sc = spectator_count.clone();
 
     let handle = std::thread::Builder::new()
         .name("lk-worker".into())
@@ -110,9 +112,7 @@ pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
             };
 
             rt.block_on(async {
-                if let Err(e) =
-                    run_worker(url, token, pcm_rx, cmd_rx, stop_rx, vs, va, rc, sc).await
-                {
+                if let Err(e) = run_worker(url, token, pcm_rx, cmd_rx, stop_rx).await {
                     eprintln!("[livekit] worker error: {e}");
                 }
             });
@@ -122,10 +122,6 @@ pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
     *guard = Some(NativeLiveKit {
         pcm_tx,
         cmd_tx,
-        room_connected,
-        spectator_count,
-        video_source,
-        video_active,
         _stop: stop_tx,
         _join: handle,
     });
@@ -143,15 +139,16 @@ pub fn disconnect_livekit_room() -> NapiResult<()> {
         let _ = state._stop.send(());
     }
     *guard = None;
+    ROOM_CONNECTED.store(false, Ordering::SeqCst);
+    SPECTATOR_COUNT.store(0, Ordering::Relaxed);
+    VIDEO_ACTIVE.store(false, Ordering::SeqCst);
+    VIDEO_SOURCE.store(None);
     Ok(())
 }
 
 #[napi]
 pub fn is_livekit_room_connected() -> bool {
-    LIVEKIT.lock().ok().is_some_and(|g| {
-        g.as_ref()
-            .is_some_and(|s| s.room_connected.load(Ordering::Relaxed))
-    })
+    ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
 // ── NAPI: Audio PCM Feed ─────────────────────────────────────────────────
@@ -160,11 +157,22 @@ pub fn is_livekit_room_connected() -> bool {
 pub fn feed_pcm(pcm: napi::bindgen_prelude::Buffer) -> NapiResult<()> {
     with_guard(|state| {
         // PCM arrives packed as i16 LE bytes from the capture native module.
-        let samples: Vec<i16> = pcm
-            .as_ref()
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let bytes = pcm.as_ref();
+        let samples: Vec<i16> = if cfg!(target_endian = "little") {
+            if let Ok(slice) = bytemuck::try_cast_slice::<u8, i16>(bytes) {
+                slice.to_vec()
+            } else {
+                bytes
+                    .chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    .collect()
+            }
+        } else {
+            bytes
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect()
+        };
         state
             .pcm_tx
             .send(samples)
@@ -201,13 +209,16 @@ pub fn stop_video_track() -> NapiResult<()> {
 
 #[napi]
 pub fn is_video_track_active() -> bool {
-    LIVEKIT.lock().ok().is_some_and(|g| {
-        g.as_ref()
-            .is_some_and(|s| s.video_active.load(Ordering::Relaxed))
-    })
+    VIDEO_ACTIVE.load(Ordering::Relaxed)
 }
 
 #[napi]
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    reason = "Recombining high and low 32-bit timestamp integers into a 64-bit microsecond integer"
+)]
 pub fn capture_dmabuf_frame(
     dmabuf_fd: i32,
     width: u32,
@@ -218,21 +229,11 @@ pub fn capture_dmabuf_frame(
 ) -> NapiResult<()> {
     #[cfg(target_os = "linux")]
     {
-        let guard = LIVEKIT
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        let Some(state) = guard.as_ref() else {
-            return Err(napi::Error::from_reason("Room not connected"));
-        };
-        let vs = state
-            .video_source
-            .lock()
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        let Some(ref source) = *vs else {
+        let Some(source) = VIDEO_SOURCE.load_full() else {
             return Err(napi::Error::from_reason("Video track not active"));
         };
         let timestamp_us =
-            ((timestamp_lo as u32 as u64) | ((timestamp_hi as u32 as u64) << 32)) as i64;
+            ((u64::from(timestamp_lo as u32)) | (u64::from(timestamp_hi as u32) << 32)) as i64;
         source.capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us);
         Ok(())
     }
@@ -254,14 +255,7 @@ pub fn capture_dmabuf_frame(
 
 #[napi]
 pub fn get_spectator_count() -> u32 {
-    LIVEKIT
-        .lock()
-        .ok()
-        .and_then(|g| {
-            g.as_ref()
-                .map(|s| s.spectator_count.load(Ordering::Relaxed))
-        })
-        .unwrap_or(0)
+    SPECTATOR_COUNT.load(Ordering::Relaxed)
 }
 
 // ── Worker Thread ────────────────────────────────────────────────────────
@@ -272,10 +266,6 @@ async fn run_worker(
     mut pcm_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<i16>>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerCmd>,
     mut stop_rx: tokio::sync::oneshot::Receiver<()>,
-    video_source: Arc<Mutex<Option<NativeVideoSource>>>,
-    video_active: Arc<AtomicBool>,
-    room_connected: Arc<AtomicBool>,
-    spectator_count: Arc<AtomicU32>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let audio = NativeAudioSource::new(AudioSourceOptions::default(), SAMPLE_RATE, CHANNELS, 0);
 
@@ -297,10 +287,10 @@ async fn run_worker(
         .await?;
 
     eprintln!("[livekit] audio track published");
-    room_connected.store(true, Ordering::SeqCst);
+    ROOM_CONNECTED.store(true, Ordering::SeqCst);
 
     let samples_per_10ms = (SAMPLE_RATE / 100 * CHANNELS) as usize;
-    let mut buffer = Vec::new();
+    let mut buffer = VecDeque::new();
 
     loop {
         tokio::select! {
@@ -314,10 +304,10 @@ async fn run_worker(
                 };
                 match cmd {
                     WorkerCmd::StartVideo { config } => {
-                        handle_start_video(&room, &config, &video_source, &video_active).await;
+                        handle_start_video(&room, &config).await;
                     }
                     WorkerCmd::StopVideo => {
-                        handle_stop_video(&room, &video_source, &video_active).await;
+                        handle_stop_video(&room).await;
                     }
                     WorkerCmd::Shutdown => {
                         break;
@@ -325,32 +315,30 @@ async fn run_worker(
                 }
             }
             event = room_events.recv() => {
-                if let Some(event) = event {
-                    match event {
-                        RoomEvent::ParticipantConnected(_)
-                        | RoomEvent::ParticipantDisconnected(_)
-                        | RoomEvent::ParticipantsUpdated { .. } => {
-                            spectator_count.store(
-                                room.remote_participants().len() as u32,
-                                Ordering::Relaxed,
-                            );
-                        }
-                        _ => {}
-                    }
+                if let Some(
+                    RoomEvent::ParticipantConnected(_)
+                    | RoomEvent::ParticipantDisconnected(_)
+                    | RoomEvent::ParticipantsUpdated { .. },
+                ) = event
+                {
+                    SPECTATOR_COUNT.store(
+                        u32::try_from(room.remote_participants().len()).unwrap_or(u32::MAX),
+                        Ordering::Relaxed,
+                    );
                 }
             }
             pcm = pcm_rx.recv() => {
                 let Some(pcm_chunk) = pcm else {
                     break;
                 };
-                buffer.extend_from_slice(&pcm_chunk);
+                buffer.extend(pcm_chunk);
                 while buffer.len() >= samples_per_10ms {
                     let chunk: Vec<i16> = buffer.drain(..samples_per_10ms).collect();
                     let frame = AudioFrame {
                         data: chunk.into(),
                         sample_rate: SAMPLE_RATE,
                         num_channels: CHANNELS,
-                        samples_per_channel: (SAMPLE_RATE / 100) as u32,
+                        samples_per_channel: SAMPLE_RATE / 100,
                     };
                     if let Err(e) = audio.capture_frame(&frame).await {
                         eprintln!("[livekit] audio capture_frame error: {e}");
@@ -360,20 +348,16 @@ async fn run_worker(
         }
     }
 
-    handle_stop_video(&room, &video_source, &video_active).await;
+    handle_stop_video(&room).await;
 
-    room_connected.store(false, Ordering::SeqCst);
+    ROOM_CONNECTED.store(false, Ordering::SeqCst);
+    SPECTATOR_COUNT.store(0, Ordering::Relaxed);
     room.close().await?;
     Ok(())
 }
 
-async fn handle_start_video(
-    room: &Room,
-    config: &CaptureConfig,
-    video_source: &Arc<Mutex<Option<NativeVideoSource>>>,
-    video_active: &Arc<AtomicBool>,
-) {
-    handle_stop_video(room, video_source, video_active).await;
+async fn handle_start_video(room: &Room, config: &CaptureConfig) {
+    handle_stop_video(room).await;
 
     let resolution = VideoResolution {
         width: config.width,
@@ -415,21 +399,13 @@ async fn handle_start_video(
         }
     }
 
-    if let Ok(mut guard) = video_source.lock() {
-        *guard = Some(source.clone());
-    }
-    video_active.store(true, Ordering::SeqCst);
+    VIDEO_SOURCE.store(Some(Arc::new(source)));
+    VIDEO_ACTIVE.store(true, Ordering::SeqCst);
 }
 
-async fn handle_stop_video(
-    room: &Room,
-    video_source: &Arc<Mutex<Option<NativeVideoSource>>>,
-    video_active: &Arc<AtomicBool>,
-) {
-    if let Ok(mut guard) = video_source.lock() {
-        guard.take();
-    }
-    video_active.store(false, Ordering::SeqCst);
+async fn handle_stop_video(room: &Room) {
+    VIDEO_SOURCE.store(None);
+    VIDEO_ACTIVE.store(false, Ordering::SeqCst);
 
     let publications: Vec<_> = room
         .local_participant()
