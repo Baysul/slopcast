@@ -216,22 +216,40 @@ pub fn capture_dmabuf_frame(
     timestamp_lo: i32,
     timestamp_hi: i32,
 ) -> NapiResult<()> {
-    let guard = LIVEKIT
-        .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    let Some(state) = guard.as_ref() else {
-        return Err(napi::Error::from_reason("Room not connected"));
-    };
-    let vs = state
-        .video_source
-        .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    let Some(ref source) = *vs else {
-        return Err(napi::Error::from_reason("Video track not active"));
-    };
-    let timestamp_us = ((timestamp_lo as u32 as u64) | ((timestamp_hi as u32 as u64) << 32)) as i64;
-    source.capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us);
-    Ok(())
+    #[cfg(target_os = "linux")]
+    {
+        let guard = LIVEKIT
+            .lock()
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let Some(state) = guard.as_ref() else {
+            return Err(napi::Error::from_reason("Room not connected"));
+        };
+        let vs = state
+            .video_source
+            .lock()
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let Some(ref source) = *vs else {
+            return Err(napi::Error::from_reason("Video track not active"));
+        };
+        let timestamp_us =
+            ((timestamp_lo as u32 as u64) | ((timestamp_hi as u32 as u64) << 32)) as i64;
+        source.capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us);
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (
+            dmabuf_fd,
+            width,
+            height,
+            pixel_format,
+            timestamp_lo,
+            timestamp_hi,
+        );
+        Err(napi::Error::from_reason(
+            "DMA-BUF frame capture is only supported on Linux",
+        ))
+    }
 }
 
 #[napi]
