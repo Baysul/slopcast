@@ -19,13 +19,14 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
-ringbuf = "0.4"
-crossbeam-channel = "0.5"
+ringbuf = "0.5.1"
+arc-swap = "1.9.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.10.0"
 x11 = "2.21"
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+futures-util = { version = "0.3", default-features = false, features = ["async-await"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
