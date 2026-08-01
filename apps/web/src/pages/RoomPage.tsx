@@ -23,6 +23,8 @@ export const RoomPage: React.FC = () => {
   const [participantCount, setParticipantCount] = useState(0);
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [copied, setCopied] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showFullscreenControls, setShowFullscreenControls] = useState(true);
   const [decoderStalled, setDecoderStalled] = useState(false);
   const [stalledCodec, setStalledCodec] = useState<string | null>(null);
 
@@ -31,9 +33,62 @@ export const RoomPage: React.FC = () => {
   const managedStreamRef = useRef<MediaStream | null>(null);
   const stallCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stallStartRef = useRef<number>(0);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const DECODER_STALL_THRESHOLD_MS = 8000;
   const DECODER_STALL_CHECK_MS = 2000;
+
+  const resetIdleTimer = useCallback(() => {
+    setShowFullscreenControls(true);
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+    }
+    idleTimerRef.current = setTimeout(() => {
+      setShowFullscreenControls(false);
+    }, 2500);
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const fs = !!document.fullscreenElement;
+      setIsFullscreen(fs);
+      if (!fs) {
+        setShowFullscreenControls(true);
+        if (idleTimerRef.current) {
+          clearTimeout(idleTimerRef.current);
+          idleTimerRef.current = null;
+        }
+      } else {
+        resetIdleTimer();
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+      }
+    };
+  }, [resetIdleTimer]);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+
+    const handleActivity = () => {
+      resetIdleTimer();
+    };
+
+    window.addEventListener('pointermove', handleActivity);
+    window.addEventListener('touchstart', handleActivity);
+    window.addEventListener('keydown', handleActivity);
+
+    return () => {
+      window.removeEventListener('pointermove', handleActivity);
+      window.removeEventListener('touchstart', handleActivity);
+      window.removeEventListener('keydown', handleActivity);
+    };
+  }, [isFullscreen, resetIdleTimer]);
 
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href).catch((err) => {
@@ -355,6 +410,8 @@ export const RoomPage: React.FC = () => {
   const variant = statusVariant();
   const CopyIcon = copied ? Check : Copy;
 
+  const headerFadeClass = isFullscreen && !showFullscreenControls ? 'opacity-0 pointer-events-none' : 'opacity-100';
+
   return (
     <div className="min-h-screen bg-background text-foreground relative">
       <div className="absolute inset-0 z-10">
@@ -366,10 +423,14 @@ export const RoomPage: React.FC = () => {
           fullBleed
           decoderStalled={decoderStalled}
           stalledCodec={stalledCodec}
+          isFullscreen={isFullscreen}
+          showFullscreenControls={showFullscreenControls}
         />
       </div>
 
-      <div className="fixed top-0 inset-x-0 bg-gradient-to-b from-black/60 to-transparent px-4 pt-3 pb-8 z-30 pointer-events-none">
+      <div
+        className={`fixed top-0 inset-x-0 bg-gradient-to-b from-black/60 to-transparent px-4 pt-3 pb-8 z-30 pointer-events-none transition-opacity duration-300 ${headerFadeClass}`}
+      >
         <div className="flex items-center justify-between pointer-events-auto gap-3">
           <div className="flex items-center gap-2 min-w-0">
             <button
@@ -413,7 +474,9 @@ export const RoomPage: React.FC = () => {
         </div>
       </div>
 
-      <div className="fixed bottom-4 left-4 z-30 pointer-events-none">
+      <div
+        className={`fixed bottom-4 left-4 z-30 pointer-events-none transition-opacity duration-300 ${headerFadeClass}`}
+      >
         <SpectatorBanner compact />
       </div>
 

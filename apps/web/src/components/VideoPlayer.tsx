@@ -19,6 +19,8 @@ interface VideoPlayerProps {
   getStatsFn?: () => Promise<RTCStatsReport | null>;
   decoderStalled?: boolean;
   stalledCodec?: string | null;
+  isFullscreen?: boolean;
+  showFullscreenControls?: boolean;
 }
 
 const STATS_POLL_MS = 2000;
@@ -32,6 +34,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   getStatsFn,
   decoderStalled,
   stalledCodec,
+  isFullscreen: propIsFullscreen,
+  showFullscreenControls = true,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -39,7 +43,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(1);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreenState, setIsFullscreenState] = useState(false);
+  const isFullscreen = propIsFullscreen ?? isFullscreenState;
   const [hasVideoTrack, setHasVideoTrack] = useState(false);
   const [needsUserGesture, setNeedsUserGesture] = useState(false);
 
@@ -183,37 +188,50 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return;
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreenState(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
 
+  const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
-      containerRef.current
-        .requestFullscreen()
-        .then(() => setIsFullscreen(true))
-        .catch(console.error);
+      const target = fullBleed
+        ? (containerRef.current?.closest('.min-h-screen') as HTMLElement) ||
+          containerRef.current ||
+          document.documentElement
+        : containerRef.current || document.documentElement;
+      target.requestFullscreen().catch(console.error);
     } else {
-      document
-        .exitFullscreen()
-        .then(() => setIsFullscreen(false))
-        .catch(console.error);
+      document.exitFullscreen().catch(console.error);
     }
   };
 
   const GestureIcon = isPlaying ? Volume2 : Play;
   const audioTrackCount = mediaStream?.getAudioTracks().length ?? 0;
 
+  let overlayControlsClass = 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto';
+  if (isFullscreen) {
+    overlayControlsClass = showFullscreenControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none';
+  }
+
   return (
     <div
       ref={containerRef}
       className={`relative w-full bg-black select-none flex items-center justify-center group ${
-        fullBleed ? 'h-screen max-h-screen' : 'aspect-video rounded-2xl overflow-hidden border border-border'
-      }`}
+        isFullscreen && !showFullscreenControls ? 'cursor-none' : ''
+      } ${fullBleed ? 'h-screen max-h-screen' : 'aspect-video rounded-2xl overflow-hidden border border-border'}`}
     >
       {/* biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
       <video
         ref={videoRef}
         playsInline
-        className={`w-full h-full object-contain ${hasVideoTrack && isLive ? 'block' : 'hidden'}`}
+        onDoubleClick={toggleFullscreen}
+        className={`w-full h-full object-contain cursor-pointer ${hasVideoTrack && isLive ? 'block' : 'hidden'}`}
       />
 
       {(!isLive || !hasVideoTrack) && (
@@ -281,12 +299,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      <div className="absolute top-4 right-16 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto">
+      <div className={`absolute top-4 right-16 z-20 transition-opacity duration-300 ${overlayControlsClass}`}>
         {isLive && mediaStream && <AudioVisualizer mediaStream={mediaStream} showStatus />}
       </div>
 
       {isLive && (
-        <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none group-hover:pointer-events-auto flex items-end justify-between gap-4">
+        <div
+          className={`absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 transition-opacity duration-300 flex items-end justify-between gap-4 ${overlayControlsClass}`}
+        >
           {telemetry?.hasVideo && <SpectatorTelemetryBar telemetry={telemetry} />}
 
           <div className="flex items-center gap-2 shrink-0 ml-auto">
@@ -334,17 +354,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </button>
             )}
 
-            {!fullBleed && (
-              <button
-                type="button"
-                onClick={toggleFullscreen}
-                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-                title="Toggle fullscreen"
-                aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-              >
-                {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+              title="Toggle fullscreen"
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            >
+              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+            </button>
           </div>
         </div>
       )}
