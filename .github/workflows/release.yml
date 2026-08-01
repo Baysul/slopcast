@@ -134,7 +134,7 @@ jobs:
       - name: Install Windows system deps
         if: runner.os == 'Windows'
         run: |
-          vcpkg install ffmpeg:x64-windows
+          vcpkg install "ffmpeg[core,avcodec,avdevice,avfilter,avformat,swresample,swscale]:x64-windows" --no-default-features
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
 
       - uses: pnpm/action-setup@v6
