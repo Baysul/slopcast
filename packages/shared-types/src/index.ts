@@ -59,14 +59,6 @@ export const RESOLUTION_DIMENSIONS: Record<ResolutionPreset, { width: number; he
   '2160p': { width: 3840, height: 2160 },
 };
 
-export type VideoSourceType = 'screen' | 'video-file';
-
-export interface VideoFileSourceConfig {
-  filePath: string;
-  fileName: string;
-  loop: boolean;
-}
-
 // User-configurable encoder parameters, persisted by the desktop app to a
 // JSON file in the per-platform user-data directory.
 export interface StreamSettings {
@@ -75,8 +67,6 @@ export interface StreamSettings {
   videoCodec: VideoCodec;
   resolution: ResolutionPreset;
   apiEndpoint: string;
-  sourceType?: VideoSourceType;
-  videoFilePath?: string;
 }
 
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
@@ -85,8 +75,6 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   videoCodec: 'vp8',
   resolution: '1080p',
   apiEndpoint: 'http://localhost:3001',
-  sourceType: 'screen',
-  videoFilePath: undefined,
 };
 
 export const VIDEO_CODEC_LABEL: Record<string, string> = {
@@ -128,14 +116,11 @@ export function sanitizeStreamSettings(raw: unknown): StreamSettings {
     v === 'h264' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
   const resolution = (v: unknown): ResolutionPreset =>
     v === '480p' || v === '720p' || v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
-  const sourceType = (v: unknown): VideoSourceType => (v === 'screen' || v === 'video-file' ? v : 'screen');
   return {
     fps: num(o.fps, 1, 240, d.fps),
     bitrateLimit: num(o.bitrateLimit, 100_000, 200_000_000, d.bitrateLimit),
     videoCodec: codec(o.videoCodec),
     resolution: resolution(o.resolution),
     apiEndpoint: typeof o.apiEndpoint === 'string' && o.apiEndpoint.trim() !== '' ? o.apiEndpoint : d.apiEndpoint,
-    sourceType: sourceType(o.sourceType),
-    videoFilePath: typeof o.videoFilePath === 'string' && o.videoFilePath.trim() !== '' ? o.videoFilePath : undefined,
   };
 }

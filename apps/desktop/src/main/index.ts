@@ -1,24 +1,10 @@
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as nativeLiveKit from '@slopcast/native-livekit';
 import * as native from '@slopcast/native-rust';
 import { type StreamSettings, sanitizeStreamSettings } from '@slopcast/shared-types';
 import { loadConfig } from '@slopcast/shared-types/config';
-import {
-  app,
-  BrowserWindow,
-  clipboard,
-  desktopCapturer,
-  dialog,
-  ipcMain,
-  Menu,
-  nativeImage,
-  net,
-  protocol,
-  session,
-  shell,
-} from 'electron';
+import { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, Menu, nativeImage, session, shell } from 'electron';
 
 const appConfig = loadConfig();
 
@@ -35,8 +21,6 @@ interface CaptureContext {
 
 let lastCaptureContext: CaptureContext | null = null;
 
-const allowedFilePaths = new Set<string>();
-
 const isWayland =
   process.platform === 'linux' && (process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY);
 
@@ -49,8 +33,7 @@ const detectDesktopEnvironment = (): CaptureContext['de'] => {
 
 // ── Stream Settings Persistence ─────────────────────────────────────────
 // Stored as JSON in Electron's per-platform user-data directory
-// (%APPDATA%/<app-name> on Windows, ~/.config/<app-name> on Linux,
-// ~/Library/Application Support/<app-name> on macOS).
+// (%APPDATA%/<app-name> on Windows, ~/.config/<app-name> on Linux).
 const STREAM_SETTINGS_FILE = 'stream-settings.json';
 let streamSettingsCache: StreamSettings | null = null;
 
@@ -285,27 +268,7 @@ function stopNativeCapture() {
   } catch (err) {
     console.error('Failed to stop native video capture:', err);
   }
-  try {
-    native.stopVideoFilePlayback();
-  } catch (err) {
-    console.error('Failed to stop native video file playback:', err);
-  }
 }
-
-// Register local-media as a privileged scheme before app.whenReady()
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: 'local-media',
-    privileges: {
-      standard: true,
-      secure: true,
-      supportFetchAPI: true,
-      corsEnabled: true,
-      stream: true,
-      bypassCSP: true,
-    },
-  },
-]);
 
 app.whenReady().then(() => {
   app.setName('slopcast');
@@ -776,200 +739,6 @@ app.whenReady().then(() => {
     }
   });
 
-  // ── Local media protocol ──────────────────────────────────────────────
-  // Chromium's sandbox blocks file:// access from the renderer. A custom
-  // protocol lets the renderer play back video files the user selected
-  // through the file dialog, with a session-scoped allowlist for security.
-  protocol.handle('local-media', async (request) => {
-    let filePath: string;
-    try {
-      const rawUrl = request.url;
-      const fileUrl = rawUrl.replace(/^local-media:\/*/, 'file:///');
-      filePath = fileURLToPath(fileUrl);
-    } catch {
-      return new Response('Bad Request', { status: 400 });
-    }
-    const resolvedPath = isAllowedFilePath(filePath);
-    if (!resolvedPath) {
-      return new Response('Forbidden', { status: 403 });
-    }
-    try {
-      return await net.fetch(pathToFileURL(resolvedPath).toString(), {
-        method: request.method,
-        headers: request.headers,
-      });
-    } catch {
-      return new Response('Not Found', { status: 404 });
-    }
-  });
-
-  function resolveFilePath(inputPath: string): string {
-    if (!inputPath) return inputPath;
-    let target = inputPath;
-    if (target.startsWith('file://')) {
-      try {
-        target = fileURLToPath(target);
-      } catch {
-        // Fall back to inputPath
-      }
-    } else if (target.startsWith('local-media://')) {
-      try {
-        target = fileURLToPath(target.replace('local-media://', 'file://'));
-      } catch {
-        // Fall back to inputPath
-      }
-    }
-    return path.resolve(target);
-  }
-
-  function isAllowedFilePath(filePath: string): string | null {
-    if (!filePath) return null;
-    const resolved = resolveFilePath(filePath);
-    if (allowedFilePaths.has(resolved)) return resolved;
-    try {
-      const real = realpathSync(resolved);
-      if (allowedFilePaths.has(real)) return real;
-    } catch {
-      // ignore
-    }
-    if (process.platform === 'win32') {
-      const lowerResolved = resolved.toLowerCase();
-      for (const allowed of allowedFilePaths) {
-        if (allowed.toLowerCase() === lowerResolved) return allowed;
-      }
-    }
-    return null;
-  }
-
-  ipcMain.handle('select-video-file', async () => {
-    if (!mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile'],
-      filters: [
-        {
-          name: 'Video Files',
-          extensions: [
-            'mp4',
-            'webm',
-            'ogg',
-            'ogv',
-            'mkv',
-            'avi',
-            'mov',
-            'wmv',
-            'flv',
-            'm4v',
-            'ts',
-            'mts',
-            'm2ts',
-            'vob',
-            '3gp',
-            '3g2',
-          ],
-        },
-      ],
-    });
-    if (result.canceled || result.filePaths.length === 0) return null;
-    const rawPath = result.filePaths[0];
-    const resolved = path.resolve(rawPath);
-    allowedFilePaths.add(resolved);
-    try {
-      const real = realpathSync(resolved);
-      allowedFilePaths.add(real);
-    } catch {
-      // ignore
-    }
-    return { filePath: resolved, fileName: path.basename(resolved) };
-  });
-
-  ipcMain.handle('probe-video-file', async (_e, filePath: string) => {
-    try {
-      const realResolved = isAllowedFilePath(filePath);
-      if (!realResolved) {
-        console.warn('probe-video-file: path not in allowedFilePaths:', filePath);
-        return null;
-      }
-      return native.probeVideoFile(realResolved);
-    } catch (err) {
-      console.error('probe-video-file IPC error:', err, 'for filePath:', filePath);
-      return null;
-    }
-  });
-
-  ipcMain.handle('get-shared-video-buffer', async () => {
-    try {
-      return native.getSharedVideoBuffer();
-    } catch (err) {
-      console.error('get-shared-video-buffer error:', err);
-      return null;
-    }
-  });
-
-  ipcMain.handle('start-video-file', async (_e, filePath: string, loop?: boolean) => {
-    try {
-      const realResolved = isAllowedFilePath(filePath);
-      if (!realResolved) {
-        console.warn('start-video-file: path not in allowedFilePaths:', filePath);
-        return false;
-      }
-      native.setAudioFrameCallback((_err: Error | null, buf: Buffer | null) => {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        mainWindow.webContents.send('video:audio', buf && buf.length > 0 ? buf : null);
-      });
-
-      native.setSharedVideoFrameCallback((_err: Error | null, meta: unknown) => {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        mainWindow.webContents.send('video:shared-frame', meta);
-      });
-
-      native.startVideoFilePlayback(realResolved, loop);
-      return true;
-    } catch (err) {
-      console.error('start-video-file IPC error:', err, 'for filePath:', filePath);
-      return false;
-    }
-  });
-
-  ipcMain.handle('set-loop-video-file', async (_e, loop: boolean) => {
-    try {
-      native.setVideoFileLoop(loop);
-      return true;
-    } catch (err) {
-      console.error('set-loop-video-file IPC error:', err);
-      return false;
-    }
-  });
-
-  ipcMain.handle('stop-video-file', async () => {
-    try {
-      native.stopVideoFilePlayback();
-      return true;
-    } catch (err) {
-      console.error('stop-video-file IPC error:', err);
-      return false;
-    }
-  });
-
-  ipcMain.handle('seek-video-file', async (_e, tsMs: number) => {
-    try {
-      native.seekVideoFilePlayback(tsMs);
-      return true;
-    } catch (err) {
-      console.error('seek-video-file IPC error:', err);
-      return false;
-    }
-  });
-
-  ipcMain.handle('pause-video-file', async (_e, paused: boolean) => {
-    try {
-      native.setVideoFilePaused(paused);
-      return true;
-    } catch (err) {
-      console.error('pause-video-file IPC error:', err);
-      return false;
-    }
-  });
-
   createWindow();
 });
 
@@ -978,7 +747,5 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  app.quit();
 });

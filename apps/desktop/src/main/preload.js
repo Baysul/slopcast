@@ -29,27 +29,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopNativeCapture: () => ipcRenderer.invoke('stop-native-capture'),
   isNativeCaptureActive: () => ipcRenderer.invoke('is-native-capture-active'),
   getSpectatorCount: () => ipcRenderer.invoke('get-spectator-count'),
-  selectVideoFile: () => ipcRenderer.invoke('select-video-file'),
-  probeVideoFile: (filePath) => ipcRenderer.invoke('probe-video-file', filePath),
-  startVideoFile: (filePath, loop) => ipcRenderer.invoke('start-video-file', filePath, loop),
-  setLoopVideoFile: (loop) => ipcRenderer.invoke('set-loop-video-file', loop),
-  stopVideoFile: () => ipcRenderer.invoke('stop-video-file'),
-  seekVideoFile: (tsMs) => ipcRenderer.invoke('seek-video-file', tsMs),
-  pauseVideoFile: (paused) => ipcRenderer.invoke('pause-video-file', paused),
-  onVideoFileFrame: (cb) => {
-    const handler = (_e, data) => cb(data);
-    ipcRenderer.on('video:frame', handler);
-    return () => ipcRenderer.removeListener('video:frame', handler);
-  },
-  onVideoFileAudio: (cb) => {
-    const handler = (_e, data) => cb(data);
-    ipcRenderer.on('video:audio', handler);
-    return () => ipcRenderer.removeListener('video:audio', handler);
-  },
-  getSharedVideoBuffer: () => ipcRenderer.invoke('get-shared-video-buffer'),
-  onVideoSharedFrame: (cb) => {
-    const handler = (_e, meta) => cb(meta);
-    ipcRenderer.on('video:shared-frame', handler);
-    return () => ipcRenderer.removeListener('video:shared-frame', handler);
-  },
 });
