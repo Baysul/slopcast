@@ -79,7 +79,6 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
 
 export const VIDEO_CODEC_LABEL: Record<string, string> = {
   'VIDEO/H264': 'H.264',
-  'VIDEO/H265': 'H.265',
   'VIDEO/VP8': 'VP8',
   'VIDEO/VP9': 'VP9',
   'VIDEO/AV1': 'AV1',

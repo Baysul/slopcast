@@ -213,10 +213,10 @@ impl AppNodeInfo {
         }
     }
 
-    fn fallback_pid(&self) -> Option<u32> {
+    fn fallback_pid(&self, procs: &[ProcEntry]) -> Option<u32> {
         self.binary
             .as_deref()
-            .and_then(resolve_pid_by_binary)
+            .and_then(|bin| resolve_pid_by_binary(procs, bin))
             .map(i32::cast_unsigned)
             .filter(|p| *p > 0)
     }
@@ -333,6 +333,7 @@ struct GraphTracker {
     default_sink_name: Option<String>,
     pending_metadata: Option<GlobalObject<PropertiesBox>>,
     client_pids: HashMap<u32, u32>,
+    procs: Vec<ProcEntry>,
 }
 
 impl GraphTracker {
@@ -356,6 +357,7 @@ impl GraphTracker {
             default_sink_name: None,
             pending_metadata: None,
             client_pids: HashMap::new(),
+            procs: iter_proc(),
         }
     }
 
@@ -423,7 +425,7 @@ impl GraphTracker {
                     info.pid = Some(p);
                 }
                 if info.pid.is_none_or(|p| p == 0) {
-                    info.pid = info.fallback_pid();
+                    info.pid = info.fallback_pid(&self.procs);
                 }
                 let our_pid = std::process::id() as u32;
                 let is_slopcast = info.pid.is_some_and(|p| p == our_pid)
@@ -453,7 +455,7 @@ impl GraphTracker {
             .or_else(|| {
                 let name = props.get("application.name").unwrap_or("");
                 (!name.is_empty())
-                    .then(|| resolve_pid_by_name(name))
+                    .then(|| resolve_pid_by_name(&self.procs, name))
                     .flatten()
             });
         if let Some(pid) = pid {
@@ -912,30 +914,24 @@ fn run_capture_session(
                         static PCM_SCRATCH: std::cell::RefCell<Vec<u8>> =
                             std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES));
                     }
-                    let mut all_bytes = PCM_SCRATCH.with(|v| v.take());
-                    all_bytes.clear();
-                    for data in buffer.datas_mut() {
-                        let start = data.chunk().offset() as usize;
-                        let size = data.chunk().size() as usize;
-                        let Some(bytes) = data.data() else {
-                            continue;
-                        };
-                        let end = start.saturating_add(size).min(bytes.len());
-                        let Some(slice) = bytes.get(start..end) else {
-                            continue;
-                        };
-                        all_bytes.extend_from_slice(slice);
-                    }
-                    if !all_bytes.is_empty() {
-                        invoke_audio_data_callback(all_bytes);
-                    }
-                    PCM_SCRATCH.with(|v| {
-                        let mut buf = v.replace(Vec::new());
-                        buf.clear();
-                        if buf.capacity() < MAX_AUDIO_FRAME_BYTES {
-                            buf.reserve(MAX_AUDIO_FRAME_BYTES);
+                    PCM_SCRATCH.with(|cell| {
+                        let mut all_bytes = cell.borrow_mut();
+                        all_bytes.clear();
+                        for data in buffer.datas_mut() {
+                            let start = data.chunk().offset() as usize;
+                            let size = data.chunk().size() as usize;
+                            let Some(bytes) = data.data() else {
+                                continue;
+                            };
+                            let end = start.saturating_add(size).min(bytes.len());
+                            let Some(slice) = bytes.get(start..end) else {
+                                continue;
+                            };
+                            all_bytes.extend_from_slice(slice);
                         }
-                        *v.borrow_mut() = buf;
+                        if !all_bytes.is_empty() {
+                            invoke_audio_data_callback(&all_bytes);
+                        }
                     });
                 })
                 .register()
@@ -1131,13 +1127,13 @@ fn client_sec_pid(props: &DictRef) -> Option<i32> {
     }
 }
 
-fn resolve_pid_by_binary(binary: &str) -> Option<i32> {
+fn resolve_pid_by_binary(procs: &[ProcEntry], binary: &str) -> Option<i32> {
     if binary.is_empty() {
         return None;
     }
     let lower = binary.to_lowercase();
-    let candidates: Vec<i32> = iter_proc()
-        .into_iter()
+    let candidates: Vec<i32> = procs
+        .iter()
         .filter(|e| {
             e.comm.to_lowercase() == lower
                 || std::path::Path::new(e.cmdline.split('\0').next().unwrap_or(""))
@@ -1150,15 +1146,15 @@ fn resolve_pid_by_binary(binary: &str) -> Option<i32> {
     (candidates.len() == 1).then_some(candidates[0])
 }
 
-fn resolve_pid_by_name(name: &str) -> Option<i32> {
+fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32> {
     if name.is_empty() {
         return None;
     }
     let search_key = name.split_whitespace().next().filter(|s| s.len() >= 2)?;
     let search_lower = search_key.to_lowercase();
 
-    iter_proc()
-        .into_iter()
+    procs
+        .iter()
         .find(|e| {
             let comm_lower = e.comm.to_lowercase();
             comm_lower == search_lower
@@ -1235,6 +1231,9 @@ fn collect_client_pids(
     let reg_cell = bind_registry.clone();
     let core_rc = core.clone();
 
+    let procs = Rc::new(iter_proc());
+    let procs_cb = procs.clone();
+
     let _reg_listener = registry
         .add_listener_local()
         .global(move |global| {
@@ -1251,7 +1250,7 @@ fn collect_client_pids(
                     })
                     .or_else(|| {
                         (!app_name.is_empty())
-                            .then(|| resolve_pid_by_name(app_name))
+                            .then(|| resolve_pid_by_name(&procs_cb, app_name))
                             .flatten()
                     });
                 if let Some(pid) = pid {
@@ -1281,9 +1280,12 @@ fn collect_client_pids(
                         is_valid_pid(p.cast_signed()).then_some(p.cast_signed())
                     })
                     .or_else(|| {
-                        resolve_pid_by_binary(props.get("application.process.binary").unwrap_or(""))
+                        resolve_pid_by_binary(
+                            &procs_cb,
+                            props.get("application.process.binary").unwrap_or(""),
+                        )
                     })
-                    .or_else(|| resolve_pid_by_name(stream_name))
+                    .or_else(|| resolve_pid_by_name(&procs_cb, stream_name))
                     .unwrap_or(0);
 
                 if pid == our_pid || stream_name.to_lowercase().contains("slopcast") {
@@ -1939,7 +1941,8 @@ fn meter_stream(
                     peak = peak.max(mag);
                 }
             }
-            level.store(peak.to_bits(), Ordering::Relaxed);
+            let peak = peak.clamp(0.0, 1.0);
+            level.fetch_max(peak.to_bits(), Ordering::Relaxed);
         })
         .register()
         .ok()?;
@@ -2132,7 +2135,7 @@ pub(crate) fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
     Ok(levels
         .iter()
         .map(|(id, level)| {
-            let raw = f32::from_bits(level.load(Ordering::Relaxed));
+            let raw = f32::from_bits(level.swap(0, Ordering::Relaxed));
             AudioAppLevel {
                 id: (*id).cast_signed(),
                 level: if raw.is_finite() {
@@ -2159,15 +2162,24 @@ pub(crate) fn set_audio_data_callback(
     Ok(())
 }
 
-fn invoke_audio_data_callback(data: Vec<u8>) {
+fn invoke_audio_data_callback(data: &[u8]) {
     // PipeWire delivers f32 LE frames; we downmix to packed i16 LE bytes so the
     // N-API boundary transfers one binary buffer instead of ~960 JS numbers.
-    let mut i16_bytes = Vec::with_capacity(data.len() / 2);
-    for chunk in data.chunks_exact(4) {
-        let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        i16_bytes.extend_from_slice(&((f.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
+    thread_local! {
+        static I16_SCRATCH: std::cell::RefCell<Vec<u8>> =
+            std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES / 2));
     }
-    crate::audio_ring::push_pcm_bytes(&i16_bytes);
+    I16_SCRATCH.with(|cell| {
+        let mut i16_bytes = cell.borrow_mut();
+        i16_bytes.clear();
+        i16_bytes.reserve(data.len() / 2);
+        for chunk in data.chunks_exact(4) {
+            let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let sample = (f.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            i16_bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        crate::audio_ring::push_pcm_bytes(&i16_bytes);
+    });
 }
 
 fn create_audio_capture_format() -> Option<Vec<u8>> {

@@ -392,7 +392,6 @@ async fn handle_start_video(
             "vp9" => Some(VideoCodec::VP9),
             "h264" => Some(VideoCodec::H264),
             "av1" => Some(VideoCodec::AV1),
-            "h265" => Some(VideoCodec::H265),
             _ => None,
         })
         .unwrap_or(VideoCodec::VP9);

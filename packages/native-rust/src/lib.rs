@@ -191,9 +191,30 @@ pub fn init_engine() -> String {
 /// # Errors
 ///
 /// Returns an error if the platform-specific audio enumeration fails.
-#[napi]
-pub fn list_audio_applications() -> napi::Result<Vec<AudioApp>> {
-    platform::list_audio_applications()
+pub struct ListAudioAppsTask;
+
+impl napi::Task for ListAudioAppsTask {
+    type Output = Vec<AudioApp>;
+    type JsValue = Vec<AudioApp>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        platform::list_audio_applications()
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Lists active audio applications visible to the native layer asynchronously.
+///
+/// # Errors
+///
+/// Returns an error if the platform-specific audio enumeration fails.
+#[napi(ts_return_type = "Promise<Array<AudioApp>>")]
+pub fn list_audio_applications() -> napi::Result<napi::bindgen_prelude::AsyncTask<ListAudioAppsTask>>
+{
+    Ok(napi::bindgen_prelude::AsyncTask::new(ListAudioAppsTask))
 }
 
 /// Starts exclusive audio capture for the given application.
@@ -264,15 +285,36 @@ pub fn resolve_audio_app_for_captured_window() -> napi::Result<Option<AudioApp>>
     Ok(platform::resolve_audio_app_for_captured_window())
 }
 
+pub struct ResolveAudioAppByNameTask {
+    label: String,
+}
+
+impl napi::Task for ResolveAudioAppByNameTask {
+    type Output = Option<AudioApp>;
+    type JsValue = Option<AudioApp>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let apps = platform::list_audio_applications()?;
+        Ok(find_best_audio_match(&apps, &self.label))
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 /// Resolves the best-matching audio application by name.
 ///
 /// # Errors
 ///
 /// Delegates to `list_audio_applications` and propagates its errors.
-#[napi]
-pub fn resolve_audio_app_by_name(label: String) -> napi::Result<Option<AudioApp>> {
-    let apps = platform::list_audio_applications()?;
-    Ok(find_best_audio_match(&apps, &label))
+#[napi(ts_return_type = "Promise<AudioApp | null>")]
+pub fn resolve_audio_app_by_name(
+    label: String,
+) -> napi::Result<napi::bindgen_prelude::AsyncTask<ResolveAudioAppByNameTask>> {
+    Ok(napi::bindgen_prelude::AsyncTask::new(
+        ResolveAudioAppByNameTask { label },
+    ))
 }
 
 /// Returns a snapshot of the currently active `PipeWire` video capture context.
@@ -359,8 +401,6 @@ pub fn stop_video_capture() -> napi::Result<bool> {
     platform::stop_video_capture()
 }
 
-#[napi(object)]
-#[derive(Debug, Clone)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,9 +422,97 @@ mod tests {
     }
 
     #[test]
+    fn test_init_engine() {
+        assert_eq!(init_engine(), "Native engine initialized");
+    }
+
+    #[test]
+    fn test_struct_properties() {
+        let audio_app = AudioApp {
+            id: 42,
+            name: "TestApp".to_string(),
+            process_id: 1234,
+            bundle_id: Some("com.example.test".to_string()),
+            window_title: Some("Test Window".to_string()),
+            client_id: Some(100),
+            media_title: Some("Song Title".to_string()),
+        };
+        let cloned_app = audio_app.clone();
+        assert_eq!(cloned_app.id, 42);
+        assert_eq!(cloned_app.name, "TestApp");
+        assert_eq!(cloned_app.process_id, 1234);
+        assert_eq!(cloned_app.bundle_id.as_deref(), Some("com.example.test"));
+        assert_eq!(cloned_app.window_title.as_deref(), Some("Test Window"));
+        assert_eq!(cloned_app.client_id, Some(100));
+        assert_eq!(cloned_app.media_title.as_deref(), Some("Song Title"));
+        assert!(format!("{audio_app:?}").contains("TestApp"));
+
+        let level = AudioAppLevel { id: 1, level: 0.75 };
+        let cloned_level = level;
+        assert_eq!(cloned_level.id, 1);
+        assert!((cloned_level.level - 0.75).abs() < f64::EPSILON);
+
+        let context = CaptureContext {
+            de: "kde".to_string(),
+            source_type: "window".to_string(),
+            media_name: Some("kwin-screencast-test".to_string()),
+            video_node_count: 1,
+            app: Some(audio_app),
+            screencast_node_id: Some(123),
+        };
+        let cloned_context = context.clone();
+        assert_eq!(cloned_context.de, "kde");
+        assert_eq!(cloned_context.source_type, "window");
+        assert_eq!(cloned_context.video_node_count, 1);
+        assert_eq!(cloned_context.screencast_node_id, Some(123));
+        assert!(format!("{context:?}").contains("kwin-screencast-test"));
+    }
+
+    #[test]
+    fn test_title_matches_exact_and_case() {
+        assert!(title_matches("Discord", "discord", "discord"));
+        assert!(title_matches("DISCORD", "discord", "discord"));
+    }
+
+    #[test]
+    fn test_title_matches_containment() {
+        assert!(title_matches(
+            "Discord | General",
+            "discord | general - brave",
+            "discord"
+        ));
+        assert!(title_matches(
+            "Visual Studio Code - main.rs",
+            "visual studio code",
+            "visual"
+        ));
+    }
+
+    #[test]
+    fn test_title_matches_first_word() {
+        assert!(title_matches(
+            "Firefox Web Browser",
+            "firefox - youtube",
+            "firefox"
+        ));
+    }
+
+    #[test]
+    fn test_title_matches_unrelated() {
+        assert!(!title_matches("Calculator", "spotify", "spotify"));
+    }
+
+    #[test]
     fn matches_exact_app_name() {
         let apps = [app(1, "Spotify", None), app(2, "Firefox", None)];
         assert_eq!(matched_id(&apps, "Spotify"), Some(1));
+    }
+
+    #[test]
+    fn matches_case_insensitive() {
+        let apps = [app(1, "Spotify", None), app(2, "Firefox", None)];
+        assert_eq!(matched_id(&apps, "sPoTiFy"), Some(1));
+        assert_eq!(matched_id(&apps, "SPOTIFY"), Some(1));
     }
 
     #[test]
@@ -423,10 +551,37 @@ mod tests {
     }
 
     #[test]
+    fn returns_none_for_empty_or_whitespace_label() {
+        let apps = [app(1, "Spotify", None)];
+        assert!(find_best_audio_match(&apps, "").is_none());
+        assert!(find_best_audio_match(&apps, "   ").is_none());
+    }
+
+    #[test]
+    fn returns_none_for_empty_apps_list() {
+        assert!(find_best_audio_match(&[], "Spotify").is_none());
+    }
+
+    #[test]
     fn prefers_exact_name_over_substring() {
         // "Spotify" must win over "Spotify-cli" when the label is exactly
         // "Spotify".
         let apps = [app(1, "Spotify-cli", None), app(2, "Spotify", None)];
         assert_eq!(matched_id(&apps, "Spotify"), Some(2));
+    }
+
+    #[test]
+    fn handles_apps_with_full_metadata() {
+        let apps = [AudioApp {
+            id: 10,
+            name: "Spotify".to_string(),
+            process_id: 1234,
+            bundle_id: Some("com.spotify.client".to_string()),
+            window_title: Some("Spotify Free".to_string()),
+            client_id: Some(50),
+            media_title: Some("Artist - Track".to_string()),
+        }];
+        assert_eq!(matched_id(&apps, "Spotify"), Some(10));
+        assert_eq!(matched_id(&apps, "Spotify Free"), Some(10));
     }
 }

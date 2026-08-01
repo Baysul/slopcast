@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use zbus::blocking::{Connection, Proxy};
+use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedValue, Value};
 
 pub(crate) struct MprisPlayer {
@@ -27,49 +27,55 @@ pub(crate) fn list_players() -> Vec<MprisPlayer> {
             continue;
         }
 
-        let Ok(proxy) = Proxy::new(
+        let main_props = dbus_get_all_properties(
             &conn,
-            name.as_str(),
+            &name,
             "/org/mpris/MediaPlayer2",
             "org.mpris.MediaPlayer2",
-        ) else {
-            continue;
-        };
-        let Ok(identity) = proxy.get_property::<String>("Identity") else {
+        );
+        let Some(identity) = main_props.get("Identity").and_then(|v| match &**v {
+            Value::Str(s) => Some(s.to_string()),
+            _ => None,
+        }) else {
             continue;
         };
 
         let pid = dbus_get_pid(&conn, &name);
-        let desktop_entry: Option<String> = proxy.get_property("DesktopEntry").ok();
-        let Ok(player_proxy) = Proxy::new(
+        let desktop_entry = main_props.get("DesktopEntry").and_then(|v| match &**v {
+            Value::Str(s) => Some(s.to_string()),
+            _ => None,
+        });
+
+        let player_props = dbus_get_all_properties(
             &conn,
-            name.as_str(),
+            &name,
             "/org/mpris/MediaPlayer2",
             "org.mpris.MediaPlayer2.Player",
-        ) else {
-            players.push(MprisPlayer {
-                pid,
-                identity,
-                desktop_entry,
-                playing: false,
-                title: None,
-            });
-            continue;
-        };
-        let playback_status: Option<String> = player_proxy.get_property("PlaybackStatus").ok();
-        let title: Option<String> = player_proxy
-            .get_property::<HashMap<String, OwnedValue>>("Metadata")
-            .ok()
-            .and_then(|m| {
-                m.get("xesam:title")
-                    .and_then(|v| match &**v {
-                        Value::Str(s) => Some(s.as_str()),
-                        _ => None,
-                    })
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-            });
-        let playing = playback_status.as_deref() == Some("Playing");
+        );
+        let playback_status = player_props.get("PlaybackStatus").and_then(|v| match &**v {
+            Value::Str(s) => Some(s.as_str()),
+            _ => None,
+        });
+
+        let title = player_props.get("Metadata").and_then(|v| match &**v {
+            Value::Dict(dict) => {
+                for (key, val) in dict.iter() {
+                    if let Value::Str(k) = key {
+                        if k.as_str() == "xesam:title" {
+                            if let Value::Str(s) = val {
+                                if !s.is_empty() {
+                                    return Some(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        });
+
+        let playing = playback_status == Some("Playing");
 
         players.push(MprisPlayer {
             pid,
@@ -81,6 +87,27 @@ pub(crate) fn list_players() -> Vec<MprisPlayer> {
     }
 
     players
+}
+
+fn dbus_get_all_properties(
+    conn: &Connection,
+    bus_name: &str,
+    path: &str,
+    interface: &str,
+) -> HashMap<String, OwnedValue> {
+    let Ok(reply) = conn.call_method(
+        Some(bus_name),
+        path,
+        Some("org.freedesktop.DBus.Properties"),
+        "GetAll",
+        &(interface,),
+    ) else {
+        return HashMap::new();
+    };
+    reply
+        .body()
+        .deserialize::<HashMap<String, OwnedValue>>()
+        .unwrap_or_default()
 }
 
 fn dbus_list_names(conn: &Connection) -> Result<Vec<String>, zbus::Error> {
