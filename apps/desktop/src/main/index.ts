@@ -285,7 +285,27 @@ function stopNativeCapture() {
   } catch (err) {
     console.error('Failed to stop native video capture:', err);
   }
+  try {
+    native.stopVideoFilePlayback();
+  } catch (err) {
+    console.error('Failed to stop native video file playback:', err);
+  }
 }
+
+// Register local-media as a privileged scheme before app.whenReady()
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'local-media',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+      bypassCSP: true,
+    },
+  },
+]);
 
 app.whenReady().then(() => {
   app.setName('slopcast');
@@ -764,17 +784,13 @@ app.whenReady().then(() => {
     let filePath: string;
     try {
       const rawUrl = request.url;
-      const fileUrl = rawUrl.replace(/^local-media:\/\//, 'file://');
+      const fileUrl = rawUrl.replace(/^local-media:\/*/, 'file:///');
       filePath = fileURLToPath(fileUrl);
     } catch {
       return new Response('Bad Request', { status: 400 });
     }
-    const resolvedPath = realpathSync(filePath);
-    if (!allowedFilePaths.has(resolvedPath)) {
-      return new Response('Forbidden', { status: 403 });
-    }
-    const homeDir = app.getPath('home');
-    if (!resolvedPath.startsWith(homeDir + path.sep) && resolvedPath !== homeDir) {
+    const resolvedPath = isAllowedFilePath(filePath);
+    if (!resolvedPath) {
       return new Response('Forbidden', { status: 403 });
     }
     try {
@@ -791,6 +807,12 @@ app.whenReady().then(() => {
       const contentType = mimeTypes[ext] ?? 'video/mp4';
 
       const rangeHeader = request.headers.get('Range');
+      const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+      };
+
       if (rangeHeader) {
         const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
         if (match) {
@@ -806,6 +828,7 @@ app.whenReady().then(() => {
                 'Content-Length': String(chunkLength),
                 'Content-Range': `bytes ${start}-${end}/${fileStat.size}`,
                 'Accept-Ranges': 'bytes',
+                ...corsHeaders,
               },
             });
           }
@@ -818,12 +841,51 @@ app.whenReady().then(() => {
           'Content-Type': contentType,
           'Content-Length': String(fileStat.size),
           'Accept-Ranges': 'bytes',
+          ...corsHeaders,
         },
       });
     } catch {
       return new Response('Not Found', { status: 404 });
     }
   });
+
+  function resolveFilePath(inputPath: string): string {
+    if (!inputPath) return inputPath;
+    let target = inputPath;
+    if (target.startsWith('file://')) {
+      try {
+        target = fileURLToPath(target);
+      } catch {
+        // Fall back to inputPath
+      }
+    } else if (target.startsWith('local-media://')) {
+      try {
+        target = fileURLToPath(target.replace('local-media://', 'file://'));
+      } catch {
+        // Fall back to inputPath
+      }
+    }
+    return path.resolve(target);
+  }
+
+  function isAllowedFilePath(filePath: string): string | null {
+    if (!filePath) return null;
+    const resolved = resolveFilePath(filePath);
+    if (allowedFilePaths.has(resolved)) return resolved;
+    try {
+      const real = realpathSync(resolved);
+      if (allowedFilePaths.has(real)) return real;
+    } catch {
+      // ignore
+    }
+    if (process.platform === 'win32') {
+      const lowerResolved = resolved.toLowerCase();
+      for (const allowed of allowedFilePaths) {
+        if (allowed.toLowerCase() === lowerResolved) return allowed;
+      }
+    }
+    return null;
+  }
 
   ipcMain.handle('select-video-file', async () => {
     if (!mainWindow) return null;
@@ -854,37 +916,23 @@ app.whenReady().then(() => {
       ],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
-    const resolved = realpathSync(result.filePaths[0]);
-    allowedFilePaths.clear();
+    const rawPath = result.filePaths[0];
+    const resolved = path.resolve(rawPath);
     allowedFilePaths.add(resolved);
+    try {
+      const real = realpathSync(resolved);
+      allowedFilePaths.add(real);
+    } catch {
+      // ignore
+    }
     return { filePath: resolved, fileName: path.basename(resolved) };
   });
 
-  function resolveFilePath(inputPath: string): string {
-    if (!inputPath) return inputPath;
-    let target = inputPath;
-    if (target.startsWith('file://')) {
-      try {
-        target = fileURLToPath(target);
-      } catch {
-        // Fall back to inputPath
-      }
-    } else if (target.startsWith('local-media://')) {
-      try {
-        target = fileURLToPath(target.replace('local-media://', 'file://'));
-      } catch {
-        // Fall back to inputPath
-      }
-    }
-    return path.resolve(target);
-  }
-
   ipcMain.handle('probe-video-file', async (_e, filePath: string) => {
     try {
-      const resolved = resolveFilePath(filePath);
-      const realResolved = realpathSync(resolved);
-      if (!allowedFilePaths.has(realResolved)) {
-        console.warn('probe-video-file: path not in allowedFilePaths:', realResolved);
+      const realResolved = isAllowedFilePath(filePath);
+      if (!realResolved) {
+        console.warn('probe-video-file: path not in allowedFilePaths:', filePath);
         return null;
       }
       return native.probeVideoFile(realResolved);
@@ -894,12 +942,20 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('start-video-file', async (_e, filePath: string) => {
+  ipcMain.handle('get-shared-video-buffer', async () => {
     try {
-      const resolved = resolveFilePath(filePath);
-      const realResolved = realpathSync(resolved);
-      if (!allowedFilePaths.has(realResolved)) {
-        console.warn('start-video-file: path not in allowedFilePaths:', realResolved);
+      return native.getSharedVideoBuffer();
+    } catch (err) {
+      console.error('get-shared-video-buffer error:', err);
+      return null;
+    }
+  });
+
+  ipcMain.handle('start-video-file', async (_e, filePath: string, loop?: boolean) => {
+    try {
+      const realResolved = isAllowedFilePath(filePath);
+      if (!realResolved) {
+        console.warn('start-video-file: path not in allowedFilePaths:', filePath);
         return false;
       }
       const sendFrame = (channel: 'video:frame' | 'video:audio', buf: Buffer | null) => {
@@ -918,10 +974,25 @@ app.whenReady().then(() => {
         sendFrame('video:audio', buf);
       });
 
-      native.startVideoFilePlayback(realResolved);
+      native.setSharedVideoFrameCallback((_err: Error | null, meta: unknown) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send('video:shared-frame', meta);
+      });
+
+      native.startVideoFilePlayback(realResolved, loop);
       return true;
     } catch (err) {
       console.error('start-video-file IPC error:', err, 'for filePath:', filePath);
+      return false;
+    }
+  });
+
+  ipcMain.handle('set-loop-video-file', async (_e, loop: boolean) => {
+    try {
+      native.setVideoFileLoop(loop);
+      return true;
+    } catch (err) {
+      console.error('set-loop-video-file IPC error:', err);
       return false;
     }
   });

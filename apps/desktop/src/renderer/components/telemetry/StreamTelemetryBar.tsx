@@ -55,18 +55,19 @@ const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> =
   height = 22,
 }) => {
   let points = '';
+  let areaPoints = '';
   if (data.length >= 2) {
     const max = Math.max(...data);
     const min = Math.min(...data, 0);
     const span = Math.max(max - min, 0.001);
     const step = width / (data.length - 1);
-    points = data
-      .map((v, i) => {
-        const x = i * step;
-        const y = height - ((v - min) / span) * (height - 3) - 1.5;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(' ');
+    const coords = data.map((v, i) => {
+      const x = i * step;
+      const y = height - ((v - min) / span) * (height - 3) - 1.5;
+      return { x, y };
+    });
+    points = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+    areaPoints = `0,${height} ${points} ${width},${height}`;
   }
   return (
     <svg
@@ -77,6 +78,13 @@ const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> =
       aria-hidden="true"
       preserveAspectRatio="none"
     >
+      <defs>
+        <linearGradient id="sparkline-area-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--color-safelight)" stopOpacity="0.25" />
+          <stop offset="100%" stopColor="var(--color-safelight)" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {areaPoints && <polygon points={areaPoints} fill="url(#sparkline-area-grad)" />}
       {points && (
         <polyline
           points={points}

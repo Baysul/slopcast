@@ -70,7 +70,7 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = ({
     const isSelected = members.some((m) => m.id === selectedAudioAppId);
     const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
     const level = members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
-    const btnClass = `flex items-center justify-between p-3 rounded-lg border text-xs transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
+    const btnClass = `flex items-center justify-between p-3 rounded-lg border transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
       isSelected,
     )} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`;
 
@@ -91,7 +91,7 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = ({
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="font-semibold truncate min-w-0">{displayName(representative)}</span>
+            <span className="text-sm font-semibold truncate min-w-0">{displayName(representative)}</span>
             {!isDesktopAudio && <AudioLevelMeter level={level} />}
           </div>
           {(() => {

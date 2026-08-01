@@ -1,6 +1,6 @@
 import type { VideoCodec } from '@slopcast/shared-types';
 import { Room, RoomEvent } from 'livekit-client';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { notify, primeAudioContext } from '../lib/toast';
 import '../types/electron-api.d.ts';
 
@@ -33,6 +33,12 @@ export function useLiveKitRoom({
   const [isCreatingRoom, setIsCreatingRoom] = useState<boolean>(false);
 
   const liveKitRoomRef = useRef<Room | null>(null);
+
+  useEffect(() => {
+    if (liveKitRoomRef.current?.options?.publishDefaults) {
+      liveKitRoomRef.current.options.publishDefaults.videoCodec = videoCodec;
+    }
+  }, [videoCodec]);
 
   const disconnectRoom = useCallback(() => {
     const room = liveKitRoomRef.current;

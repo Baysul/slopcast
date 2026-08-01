@@ -6,7 +6,7 @@ import {
   VIDEO_CODEC_PRIORITY,
 } from '@slopcast/shared-types';
 import { Track } from 'livekit-client';
-import { Pause, Play, ScreenShare, X } from 'lucide-react';
+import { Check, Copy, FileVideo, Pause, Play, ScreenShare, X } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -229,7 +229,7 @@ export const PresenterApp: React.FC = () => {
   const [selectedSourceType, setSelectedSourceType] = useState<VideoSourceType>('screen');
   const [selectedVideoFilePath, setSelectedVideoFilePath] = useState<string | null>(null);
   const [selectedVideoFileName, setSelectedVideoFileName] = useState<string | null>(null);
-  const [videoFileLoop, setVideoFileLoop] = useState(false);
+  const [videoFileLoop, setVideoFileLoop] = useState(true);
   const [videoDuration, setVideoDuration] = useState(0);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoIsPlaying, setVideoIsPlaying] = useState(false);
@@ -241,7 +241,7 @@ export const PresenterApp: React.FC = () => {
   const videoCurrentTimeRef = useRef(0);
   const videoIsPlayingRef = useRef(false);
   const videoDurationRef = useRef(0);
-  const videoFileLoopRef = useRef(false);
+  const videoFileLoopRef = useRef(true);
   const lastTickWallMsRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -254,6 +254,12 @@ export const PresenterApp: React.FC = () => {
 
   useEffect(() => {
     videoFileLoopRef.current = videoFileLoop;
+    if (videoFileElementRef.current) {
+      videoFileElementRef.current.loop = videoFileLoop;
+    }
+    if (window.electronAPI?.setLoopVideoFile) {
+      window.electronAPI.setLoopVideoFile(videoFileLoop);
+    }
   }, [videoFileLoop]);
 
   // ── Stream Settings (user-configurable encoder parameters) ───────────
@@ -301,16 +307,19 @@ export const PresenterApp: React.FC = () => {
   const bitrateLimitRef = useRef(DEFAULT_STREAM_SETTINGS.bitrateLimit);
   const resolutionRef = useRef(DEFAULT_STREAM_SETTINGS.resolution);
   const audioAppIdRef = useRef<number | null>(null);
+  const activeVideoCodecRef = useRef<VideoCodec>(videoCodec);
+  const isCodecSwitchingRef = useRef(false);
   // Gates the persistence effect until the saved file has been loaded, and
   // remembers the last written values so hydration never triggers a re-save.
   const settingsHydratedRef = useRef(false);
   const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
 
   const videoFileTimeUpdateRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const videoFileElementRef = useRef<HTMLVideoElement | null>(null);
   const videoFileGenRef = useRef<{
-    video: MediaStreamTrackGenerator;
+    video: MediaStreamTrackGenerator | null;
     audio: MediaStreamTrackGenerator | null;
-    videoWriter: WritableStreamDefaultWriter<VideoFrame>;
+    videoWriter: WritableStreamDefaultWriter<VideoFrame> | null;
     audioWriter: WritableStreamDefaultWriter<AudioData> | null;
     cleanup: () => void;
   } | null>(null);
@@ -500,6 +509,114 @@ export const PresenterApp: React.FC = () => {
     void update();
   }, [streamFps, bitrateLimit, isSharing, replaceAudioTrack, liveKitRoomRef]);
 
+  const replaceVideoCodec = useCallback(
+    async (targetCodec: VideoCodec): Promise<void> => {
+      const room = liveKitRoomRef.current;
+      if (!room) return;
+
+      if (isCodecSwitchingRef.current) return;
+      isCodecSwitchingRef.current = true;
+
+      if (room.options?.publishDefaults) {
+        room.options.publishDefaults.videoCodec = targetCodec;
+      }
+
+      const videoTrack = localStreamRef.current?.getVideoTracks()[0];
+      if (!videoTrack || videoTrack.readyState === 'ended') {
+        isCodecSwitchingRef.current = false;
+        return;
+      }
+
+      const videoPub = room.localParticipant.videoTrackPublications.values().next().value;
+      const oldTrack = videoPub?.track;
+
+      console.log(`[Presenter] Live video codec switch: ${activeVideoCodecRef.current} -> ${targetCodec}`);
+
+      try {
+        if (oldTrack) {
+          // Pass `stopOnUnpublish = false` so LiveKit unpublishes the track
+          // without calling `track.stop()`. Otherwise, `videoTrack` is killed
+          // (readyState becomes 'ended'), firing onended and leaving publishTrack
+          // with a dead MediaStreamTrack (producing 0 fps / 0 Mbps / ?x?).
+          await room.localParticipant.unpublishTrack(oldTrack, false);
+          await new Promise((r) => setTimeout(r, 150));
+        }
+
+        await room.localParticipant.publishTrack(videoTrack, {
+          source: Track.Source.ScreenShare,
+          screenShareEncoding: undefined,
+          simulcast: false,
+          videoCodec: targetCodec,
+        });
+
+        if (targetCodec === 'h264') {
+          videoTrack.contentHint = 'motion';
+        }
+
+        const newPub = room.localParticipant.videoTrackPublications.values().next().value;
+        const sender = (newPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+        if (sender) {
+          try {
+            const params = sender.getParameters();
+            if (!params.encodings?.length) params.encodings = [{}];
+            for (const enc of params.encodings) {
+              enc.maxBitrate = bitrateLimitRef.current;
+              enc.maxFramerate = streamFpsRef.current;
+              enc.scaleResolutionDownBy = 1.0;
+              enc.priority = 'high';
+              enc.networkPriority = 'high';
+              enc.active = true;
+            }
+            await sender.setParameters(params);
+          } catch (err) {
+            console.warn('[Presenter] Re-applying encoder parameters after codec switch failed:', err);
+          }
+        }
+
+        statsPrevRef.current = { vBytes: 0, vFrames: 0, vTs: 0, vInit: false, aBytes: 0, aTs: 0, aInit: false };
+        activeVideoCodecRef.current = targetCodec;
+        notify(
+          'info',
+          'Video codec updated',
+          `Switched video codec to ${codecLabel(targetCodec) ?? targetCodec.toUpperCase()}`,
+        );
+      } catch (err) {
+        console.error('[Presenter] Live video codec switch failed:', err);
+        notify('error', 'Codec switch failed', `Could not switch video codec to ${targetCodec.toUpperCase()}`);
+
+        const prevCodec = activeVideoCodecRef.current;
+        if (oldTrack && prevCodec && prevCodec !== targetCodec) {
+          try {
+            await room.localParticipant.publishTrack(videoTrack, {
+              source: Track.Source.ScreenShare,
+              screenShareEncoding: undefined,
+              simulcast: false,
+              videoCodec: prevCodec,
+            });
+            setVideoCodec(prevCodec);
+          } catch (revertErr) {
+            console.error('[Presenter] Reverting to previous codec also failed:', revertErr);
+          }
+        }
+      } finally {
+        isCodecSwitchingRef.current = false;
+      }
+    },
+    [liveKitRoomRef],
+  );
+
+  // Real-time video codec switching while sharing.
+  useEffect(() => {
+    if (!isSharing) {
+      activeVideoCodecRef.current = videoCodec;
+      return;
+    }
+
+    if (activeVideoCodecRef.current === videoCodec) return;
+
+    void replaceVideoCodec(videoCodec);
+  }, [videoCodec, isSharing, replaceVideoCodec]);
+
   // Bind the live capture stream to the local preview <video>.
   useEffect(() => {
     const el = previewVideoRef.current;
@@ -552,7 +669,9 @@ export const PresenterApp: React.FC = () => {
         setBitrateLimit(saved.bitrateLimit);
         const bestCodec = codecs[0]?.codec ?? 'h264';
         const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
-        setVideoCodec(savedOk ? saved.videoCodec : bestCodec);
+        const hydratedCodec = savedOk ? saved.videoCodec : bestCodec;
+        setVideoCodec(hydratedCodec);
+        activeVideoCodecRef.current = hydratedCodec;
         setResolution(saved.resolution);
         setApiEndpoint(saved.apiEndpoint);
         if (saved.sourceType) setSelectedSourceType(saved.sourceType);
@@ -898,6 +1017,144 @@ export const PresenterApp: React.FC = () => {
       throw new Error('Electron API not available');
     }
 
+    // Check if container is natively demuxable by Chromium HTML <video> tag
+    const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+    const chromiumNativeContainers = ['.mp4', '.m4v', '.webm', '.mov', '.ogg', '.ogv'];
+    const isChromiumNative = chromiumNativeContainers.includes(ext);
+
+    // ── Primary Path: Zero-Copy GPU VRAM Pipeline (for Chromium-compatible containers) ──
+    if (isChromiumNative) {
+      let createdVideoEl: HTMLVideoElement | null = null;
+      try {
+        const normalizedPath = filePath.replace(/\\/g, '/');
+        const parts = normalizedPath.split('/');
+        const encodedParts = parts.map((part, idx) => {
+          if (idx === 0 && /^[a-zA-Z]:$/.test(part)) {
+            return part;
+          }
+          return encodeURIComponent(part);
+        });
+        const mediaUrl = `local-media:///${encodedParts.join('/')}`;
+        const videoEl = document.createElement('video');
+        createdVideoEl = videoEl;
+        videoEl.crossOrigin = 'anonymous';
+        videoEl.preload = 'auto';
+        videoEl.volume = 0;
+        videoEl.muted = false;
+        videoEl.loop = videoFileLoopRef.current;
+        videoEl.style.position = 'fixed';
+        videoEl.style.top = '-9999px';
+        videoEl.style.left = '-9999px';
+        videoEl.style.width = '1px';
+        videoEl.style.height = '1px';
+        videoEl.style.opacity = '0';
+        videoEl.style.pointerEvents = 'none';
+        document.body.appendChild(videoEl);
+        videoEl.src = mediaUrl;
+
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('Media load timeout')), 3000);
+          const onLoaded = () => {
+            clearTimeout(timeout);
+            videoEl.removeEventListener('loadedmetadata', onLoaded);
+            videoEl.removeEventListener('error', onError);
+            resolve();
+          };
+          const onError = () => {
+            clearTimeout(timeout);
+            videoEl.removeEventListener('loadedmetadata', onLoaded);
+            videoEl.removeEventListener('error', onError);
+            const errCode = videoEl.error?.code;
+            const errMsg = videoEl.error?.message;
+            reject(
+              new Error(
+                `Chromium media decoder error (code ${errCode ?? 'unknown'}: ${
+                  errMsg || 'format or codec unsupported by HTML video element'
+                })`,
+              ),
+            );
+          };
+          videoEl.addEventListener('loadedmetadata', onLoaded);
+          videoEl.addEventListener('error', onError);
+        });
+
+        const captureFn =
+          (
+            videoEl as HTMLVideoElement & {
+              captureStream?: () => MediaStream;
+              mozCaptureStream?: () => MediaStream;
+            }
+          ).captureStream ||
+          (
+            videoEl as HTMLVideoElement & {
+              captureStream?: () => MediaStream;
+              mozCaptureStream?: () => MediaStream;
+            }
+          ).mozCaptureStream;
+
+        if (captureFn) {
+          await videoEl.play();
+          const mediaStream = captureFn.call(videoEl);
+          const vTrack = mediaStream.getVideoTracks()[0];
+          const aTrack = mediaStream.getAudioTracks()[0] ?? null;
+
+          if (vTrack) {
+            vTrack.contentHint = 'motion';
+            const durSec = videoEl.duration || 0;
+            setVideoDuration(durSec);
+            videoDurationRef.current = durSec;
+            setVideoIsPlaying(true);
+            videoIsPlayingRef.current = true;
+            setVideoCurrentTime(0);
+            videoCurrentTimeRef.current = 0;
+
+            if (videoFileTimeUpdateRef.current) clearInterval(videoFileTimeUpdateRef.current);
+            videoFileTimeUpdateRef.current = setInterval(() => {
+              if (videoFileElementRef.current) {
+                setVideoCurrentTime(videoFileElementRef.current.currentTime);
+                videoCurrentTimeRef.current = videoFileElementRef.current.currentTime;
+              }
+            }, 100);
+
+            const cleanup = () => {
+              if (videoFileTimeUpdateRef.current) clearInterval(videoFileTimeUpdateRef.current);
+              videoEl.pause();
+              videoEl.src = '';
+              videoEl.load();
+              if (videoEl.parentNode) {
+                videoEl.parentNode.removeChild(videoEl);
+              }
+              videoFileElementRef.current = null;
+            };
+
+            videoFileElementRef.current = videoEl;
+            videoFileGenRef.current = {
+              video: null,
+              audio: null,
+              videoWriter: null,
+              audioWriter: null,
+              cleanup,
+            };
+
+            console.log(
+              '[Zero-Copy VRAM] Successfully initialized GPU VRAM video pipeline via Chromium hardware media stream',
+            );
+            return { videoTrack: vTrack, audioTrack: aTrack };
+          }
+        }
+      } catch (err) {
+        if (createdVideoEl?.parentNode) {
+          createdVideoEl.parentNode.removeChild(createdVideoEl);
+        }
+        console.warn('[Zero-Copy VRAM] Local GPU media stream capture fallback to native Rust FFmpeg:', err);
+      }
+    } else {
+      console.log(
+        `[Video Stream] Container format '${ext}' is not natively demuxed by Chromium; routing directly to native Rust FFmpeg`,
+      );
+    }
+
+    // ── Fallback Path: Native Rust FFmpeg Engine ──
     const videoGenerator = new MediaStreamTrackGenerator({ kind: 'video' });
     const videoWriter = videoGenerator.writable.getWriter();
     let audioWriter: WritableStreamDefaultWriter<AudioData> | null = null;
@@ -913,6 +1170,7 @@ export const PresenterApp: React.FC = () => {
 
     const startWallUs = performance.now() * 1000;
     let totalAudioSamples = 0;
+    let lastVideoTsUs = -1;
 
     const createAudioGenerator = () => {
       if (audioGeneratorReady) return;
@@ -943,21 +1201,87 @@ export const PresenterApp: React.FC = () => {
       earlyAudioData = [];
     };
 
+    let videoWriterClosed = false;
+    let audioWriterClosed = false;
+
+    const safeCloseVideoWriter = () => {
+      if (!videoWriterClosed) {
+        videoWriterClosed = true;
+        videoWriter.close().catch((err) => console.debug('videoWriter close:', err));
+      }
+    };
+
+    const safeCloseAudioWriter = () => {
+      if (!audioWriterClosed && audioWriter) {
+        audioWriterClosed = true;
+        audioWriter.close().catch((err) => console.debug('audioWriter close:', err));
+      }
+    };
+
+    let sharedBufferView: Uint8Array | null = null;
+    try {
+      const sharedBuffer = await window.electronAPI.getSharedVideoBuffer();
+      if (sharedBuffer) {
+        sharedBufferView = new Uint8Array(sharedBuffer);
+      }
+    } catch (err) {
+      console.warn('Failed to acquire shared video buffer:', err);
+    }
+
+    const unsubSharedFrame = window.electronAPI.onVideoSharedFrame((meta) => {
+      if (!meta) {
+        safeCloseVideoWriter();
+        safeCloseAudioWriter();
+        return;
+      }
+      if (!sharedBufferView) return;
+
+      const HEADER_SIZE = 64;
+      const SLOT_DATA_SIZE = 1920 * 1080 * 4;
+      const slotOffset = HEADER_SIZE + meta.slotIndex * SLOT_DATA_SIZE;
+      const frameLen = meta.width * meta.height * 4;
+
+      if (slotOffset + frameLen > sharedBufferView.byteLength) return;
+
+      const elapsedUs = Math.round(performance.now() * 1000 - startWallUs);
+      let tsUs = Math.max(0, elapsedUs);
+      if (tsUs <= lastVideoTsUs) {
+        tsUs = lastVideoTsUs + 1;
+      }
+      lastVideoTsUs = tsUs;
+
+      const frameSlice = sharedBufferView.subarray(slotOffset, slotOffset + frameLen);
+      const frame = new VideoFrame(frameSlice, {
+        format: 'RGBA',
+        codedWidth: meta.width,
+        codedHeight: meta.height,
+        timestamp: tsUs,
+      });
+      videoWriter.write(frame).catch(console.error);
+      frame.close();
+    });
+
     const unsubFrame = window.electronAPI.onVideoFileFrame((data) => {
       if (!data) {
-        videoWriter.close().catch(console.error);
-        audioWriter?.close().catch(console.error);
+        safeCloseVideoWriter();
+        safeCloseAudioWriter();
         return;
       }
 
-      if (width === null || height === null) return;
+      if (sharedBufferView || width === null || height === null) return;
 
       const elapsedUs = Math.round(performance.now() * 1000 - startWallUs);
+      let tsUs = Math.max(0, elapsedUs);
+      if (tsUs <= lastVideoTsUs) {
+        tsUs = lastVideoTsUs + 1;
+      }
+      lastVideoTsUs = tsUs;
+
       const frame = new VideoFrame(new Uint8Array(data), {
         format: 'RGBA',
         codedWidth: width,
         codedHeight: height,
-        timestamp: Math.max(0, elapsedUs),
+        timestamp: tsUs,
       });
       videoWriter.write(frame).catch(console.error);
       frame.close();
@@ -965,7 +1289,7 @@ export const PresenterApp: React.FC = () => {
 
     const unsubAudio = window.electronAPI.onVideoFileAudio((data) => {
       if (!data) {
-        audioWriter?.close().catch(console.error);
+        safeCloseAudioWriter();
         return;
       }
 
@@ -1008,7 +1332,7 @@ export const PresenterApp: React.FC = () => {
       createAudioGenerator();
     }
 
-    const started = await window.electronAPI.startVideoFile(filePath);
+    const started = await window.electronAPI.startVideoFile(filePath, videoFileLoopRef.current);
     if (!started) throw new Error('Failed to start FFmpeg video file playback');
 
     const durSec = info.durationMs / 1000;
@@ -1035,10 +1359,7 @@ export const PresenterApp: React.FC = () => {
         const dur = videoDurationRef.current;
         if (dur > 0 && nextTime >= dur) {
           if (videoFileLoopRef.current) {
-            nextTime = 0;
-            if (window.electronAPI) {
-              window.electronAPI.seekVideoFile(0);
-            }
+            nextTime = dur > 0 ? nextTime % dur : 0;
           } else {
             nextTime = dur;
             setVideoIsPlaying(false);
@@ -1055,8 +1376,9 @@ export const PresenterApp: React.FC = () => {
 
     // Add a cleanup record for handleStopShare to use
     const cleanup = () => {
-      videoWriter.close().catch(console.error);
-      audioWriter?.close().catch(console.error);
+      safeCloseVideoWriter();
+      safeCloseAudioWriter();
+      unsubSharedFrame();
       unsubFrame();
       unsubAudio();
     };
@@ -1165,7 +1487,9 @@ export const PresenterApp: React.FC = () => {
           source: Track.Source.ScreenShare,
           screenShareEncoding: undefined,
           simulcast: false,
+          videoCodec,
         });
+        activeVideoCodecRef.current = videoCodec;
 
         if (audioTrack) {
           await room.localParticipant.publishTrack(audioTrack, {
@@ -1271,7 +1595,9 @@ export const PresenterApp: React.FC = () => {
         source: Track.Source.ScreenShare,
         screenShareEncoding: undefined,
         simulcast: false,
+        videoCodec,
       });
+      activeVideoCodecRef.current = videoCodec;
 
       if (videoCodec === 'h264') {
         videoTrack.contentHint = 'motion';
@@ -1431,8 +1757,7 @@ export const PresenterApp: React.FC = () => {
   const startDisabledReason = (): string | null => {
     if (isSharing || canStartShare) return null;
     if (!roomCode) return 'Create a live room to start sharing.';
-    if (selectedSourceType === 'video-file' && !selectedVideoFilePath)
-      return 'Select a video file above to start streaming.';
+    if (selectedSourceType === 'video-file' && !selectedVideoFilePath) return 'Select a video file to start streaming.';
     return 'Select a window above to start sharing.';
   };
   const disabledReason = startDisabledReason();
@@ -1462,13 +1787,32 @@ export const PresenterApp: React.FC = () => {
                   </Badge>
                 )}
                 <Button variant="secondary" size="sm" onClick={handleCopyCode} className="gap-2">
-                  <span className="text-muted-foreground font-mono">{roomCode}</span>
-                  <span className="text-foreground bg-accent/50 px-2 py-1 rounded-md">
-                    {copied === 'code' ? 'Copied' : 'Copy'}
+                  <span className="font-mono text-sm font-semibold tabular-nums tracking-wide text-foreground/90">
+                    {roomCode}
+                  </span>
+                  <span className="text-foreground bg-accent/50 px-2 py-0.5 rounded-md text-xs flex items-center gap-1">
+                    {copied === 'code' ? (
+                      <>
+                        <Check className="w-3 h-3 text-safelight" aria-hidden="true" />
+                        Copied
+                      </>
+                    ) : (
+                      'Copy'
+                    )}
                   </span>
                 </Button>
-                <Button size="sm" onClick={handleCopyLink}>
-                  {copied === 'link' ? 'Link Copied!' : 'Copy Link'}
+                <Button size="sm" onClick={handleCopyLink} className="gap-1.5">
+                  {copied === 'link' ? (
+                    <>
+                      <Check className="w-4 h-4" aria-hidden="true" />
+                      Link Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" aria-hidden="true" />
+                      Copy Link
+                    </>
+                  )}
                 </Button>
               </div>
             )}
@@ -1484,7 +1828,7 @@ export const PresenterApp: React.FC = () => {
 
       <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
         {/* Screenshare Preview */}
-        <Card className="overflow-hidden shadow-2xl">
+        <Card className="overflow-hidden shadow-2xl transition-all duration-300">
           <CardContent className="p-0">
             <div className="relative bg-black aspect-video flex items-center justify-center">
               <video
@@ -1509,7 +1853,7 @@ export const PresenterApp: React.FC = () => {
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-6">
                   {!roomCode ? (
                     <>
-                      <span className="p-3 rounded-full bg-safelight/10 mb-1 motion-safe:animate-pulse">
+                      <span className="p-3 rounded-full bg-safelight/10 mb-1">
                         <ScreenShare className="size-7 text-safelight/60" aria-hidden="true" />
                       </span>
                       <p className="text-sm text-foreground font-semibold">Ready to stream</p>
@@ -1575,55 +1919,6 @@ export const PresenterApp: React.FC = () => {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* ── Video file source ──────────────────────────────── */}
-              <div className="flex gap-2 min-w-0 max-w-full">
-                <Button
-                  variant={selectedSourceType === 'video-file' ? 'default' : 'outline'}
-                  size="sm"
-                  className="flex-1 min-w-0 max-w-full overflow-hidden"
-                  onClick={async () => {
-                    const result = await window.electronAPI?.selectVideoFile();
-                    if (result) {
-                      setSelectedSourceType('video-file');
-                      setSelectedVideoFilePath(result.filePath);
-                      setSelectedVideoFileName(result.fileName);
-                      setVideoFileError(null);
-                      setSelectedSourceId('');
-                      preCheckVideoFile(result.filePath);
-                    }
-                  }}
-                  onContextMenu={(e) => {
-                    if (selectedVideoFilePath) {
-                      e.preventDefault();
-                      setSelectedSourceType('screen');
-                      setSelectedVideoFilePath(null);
-                      setSelectedVideoFileName(null);
-                      setVideoFileError(null);
-                    }
-                  }}
-                >
-                  <span className="truncate max-w-full block">
-                    {selectedVideoFileName ? `Selected: ${selectedVideoFileName}` : 'Stream Video File...'}
-                  </span>
-                </Button>
-                {selectedVideoFilePath && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="px-2 shrink-0"
-                    onClick={() => {
-                      setSelectedSourceType('screen');
-                      setSelectedVideoFilePath(null);
-                      setSelectedVideoFileName(null);
-                      setVideoFileError(null);
-                    }}
-                    aria-label="Deselect video file"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                )}
-              </div>
-
               {(() => {
                 if (isWayland) {
                   if (captureContext?.de === 'kde' && !autoDetectFailed) {
@@ -1729,6 +2024,58 @@ export const PresenterApp: React.FC = () => {
                   {disabledReason}
                 </p>
               )}
+
+              {/* ── Video file source ──────────────────────────────── */}
+              <div className="flex gap-2 min-w-0 max-w-full pt-1 border-t border-border/40">
+                <Button
+                  variant={selectedSourceType === 'video-file' ? 'default' : 'outline'}
+                  size="sm"
+                  className="flex-1 min-w-0 max-w-full overflow-hidden"
+                  onClick={async () => {
+                    const result = await window.electronAPI?.selectVideoFile();
+                    if (result) {
+                      setSelectedSourceType('video-file');
+                      setSelectedVideoFilePath(result.filePath);
+                      setSelectedVideoFileName(result.fileName);
+                      setVideoFileError(null);
+                      setSelectedSourceId('');
+                      preCheckVideoFile(result.filePath);
+                    }
+                  }}
+                  onContextMenu={(e) => {
+                    if (selectedVideoFilePath) {
+                      e.preventDefault();
+                      setSelectedSourceType('screen');
+                      setSelectedVideoFilePath(null);
+                      setSelectedVideoFileName(null);
+                      setVideoFileError(null);
+                    }
+                  }}
+                >
+                  <span className="truncate max-w-full block flex items-center justify-center gap-1.5">
+                    <FileVideo className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">
+                      {selectedVideoFileName ? `Selected: ${selectedVideoFileName}` : 'Stream Video File...'}
+                    </span>
+                  </span>
+                </Button>
+                {selectedVideoFilePath && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="px-2 shrink-0"
+                    onClick={() => {
+                      setSelectedSourceType('screen');
+                      setSelectedVideoFilePath(null);
+                      setSelectedVideoFileName(null);
+                      setVideoFileError(null);
+                    }}
+                    aria-label="Deselect video file"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -1748,13 +2095,22 @@ export const PresenterApp: React.FC = () => {
                   variant="outline"
                   size="sm"
                   onClick={async () => {
-                    if (!window.electronAPI) return;
                     if (videoIsPlaying) {
-                      await window.electronAPI.pauseVideoFile(true);
+                      if (videoFileElementRef.current) {
+                        videoFileElementRef.current.pause();
+                      }
+                      if (window.electronAPI) {
+                        await window.electronAPI.pauseVideoFile(true);
+                      }
                       setVideoIsPlaying(false);
                       videoIsPlayingRef.current = false;
                     } else {
-                      await window.electronAPI.pauseVideoFile(false);
+                      if (videoFileElementRef.current) {
+                        videoFileElementRef.current.play().catch(console.error);
+                      }
+                      if (window.electronAPI) {
+                        await window.electronAPI.pauseVideoFile(false);
+                      }
                       lastTickWallMsRef.current = performance.now();
                       setVideoIsPlaying(true);
                       videoIsPlayingRef.current = true;
@@ -1801,6 +2157,9 @@ export const PresenterApp: React.FC = () => {
                       videoCurrentTimeRef.current = newTime;
                       setVideoCurrentTime(newTime);
                       lastTickWallMsRef.current = performance.now();
+                      if (videoFileElementRef.current) {
+                        videoFileElementRef.current.currentTime = newTime;
+                      }
                       if (window.electronAPI) {
                         window.electronAPI.seekVideoFile(newTime * 1000);
                       }
