@@ -102,8 +102,6 @@ if (isWayland) {
   features.push('WaylandLinuxDrmSyncobj');
 }
 
-features.push('PlatformHEVCDecoderSupport');
-
 switch (process.platform) {
   case 'linux':
     features.push('AcceleratedVideoEncoder');
@@ -126,6 +124,7 @@ app.commandLine.appendSwitch('enable-features', features.join(','));
 app.commandLine.appendSwitch('enable-low-latency-video-decoder');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-frame-rate-limit');
 // DO NOT re-add --no-zygote. In Electron 43 this flag forces posix_spawn() instead of
 // fork() for GPU child processes, which prevents PipeWire thread loops from being inherited.
 // The null pw_thread_loop* that results triggers a CHECK failure → SIGTRAP on screen-share
@@ -300,19 +299,13 @@ app.whenReady().then(() => {
   try {
     const initMsg = native.initEngine();
     console.log(`[Native Rust] ${initMsg}`);
-
-    const audioApps = native.listAudioApplications();
-    console.log(`🔊 Detected ${audioApps.length} active audio applications:`);
-    for (const app of audioApps) {
-      console.log(`  - [ID: ${app.id}] ${app.name} (Process ID: ${app.processId})`);
-    }
   } catch (err) {
     console.error('❌ Native audio engine error:', err);
   }
 
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer
-      .getSources({ types: ['window', 'screen'] })
+      .getSources({ types: ['window', 'screen'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false })
       .then((sources) => {
         if (sources.length === 0) {
           console.warn(
@@ -392,9 +385,9 @@ app.whenReady().then(() => {
     isWayland,
   }));
 
-  ipcMain.handle('get-audio-apps', () => {
+  ipcMain.handle('get-audio-apps', async () => {
     try {
-      return native.listAudioApplications();
+      return await native.listAudioApplications();
     } catch (err) {
       console.error('get-audio-apps IPC error:', err);
       return [];
@@ -477,7 +470,11 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('get-desktop-sources', async () => {
-    const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 300, height: 180 },
+      fetchWindowIcons: false,
+    });
     return sources.map((s) => ({
       id: s.id,
       name: s.name,
@@ -519,7 +516,7 @@ app.whenReady().then(() => {
     const hint = nameHint ?? lastCapturedSourceName;
     if (hint) {
       try {
-        const app = native.resolveAudioAppByName(hint);
+        const app = await native.resolveAudioAppByName(hint);
         if (app) {
           console.log(`[resolve-audio-source] Wayland name-match "${hint}" → "${app.name}"`);
           return app;
@@ -559,7 +556,10 @@ app.whenReady().then(() => {
     return null;
   };
 
-  const resolveAudioForX11 = (sourceId: string | undefined, nameHint: string | undefined): native.AudioApp | null => {
+  const resolveAudioForX11 = async (
+    sourceId: string | undefined,
+    nameHint: string | undefined,
+  ): Promise<native.AudioApp | null> => {
     // Layer 1: _NET_WM_PID via X11 window ID.
     if (sourceId?.startsWith('window:')) {
       const windowId = parseInt(sourceId.split(':')[1], 10);
@@ -579,7 +579,7 @@ app.whenReady().then(() => {
     // Layer 2: Name matching via Rust.
     if (nameHint) {
       try {
-        const app = native.resolveAudioAppByName(nameHint);
+        const app = await native.resolveAudioAppByName(nameHint);
         if (app) {
           console.log(`[resolve-audio-source] X11 name-match "${nameHint}" → "${app.name}"`);
           return app;
@@ -605,7 +605,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('resolve-audio-app-by-name', async (_event, label: string): Promise<native.AudioApp | null> => {
     try {
-      return native.resolveAudioAppByName(label);
+      return await native.resolveAudioAppByName(label);
     } catch (err) {
       console.error('resolve-audio-app-by-name error:', err);
       return null;
@@ -649,7 +649,11 @@ app.whenReady().then(() => {
         // Activate the portal on Wayland to create the screencast
         // PipeWire node. On X11, getSources() returns the native list
         // without a portal prompt.
-        const sources = await desktopCapturer.getSources({ types: ['window', 'screen'] });
+        const sources = await desktopCapturer.getSources({
+          types: ['window', 'screen'],
+          thumbnailSize: { width: 0, height: 0 },
+          fetchWindowIcons: false,
+        });
         if (sources.length === 0) {
           return { ok: false, error: 'No capture sources available' };
         }
