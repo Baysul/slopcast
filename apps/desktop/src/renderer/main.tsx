@@ -137,6 +137,7 @@ export const PresenterApp: React.FC = () => {
           enc.scaleResolutionDownBy = 1.0;
           enc.priority = 'high';
           enc.networkPriority = 'high';
+          (enc as { degradationPreference?: string }).degradationPreference = 'maintain-framerate';
           enc.active = true;
         }
         await sender.setParameters(params);
@@ -190,16 +191,17 @@ export const PresenterApp: React.FC = () => {
           await new Promise((r) => setTimeout(r, 150));
         }
 
+        videoTrack.contentHint = 'motion';
+
         await room.localParticipant.publishTrack(videoTrack, {
           source: Track.Source.ScreenShare,
-          screenShareEncoding: undefined,
+          screenShareEncoding: {
+            maxBitrate: bitrateLimitRef.current,
+            maxFramerate: streamFpsRef.current,
+          },
           simulcast: false,
           videoCodec: targetCodec,
         });
-
-        if (targetCodec === 'h264') {
-          videoTrack.contentHint = 'motion';
-        }
 
         const newPub = room.localParticipant.videoTrackPublications.values().next().value;
         const sender = (newPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
@@ -213,6 +215,7 @@ export const PresenterApp: React.FC = () => {
               enc.scaleResolutionDownBy = 1.0;
               enc.priority = 'high';
               enc.networkPriority = 'high';
+              (enc as { degradationPreference?: string }).degradationPreference = 'maintain-framerate';
               enc.active = true;
             }
             await sender.setParameters(params);
@@ -237,7 +240,10 @@ export const PresenterApp: React.FC = () => {
           try {
             await room.localParticipant.publishTrack(videoTrack, {
               source: Track.Source.ScreenShare,
-              screenShareEncoding: undefined,
+              screenShareEncoding: {
+                maxBitrate: bitrateLimitRef.current,
+                maxFramerate: streamFpsRef.current,
+              },
               simulcast: false,
               videoCodec: prevCodec,
             });
@@ -265,16 +271,16 @@ export const PresenterApp: React.FC = () => {
     void replaceVideoCodec(videoCodec);
   }, [videoCodec, isSharing, replaceVideoCodec]);
 
-  const handleCreateRoom = async () => {
+  const handleCreateRoom = useCallback(async () => {
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
     setSelectedAudioAppId(null);
     setAutoDetectFailed(false);
 
     await createLiveKitRoom();
-  };
+  }, [setAudioAppExplicitlySet, setAutoDetectedApp, setSelectedAudioAppId, setAutoDetectFailed, createLiveKitRoom]);
 
-  const captureVideoTrack = async (): Promise<MediaStreamTrack> => {
+  const captureVideoTrack = useCallback(async (): Promise<MediaStreamTrack> => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
     if (isWayland) {
       const fps = streamFpsRef.current;
@@ -290,7 +296,7 @@ export const PresenterApp: React.FC = () => {
       if (!track) {
         throw new Error('xdg-desktop-portal granted no video track');
       }
-      track.contentHint = 'detail';
+      track.contentHint = 'motion';
       return track;
     }
 
@@ -318,11 +324,54 @@ export const PresenterApp: React.FC = () => {
       },
     });
     const track = stream.getVideoTracks()[0];
-    track.contentHint = 'detail';
+    track.contentHint = 'motion';
     return track;
-  };
+  }, [isWayland, resolutionRef, streamFpsRef, selectedSourceId]);
 
-  const handleStartShare = async () => {
+  const handleStopShare = useCallback(async () => {
+    const stream = localStreamRef.current;
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+      localStreamRef.current = null;
+    }
+    setPreviewStream(null);
+
+    const room = liveKitRoomRef.current;
+    if (room) {
+      for (const pub of room.localParticipant.trackPublications.values()) {
+        const t = pub.track;
+        if (t) {
+          await room.localParticipant.unpublishTrack(t);
+        }
+      }
+    }
+
+    stopTelemetryPolling();
+    audioAppIdRef.current = null;
+    if (window.electronAPI) {
+      await window.electronAPI.stopAudioCapture();
+    }
+    setIsSharing(false);
+    if (!audioAppExplicitlySet) {
+      setSelectedAudioAppId(null);
+    }
+    setAudioAppExplicitlySet(false);
+    setAutoDetectedApp(null);
+    setAutoDetectFailed(false);
+  }, [
+    liveKitRoomRef,
+    stopTelemetryPolling,
+    audioAppIdRef,
+    audioAppExplicitlySet,
+    setSelectedAudioAppId,
+    setAudioAppExplicitlySet,
+    setAutoDetectedApp,
+    setAutoDetectFailed,
+  ]);
+
+  const handleStartShare = useCallback(async () => {
     primeAudioContext();
     try {
       const videoTrack = await captureVideoTrack();
@@ -403,16 +452,46 @@ export const PresenterApp: React.FC = () => {
 
       resetStatsPrev();
 
+      videoTrack.contentHint = 'motion';
+
       await room.localParticipant.publishTrack(videoTrack, {
         source: Track.Source.ScreenShare,
-        screenShareEncoding: undefined,
+        screenShareEncoding: {
+          maxBitrate: bitrateLimitRef.current,
+          maxFramerate: streamFpsRef.current,
+        },
         simulcast: false,
         videoCodec,
       });
       activeVideoCodecRef.current = videoCodec;
 
+      const videoPub = room.localParticipant.videoTrackPublications.values().next().value;
+      const sender = (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+      if (sender) {
+        try {
+          const params = sender.getParameters();
+          if (!params.encodings?.length) params.encodings = [{}];
+          for (const enc of params.encodings) {
+            enc.maxBitrate = bitrateLimitRef.current;
+            enc.maxFramerate = streamFpsRef.current;
+            enc.scaleResolutionDownBy = 1.0;
+            enc.priority = 'high';
+            enc.networkPriority = 'high';
+            (enc as { degradationPreference?: string }).degradationPreference = 'maintain-framerate';
+            enc.active = true;
+          }
+          await sender.setParameters(params);
+          console.log(
+            `[Presenter] Initial encoder parameters applied: fps=${streamFpsRef.current} bitrate=${(
+              bitrateLimitRef.current / 1_000_000
+            ).toFixed(0)}Mbps`,
+          );
+        } catch (err) {
+          console.warn('[Presenter] Setting initial encoder parameters failed:', err);
+        }
+      }
+
       if (videoCodec === 'h264') {
-        videoTrack.contentHint = 'motion';
         try {
           const publisher = (
             room as {
@@ -466,48 +545,36 @@ export const PresenterApp: React.FC = () => {
         setAutoDetectedApp(null);
       }
     }
-  };
+  }, [
+    captureVideoTrack,
+    selectedAudioAppId,
+    audioAppExplicitlySet,
+    loadAudioApps,
+    attemptAutoResolve,
+    isWayland,
+    selectedSourceId,
+    setAutoDetectFailed,
+    setCaptureContext,
+    setSelectedAudioAppId,
+    setAutoDetectedApp,
+    captureAudioTrack,
+    audioAppIdRef,
+    liveKitRoomRef,
+    resetStatsPrev,
+    bitrateLimitRef,
+    streamFpsRef,
+    videoCodec,
+    setTelemetry,
+    startTelemetryPolling,
+    handleStopShare,
+  ]);
 
-  const handleStopShare = async () => {
-    const stream = localStreamRef.current;
-    if (stream) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-      localStreamRef.current = null;
-    }
-    setPreviewStream(null);
-
-    const room = liveKitRoomRef.current;
-    if (room) {
-      for (const pub of room.localParticipant.trackPublications.values()) {
-        const t = pub.track;
-        if (t) {
-          await room.localParticipant.unpublishTrack(t);
-        }
-      }
-    }
-
-    stopTelemetryPolling();
-    audioAppIdRef.current = null;
-    if (window.electronAPI) {
-      await window.electronAPI.stopAudioCapture();
-    }
-    setIsSharing(false);
-    if (!audioAppExplicitlySet) {
-      setSelectedAudioAppId(null);
-    }
-    setAudioAppExplicitlySet(false);
-    setAutoDetectedApp(null);
-    setAutoDetectFailed(false);
-  };
-
-  const flashCopied = (kind: 'link' | 'code') => {
+  const flashCopied = useCallback((kind: 'link' | 'code') => {
     setCopied(kind);
     setTimeout(() => setCopied(null), 2000);
-  };
+  }, []);
 
-  const handleCopyLink = async () => {
+  const handleCopyLink = useCallback(async () => {
     const url = shareUrl;
     if (!url) return;
     const ok = await copyText(url);
@@ -516,9 +583,9 @@ export const PresenterApp: React.FC = () => {
     } else {
       notify('error', 'Copy failed', 'Room link could not be copied.');
     }
-  };
+  }, [shareUrl, flashCopied]);
 
-  const handleCopyCode = async () => {
+  const handleCopyCode = useCallback(async () => {
     if (!roomCode) return;
     const ok = await copyText(roomCode);
     if (ok) {
@@ -526,7 +593,15 @@ export const PresenterApp: React.FC = () => {
     } else {
       notify('error', 'Copy failed', 'Room code could not be copied.');
     }
-  };
+  }, [roomCode, flashCopied]);
+
+  const handleSelectSource = useCallback(
+    (source: DesktopSource) => {
+      setSelectedSourceId(source.id);
+      void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
+    },
+    [attemptAutoResolve],
+  );
 
   const canStartShare = !!roomCode && !isSharing && (isWayland || !!selectedSourceId);
   const startDisabledReason = (): string | null => {
@@ -579,10 +654,7 @@ export const PresenterApp: React.FC = () => {
             isWayland={isWayland}
             desktopSources={desktopSources}
             selectedSourceId={selectedSourceId}
-            onSelectSource={(source) => {
-              setSelectedSourceId(source.id);
-              void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
-            }}
+            onSelectSource={handleSelectSource}
             captureContext={captureContext}
             autoDetectFailed={autoDetectFailed}
             isSharing={isSharing}

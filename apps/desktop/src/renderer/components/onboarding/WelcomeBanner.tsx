@@ -1,9 +1,8 @@
 import { ArrowRight, ScreenShare, Users, X } from 'lucide-react';
-import type React from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useOnboarding } from '@/hooks/useOnboarding';
 
-export const WelcomeBanner: React.FC = () => {
+export const WelcomeBanner: React.FC = React.memo(() => {
   const { completed, dismiss } = useOnboarding();
   const [visible, setVisible] = useState(false);
   const [exiting, setExiting] = useState(false);
@@ -129,4 +128,6 @@ export const WelcomeBanner: React.FC = () => {
       </div>
     </div>
   );
-};
+});
+
+WelcomeBanner.displayName = 'WelcomeBanner';

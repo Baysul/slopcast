@@ -81,10 +81,12 @@ export function useAudioCapture(
   useEffect(() => {
     void loadAudioApps();
     const interval = setInterval(() => {
-      void loadAudioApps();
+      if (document.visibilityState === 'visible' && (!isSharing || audioApps.length === 0)) {
+        void loadAudioApps();
+      }
     }, AUDIO_APPS_POLL_MS);
     return () => clearInterval(interval);
-  }, [loadAudioApps]);
+  }, [loadAudioApps, isSharing, audioApps.length]);
 
   // Audio level metering
   useEffect(() => {
@@ -97,17 +99,28 @@ export function useAudioCapture(
     void api.startAudioMetering().then((started) => {
       if (!started || cancelled) return;
       interval = setInterval(() => {
+        if (document.visibilityState !== 'visible') return;
         void api.getAudioLevels().then((levels) => {
           if (cancelled) return;
           setAudioLevels((prev) => {
+            let changed = false;
             const next = new Map<number, number>();
             for (const { id, level } of levels) {
-              next.set(id, Math.max(level, (prev.get(id) ?? 0) * 0.72));
+              const prevLevel = prev.get(id) ?? 0;
+              const decayed = Math.max(level, prevLevel * 0.82);
+              next.set(id, decayed);
+              if (Math.abs(decayed - prevLevel) > 0.005) {
+                changed = true;
+              }
             }
+            if (prev.size !== next.size) {
+              changed = true;
+            }
+            if (!changed) return prev;
             return next;
           });
         });
-      }, 150);
+      }, 100);
     });
 
     return () => {
