@@ -20,7 +20,7 @@ function scaleAudioLevel(rawLevel: number, adaptivePeak: number): number {
   const boosted = Math.min(1.0, rawLevel * gain);
 
   // Perceptual power curve (v^0.38) maps decibel-like dynamic range smoothly
-  return Math.pow(boosted, 0.38);
+  return boosted ** 0.38;
 }
 
 // Scrolling peak-history bar meter fed by native PipeWire metering.
