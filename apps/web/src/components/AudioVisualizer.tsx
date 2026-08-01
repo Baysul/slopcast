@@ -52,9 +52,30 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
+        let wasSilent = false;
+
         const draw = () => {
           animationFrameId = requestAnimationFrame(draw);
+          if (document.hidden) return;
+
           analyser.getByteFrequencyData(dataArray);
+
+          let hasSignal = false;
+          for (let i = 0; i < bufferLength; i++) {
+            if (dataArray[i] > 0) {
+              hasSignal = true;
+              break;
+            }
+          }
+
+          if (!hasSignal) {
+            if (!wasSilent) {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              wasSilent = true;
+            }
+            return;
+          }
+          wasSilent = false;
 
           ctx.clearRect(0, 0, canvas.width, canvas.height);
 
