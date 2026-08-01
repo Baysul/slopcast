@@ -13,6 +13,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         target: [server, web]
     steps:
@@ -66,6 +67,7 @@ jobs:
   build-desktop:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
