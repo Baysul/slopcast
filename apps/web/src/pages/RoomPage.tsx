@@ -83,7 +83,9 @@ export const RoomPage: React.FC = () => {
       if (!managedStreamRef.current) {
         managedStreamRef.current = new MediaStream();
       }
-      managedStreamRef.current.addTrack(track.mediaStreamTrack);
+      if (!managedStreamRef.current.getTracks().includes(track.mediaStreamTrack)) {
+        managedStreamRef.current.addTrack(track.mediaStreamTrack);
+      }
       setMediaStream(new MediaStream(managedStreamRef.current.getTracks()));
       setConnectionStatus('live');
       setStatusText('Live');
@@ -132,6 +134,14 @@ export const RoomPage: React.FC = () => {
     room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
       if (isStale()) return;
       switch (state) {
+        case ConnectionState.Connected:
+          if (managedStreamRef.current && managedStreamRef.current.getTracks().length > 0) {
+            setConnectionStatus('live');
+            setStatusText('Live');
+          } else {
+            setStatusText('Connected — waiting for stream...');
+          }
+          break;
         case ConnectionState.Reconnecting:
           setStatusText('Reconnecting...');
           break;
@@ -178,15 +188,48 @@ export const RoomPage: React.FC = () => {
 
     const getToken = async (): Promise<{ token: string; livekitUrl: string }> => {
       const res = await fetch(`${baseUrl}/api/rooms/${roomId}/token`);
-      if (!res.ok) throw new Error('Failed to fetch spectator token');
+      if (!res.ok) {
+        const errData = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errData.error || `Failed to fetch spectator token (${res.status})`);
+      }
       const data = (await res.json()) as { token: string; livekitUrl: string };
       return data;
     };
 
     getToken()
       .then(({ token, livekitUrl }) => {
+        if (isStale()) return;
         const livekitUrlForClient = livekitUrl || injectedLivekitUrl || `ws://${window.location.hostname}:7880`;
-        return room.connect(livekitUrlForClient, token);
+        return room.connect(livekitUrlForClient, token).then(() => {
+          if (isStale()) {
+            room.disconnect();
+            return;
+          }
+          setParticipantCount(room.remoteParticipants.size);
+          const existingTracks: MediaStreamTrack[] = [];
+          for (const participant of room.remoteParticipants.values()) {
+            for (const pub of participant.trackPublications.values()) {
+              if (pub.track?.mediaStreamTrack) {
+                existingTracks.push(pub.track.mediaStreamTrack);
+              }
+            }
+          }
+          if (existingTracks.length > 0) {
+            if (!managedStreamRef.current) {
+              managedStreamRef.current = new MediaStream();
+            }
+            for (const track of existingTracks) {
+              if (!managedStreamRef.current.getTracks().includes(track)) {
+                managedStreamRef.current.addTrack(track);
+              }
+            }
+            setMediaStream(new MediaStream(managedStreamRef.current.getTracks()));
+            setConnectionStatus('live');
+            setStatusText('Live');
+          } else if (room.state === ConnectionState.Connected) {
+            setStatusText('Connected — waiting for stream...');
+          }
+        });
       })
       .catch((err) => {
         if (isStale()) return;

@@ -36,15 +36,11 @@
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": {
-          "level": "warn",
-          "options": {
-            "maxAllowedComplexity": 50
-          }
+          "level": "warn"
         },
         "noExcessiveLinesPerFunction": {
           "level": "warn",
           "options": {
-            "maxLines": 50,
             "skipBlankLines": true,
             "skipIifes": false
           }
