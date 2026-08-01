@@ -1,7 +1,5 @@
-[target.'cfg(target_env = "msvc")']
-rustflags = [
-  "-C", "link-arg=/NODEFAULTLIB:msvcrt",
-  "-C", "link-arg=/NODEFAULTLIB:msvcrtd",
-  "-C", "link-arg=/NODEFAULTLIB:msvcprt",
-  "-C", "link-arg=/NODEFAULTLIB:msvcprtd",
-]
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
