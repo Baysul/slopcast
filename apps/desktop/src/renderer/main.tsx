@@ -1532,6 +1532,10 @@ export const PresenterApp: React.FC = () => {
         if (isMonitor || (isWayland && ctx?.de === 'kde')) {
           setAutoDetectFailed(false);
           targetAudioId = -1;
+          if (!audioAppExplicitlySet) {
+            setSelectedAudioAppId(-1);
+            setAutoDetectedApp({ id: -1, name: 'Desktop Audio', processId: 0 });
+          }
           console.log('[Presenter] No specific app resolved — using system audio (desktop audio fallback)');
         } else {
           notify('info', 'No audio detected', 'Sharing video only. Select an audio app and restart to include audio.');
@@ -1662,6 +1666,10 @@ export const PresenterApp: React.FC = () => {
         clearInterval(videoFileTimeUpdateRef.current);
         videoFileTimeUpdateRef.current = null;
       }
+      if (!audioAppExplicitlySet) {
+        setSelectedAudioAppId(null);
+        setAutoDetectedApp(null);
+      }
     }
   };
 
@@ -1718,6 +1726,9 @@ export const PresenterApp: React.FC = () => {
       await window.electronAPI.stopAudioCapture();
     }
     setIsSharing(false);
+    if (!audioAppExplicitlySet) {
+      setSelectedAudioAppId(null);
+    }
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
     setAutoDetectFailed(false);
