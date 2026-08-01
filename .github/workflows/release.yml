@@ -94,10 +94,6 @@ jobs:
             name: linux-tar
             script: dist:desktop:linux:tar
             asset-path: apps/desktop/release/*.tar.gz
-          - os: macos-latest
-            name: mac
-            script: dist:desktop:mac
-            asset-path: apps/desktop/release/*.dmg
           - os: windows-latest
             name: win
             script: dist:desktop:win
@@ -113,29 +109,8 @@ jobs:
             libpipewire-0.3-dev \
             libglib2.0-dev \
             libx11-dev \
-            libavcodec-dev \
-            libavformat-dev \
-            libavutil-dev \
-            libswscale-dev \
-            libavdevice-dev \
-            libavfilter-dev \
-            libswresample-dev \
             pkg-config \
             clang
-
-      - name: Install macOS system deps
-        if: runner.os == 'macOS'
-        run: |
-          brew install ffmpeg pkg-config
-          echo "PKG_CONFIG_PATH=$(brew --prefix)/opt/ffmpeg/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$(brew --prefix)/lib:${LIBRARY_PATH:-}" >> $GITHUB_ENV
-          echo "RUSTFLAGS=-L$(brew --prefix)/lib" >> $GITHUB_ENV
-
-      - name: Install Windows system deps
-        if: runner.os == 'Windows'
-        run: |
-          vcpkg install "ffmpeg[core,avcodec,avdevice,avfilter,avformat,swresample,swscale]:x64-windows" --no-default-features
-          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
 
       - uses: pnpm/action-setup@v6
         with:

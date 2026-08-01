@@ -17,8 +17,7 @@ fn main() {
 
 fn check_targets() {
     let cross_targets: &[&str] = match std::env::consts::OS {
-        "linux" => &["x86_64-pc-windows-msvc", "aarch64-apple-darwin"],
-        "macos" => &["x86_64-pc-windows-msvc"],
+        "linux" => &["x86_64-pc-windows-msvc"],
         _ => &[],
     };
 
@@ -36,13 +35,6 @@ fn check_targets() {
     for &target in cross_targets {
         let mut cmd = Command::new("cargo");
         cmd.arg("check").arg("--target").arg(target);
-        // ffmpeg-sys-next links against system FFmpeg libraries that only
-        // exist for the host platform, so cross-target checks must run
-        // without the ffmpeg feature (the stubs take over).
-        cmd.arg("--no-default-features");
-        if target.contains("apple") {
-            cmd.env("DOCS_RS", "1");
-        }
         let status = cmd.status().expect("failed to run cargo check");
         if !status.success() {
             exit(status.code().unwrap_or(1));

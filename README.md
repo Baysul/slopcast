@@ -32,8 +32,7 @@ Well first of all, native Linux desktop support is a must. The app should:
 - Be free and open-source.
 - Be easy to use. You and your friends should be able to watch a movie together with as little friction as possible. The UI must also be relatively simple and approachable while still looking good enough.
 - Not require registration or a download for people who just need to watch.[^2]
-- A cross-platform desktop app
-  - This is still a work in progress! Windows and Mac builds haven't been tested yet, but a functioning Windows build will be coming soon.
+- A cross-platform desktop app (Linux, Windows)
 
 ### 
 
@@ -222,9 +221,8 @@ packages/
 | Platform | Requirements |
 |----------|-------------|
 | **All** | [Rust toolchain](https://rustup.rs) (stable), C++20 compiler |
-| **Linux** | [PipeWire](https://pipewire.org/) (`libpipewire-0.3-dev`), `xdg-desktop-portal` (Wayland), `libx11-dev`, FFmpeg dev headers (`libavcodec-dev`, `libavformat-dev`, `libavutil-dev`, `libswscale-dev`, `libavdevice-dev`, `libavfilter-dev`, `libswresample-dev`, `pkg-config`, `clang`) |
-| **macOS** | Xcode Command Line Tools (`xcode-select --install`), `ffmpeg`, `pkg-config` |
-| **Windows** | MSVC 2022+ (Build Tools for Visual Studio), `vcpkg install "ffmpeg[core,avcodec,avdevice,avfilter,avformat,swresample,swscale]:x64-windows" --no-default-features` |
+| **Linux** | [PipeWire](https://pipewire.org/) (`libpipewire-0.3-dev`), `xdg-desktop-portal` (Wayland), `libx11-dev`, `pkg-config`, `clang` |
+| **Windows** | MSVC 2022+ (Build Tools for Visual Studio) |
 
 The native Rust module (`packages/native-rust`) is compiled via napi-rs and linked into the Electron main process. A C++20-capable toolchain is required (gcc >= 10, clang >= 10, or MSVC 2022+).
 

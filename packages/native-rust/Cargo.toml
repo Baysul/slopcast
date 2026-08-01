@@ -19,13 +19,8 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
-ffmpeg-next = { version = "8", optional = true }
 ringbuf = "0.4"
 crossbeam-channel = "0.5"
-
-[features]
-default = ["ffmpeg"]
-ffmpeg = ["dep:ffmpeg-next"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.10.0"
@@ -50,9 +45,6 @@ windows = { version = "0.62.2", features = [
 ] }
 # Direct dependency required: the `#[implement]` proc-macro emits `windows_core::` paths.
 windows-core = "0.62.2"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-screencapturekit = "8"
 
 [profile.release]
 opt-level = 3

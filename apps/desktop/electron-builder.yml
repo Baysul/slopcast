@@ -21,12 +21,6 @@ files:
   - "!**/*.dSYM/**"
   - "!**/*.ipdb"
   - "!**/*.iobj"
-mac:
-  category: public.app-category.utilities
-  target:
-    - dmg
-  extendInfo:
-    NSAudioCaptureUsageDescription: "Slopcast needs to capture system audio for screensharing."
 win:
   target:
     - nsis

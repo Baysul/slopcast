@@ -29,7 +29,7 @@ pub fn set_audio_data_callback(callback: Arc<ThreadsafeFunction<Buffer, ()>>) ->
 }
 
 /// RT-safe non-blocking lock-free push of PCM audio bytes into the global audio ring buffer.
-/// Safe to call directly from PipeWire, WASAPI, or CoreAudio real-time process callbacks.
+/// Safe to call directly from PipeWire or WASAPI real-time process callbacks.
 pub fn push_pcm_bytes(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
