@@ -6,6 +6,7 @@ import { initRoutes } from './routes.js';
 const config = loadConfig();
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '16kb' }));
 
 const roomCreateLimiter = rateLimit({
