@@ -55,7 +55,17 @@ windows-core = "0.62.2"
 screencapturekit = "8"
 
 [profile.release]
-debug = 2
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = false
+strip = true
+
+[profile.release.build-override]
+opt-level = 0
+
+[profile.release.package."*"]
+opt-level = "z"
 
 [build-dependencies]
 napi-build = "2"
