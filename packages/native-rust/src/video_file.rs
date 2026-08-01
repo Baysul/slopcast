@@ -668,7 +668,6 @@ pub(crate) mod ffmpeg {
             let mut aframe = frame::Audio::empty();
 
             let mut playback_start = std::time::Instant::now();
-            let mut audio_samples_sent: u64 = 0;
             let mut video_frames_sent: u64 = 0;
 
             loop {
@@ -692,7 +691,6 @@ pub(crate) mod ffmpeg {
                         audio_resampler = None;
                         audio_resampler_info = None;
                         let valid_ts = ts_ms.max(0) as f64;
-                        audio_samples_sent = ((valid_ts / 1000.0) * 48000.0) as u64;
                         let fps_val = fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
                         video_frames_sent = ((valid_ts / 1000.0) * fps_val) as u64;
                         playback_start = std::time::Instant::now()
@@ -703,12 +701,9 @@ pub(crate) mod ffmpeg {
 
                 if paused_clone.load(Ordering::Relaxed) && !did_seek {
                     thread::sleep(std::time::Duration::from_millis(5));
-                    let cur_stream_sec = if audio_stream_index.is_some() {
-                        audio_samples_sent as f64 / 48000.0
-                    } else {
-                        let fps_val = fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
-                        video_frames_sent as f64 / fps_val
-                    };
+                    let fps_val = fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
+                    let fps_val = if fps_val <= 0.0 { 30.0 } else { fps_val };
+                    let cur_stream_sec = video_frames_sent as f64 / fps_val;
                     playback_start = std::time::Instant::now()
                         - std::time::Duration::from_secs_f64(cur_stream_sec);
                     continue;
@@ -731,7 +726,6 @@ pub(crate) mod ffmpeg {
                             }
                             audio_resampler = None;
                             audio_resampler_info = None;
-                            audio_samples_sent = 0;
                             video_frames_sent = 0;
                             playback_start = std::time::Instant::now();
                             continue;
@@ -935,8 +929,6 @@ pub(crate) mod ffmpeg {
                                                         (resampled.samples() * 4) as usize;
                                                     let byte_len = bytes_needed.min(data.len());
                                                     if byte_len > 0 {
-                                                        audio_samples_sent +=
-                                                            resampled.samples() as u64;
                                                         invoke_audio_callback(
                                                             data[..byte_len].to_vec(),
                                                         );
@@ -950,13 +942,9 @@ pub(crate) mod ffmpeg {
                         }
 
                         // Real-time pacing: ensure playback stays within 50ms of wall-clock time
-                        let stream_sec = if audio_stream_index.is_some() {
-                            audio_samples_sent as f64 / 48000.0
-                        } else {
-                            let fps_val =
-                                fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
-                            video_frames_sent as f64 / fps_val
-                        };
+                        let fps_val = fps.numerator() as f64 / (fps.denominator() as f64).max(1.0);
+                        let fps_val = if fps_val <= 0.0 { 30.0 } else { fps_val };
+                        let stream_sec = video_frames_sent as f64 / fps_val;
                         let elapsed_sec = playback_start.elapsed().as_secs_f64();
                         if stream_sec > elapsed_sec + 0.05 {
                             let ahead_ms =
