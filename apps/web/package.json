@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "prebuild": "pnpm --filter @slopcast/shared-types build",
+    "check": "tsc --noEmit",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
