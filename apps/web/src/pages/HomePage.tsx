@@ -2,11 +2,11 @@ import { ArrowRight, Loader2 } from 'lucide-react';
 import type React from 'react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { Header } from '../components/Header';
 import { SpectatorBanner } from '../components/SpectatorBanner';
-import { Button } from '../components/ui/button';
-import { Card } from '../components/ui/card';
-import { Input } from '../components/ui/input';
 
 export const HomePage: React.FC = () => {
   const [roomInput, setRoomInput] = useState('');

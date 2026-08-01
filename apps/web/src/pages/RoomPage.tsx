@@ -3,9 +3,9 @@ import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { SpectatorBanner } from '../components/SpectatorBanner';
-import { Badge } from '../components/ui/badge';
-import { Button } from '../components/ui/button';
 import { VideoPlayer } from '../components/VideoPlayer';
 
 type StatusVariant = 'live' | 'disconnected' | 'info';
