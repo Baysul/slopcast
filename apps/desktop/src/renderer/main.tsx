@@ -1193,8 +1193,13 @@ export const PresenterApp: React.FC = () => {
             timestamp: tsUs,
             data: new Uint8Array(buf.buffer, buf.byteOffset, buf.length) as BufferSource,
           });
-          audioWriter?.write(audioData).catch(console.error);
-          audioData.close();
+          audioWriter?.write(audioData).then(
+            () => audioData.close(),
+            (err) => {
+              audioData.close();
+              console.error(err);
+            },
+          );
         }
       }
       totalAudioSamples += audioFrameIdx;
@@ -1257,8 +1262,13 @@ export const PresenterApp: React.FC = () => {
         codedHeight: meta.height,
         timestamp: tsUs,
       });
-      videoWriter.write(frame).catch(console.error);
-      frame.close();
+      videoWriter.write(frame).then(
+        () => frame.close(),
+        (err) => {
+          frame.close();
+          console.error(err);
+        },
+      );
     });
 
     const unsubFrame = window.electronAPI.onVideoFileFrame((data) => {
@@ -1283,8 +1293,13 @@ export const PresenterApp: React.FC = () => {
         codedHeight: height,
         timestamp: tsUs,
       });
-      videoWriter.write(frame).catch(console.error);
-      frame.close();
+      videoWriter.write(frame).then(
+        () => frame.close(),
+        (err) => {
+          frame.close();
+          console.error(err);
+        },
+      );
     });
 
     const unsubAudio = window.electronAPI.onVideoFileAudio((data) => {
@@ -1317,8 +1332,13 @@ export const PresenterApp: React.FC = () => {
         timestamp: tsUs,
         data: new Uint8Array(buf.buffer, buf.byteOffset, buf.length) as BufferSource,
       });
-      audioWriter.write(audioData).catch(console.error);
-      audioData.close();
+      audioWriter.write(audioData).then(
+        () => audioData.close(),
+        (err) => {
+          audioData.close();
+          console.error(err);
+        },
+      );
     });
 
     // Probe to get dimensions
