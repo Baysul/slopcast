@@ -80,7 +80,7 @@ export function useLiveKitRoom({
       const url = room.shareUrl;
       const token = room.token;
       const apiLivekitUrl = room.livekitUrl;
-      const resolvedLivekitUrl = livekitUrl || apiLivekitUrl;
+      const resolvedLivekitUrl = apiLivekitUrl || livekitUrl;
 
       setRoomCode(code);
       setShareUrl(url);
