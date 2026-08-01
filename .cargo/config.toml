@@ -1,5 +1,2 @@
-[alias]
-xtask = "run --manifest-path xtask/Cargo.toml --"
-
 [target.'cfg(target_env = "msvc")']
 rustflags = ["-C", "target-feature=-crt-static"]
