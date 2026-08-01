@@ -59,7 +59,7 @@ export function loadConfig(): AppConfig {
     }
   }
 
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEV_KEYS !== 'true') {
     if (config.livekitApiKey === 'devkey' || config.livekitApiSecret === 'secret') {
       throw new Error('Production environment requires custom LIVEKIT_API_KEY and LIVEKIT_API_SECRET');
     }

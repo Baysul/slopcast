@@ -15,6 +15,20 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, 'dist/renderer'),
     emptyOutDir: true,
+    sourcemap: false,
+    minify: 'esbuild',
+    cssMinify: true,
+    reportCompressedSize: false,
+    target: 'esnext',
+    rollupOptions: {
+      treeshake: {
+        preset: 'recommended',
+      },
+    },
+  },
+  esbuild: {
+    legalComments: 'none',
+    drop: ['debugger'],
   },
   server: {
     port: 5173,

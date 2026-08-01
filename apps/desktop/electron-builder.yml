@@ -14,6 +14,13 @@ files:
   - "!**/target/**"
   - "!**/node_modules/@slopcast/native-rust/{src,scripts,node_modules}/**"
   - "!**/node_modules/@slopcast/native-rust/{Cargo.toml,Cargo.lock,rustfmt.toml,test-native.js,build.rs}"
+  - "!**/node_modules/@slopcast/native-livekit/{src,scripts,node_modules}/**"
+  - "!**/node_modules/@slopcast/native-livekit/{Cargo.toml,Cargo.lock,rustfmt.toml,test-native.js,build.rs}"
+  - "!**/*.map"
+  - "!**/*.pdb"
+  - "!**/*.dSYM/**"
+  - "!**/*.ipdb"
+  - "!**/*.iobj"
 mac:
   category: public.app-category.utilities
   target:
