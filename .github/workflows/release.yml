@@ -26,8 +26,9 @@ jobs:
       # daemon-side pulls (buildkit/QEMU images) and buildkit-side base images.
       - name: Configure Docker Hub mirror
         run: |
+          sudo mkdir -p /etc/docker
           echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
+          sudo systemctl restart docker || true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -111,6 +112,10 @@ jobs:
             libx11-dev \
             pkg-config \
             clang
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - uses: pnpm/action-setup@v6
         with:
