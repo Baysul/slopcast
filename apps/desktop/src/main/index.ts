@@ -1,7 +1,6 @@
-import { createReadStream, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as nativeLiveKit from '@slopcast/native-livekit';
 import * as native from '@slopcast/native-rust';
 import { type StreamSettings, sanitizeStreamSettings } from '@slopcast/shared-types';
@@ -15,6 +14,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  net,
   protocol,
   session,
   shell,
@@ -794,55 +794,9 @@ app.whenReady().then(() => {
       return new Response('Forbidden', { status: 403 });
     }
     try {
-      const fileStat = await stat(resolvedPath);
-      const ext = path.extname(resolvedPath).toLowerCase();
-      const mimeTypes: Record<string, string> = {
-        '.mp4': 'video/mp4',
-        '.webm': 'video/webm',
-        '.ogg': 'video/ogg',
-        '.ogv': 'video/ogg',
-        '.mkv': 'video/x-matroska',
-        '.mov': 'video/quicktime',
-      };
-      const contentType = mimeTypes[ext] ?? 'video/mp4';
-
-      const rangeHeader = request.headers.get('Range');
-      const corsHeaders = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': '*',
-        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-      };
-
-      if (rangeHeader) {
-        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-        if (match) {
-          const start = parseInt(match[1], 10);
-          const end = match[2] ? parseInt(match[2], 10) : fileStat.size - 1;
-          if (start < fileStat.size && end < fileStat.size && start <= end) {
-            const chunkLength = end - start + 1;
-            const stream = createReadStream(resolvedPath, { start, end });
-            return new Response(stream as unknown as ReadableStream, {
-              status: 206,
-              headers: {
-                'Content-Type': contentType,
-                'Content-Length': String(chunkLength),
-                'Content-Range': `bytes ${start}-${end}/${fileStat.size}`,
-                'Accept-Ranges': 'bytes',
-                ...corsHeaders,
-              },
-            });
-          }
-        }
-      }
-
-      return new Response(createReadStream(resolvedPath) as unknown as ReadableStream, {
-        status: 200,
-        headers: {
-          'Content-Type': contentType,
-          'Content-Length': String(fileStat.size),
-          'Accept-Ranges': 'bytes',
-          ...corsHeaders,
-        },
+      return await net.fetch(pathToFileURL(resolvedPath).toString(), {
+        method: request.method,
+        headers: request.headers,
       });
     } catch {
       return new Response('Not Found', { status: 404 });
@@ -958,20 +912,9 @@ app.whenReady().then(() => {
         console.warn('start-video-file: path not in allowedFilePaths:', filePath);
         return false;
       }
-      const sendFrame = (channel: 'video:frame' | 'video:audio', buf: Buffer | null) => {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        if (buf && buf.length > 0) {
-          mainWindow.webContents.send(channel, buf);
-        } else {
-          mainWindow.webContents.send(channel, null);
-        }
-      };
-      native.setVideoFrameCallback((_err: Error | null, buf: Buffer | null) => {
-        sendFrame('video:frame', buf);
-      });
-
       native.setAudioFrameCallback((_err: Error | null, buf: Buffer | null) => {
-        sendFrame('video:audio', buf);
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send('video:audio', buf && buf.length > 0 ? buf : null);
       });
 
       native.setSharedVideoFrameCallback((_err: Error | null, meta: unknown) => {
