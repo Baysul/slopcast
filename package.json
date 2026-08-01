@@ -2,6 +2,7 @@
   "name": "slopcast-monorepo",
   "desktopName": "slopcast-app",
   "author": "Basil <parsley@duck.com>",
+  "homepage": "https://github.com/Baysul/slopcast",
   "private": true,
   "version": "0.1.0",
   "packageManager": "pnpm@9.15.4",
