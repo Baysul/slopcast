@@ -16,7 +16,7 @@
     }
   },
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "tsc",
     "build": "tsc"
   },
   "devDependencies": {
