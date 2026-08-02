@@ -31,6 +31,7 @@ export default defineConfig({
     drop: ['debugger'],
   },
   server: {
+    host: '0.0.0.0',
     port: config.webPort,
     proxy: {
       '/api': {

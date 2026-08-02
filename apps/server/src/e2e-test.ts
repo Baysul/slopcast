@@ -118,8 +118,12 @@ function killPort(port: number): void {
 
 function httpGet(url: string): Promise<number> {
   return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'localhost') {
+      parsed.hostname = '127.0.0.1';
+    }
     const req = http
-      .get(url, (res) => {
+      .get(parsed.toString(), (res) => {
         res.resume();
         resolve(res.statusCode ?? 0);
       })
@@ -399,20 +403,29 @@ async function runTest(): Promise<TestResult> {
   try {
     livekitProc = await ensureLiveKit(config.livekitUrl, logEntries);
 
-    // Kill conflicting processes on configured ports.
-    killPort(config.serverPort);
-    killPort(config.webPort);
-    await new Promise((r) => setTimeout(r, 500));
+    // Ensure API server is running.
+    try {
+      await pollHealth(`${config.apiEndpoint}/health`, 1000, 'API server');
+      log('SPAWN', 'API server is already running and healthy');
+    } catch {
+      killPort(config.serverPort);
+      await new Promise((r) => setTimeout(r, 500));
+      log('SPAWN', 'Starting API server...');
+      serverProc = spawnLogging('pnpm', ['--filter', 'server', 'dev'], 'server', logEntries);
+      await pollHealth(`${config.apiEndpoint}/health`, STARTUP_TIMEOUT_MS, 'API server');
+    }
 
-    // Spawn API server.
-    log('SPAWN', 'Starting API server...');
-    serverProc = spawnLogging('pnpm', ['--filter', 'server', 'dev'], 'server', logEntries);
-    await pollHealth(`${config.apiEndpoint}/health`, STARTUP_TIMEOUT_MS, 'API server');
-
-    // Spawn Web server.
-    log('SPAWN', 'Starting Web dev server...');
-    webProc = spawnLogging('pnpm', ['--filter', 'web', 'dev'], 'web', logEntries);
-    await pollHealth(config.websiteUrl, STARTUP_TIMEOUT_MS, 'Web server');
+    // Ensure Web server is running.
+    try {
+      await pollHealth(config.websiteUrl, 1000, 'Web server');
+      log('SPAWN', 'Web dev server is already running and healthy');
+    } catch {
+      killPort(config.webPort);
+      await new Promise((r) => setTimeout(r, 500));
+      log('SPAWN', 'Starting Web dev server...');
+      webProc = spawnLogging('pnpm', ['--filter', 'web', 'dev'], 'web', logEntries);
+      await pollHealth(config.websiteUrl, STARTUP_TIMEOUT_MS, 'Web server');
+    }
 
     // Spotify check.
     log('SPOTIFY', 'Checking Spotify process...');

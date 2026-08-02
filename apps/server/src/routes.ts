@@ -11,6 +11,20 @@ function toWsUrl(url: string): string {
   return url.replace(/^http(s?):\/\//, 'ws$1://');
 }
 
+function toHttpUrl(url: string): string {
+  let normalized = url.replace(/^ws(s?):\/\//, 'http$1://');
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.hostname === 'localhost') {
+      parsed.hostname = '127.0.0.1';
+    }
+    normalized = parsed.toString().replace(/\/$/, '');
+  } catch {
+    // Ignore invalid URLs
+  }
+  return normalized;
+}
+
 export function initRoutes(
   host: string,
   apiKey: string,
@@ -18,7 +32,7 @@ export function initRoutes(
   websiteUrl: string,
   clientUrl?: string,
 ): Router {
-  const roomClient = new RoomServiceClient(host, apiKey, apiSecret);
+  const roomClient = new RoomServiceClient(toHttpUrl(host), apiKey, apiSecret);
   const livekitWsUrl = toWsUrl(clientUrl ?? host);
 
   const router = createRouter();

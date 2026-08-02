@@ -50,6 +50,7 @@ PRODUCT.md
 
 # Test artifacts
 test-output/
+dump.json
 
 # Configuration
 slopcast.config.json
