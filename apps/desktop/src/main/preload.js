@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppConfig: () => ipcRenderer.invoke('get-app-config'),
   getPlatformInfo: () => ipcRenderer.invoke('get-platform-info'),
   getAudioApps: () => ipcRenderer.invoke('get-audio-apps'),
+  dumpAudioSources: () => ipcRenderer.invoke('dump-audio-sources'),
   startAudioCapture: (targetId) => ipcRenderer.invoke('start-audio-capture', targetId),
   stopAudioCapture: () => ipcRenderer.invoke('stop-audio-capture'),
   connectNativeRoom: (livekitUrl, token) => ipcRenderer.invoke('connect-native-room', livekitUrl, token),
@@ -17,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resolveAudioSource: (opts) => ipcRenderer.invoke('resolve-audio-source', opts),
   resolveAudioAppByName: (label) => ipcRenderer.invoke('resolve-audio-app-by-name', label),
   getCaptureContext: () => ipcRenderer.invoke('get-capture-context'),
+  inspectCaptureContext: () => ipcRenderer.invoke('inspect-capture-context'),
   getStreamSettings: () => ipcRenderer.invoke('get-stream-settings'),
   saveStreamSettings: (settings) => ipcRenderer.invoke('save-stream-settings', settings),
   getOnboardingCompleted: () => ipcRenderer.invoke('get-onboarding-completed'),
@@ -29,4 +31,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopNativeCapture: () => ipcRenderer.invoke('stop-native-capture'),
   isNativeCaptureActive: () => ipcRenderer.invoke('is-native-capture-active'),
   getSpectatorCount: () => ipcRenderer.invoke('get-spectator-count'),
+  onAudioPcmData: (callback) => {
+    const handler = (_event, buffer) => callback(buffer);
+    ipcRenderer.on('audio-pcm-data', handler);
+    return () => ipcRenderer.removeListener('audio-pcm-data', handler);
+  },
 });

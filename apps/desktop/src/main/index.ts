@@ -14,7 +14,7 @@ let lastCapturedSourceName: string | null = null;
 interface CaptureContext {
   de: 'unknown' | 'kde' | 'gnome';
   mediaName: string | null;
-  sourceType: 'monitor' | 'window' | 'unknown';
+  sourceType: 'monitor' | 'window' | 'region' | 'unknown';
   videoNodeCount: number;
   screencastNodeId: number | null;
 }
@@ -355,6 +355,11 @@ app.whenReady().then(() => {
       native.setAudioDataCallback((err: Error | null, arg: Buffer) => {
         if (err || !mainWindow || mainWindow.isDestroyed()) return;
         try {
+          mainWindow.webContents.send('audio-pcm-data', arg);
+        } catch (_sendErr) {
+          // Window may be navigating or destroyed
+        }
+        try {
           nativeLiveKit.feedPcm(arg);
         } catch (_feedErr) {
           // Room may not be connected yet — that's fine
@@ -390,6 +395,15 @@ app.whenReady().then(() => {
       return await native.listAudioApplications();
     } catch (err) {
       console.error('get-audio-apps IPC error:', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle('dump-audio-sources', async () => {
+    try {
+      return await native.dumpAudioSources();
+    } catch (err) {
+      console.error('dump-audio-sources IPC error:', err);
       return [];
     }
   });
@@ -499,7 +513,7 @@ app.whenReady().then(() => {
     // Layer 1: PipeWire introspection — retry as xdg-desktop-portal may lag.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const app = native.resolveAudioAppForCapturedWindow();
+        const app = await native.resolveAudioAppForCapturedWindow();
         if (app) {
           console.log(`[resolve-audio-source] Wayland PW-introspect → "${app.name}" (PID ${app.processId})`);
           return app;
@@ -530,11 +544,14 @@ app.whenReady().then(() => {
     // environment is streaming, whether the source is a monitor or a window,
     // and the best-matched audio app for the captured source.
     try {
-      const ctx = native.getCaptureContext();
+      const ctx = await native.getCaptureContext();
       lastCaptureContext = toCaptureContext(ctx);
       console.log(
         `[resolve-audio-source] Wayland context: de=${lastCaptureContext.de} sourceType=${lastCaptureContext.sourceType} mediaName="${lastCaptureContext.mediaName ?? ''}" videoNodes=${lastCaptureContext.videoNodeCount}`,
       );
+      if (lastCaptureContext.sourceType === 'monitor' || lastCaptureContext.sourceType === 'region') {
+        return null;
+      }
       if (ctx.app) {
         console.log(`[resolve-audio-source] Wayland context-match → "${ctx.app.name}"`);
         return ctx.app;
@@ -565,7 +582,7 @@ app.whenReady().then(() => {
       const windowId = parseInt(sourceId.split(':')[1], 10);
       if (!Number.isNaN(windowId)) {
         try {
-          const app = native.resolveAudioAppForX11Window(windowId);
+          const app = await native.resolveAudioAppForX11Window(windowId);
           if (app) {
             console.log(`[resolve-audio-source] X11 PID-match: window ${windowId} → "${app.name}"`);
             return app;
@@ -613,6 +630,18 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('get-capture-context', () => lastCaptureContext);
+
+  // Fresh PipeWire introspection (not the cached lastCaptureContext):
+  // xdg-desktop-portal screencast metadata + KWin window resolution + matched
+  // audio app for the captured window.
+  ipcMain.handle('inspect-capture-context', async () => {
+    try {
+      return await native.getCaptureContext();
+    } catch (err) {
+      console.error('inspect-capture-context IPC error:', err);
+      return null;
+    }
+  });
 
   // ── Native Video Capture ─────────────────────────────────────────────
   // Video frames are produced by native-rust's PipeWire pw_stream and
@@ -666,7 +695,7 @@ app.whenReady().then(() => {
         let nodeId: number | null = null;
         if (isWayland) {
           try {
-            const ctx = native.getCaptureContext();
+            const ctx = await native.getCaptureContext();
             nodeId = ctx.screencastNodeId ?? null;
             lastCaptureContext = toCaptureContext(ctx);
             console.log(`[native-capture] nodeId=${nodeId} de=${ctx.de} sourceType=${ctx.sourceType}`);

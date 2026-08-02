@@ -23,6 +23,71 @@ import { codecOptionSuffix } from './utils/codecs';
 import './types/electron-api.d.ts';
 import './index.css';
 
+async function applySenderParameters(sender: RTCRtpSender, maxBitrate: number, maxFramerate: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const params = sender.getParameters();
+      if (!params || !params.transactionId) {
+        await new Promise((r) => setTimeout(r, 100));
+        continue;
+      }
+      if (!params.encodings?.length) params.encodings = [{}];
+      for (const enc of params.encodings) {
+        enc.maxBitrate = maxBitrate;
+        enc.maxFramerate = maxFramerate;
+        enc.scaleResolutionDownBy = 1.0;
+        enc.priority = 'high';
+        enc.networkPriority = 'high';
+        (enc as { degradationPreference?: string }).degradationPreference = 'maintain-framerate';
+        enc.active = true;
+      }
+      await sender.setParameters(params);
+      return true;
+    } catch (err) {
+      if (attempt < 4) {
+        await new Promise((r) => setTimeout(r, 100));
+      } else {
+        console.warn('[Presenter] Setting encoder parameters failed:', err);
+      }
+    }
+  }
+  return false;
+}
+
+// Debug aid: print every live PipeWire audio stream node's full property
+// dictionary (the same view pw-dump shows) when a capture starts, so a missed
+// auto-resolve can be matched against the real nodes. Fire-and-forget: never
+// blocks share start on PipeWire enumeration.
+async function logLiveAudioSources(): Promise<void> {
+  if (!window.electronAPI?.dumpAudioSources) return;
+  try {
+    const sources = await window.electronAPI.dumpAudioSources();
+    console.log(`[Presenter] live audio sources: ${sources.length}`);
+    for (const source of sources) {
+      console.log('[Presenter] audio source props:', JSON.stringify(source, null, 2));
+    }
+  } catch (err) {
+    console.warn('[Presenter] live audio source dump failed:', err);
+  }
+}
+
+// Debug aid: print what was actually captured — the track label, the capture
+// source id, and a fresh capture-context introspection carrying the
+// xdg-desktop-portal screencast metadata (portal.screencast.*) for the picked
+// window, KWin window PID/caption, and the best-matched audio app. Fire-and-forget.
+async function logSelectedApplication(label: string, sourceId: string | null): Promise<void> {
+  if (!window.electronAPI?.inspectCaptureContext) return;
+  try {
+    const context = await window.electronAPI.inspectCaptureContext();
+    console.log(
+      `[Presenter] selected application (trackLabel="${label}", sourceId=${sourceId ?? 'null'}):`,
+      JSON.stringify(context, null, 2),
+    );
+  } catch (err) {
+    console.warn('[Presenter] selected application dump failed:', err);
+  }
+}
+
 export const PresenterApp: React.FC = () => {
   const [isWayland, setIsWayland] = useState<boolean>(false);
   const [desktopSources, setDesktopSources] = useState<DesktopSource[]>([]);
@@ -127,21 +192,10 @@ export const PresenterApp: React.FC = () => {
       if (!room) return;
       const pub = room.localParticipant.videoTrackPublications.values().next().value;
       const sender = (pub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
-      if (!sender) return;
-      try {
-        const params = sender.getParameters();
-        if (!params.encodings?.length) params.encodings = [{}];
-        for (const enc of params.encodings) {
-          enc.maxBitrate = br;
-          enc.maxFramerate = fps;
-          enc.scaleResolutionDownBy = 1.0;
-          enc.priority = 'high';
-          enc.networkPriority = 'high';
-          (enc as { degradationPreference?: string }).degradationPreference = 'maintain-framerate';
-          enc.active = true;
+      if (sender) {
+        if (await applySenderParameters(sender, br, fps)) {
+          console.log(`[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps`);
         }
-        await sender.setParameters(params);
-        console.log(`[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps`);
 
         const currentId = audioAppIdRef.current;
         if (currentId != null) {
@@ -155,8 +209,6 @@ export const PresenterApp: React.FC = () => {
             }
           }
         }
-      } catch (err) {
-        console.warn('[Presenter] live encoder update failed:', err);
       }
     };
     void update();
@@ -297,6 +349,8 @@ export const PresenterApp: React.FC = () => {
         throw new Error('xdg-desktop-portal granted no video track');
       }
       track.contentHint = 'motion';
+      void logLiveAudioSources();
+      void logSelectedApplication(track.label, null);
       return track;
     }
 
@@ -325,6 +379,8 @@ export const PresenterApp: React.FC = () => {
     });
     const track = stream.getVideoTracks()[0];
     track.contentHint = 'motion';
+    void logLiveAudioSources();
+    void logSelectedApplication(track.label, selectedSourceId);
     return track;
   }, [isWayland, resolutionRef, streamFpsRef, selectedSourceId]);
 
@@ -397,7 +453,7 @@ export const PresenterApp: React.FC = () => {
 
         const isMonitor = ctx?.sourceType === 'monitor' || (!isWayland && selectedSourceId?.startsWith('screen:'));
 
-        if (isMonitor || (isWayland && ctx?.de === 'kde')) {
+        if (isMonitor) {
           setAutoDetectFailed(false);
           targetAudioId = -1;
           if (!audioAppExplicitlySet) {
@@ -468,26 +524,12 @@ export const PresenterApp: React.FC = () => {
       const videoPub = room.localParticipant.videoTrackPublications.values().next().value;
       const sender = (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
       if (sender) {
-        try {
-          const params = sender.getParameters();
-          if (!params.encodings?.length) params.encodings = [{}];
-          for (const enc of params.encodings) {
-            enc.maxBitrate = bitrateLimitRef.current;
-            enc.maxFramerate = streamFpsRef.current;
-            enc.scaleResolutionDownBy = 1.0;
-            enc.priority = 'high';
-            enc.networkPriority = 'high';
-            (enc as { degradationPreference?: string }).degradationPreference = 'maintain-framerate';
-            enc.active = true;
-          }
-          await sender.setParameters(params);
+        if (await applySenderParameters(sender, bitrateLimitRef.current, streamFpsRef.current)) {
           console.log(
             `[Presenter] Initial encoder parameters applied: fps=${streamFpsRef.current} bitrate=${(
               bitrateLimitRef.current / 1_000_000
             ).toFixed(0)}Mbps`,
           );
-        } catch (err) {
-          console.warn('[Presenter] Setting initial encoder parameters failed:', err);
         }
       }
 
