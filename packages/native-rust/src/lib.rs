@@ -5,6 +5,7 @@
 
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
+use std::collections::HashMap;
 
 mod audio_ring;
 
@@ -20,6 +21,10 @@ mod unsupported_platform {
         Err(napi::Error::from_reason(
             "Native audio capture is not supported on this platform",
         ))
+    }
+
+    pub fn dump_audio_sources() -> napi::Result<Vec<std::collections::HashMap<String, String>>> {
+        Ok(Vec::new())
     }
 
     pub fn start_audio_capture(_: &napi::Either<String, i32>) -> napi::Result<bool> {
@@ -141,34 +146,155 @@ pub struct CaptureContext {
     pub video_node_count: i32,
     pub app: Option<AudioApp>,
     pub screencast_node_id: Option<u32>,
+    /// xdg-desktop-portal screencast metadata (`portal.screencast.*`) for the
+    /// captured window — the portal's own record of what was picked.
+    pub portal_props: Option<HashMap<String, String>>,
+    /// KWin-resolved owning window PID (KDE window captures only).
+    pub window_pid: Option<i32>,
+    /// KWin-resolved window caption (KDE window captures only).
+    pub window_caption: Option<String>,
 }
 
 pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
-    let lower = label.to_lowercase();
-    let first_word = lower.split_whitespace().next()?;
-    apps.iter()
-        .find(|a| a.name.to_lowercase() == lower)
-        .or_else(|| apps.iter().find(|a| lower.contains(&a.name.to_lowercase())))
-        .or_else(|| apps.iter().find(|a| a.name.to_lowercase().contains(&lower)))
-        .or_else(|| {
-            apps.iter().find(|a| {
-                let n = a.name.to_lowercase();
-                n.contains(first_word) || first_word.contains(&n)
-            })
+    let label_trim = label.trim();
+    if label_trim.is_empty() {
+        return None;
+    }
+    let lower = label_trim.to_lowercase();
+    let lower_clean = lower
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>();
+    let first_word = lower.split_whitespace().next().unwrap_or("");
+
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let acronym: String = if words.len() >= 2 {
+        words
+            .iter()
+            .map(|w| w.chars().next().unwrap_or(' '))
+            .collect()
+    } else {
+        String::new()
+    };
+
+    let norm_apps: Vec<(&AudioApp, String, String, Option<String>, String)> = apps
+        .iter()
+        .filter(|a| !a.name.trim().is_empty())
+        .map(|a| {
+            let name_lower = a.name.trim().to_lowercase();
+            let name_clean = name_lower
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>();
+            let win_lower = a
+                .window_title
+                .as_deref()
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty());
+            let cmdline_lower = if a.process_id > 0 {
+                std::fs::read_to_string(format!("/proc/{}/cmdline", a.process_id))
+                    .unwrap_or_default()
+                    .replace('\\', "/")
+                    .to_lowercase()
+            } else {
+                String::new()
+            };
+            (a, name_lower, name_clean, win_lower, cmdline_lower)
         })
-        // Wine/Proton games report `application.name=wine64-preloader` while
-        // the actual window title is the game name. Chromium-family browsers
-        // leave `media.name="Playback"` and rely on the track label carrying
-        // the window title. Match against `window_title` as a fallback for
-        // both.
-        .or_else(|| {
-            apps.iter().find(|a| {
-                a.window_title
-                    .as_deref()
-                    .is_some_and(|t| title_matches(t, &lower, first_word))
-            })
-        })
-        .cloned()
+        .collect();
+
+    // 1. Exact name match
+    if let Some((a, _, _, _, _)) = norm_apps
+        .iter()
+        .find(|(_, name_lower, _, _, _)| *name_lower == lower)
+    {
+        return Some((*a).clone());
+    }
+
+    // 2. Cleaned name equality (handling spaces / .exe, e.g. "zenless zone zero" vs "zenlesszonezero.exe")
+    if !lower_clean.is_empty() {
+        if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, _, name_clean, _, _)| {
+            let stem = name_clean.trim_end_matches("exe");
+            !stem.is_empty()
+                && (stem == lower_clean
+                    || lower_clean.contains(stem)
+                    || stem.contains(&lower_clean))
+        }) {
+            return Some((*a).clone());
+        }
+    }
+
+    // 3. Name contained in label
+    if let Some((a, _, _, _, _)) = norm_apps
+        .iter()
+        .find(|(_, name_lower, _, _, _)| !name_lower.is_empty() && lower.contains(name_lower))
+    {
+        return Some((*a).clone());
+    }
+
+    // 4. Label contained in name
+    if let Some((a, _, _, _, _)) = norm_apps
+        .iter()
+        .find(|(_, name_lower, _, _, _)| !name_lower.is_empty() && name_lower.contains(&lower))
+    {
+        return Some((*a).clone());
+    }
+
+    // 5. Acronym match (e.g. "Final Fantasy XIV" -> "ffxiv" matching "ffxiv_dx11.exe")
+    if acronym.len() >= 3 {
+        if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
+            name_lower.starts_with(&acronym) || name_lower.contains(&acronym)
+        }) {
+            return Some((*a).clone());
+        }
+    }
+
+    // 6. Cmdline match (e.g. /proc/pid/cmdline containing "final fantasy xiv")
+    if lower.len() >= 3 {
+        if let Some((a, _, _, _, _)) = norm_apps
+            .iter()
+            .find(|(_, _, _, _, cmdline)| !cmdline.is_empty() && cmdline.contains(&lower))
+        {
+            return Some((*a).clone());
+        }
+    }
+
+    // 7. Significant word match (word length >= 4)
+    for word in &words {
+        if word.len() >= 4 {
+            if let Some((a, _, _, _, _)) = norm_apps
+                .iter()
+                .find(|(_, name_lower, _, _, _)| name_lower.contains(word))
+            {
+                return Some((*a).clone());
+            }
+        }
+    }
+
+    // 8. First word match
+    if !first_word.is_empty() {
+        if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
+            !name_lower.is_empty()
+                && (name_lower.contains(first_word) || first_word.contains(name_lower))
+        }) {
+            return Some((*a).clone());
+        }
+    }
+
+    // 9. Window title match
+    if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, _, _, win_lower, _)| {
+        win_lower
+            .as_deref()
+            .is_some_and(|wt| title_matches(wt, &lower, first_word))
+    }) {
+        return Some((*a).clone());
+    }
+
+    None
 }
 
 fn title_matches(title: &str, lower: &str, first_word: &str) -> bool {
@@ -187,10 +313,6 @@ pub fn init_engine() -> String {
 }
 
 /// Lists active audio applications visible to the native layer.
-///
-/// # Errors
-///
-/// Returns an error if the platform-specific audio enumeration fails.
 pub struct ListAudioAppsTask;
 
 impl napi::Task for ListAudioAppsTask {
@@ -263,26 +385,90 @@ pub fn is_audio_capture_active() -> napi::Result<bool> {
     platform::is_audio_capture_active()
 }
 
-/// Resolves the audio application for the given X11 window ID.
+pub struct ResolveAudioAppForX11WindowTask {
+    window_id: u32,
+}
+
+impl napi::Task for ResolveAudioAppForX11WindowTask {
+    type Output = Option<AudioApp>;
+    type JsValue = Option<AudioApp>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(platform::resolve_audio_app_for_x11_window(self.window_id))
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Resolves the audio application for the given X11 window ID asynchronously.
 ///
 /// # Errors
 ///
 /// Always returns `Ok`.
-#[napi]
-pub fn resolve_audio_app_for_x11_window(window_id: i32) -> napi::Result<Option<AudioApp>> {
-    Ok(platform::resolve_audio_app_for_x11_window(
-        window_id.cast_unsigned(),
+#[napi(ts_return_type = "Promise<AudioApp | null>")]
+pub fn resolve_audio_app_for_x11_window(
+    window_id: i32,
+) -> napi::Result<napi::bindgen_prelude::AsyncTask<ResolveAudioAppForX11WindowTask>> {
+    let wid = if window_id > 0 { window_id as u32 } else { 0 };
+    Ok(napi::bindgen_prelude::AsyncTask::new(
+        ResolveAudioAppForX11WindowTask { window_id: wid },
     ))
 }
 
-/// Resolves the audio application for the currently portal-captured window.
+pub struct ResolveAudioAppForCapturedWindowTask;
+
+impl napi::Task for ResolveAudioAppForCapturedWindowTask {
+    type Output = Option<AudioApp>;
+    type JsValue = Option<AudioApp>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(platform::resolve_audio_app_for_captured_window())
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Resolves the audio application for the currently portal-captured window asynchronously.
 ///
 /// # Errors
 ///
 /// Always returns `Ok`.
-#[napi]
-pub fn resolve_audio_app_for_captured_window() -> napi::Result<Option<AudioApp>> {
-    Ok(platform::resolve_audio_app_for_captured_window())
+#[napi(ts_return_type = "Promise<AudioApp | null>")]
+pub fn resolve_audio_app_for_captured_window()
+-> napi::Result<napi::bindgen_prelude::AsyncTask<ResolveAudioAppForCapturedWindowTask>> {
+    Ok(napi::bindgen_prelude::AsyncTask::new(
+        ResolveAudioAppForCapturedWindowTask,
+    ))
+}
+
+pub struct DumpAudioSourcesTask;
+
+impl napi::Task for DumpAudioSourcesTask {
+    type Output = Vec<std::collections::HashMap<String, String>>;
+    type JsValue = Vec<std::collections::HashMap<String, String>>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        platform::dump_audio_sources()
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Dumps the full property dictionaries of every live audio stream node asynchronously.
+///
+/// # Errors
+///
+/// Returns an error if `PipeWire` node enumeration fails.
+#[napi(ts_return_type = "Promise<Array<Record<string, string>>>")]
+pub fn dump_audio_sources() -> napi::Result<napi::bindgen_prelude::AsyncTask<DumpAudioSourcesTask>>
+{
+    Ok(napi::bindgen_prelude::AsyncTask::new(DumpAudioSourcesTask))
 }
 
 pub struct ResolveAudioAppByNameTask {
@@ -303,7 +489,7 @@ impl napi::Task for ResolveAudioAppByNameTask {
     }
 }
 
-/// Resolves the best-matching audio application by name.
+/// Resolves the best-matching audio application by name asynchronously.
 ///
 /// # Errors
 ///
@@ -317,14 +503,30 @@ pub fn resolve_audio_app_by_name(
     ))
 }
 
-/// Returns a snapshot of the currently active `PipeWire` video capture context.
+pub struct GetCaptureContextTask;
+
+impl napi::Task for GetCaptureContextTask {
+    type Output = CaptureContext;
+    type JsValue = CaptureContext;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        platform::get_capture_context()
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Returns a snapshot of the currently active `PipeWire` video capture context asynchronously.
 ///
 /// # Errors
 ///
 /// Returns an error if `PipeWire` video node introspection fails.
-#[napi]
-pub fn get_capture_context() -> napi::Result<CaptureContext> {
-    platform::get_capture_context()
+#[napi(ts_return_type = "Promise<CaptureContext>")]
+pub fn get_capture_context() -> napi::Result<napi::bindgen_prelude::AsyncTask<GetCaptureContextTask>>
+{
+    Ok(napi::bindgen_prelude::AsyncTask::new(GetCaptureContextTask))
 }
 
 /// Starts per-app audio level metering.
@@ -357,6 +559,36 @@ pub fn get_audio_levels() -> napi::Result<Vec<AudioAppLevel>> {
     platform::get_audio_levels()
 }
 
+/// Telemetry counters for the audio ring buffer.
+#[napi(object)]
+#[derive(Debug, Clone, Copy)]
+pub struct AudioRingStats {
+    pub captured_chunks: i64,
+    pub captured_bytes: i64,
+    pub ring_drops: i64,
+    pub tsfn_drops: i64,
+    pub truncated_bytes: i64,
+}
+
+/// Returns current telemetry counters for the audio ring buffer.
+#[napi]
+pub fn get_audio_ring_stats() -> AudioRingStats {
+    let s = audio_ring::get_audio_ring_stats();
+    AudioRingStats {
+        captured_chunks: s.captured_chunks as i64,
+        captured_bytes: s.captured_bytes as i64,
+        ring_drops: s.ring_drops as i64,
+        tsfn_drops: s.tsfn_drops as i64,
+        truncated_bytes: s.truncated_bytes as i64,
+    }
+}
+
+/// Resets telemetry counters for the audio ring buffer.
+#[napi]
+pub fn reset_audio_ring_stats() {
+    audio_ring::reset_audio_ring_stats();
+}
+
 /// Registers a callback that receives converted PCM audio data as 16-bit
 /// signed integer samples (48 kHz, 2 channel). The conversion from F32LE
 /// happens in Rust before the callback fires.
@@ -366,10 +598,15 @@ pub fn get_audio_levels() -> napi::Result<Vec<AudioAppLevel>> {
 /// Returns an error if the platform module rejects the callback.
 #[napi]
 pub fn set_audio_data_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
+    callback: std::sync::Arc<audio_ring::AudioThreadsafeFunction>,
 ) -> napi::Result<()> {
-    audio_ring::set_audio_data_callback(callback.clone())?;
-    platform::set_audio_data_callback(callback)
+    audio_ring::set_audio_data_callback(callback)
+}
+
+/// Clears the registered PCM audio data callback.
+#[napi]
+pub fn clear_audio_data_callback() {
+    audio_ring::clear_audio_data_callback();
 }
 
 /// Registers a callback for receiving DMA-BUF video frames from the PipeWire
@@ -459,12 +696,31 @@ mod tests {
             video_node_count: 1,
             app: Some(audio_app),
             screencast_node_id: Some(123),
+            portal_props: Some(HashMap::from([(
+                "portal.screencast.title".to_string(),
+                "Test Window".to_string(),
+            )])),
+            window_pid: Some(4321),
+            window_caption: Some("Test Window".to_string()),
         };
         let cloned_context = context.clone();
         assert_eq!(cloned_context.de, "kde");
         assert_eq!(cloned_context.source_type, "window");
         assert_eq!(cloned_context.video_node_count, 1);
         assert_eq!(cloned_context.screencast_node_id, Some(123));
+        assert_eq!(cloned_context.window_pid, Some(4321));
+        assert_eq!(
+            cloned_context.window_caption.as_deref(),
+            Some("Test Window")
+        );
+        assert_eq!(
+            cloned_context
+                .portal_props
+                .as_ref()
+                .and_then(|m| m.get("portal.screencast.title"))
+                .map(String::as_str),
+            Some("Test Window"),
+        );
         assert!(format!("{context:?}").contains("kwin-screencast-test"));
     }
 
@@ -517,17 +773,23 @@ mod tests {
 
     #[test]
     fn matches_chromium_with_tab_title() {
-        // Brave tab title is "Brave - YouTube - Music Video" in the portal
-        // picker; the audio node's `application.name` is the binary name.
         let apps = [app(1, "Brave", None), app(2, "Spotify", None)];
         assert_eq!(matched_id(&apps, "Brave - YouTube - Music Video"), Some(1));
     }
 
     #[test]
+    fn matches_wine_proton_acronym_and_clean_name() {
+        let apps = [
+            app(1, "ffxiv_dx11.exe", None),
+            app(2, "ZenlessZoneZero.exe", None),
+        ];
+        assert_eq!(matched_id(&apps, "Final Fantasy XIV"), Some(1));
+        assert_eq!(matched_id(&apps, "FINAL FANTASY XIV"), Some(1));
+        assert_eq!(matched_id(&apps, "Zenless Zone Zero"), Some(2));
+    }
+
+    #[test]
     fn matches_wine_proton_by_window_title() {
-        // Wine/Proton games expose audio under `wine64-preloader` while the
-        // window title carries the real game name. Track label coming from
-        // the portal is "Blue Archive".
         let apps = [
             app(1, "wine64-preloader", Some("Blue Archive")),
             app(2, "Spotify", None),
@@ -537,9 +799,6 @@ mod tests {
 
     #[test]
     fn matches_chromium_by_first_word() {
-        // Brave's audio process is reported as `application.name="Brave"`.
-        // A portal track label of "Brave - YouTube - Music Video" picks the
-        // audio app because the label contains the app name.
         let apps = [app(1, "Brave", None), app(2, "Spotify", None)];
         assert_eq!(matched_id(&apps, "Brave - YouTube"), Some(1));
     }
@@ -564,8 +823,6 @@ mod tests {
 
     #[test]
     fn prefers_exact_name_over_substring() {
-        // "Spotify" must win over "Spotify-cli" when the label is exactly
-        // "Spotify".
         let apps = [app(1, "Spotify-cli", None), app(2, "Spotify", None)];
         assert_eq!(matched_id(&apps, "Spotify"), Some(2));
     }
