@@ -22,15 +22,41 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 const KWIN_SCRIPT: &str = r#"
 var target = "__TARGET_KEY__";
+var targetStem = target.replace(/\.exe$/, "");
 var list = typeof workspace.windowList === "function" ? workspace.windowList() : workspace.clientList();
-for (var i = 0; i < list.length; i++) {
-    var w = list[i];
-    var df = ("" + (w.desktopFileName || "")).toLowerCase();
-    var rc = ("" + (w.resourceClass || "")).toLowerCase();
-    if (df === target || rc === target) {
-        callDBus("__BUS_NAME__", "/org/slopcast/KWinHelper", "org.slopcast.KWinHelper", "report", w.pid + "\n" + w.caption);
-        break;
+
+function findMatch(exactOnly) {
+    for (var i = 0; i < list.length; i++) {
+        var w = list[i];
+        var df = ("" + (w.desktopFileName || "")).toLowerCase();
+        var rc = ("" + (w.resourceClass || "")).toLowerCase();
+        var rn = ("" + (w.resourceName || "")).toLowerCase();
+        var dfStem = df.replace(/\.exe$/, "");
+        var rcStem = rc.replace(/\.exe$/, "");
+        var rnStem = rn.replace(/\.exe$/, "");
+        var title = w.title || w.caption || "";
+
+        var exact = df === target || rc === target || rn === target ||
+            dfStem === targetStem || rcStem === targetStem || rnStem === targetStem;
+
+        if (exact) {
+            return { pid: w.pid, title: title };
+        }
+
+        if (!exactOnly && targetStem.length >= 3) {
+            if ((dfStem.length >= 3 && (dfStem.indexOf(targetStem) !== -1 || targetStem.indexOf(dfStem) !== -1)) ||
+                (rcStem.length >= 3 && (rcStem.indexOf(targetStem) !== -1 || targetStem.indexOf(rcStem) !== -1)) ||
+                (rnStem.length >= 3 && (rnStem.indexOf(targetStem) !== -1 || targetStem.indexOf(rnStem) !== -1))) {
+                return { pid: w.pid, title: title };
+            }
+        }
     }
+    return null;
+}
+
+var found = findMatch(true) || findMatch(false);
+if (found) {
+    callDBus("__BUS_NAME__", "/org/slopcast/KWinHelper", "org.slopcast.KWinHelper", "report", found.pid + "\n" + found.title);
 }
 "#;
 

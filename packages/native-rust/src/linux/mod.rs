@@ -11,7 +11,7 @@ use pipewire::spa::param::format::MediaType;
 use pipewire::spa::param::{ParamType, format_utils};
 use pipewire::spa::pod::{Object, Pod, Value};
 use pipewire::spa::utils::{SpaTypes, dict::DictRef};
-use pipewire::stream::{StreamFlags, StreamListener, StreamRc};
+use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -865,7 +865,8 @@ fn run_capture_session(
         }
     };
 
-    for _ in 0..100 {
+    let mut node_found = false;
+    for _ in 0..60 {
         pw.main_loop
             .loop_()
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
@@ -874,11 +875,16 @@ fn run_capture_session(
             .ok()
             .is_some_and(|s| s.capture_node_id.is_some_and(|id| id != 0))
         {
+            node_found = true;
             break;
         }
     }
 
-    let _ = ready_tx.send(Ok(()));
+    if !node_found {
+        let _ = ready_tx.send(Err("Virtual capture node failed to appear".into()));
+        destroy_capture_node(&mut capture_node, &pw.core, &tracker, &shared);
+        return;
+    }
 
     let capture_node_id = shared
         .lock()
@@ -888,12 +894,16 @@ fn run_capture_session(
     let mut _pcm_stream: Option<StreamRc> = None;
     let mut _pcm_listener: Option<StreamListener<()>> = None;
 
-    if capture_node_id != 0
-        && let Some(values) = create_audio_capture_format()
-        && let Some(pod) = Pod::from_bytes(&values)
-    {
+    let ready_tx_cell = Rc::new(RefCell::new(Some(ready_tx)));
+
+    let setup_pcm_stream = |node_id: u32,
+                            ready_cell: &Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>|
+     -> Option<(StreamRc, StreamListener<()>)> {
+        let values = create_audio_capture_format()?;
+        let pod = Pod::from_bytes(&values)?;
         let mut params = [pod];
-        if let Ok(stream) = StreamRc::new(
+
+        let stream = StreamRc::new(
             pw.core.clone(),
             AUDIO_STREAM_NAME,
             properties! {
@@ -903,50 +913,76 @@ fn run_capture_session(
                 "node.dont-move" => "true",
                 "node.dont-reconnect" => "true",
             },
-        ) {
-            let listener = stream
-                .add_local_listener_with_user_data(())
-                .process(move |s, ()| {
-                    let Some(mut buffer) = s.dequeue_buffer() else {
-                        return;
-                    };
-                    thread_local! {
-                        static PCM_SCRATCH: std::cell::RefCell<Vec<u8>> =
-                            std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES));
+        )
+        .ok()?;
+
+        let ready_cell_clone = ready_cell.clone();
+        let listener = stream
+            .add_local_listener_with_user_data(())
+            .state_changed(move |_stream, _old, state, _error| match state {
+                StreamState::Streaming | StreamState::Paused => {
+                    if let Some(tx) = ready_cell_clone.borrow_mut().take() {
+                        let _ = tx.send(Ok(()));
                     }
-                    PCM_SCRATCH.with(|cell| {
-                        let mut all_bytes = cell.borrow_mut();
-                        all_bytes.clear();
-                        for data in buffer.datas_mut() {
-                            let start = data.chunk().offset() as usize;
-                            let size = data.chunk().size() as usize;
-                            let Some(bytes) = data.data() else {
-                                continue;
-                            };
-                            let end = start.saturating_add(size).min(bytes.len());
-                            let Some(slice) = bytes.get(start..end) else {
-                                continue;
-                            };
-                            all_bytes.extend_from_slice(slice);
-                        }
-                        if !all_bytes.is_empty() {
-                            invoke_audio_data_callback(&all_bytes);
-                        }
-                    });
-                })
-                .register()
-                .ok();
-            if let Err(e) = stream.connect(
-                pipewire::spa::utils::Direction::Input,
-                Some(capture_node_id),
-                StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-                &mut params,
-            ) {
-                eprintln!("[audio-capture] stream connect: {e}");
-            } else {
-                _pcm_stream = Some(stream);
-                _pcm_listener = listener;
+                }
+                StreamState::Unconnected | StreamState::Connecting => {}
+                StreamState::Error(e) => {
+                    if let Some(tx) = ready_cell_clone.borrow_mut().take() {
+                        let _ = tx.send(Err(format!("PCM stream error: {e}")));
+                    }
+                }
+            })
+            .process(move |s, ()| {
+                let Some(mut buffer) = s.dequeue_buffer() else {
+                    return;
+                };
+                thread_local! {
+                    static PCM_SCRATCH: std::cell::RefCell<Vec<u8>> =
+                        std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES));
+                }
+                PCM_SCRATCH.with(|cell| {
+                    let mut all_bytes = cell.borrow_mut();
+                    all_bytes.clear();
+                    for data in buffer.datas_mut() {
+                        let start = data.chunk().offset() as usize;
+                        let size = data.chunk().size() as usize;
+                        let Some(bytes) = data.data() else {
+                            continue;
+                        };
+                        let end = start.saturating_add(size).min(bytes.len());
+                        let Some(slice) = bytes.get(start..end) else {
+                            continue;
+                        };
+                        all_bytes.extend_from_slice(slice);
+                    }
+                    if !all_bytes.is_empty() {
+                        invoke_audio_data_callback(&all_bytes);
+                    }
+                });
+            })
+            .register()
+            .ok()?;
+
+        if let Err(e) = stream.connect(
+            pipewire::spa::utils::Direction::Input,
+            Some(node_id),
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            &mut params,
+        ) {
+            eprintln!("[audio-capture] stream connect: {e}");
+            if let Some(tx) = ready_cell.borrow_mut().take() {
+                let _ = tx.send(Err(format!("PCM stream connect failed: {e}")));
             }
+            None
+        } else {
+            Some((stream, listener))
+        }
+    };
+
+    if capture_node_id != 0 {
+        if let Some((s, l)) = setup_pcm_stream(capture_node_id, &ready_tx_cell) {
+            _pcm_stream = Some(s);
+            _pcm_listener = Some(l);
         }
     }
 
@@ -955,8 +991,9 @@ fn run_capture_session(
         pipewire::metadata::MetadataListener,
     )> = None;
     let mut sink_watch: Option<DefaultSinkWatch> = None;
+    let mut reconnect_pcm_pending = false;
 
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.load(Ordering::Relaxed) {
         pw.main_loop
             .loop_()
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
@@ -984,32 +1021,23 @@ fn run_capture_session(
                 capture_node = Some(node);
                 capture_layout = layout;
             }
-            // Reconnect the PCM stream to the new capture node so audio capture
-            // continues after a default-sink channel-layout change.
-            if let Some(ref stream) = _pcm_stream {
-                let node_id = shared
-                    .lock()
-                    .ok()
-                    .and_then(|s| s.capture_node_id)
-                    .unwrap_or(0);
-                if node_id != 0
-                    && let Some(values) = create_audio_capture_format()
-                    && let Some(pod) = Pod::from_bytes(&values)
-                {
-                    let mut params = [pod];
-                    if stream
-                        .connect(
-                            pipewire::spa::utils::Direction::Input,
-                            Some(node_id),
-                            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-                            &mut params,
-                        )
-                        .is_err()
-                    {
-                        eprintln!(
-                            "[audio-capture] reconnect pcm_stream after layout change: failed"
-                        );
-                    }
+            reconnect_pcm_pending = true;
+        }
+
+        if reconnect_pcm_pending {
+            let new_node_id = shared
+                .lock()
+                .ok()
+                .and_then(|s| s.capture_node_id)
+                .unwrap_or(0);
+            if new_node_id != 0 {
+                _pcm_listener = None;
+                _pcm_stream = None;
+                let dummy_ready = Rc::new(RefCell::new(None));
+                if let Some((s, l)) = setup_pcm_stream(new_node_id, &dummy_ready) {
+                    _pcm_stream = Some(s);
+                    _pcm_listener = Some(l);
+                    reconnect_pcm_pending = false;
                 }
             }
         }
@@ -1055,7 +1083,8 @@ fn run_capture_session(
 }
 
 fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
-    crate::audio_ring::start_audio_ring();
+    crate::audio_ring::start_audio_ring()
+        .map_err(|e| napi::Error::from_reason(format!("Failed to start audio ring: {e}")))?;
     let shared = Arc::new(Mutex::new(SessionShared::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -1068,6 +1097,7 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
             .name("pw-window-audio-capture".into())
             .spawn(move || run_capture_session(target, shared, stop, ready_tx, target_rx))
             .map_err(|e| {
+                crate::audio_ring::stop_audio_ring();
                 napi::Error::from_reason(format!("Failed to spawn PipeWire worker: {e}"))
             })?
     };
@@ -1075,11 +1105,13 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
     match ready_rx.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(())) => {}
         Ok(Err(reason)) => {
+            crate::audio_ring::stop_audio_ring();
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
             return Err(napi::Error::from_reason(reason));
         }
         Err(_) => {
+            crate::audio_ring::stop_audio_ring();
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
             return Err(napi::Error::from_reason(
@@ -1104,6 +1136,119 @@ fn stop_session(state: &mut CaptureState) {
         let _ = session.join.join();
     }
     state.is_active = false;
+}
+
+fn is_system_or_session_daemon(pid: u32) -> bool {
+    if pid <= 1 {
+        return true;
+    }
+    let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+        return true;
+    };
+    let name = comm.trim().to_lowercase();
+    matches!(
+        name.as_str(),
+        "systemd"
+            | "systemd-executor"
+            | "init"
+            | "dbus-daemon"
+            | "dbus-broker"
+            | "pipewire"
+            | "pipewire-pulse"
+            | "wireplumber"
+            | "gnome-session"
+            | "gnome-session-b"
+            | "gnome-shell"
+            | "plasmashell"
+            | "kwin_wayland"
+            | "kwin_x11"
+            | "xdg-desktop-por"
+            | "bash"
+            | "zsh"
+            | "sh"
+            | "fish"
+            | "tmux"
+            | "screen"
+    )
+}
+
+fn get_parent_pid(pid: u32) -> Option<u32> {
+    if pid == 0 || is_system_or_session_daemon(pid) {
+        return None;
+    }
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("PPid:") {
+            return rest.trim().parse::<u32>().ok();
+        }
+    }
+    None
+}
+
+fn get_ancestor_pids(pid: u32) -> Vec<u32> {
+    let mut ancestors = Vec::with_capacity(8);
+    let mut current = pid;
+    for _ in 0..16 {
+        if current <= 1 || is_system_or_session_daemon(current) {
+            break;
+        }
+        ancestors.push(current);
+        let Some(ppid) = get_parent_pid(current) else {
+            break;
+        };
+        if ppid == current || ppid <= 1 || is_system_or_session_daemon(ppid) {
+            break;
+        }
+        current = ppid;
+    }
+    ancestors
+}
+
+fn are_processes_related(pid_a: u32, pid_b: u32) -> bool {
+    if pid_a <= 1
+        || pid_b <= 1
+        || is_system_or_session_daemon(pid_a)
+        || is_system_or_session_daemon(pid_b)
+    {
+        return false;
+    }
+    if pid_a == pid_b {
+        return true;
+    }
+    let ancestors_a = get_ancestor_pids(pid_a);
+    let ancestors_b = get_ancestor_pids(pid_b);
+    ancestors_a.iter().any(|a| ancestors_b.contains(a))
+}
+
+fn is_generic_launcher(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    let norm = lower.replace('\\', "/");
+    let stem = std::path::Path::new(&norm)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&norm)
+        .trim_end_matches(".exe");
+    matches!(
+        stem,
+        "steam"
+            | "steamwebhelper"
+            | "wine"
+            | "wine64"
+            | "wine64-preloader"
+            | "wineserver"
+            | "pv-bwrap"
+            | "pressure-vessel"
+            | "reaper"
+            | "gamemoded"
+            | "explorer"
+            | "services"
+            | "plugplay"
+            | "winedevice"
+            | "svchost"
+            | "kwin_wayland"
+            | "gnome-shell"
+            | "xdg-desktop-portal"
+    )
 }
 
 fn is_valid_pid(pid: i32) -> bool {
@@ -1131,15 +1276,35 @@ fn resolve_pid_by_binary(procs: &[ProcEntry], binary: &str) -> Option<i32> {
     if binary.is_empty() {
         return None;
     }
-    let lower = binary.to_lowercase();
+    let norm_bin = binary.replace('\\', "/");
+    let lower = std::path::Path::new(&norm_bin)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&norm_bin)
+        .to_lowercase();
+    let lower_stem = lower.trim_end_matches(".exe");
+
     let candidates: Vec<i32> = procs
         .iter()
         .filter(|e| {
-            e.comm.to_lowercase() == lower
-                || std::path::Path::new(e.cmdline.split('\0').next().unwrap_or(""))
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.to_lowercase() == lower)
+            let comm_lower = e.comm.to_lowercase();
+            let comm_stem = comm_lower.trim_end_matches(".exe");
+            if comm_lower == lower || comm_stem == lower_stem {
+                return true;
+            }
+            if comm_lower.len() == 15
+                && (lower.starts_with(&comm_lower) || lower_stem.starts_with(&comm_lower))
+            {
+                return true;
+            }
+            let norm_cmd = e.cmdline.replace('\\', "/");
+            let cmd_bin = std::path::Path::new(norm_cmd.split('\0').next().unwrap_or(""))
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let cmd_stem = cmd_bin.trim_end_matches(".exe");
+            cmd_bin == lower || cmd_stem == lower_stem
         })
         .map(|e| e.pid)
         .collect();
@@ -1152,22 +1317,30 @@ fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32> {
     }
     let search_key = name.split_whitespace().next().filter(|s| s.len() >= 2)?;
     let search_lower = search_key.to_lowercase();
+    let search_stem = search_lower.trim_end_matches(".exe");
 
     procs
         .iter()
         .find(|e| {
             let comm_lower = e.comm.to_lowercase();
-            comm_lower == search_lower
-                || comm_lower.starts_with(&search_lower)
-                || std::path::Path::new(e.cmdline.split('\0').next().unwrap_or(""))
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|base| {
-                        let b = base.to_lowercase();
-                        b == search_lower
-                            || b.starts_with(&search_lower)
-                            || search_lower.starts_with(&b)
-                    })
+            let comm_stem = comm_lower.trim_end_matches(".exe");
+            if comm_lower == search_lower
+                || comm_stem == search_stem
+                || comm_lower.starts_with(search_stem)
+                || search_stem.starts_with(&comm_lower)
+            {
+                return true;
+            }
+            let norm_cmd = e.cmdline.replace('\\', "/");
+            let base = std::path::Path::new(norm_cmd.split('\0').next().unwrap_or(""))
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let b_stem = base.trim_end_matches(".exe");
+            b_stem == search_stem
+                || b_stem.starts_with(search_stem)
+                || search_stem.starts_with(b_stem)
         })
         .map(|e| e.pid)
 }
@@ -1423,6 +1596,69 @@ pub(crate) fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
     Ok(apps)
 }
 
+/// Full property dictionaries of every live `Stream/Output/Audio` node —
+/// registry props merged with bound-node info props, the same view `pw-dump`
+/// prints. Debugging aid for auto-resolve misses: the renderer logs these when
+/// a capture starts so the captured window can be matched against real nodes.
+pub(crate) fn dump_audio_sources() -> NapiResult<Vec<HashMap<String, String>>> {
+    pipewire::init();
+    let pw = pw_init().map_err(|e| napi::Error::from_reason(format!("PipeWire init: {e}")))?;
+    let registry = pw
+        .core
+        .get_registry()
+        .map_err(|e| napi::Error::from_reason(format!("Registry: {e}")))?;
+    let nodes: Rc<RefCell<Vec<(u32, HashMap<String, String>)>>> = Rc::new(RefCell::new(Vec::new()));
+    let bindings: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let bind_core = pw.core.clone();
+    let nodes_cb = nodes.clone();
+
+    let _reg_listener = registry
+        .add_listener_local()
+        .global(move |global| {
+            let Some(props) = global.props else { return };
+            if props.get("media.class") != Some("Stream/Output/Audio") {
+                return;
+            }
+            let node_id = global.id;
+            let merged: HashMap<String, String> = props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let Some(node) = bind_core
+                .get_registry_rc()
+                .ok()
+                .and_then(|reg| reg.bind::<pipewire::node::Node, _>(global).ok())
+            else {
+                return;
+            };
+            let nodes_cell = nodes_cb.clone();
+            let listener = node
+                .add_listener_local()
+                .info(move |info| {
+                    let Some(info_props) = info.props() else {
+                        return;
+                    };
+                    let mut list = nodes_cell.borrow_mut();
+                    let Some((_, map)) = list.iter_mut().find(|(id, _)| *id == node_id) else {
+                        return;
+                    };
+                    for (k, v) in info_props.iter() {
+                        map.insert(k.to_string(), v.to_string());
+                    }
+                })
+                .register();
+            bindings.borrow_mut().push((node, listener));
+            nodes_cb.borrow_mut().push((node_id, merged));
+        })
+        .register();
+
+    sync_registry(&pw.core, &pw.main_loop);
+    // Second round trip: bound node proxies deliver their info events.
+    sync_registry(&pw.core, &pw.main_loop);
+    Ok(nodes.take().into_iter().map(|(_, map)| map).collect())
+}
+
 pub(crate) fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
     let node_id = parse_target_id(target_app_id)?;
     let mut state_guard = CAPTURE_STATE
@@ -1566,48 +1802,56 @@ pub(crate) fn resolve_audio_app_for_x11_window(window_id: u32) -> Option<AudioAp
 
     let pid = pid?;
     let apps = list_audio_applications().ok()?;
-    apps.into_iter()
-        .find(|app| app.process_id == pid.cast_signed())
+    apps.into_iter().find(|app| {
+        let app_pid = app.process_id.cast_unsigned();
+        are_processes_related(app_pid, pid)
+    })
 }
 
-fn portal_window_name(props: &DictRef) -> Option<String> {
+fn extract_portal_window_name_from_map<F>(get_prop: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
     for &key in &[
         "portal.screencast.application",
         "portal.screencast.title",
         "window.name",
         "pipewire.access.portal.app_id",
     ] {
-        if let Some(v) = props.get(key).filter(|v| !v.is_empty()) {
-            return Some(v.into());
+        if let Some(v) = get_prop(key).filter(|v| !v.is_empty()) {
+            return Some(v);
         }
     }
 
-    if let Some(v) = props
-        .get("media.name")
-        .filter(|v| !v.is_empty() && !v.contains("pipewire") && *v != "kwin_wayland")
+    if let Some(v) = get_prop("media.name")
+        .filter(|v| !v.is_empty() && !v.contains("pipewire") && v != "kwin_wayland")
     {
-        return Some(v.into());
+        return Some(v);
     }
 
-    if let Some(v) = props.get("node.name").filter(|v| !v.is_empty()) {
+    if let Some(v) = get_prop("node.name").filter(|v| !v.is_empty()) {
         let lower = v.to_lowercase();
         if lower != "kwin_wayland" && lower != "gnome-shell" && !lower.contains("pipewire") {
-            return Some(v.into());
+            return Some(v);
         }
     }
 
-    if let Some(v) = props.get("application.name").filter(|v| !v.is_empty()) {
+    if let Some(v) = get_prop("application.name").filter(|v| !v.is_empty()) {
         let lower = v.to_lowercase();
         if lower != "xdg-desktop-portal"
             && lower != "kwin_wayland"
             && lower != "gnome-shell"
             && !lower.contains("pipewire")
         {
-            return Some(v.into());
+            return Some(v);
         }
     }
 
     None
+}
+
+fn portal_window_name(props: &DictRef) -> Option<String> {
+    extract_portal_window_name_from_map(|key| props.get(key).map(Into::into))
 }
 
 /// What a `kwin-screencast-<suffix>` stream captures, derived from the suffix.
@@ -1658,33 +1902,62 @@ fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     // The suffix is the captured window's desktop file name; KWin reports the
     // owning PID and window caption for it over D-Bus.
     if let Some(win) = kwin::resolve_window(suffix) {
-        // Layer 1: exact PID match — works when the audio stream's process
-        // owns the window (native apps, Wine/Proton games).
-        if let Some(app) = apps
-            .iter()
-            .find(|app| app.process_id == win.pid.cast_signed())
-        {
+        // Layer 1: Process hierarchy & related process tree match — check if
+        // the audio process and window owner process are identical, parent/child,
+        // or share a launcher/container ancestor (e.g. Proton/Wine, Steam/bwrap).
+        if let Some(app) = apps.iter().find(|app| {
+            let app_pid = app.process_id.cast_unsigned();
+            are_processes_related(app_pid, win.pid)
+        }) {
             return Some(app.clone());
         }
-        // Layer 2: the window process and the audio-streaming process differ
-        // (browsers route tab audio through a utility process). Match by the
-        // window process's name from /proc.
+
+        // Layer 1b: Match audio app by checking process binary/cmdline of running
+        // audio apps against the suffix or window caption (normalizing Windows backslashes
+        // and .exe extensions).
+        let clean_suffix = suffix.trim_end_matches(".exe").trim_end_matches(".EXE");
+        for app in &apps {
+            let app_pid = app.process_id;
+            if app_pid <= 0 {
+                continue;
+            }
+            if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{app_pid}/cmdline")) {
+                let norm_cmd = cmdline.replace('\\', "/");
+                let exe = std::path::Path::new(norm_cmd.split('\0').next().unwrap_or(""))
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .trim_end_matches(".exe")
+                    .trim_end_matches(".EXE");
+                if !exe.is_empty()
+                    && (exe.eq_ignore_ascii_case(clean_suffix)
+                        || (!win.caption.is_empty()
+                            && win.caption.to_lowercase().contains(&exe.to_lowercase())))
+                {
+                    return Some(app.clone());
+                }
+            }
+        }
+
+        // Layer 2: Match by non-generic window process candidates.
         let comm = std::fs::read_to_string(format!("/proc/{}/comm", win.pid)).ok();
         let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", win.pid)).ok();
         let mut candidates: Vec<String> = Vec::new();
         if let Some(ref comm) = comm {
             let name = comm.trim();
-            if !name.is_empty() {
+            if !name.is_empty() && !is_generic_launcher(name) {
                 candidates.push(name.to_string());
             }
         }
         if let Some(ref cmdline) = cmdline {
-            let binary = cmdline.split('\0').next().unwrap_or("").trim();
+            let norm_cmd = cmdline.replace('\\', "/");
+            let binary = norm_cmd.split('\0').next().unwrap_or("").trim();
             if !binary.is_empty()
                 && let Some(stem) = std::path::Path::new(binary)
                     .file_stem()
                     .and_then(|s| s.to_str())
                 && !stem.is_empty()
+                && !is_generic_launcher(stem)
                 && !candidates.iter().any(|c| c == stem)
             {
                 candidates.push(stem.to_string());
@@ -1695,16 +1968,23 @@ fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
                 return Some(app);
             }
         }
-        // Layer 3: the window caption — a game's real title or a browser's
-        // tab title, which audio stream names often carry.
+
+        // Layer 3: Window caption match.
         if !win.caption.is_empty()
             && let Some(app) = crate::find_best_audio_match(&apps, &win.caption)
         {
             return Some(app);
         }
     }
-    // Layer 4: the desktop file name itself ("spotify-launcher" ~ "Spotify").
-    crate::find_best_audio_match(&apps, suffix)
+
+    // Layer 4: Match desktop file name suffix if not generic.
+    if !is_generic_launcher(suffix) {
+        if let Some(app) = crate::find_best_audio_match(&apps, suffix) {
+            return Some(app);
+        }
+    }
+
+    None
 }
 
 /// Snapshot of the `PipeWire` video nodes relevant to an active portal capture.
@@ -1714,11 +1994,35 @@ struct VideoScan {
     source_type: Option<&'static str>,
     media_name: Option<String>,
     video_node_count: u32,
+    /// Highest `object.serial` observed among screencast nodes — ensures the
+    /// active stream (most recently created) is chosen over lingering nodes.
+    highest_serial: u64,
     /// `(object.serial, media.name)` per KDE screencast node — the serial
     /// orders streams by creation time.
     kde_media_names: Vec<(u64, String)>,
     capture_names: Vec<String>,
     screencast_node_id: Option<u32>,
+    /// xdg-desktop-portal screencast metadata (`portal.screencast.*`) of the
+    /// captured window, read off the screencast video node.
+    portal_props: Option<HashMap<String, String>>,
+}
+
+/// Collect only the xdg-desktop-portal metadata keys (`portal.screencast.*`)
+/// from the screencast video node's registry + info props — the portal's own
+/// record of the captured window, without dumping the whole PipeWire node.
+fn merge_portal_props(
+    out: &mut Option<HashMap<String, String>>,
+    registry: &HashMap<String, String>,
+    info: &DictRef,
+) {
+    let merged = registry
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .chain(info.iter())
+        .filter(|(k, _)| k.starts_with("portal.screencast."))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    *out = Some(merged);
 }
 
 fn inspect_video_graph() -> Option<VideoScan> {
@@ -1768,38 +2072,56 @@ fn inspect_video_graph() -> Option<VideoScan> {
                 };
                 let media_class_owned: String = media_class.into();
                 let node_id = global.id;
+                let registry_props: HashMap<String, String> = props
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
                 let listener = node
                     .add_listener_local()
                     .info(move |info| {
                         let Some(p) = info.props() else { return };
                         let mut scan = scan_info.borrow_mut();
                         let mn = p.get("media.name").unwrap_or("");
-                        if !mn.is_empty() {
-                            scan.media_name = Some(mn.into());
-                        }
+                        let serial = p
+                            .get("object.serial")
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(0);
+
                         if let Some(suffix) = mn.strip_prefix("kwin-screencast-") {
                             scan.de = Some("kde");
-                            scan.source_type = Some(match classify_kde_screencast(suffix) {
-                                KdeScreencast::Window => "window",
-                                KdeScreencast::Monitor => "monitor",
-                                KdeScreencast::Region => "region",
-                            });
-                            let serial = p
-                                .get("object.serial")
-                                .and_then(|v| v.parse::<u64>().ok())
-                                .unwrap_or(0);
                             if !scan.kde_media_names.iter().any(|(_, s)| s == mn) {
                                 scan.kde_media_names.push((serial, mn.into()));
                             }
-                            scan.screencast_node_id = Some(node_id);
+                            if serial >= scan.highest_serial {
+                                scan.highest_serial = serial;
+                                scan.media_name = Some(mn.into());
+                                scan.source_type = Some(match classify_kde_screencast(suffix) {
+                                    KdeScreencast::Window => "window",
+                                    KdeScreencast::Monitor => "monitor",
+                                    KdeScreencast::Region => "region",
+                                });
+                                scan.screencast_node_id = Some(node_id);
+                                merge_portal_props(&mut scan.portal_props, &registry_props, p);
+                            }
                             return;
                         }
                         if p.get("portal.screencast.application")
                             .is_some_and(|v| !v.is_empty())
                         {
                             scan.de = Some("gnome");
-                            scan.source_type = Some("window");
-                            scan.screencast_node_id = Some(node_id);
+                            if serial >= scan.highest_serial {
+                                scan.highest_serial = serial;
+                                scan.media_name =
+                                    if mn.is_empty() { None } else { Some(mn.into()) };
+                                scan.source_type = Some("window");
+                                scan.screencast_node_id = Some(node_id);
+                                merge_portal_props(&mut scan.portal_props, &registry_props, p);
+                            }
+                            if let Some(name) = portal_window_name(p)
+                                && !scan.capture_names.contains(&name)
+                            {
+                                scan.capture_names.push(name);
+                            }
                         } else if media_class_owned == "Video/Source" && scan.source_type.is_none()
                         {
                             let has_app_meta =
@@ -1807,14 +2129,10 @@ fn inspect_video_graph() -> Option<VideoScan> {
                                     || p.get("pipewire.access.portal.app_id")
                                         .is_some_and(|v| !v.is_empty())
                                     || p.get("window.name").is_some_and(|v| !v.is_empty());
-                            if !has_app_meta {
+                            if !has_app_meta && serial >= scan.highest_serial {
+                                scan.highest_serial = serial;
                                 scan.source_type = Some("monitor");
                             }
-                        }
-                        if let Some(name) = portal_window_name(p)
-                            && !scan.capture_names.contains(&name)
-                        {
-                            scan.capture_names.push(name);
                         }
                     })
                     .register();
@@ -1830,15 +2148,33 @@ fn inspect_video_graph() -> Option<VideoScan> {
 }
 
 fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
-    // The stream the user just picked is the most recently created one;
-    // older `kwin-screencast` nodes may belong to other clients' captures.
-    let mut kde_names: Vec<&(u64, String)> = scan.kde_media_names.iter().collect();
-    kde_names.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-    for (_, mn) in kde_names {
-        if let Some(app) = resolve_kde_screencast_audio(mn) {
-            return Some(app);
+    // 1. For KDE screencast streams (`kwin-screencast-*`), evaluate strictly
+    // the single active (most recently created) stream based on object.serial.
+    if !scan.kde_media_names.is_empty() {
+        let mut kde_names: Vec<&(u64, String)> = scan.kde_media_names.iter().collect();
+        kde_names.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let active_mn = &kde_names[0].1;
+
+        // If the active stream is a monitor or region, return None directly.
+        if let Some(suffix) = active_mn.strip_prefix("kwin-screencast-") {
+            let class = classify_kde_screencast(suffix);
+            if class == KdeScreencast::Monitor || class == KdeScreencast::Region {
+                return None;
+            }
         }
+
+        // Resolve audio only for the active stream. If it returns None (e.g. VSCodium
+        // has no audio process), return None directly — do NOT loop through older
+        // lingering screencast streams (e.g. Steam/FFXIV).
+        return resolve_kde_screencast_audio(active_mn);
     }
+
+    // 2. Monitors and regions for non-KDE environments are screen displays — return None.
+    if scan.source_type == Some("monitor") || scan.source_type == Some("region") {
+        return None;
+    }
+
+    // 3. For GNOME / XDG portal screencast streams, match against running audio apps.
     let apps = list_audio_applications().ok()?;
     scan.capture_names
         .iter()
@@ -1855,6 +2191,18 @@ pub(crate) fn get_capture_context() -> NapiResult<crate::CaptureContext> {
         .ok_or_else(|| napi::Error::from_reason("PipeWire video node introspection failed"))?;
     let node_id = scan.screencast_node_id;
     let app = resolve_from_video_scan(&scan);
+    let (window_pid, window_caption) = if scan.de == Some("kde") {
+        scan.media_name
+            .as_deref()
+            .and_then(|mn| mn.strip_prefix("kwin-screencast-"))
+            .filter(|suffix| classify_kde_screencast(suffix) == KdeScreencast::Window)
+            .and_then(kwin::resolve_window)
+            .map_or((None, None), |w| {
+                (Some(w.pid.cast_signed()), Some(w.caption))
+            })
+    } else {
+        (None, None)
+    };
     Ok(crate::CaptureContext {
         de: scan.de.unwrap_or("unknown").into(),
         source_type: scan.source_type.unwrap_or("unknown").into(),
@@ -1862,6 +2210,9 @@ pub(crate) fn get_capture_context() -> NapiResult<crate::CaptureContext> {
         video_node_count: scan.video_node_count.cast_signed(),
         app,
         screencast_node_id: node_id,
+        portal_props: scan.portal_props,
+        window_pid,
+        window_caption,
     })
 }
 
@@ -2148,20 +2499,6 @@ pub(crate) fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
         .collect())
 }
 
-static AUDIO_DATA_CALLBACK: Mutex<
-    Option<Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>>,
-> = Mutex::new(None);
-
-pub(crate) fn set_audio_data_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
-) -> napi::Result<()> {
-    let Ok(mut guard) = AUDIO_DATA_CALLBACK.lock() else {
-        return Err(napi::Error::from_reason("Lock poisoned"));
-    };
-    *guard = Some(callback);
-    Ok(())
-}
-
 fn invoke_audio_data_callback(data: &[u8]) {
     // PipeWire delivers f32 LE frames; we downmix to packed i16 LE bytes so the
     // N-API boundary transfers one binary buffer instead of ~960 JS numbers.
@@ -2172,11 +2509,17 @@ fn invoke_audio_data_callback(data: &[u8]) {
     I16_SCRATCH.with(|cell| {
         let mut i16_bytes = cell.borrow_mut();
         i16_bytes.clear();
-        i16_bytes.reserve(data.len() / 2);
-        for chunk in data.chunks_exact(4) {
-            let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let num_samples = data.len() / 4;
+        let out_bytes = num_samples * 2;
+        i16_bytes.resize(out_bytes, 0);
+
+        for (i, chunk) in data.chunks_exact(4).enumerate() {
+            let bits = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let f = f32::from_bits(bits);
             let sample = (f.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-            i16_bytes.extend_from_slice(&sample.to_le_bytes());
+            let sample_bytes = sample.to_le_bytes();
+            i16_bytes[i * 2] = sample_bytes[0];
+            i16_bytes[i * 2 + 1] = sample_bytes[1];
         }
         crate::audio_ring::push_pcm_bytes(&i16_bytes);
     });
@@ -2219,18 +2562,31 @@ pub(crate) fn set_dmabuf_callback(
 }
 
 pub(crate) fn invoke_dmabuf_callback(fd: i32, width: i32, height: i32, format: i32, pts_ns: i64) {
-    let Ok(guard) = DMA_BUF_CALLBACK.lock() else {
+    let cb = {
+        let Ok(guard) = DMA_BUF_CALLBACK.lock() else {
+            // Close duplicated descriptor if lock fails.
+            unsafe { libc::close(fd) };
+            return;
+        };
+        guard.clone()
+    };
+
+    let Some(cb) = cb else {
+        // Close duplicated descriptor if no callback is registered.
+        unsafe { libc::close(fd) };
         return;
     };
-    let Some(ref cb) = *guard else {
-        return;
-    };
+
     let lo = (pts_ns & 0xFFFF_FFFF) as i32;
     let hi = ((pts_ns >> 32) & 0xFFFF_FFFF) as i32;
-    let _ = cb.call(
+    let status = cb.call(
         Ok((fd, width, height, format, lo, hi)),
         napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
     );
+    if status != napi::Status::Ok {
+        // Close duplicated descriptor if thread-safe function dispatch fails.
+        unsafe { libc::close(fd) };
+    }
 }
 
 pub(crate) fn clear_dmabuf_callback() {
@@ -2245,13 +2601,158 @@ pub(crate) use video::{start_video_capture, stop_video_capture};
 
 #[cfg(test)]
 mod tests {
-    use super::{KdeScreencast, classify_kde_screencast};
+    use super::{
+        KdeScreencast, ProcEntry, VideoScan, are_processes_related, classify_kde_screencast,
+        extract_portal_window_name_from_map, is_generic_launcher, resolve_from_video_scan,
+        resolve_pid_by_binary, resolve_pid_by_name,
+    };
+    use crate::AudioApp;
+    use std::collections::HashMap;
 
     #[test]
     fn test_spa_function_accessible() {
         // SAFETY: pure lookup into a static translation table; any channel
         // enum value is valid input.
         let _ = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(3) };
+    }
+
+    #[test]
+    fn identifies_generic_launchers() {
+        assert!(is_generic_launcher("steam"));
+        assert!(is_generic_launcher("wine64-preloader"));
+        assert!(is_generic_launcher("wineserver"));
+        assert!(is_generic_launcher("pv-bwrap"));
+        assert!(is_generic_launcher(
+            "C:\\windows\\system32\\wine64-preloader.exe"
+        ));
+
+        assert!(!is_generic_launcher("ZenlessZoneZero.exe"));
+        assert!(!is_generic_launcher("Z:\\games\\ZenlessZoneZero.exe"));
+        assert!(!is_generic_launcher("ffxiv_dx11.exe"));
+        assert!(!is_generic_launcher("discord"));
+        assert!(!is_generic_launcher("spotify"));
+    }
+
+    #[test]
+    fn verifies_process_descendant_check() {
+        let our_pid = std::process::id();
+        assert!(are_processes_related(our_pid, our_pid));
+        assert!(!are_processes_related(0, our_pid));
+        assert!(!are_processes_related(our_pid, 0));
+        assert!(!are_processes_related(1, 1));
+    }
+
+    #[test]
+    fn resolves_pid_by_binary_with_wine_cmdline_and_truncated_comm() {
+        let procs = vec![
+            ProcEntry {
+                pid: 100,
+                comm: "steam".into(),
+                cmdline: "/usr/bin/steam\0".into(),
+            },
+            ProcEntry {
+                pid: 200,
+                comm: "ZenlessZoneZero".into(), // 15-char kernel truncation
+                cmdline:
+                    "Z:\\SteamLibrary\\steamapps\\common\\ZenlessZoneZero\\ZenlessZoneZero.exe\0"
+                        .into(),
+            },
+            ProcEntry {
+                pid: 234,
+                comm: "ffxiv_dx11.exe".into(),
+                cmdline:
+                    "Z:\\SteamLibrary\\steamapps\\common\\FINAL FANTASY XIV\\game\\ffxiv_dx11.exe\0"
+                        .into(),
+            },
+        ];
+
+        // Should match exact binary name despite backslashes and .exe
+        assert_eq!(
+            resolve_pid_by_binary(&procs, "ZenlessZoneZero.exe"),
+            Some(200)
+        );
+        assert_eq!(
+            resolve_pid_by_binary(&procs, "Z:\\path\\ZenlessZoneZero.exe"),
+            Some(200)
+        );
+        assert_eq!(resolve_pid_by_name(&procs, "ZenlessZoneZero"), Some(200));
+        assert_eq!(resolve_pid_by_binary(&procs, "ffxiv_dx11.exe"), Some(234));
+    }
+
+    #[test]
+    fn matches_pipewire_portal_screencast_node_properties() {
+        // Sample PipeWire properties from xdg-desktop-portal / getDisplayMedia() window pickers
+        let mut ffxiv_props = HashMap::new();
+        ffxiv_props.insert("portal.screencast.title", "FINAL FANTASY XIV".to_string());
+        ffxiv_props.insert(
+            "portal.screencast.application",
+            "ffxiv_dx11.exe".to_string(),
+        );
+        ffxiv_props.insert("window.name", "FINAL FANTASY XIV".to_string());
+
+        let name = extract_portal_window_name_from_map(|k| ffxiv_props.get(k).cloned());
+        assert_eq!(name.as_deref(), Some("ffxiv_dx11.exe"));
+
+        let mut zzz_props = HashMap::new();
+        zzz_props.insert("window.name", "Zenless Zone Zero".to_string());
+        zzz_props.insert("application.name", "ZenlessZoneZero.exe".to_string());
+
+        let name = extract_portal_window_name_from_map(|k| zzz_props.get(k).cloned());
+        assert_eq!(name.as_deref(), Some("Zenless Zone Zero"));
+
+        let mut portal_wrapper = HashMap::new();
+        portal_wrapper.insert("application.name", "xdg-desktop-portal".to_string());
+        portal_wrapper.insert("node.name", "pipewire_system".to_string());
+
+        let name = extract_portal_window_name_from_map(|k| portal_wrapper.get(k).cloned());
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn matches_pipewire_getdisplaymedia_video_scan_objects() {
+        let apps = vec![
+            AudioApp {
+                id: 234,
+                name: "ffxiv_dx11.exe".to_string(),
+                process_id: 54321,
+                bundle_id: None,
+                window_title: Some("Playback".to_string()),
+                client_id: Some(230),
+                media_title: None,
+            },
+            AudioApp {
+                id: 101,
+                name: "ZenlessZoneZero.exe".to_string(),
+                process_id: 60000,
+                bundle_id: None,
+                window_title: None,
+                client_id: Some(100),
+                media_title: None,
+            },
+        ];
+
+        // Simulated PipeWire VideoScan from a getDisplayMedia() portal screencast
+        let scan = VideoScan {
+            de: Some("kde"),
+            source_type: Some("window"),
+            media_name: Some("kwin-screencast-ffxiv_dx11.exe".to_string()),
+            video_node_count: 1,
+            highest_serial: 100,
+            kde_media_names: vec![(100, "kwin-screencast-ffxiv_dx11.exe".to_string())],
+            capture_names: vec!["FINAL FANTASY XIV".to_string()],
+            screencast_node_id: Some(50),
+            portal_props: None,
+        };
+
+        let matched = scan
+            .capture_names
+            .iter()
+            .find_map(|name| crate::find_best_audio_match(&apps, name));
+        assert_eq!(matched.map(|a| a.id), Some(234));
+
+        // Matching Zenless Zone Zero by window name
+        let matched_zzz = crate::find_best_audio_match(&apps, "Zenless Zone Zero");
+        assert_eq!(matched_zzz.map(|a| a.id), Some(101));
     }
 
     #[test]
@@ -2297,5 +2798,73 @@ mod tests {
             classify_kde_screencast("0,0 1920x1080"),
             KdeScreencast::Region
         );
+    }
+
+    #[test]
+    fn resolve_from_video_scan_rejects_monitors_and_regions() {
+        let monitor_scan = VideoScan {
+            de: Some("kde"),
+            source_type: Some("monitor"),
+            media_name: Some("kwin-screencast-DP-3".to_string()),
+            video_node_count: 18,
+            highest_serial: 224,
+            kde_media_names: vec![(224, "kwin-screencast-DP-3".to_string())],
+            capture_names: vec!["Spotify".to_string()],
+            screencast_node_id: Some(224),
+            portal_props: None,
+        };
+        assert!(resolve_from_video_scan(&monitor_scan).is_none());
+
+        let region_scan = VideoScan {
+            de: Some("kde"),
+            source_type: Some("region"),
+            media_name: Some("kwin-screencast-0,0 1920x1080".to_string()),
+            video_node_count: 5,
+            highest_serial: 225,
+            kde_media_names: vec![(225, "kwin-screencast-0,0 1920x1080".to_string())],
+            capture_names: vec!["Spotify".to_string()],
+            screencast_node_id: Some(225),
+            portal_props: None,
+        };
+        assert!(resolve_from_video_scan(&region_scan).is_none());
+    }
+
+    #[test]
+    fn resolve_from_video_scan_does_not_fall_through_kde_window_to_unrelated_capture_names() {
+        // KDE scan for a window without matching audio (e.g. VSCodium), where capture_names
+        // accidentally captured Spotify from another video node.
+        let scan = VideoScan {
+            de: Some("kde"),
+            source_type: Some("window"),
+            media_name: Some("kwin-screencast-codium".to_string()),
+            video_node_count: 10,
+            highest_serial: 200,
+            kde_media_names: vec![(200, "kwin-screencast-codium".to_string())],
+            capture_names: vec!["Spotify".to_string()],
+            screencast_node_id: Some(50),
+            portal_props: None,
+        };
+        assert!(resolve_from_video_scan(&scan).is_none());
+    }
+
+    #[test]
+    fn resolve_from_video_scan_evaluates_only_newest_stream_ignoring_older_lingering_streams() {
+        // Active selection is VSCodium (serial 200), older lingering stream is Steam/FFXIV (serial 100).
+        let scan = VideoScan {
+            de: Some("kde"),
+            source_type: Some("window"),
+            media_name: Some("kwin-screencast-codium".to_string()),
+            video_node_count: 2,
+            highest_serial: 200,
+            kde_media_names: vec![
+                (100, "kwin-screencast-steam_app_default".to_string()),
+                (200, "kwin-screencast-codium".to_string()),
+            ],
+            capture_names: vec![],
+            screencast_node_id: Some(150),
+            portal_props: None,
+        };
+        // Active stream is codium (no audio) — must return None without evaluating the older steam stream.
+        assert!(resolve_from_video_scan(&scan).is_none());
     }
 }

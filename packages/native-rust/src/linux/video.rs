@@ -3,7 +3,7 @@ use pipewire::spa::param::ParamType;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pipewire::spa::pod::{Object, Pod, Value};
 use pipewire::spa::utils::{Fraction, Rectangle, SpaTypes};
-use pipewire::stream::{StreamFlags, StreamRc};
+use pipewire::stream::{StreamFlags, StreamRc, StreamState};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -16,6 +16,17 @@ struct VideoSession {
 }
 
 static VIDEO_STATE: Mutex<Option<VideoSession>> = Mutex::new(None);
+
+fn monotonic_pts_ns() -> i64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    }
+    (ts.tv_sec as i64) * 1_000_000_000 + (ts.tv_nsec as i64)
+}
 
 fn video_enum_format(width: u32, height: u32, fps_num: u32, fps_denom: u32) -> Option<Vec<u8>> {
     let mut info = VideoInfoRaw::new();
@@ -109,26 +120,83 @@ fn run_video_capture(
         }
     };
 
-    let w = width as i32;
-    let h = height as i32;
+    let negotiated = Arc::new(Mutex::new((width as i32, height as i32, 0i32)));
+    let neg_clone = negotiated.clone();
+
+    let ready_tx_cell = Arc::new(Mutex::new(Some(ready_tx)));
+    let ready_tx_state = ready_tx_cell.clone();
 
     let _listener = stream
         .add_local_listener_with_user_data(())
+        .state_changed(move |_stream, _old, state, _error| match state {
+            StreamState::Streaming | StreamState::Paused => {
+                if let Ok(mut guard) = ready_tx_state.lock() {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(Ok(()));
+                    }
+                }
+            }
+            StreamState::Unconnected | StreamState::Connecting => {}
+            StreamState::Error(e) => {
+                if let Ok(mut guard) = ready_tx_state.lock() {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(Err(format!("Stream state error: {e}")));
+                    }
+                }
+            }
+        })
+        .param_changed(move |_stream, _user_data, id, param| {
+            if id == ParamType::Format.as_raw() {
+                if let Some(pod) = param {
+                    let mut raw_info: pipewire::spa::sys::spa_video_info_raw =
+                        unsafe { std::mem::zeroed() };
+                    let res = unsafe {
+                        pipewire::spa::sys::spa_format_video_raw_parse(
+                            pod.as_raw_ptr(),
+                            &mut raw_info,
+                        )
+                    };
+                    if res >= 0 {
+                        let info = VideoInfoRaw::from_raw(raw_info);
+                        let sz = info.size();
+                        if sz.width > 0 && sz.height > 0 {
+                            if let Ok(mut g) = neg_clone.lock() {
+                                *g = (
+                                    sz.width as i32,
+                                    sz.height as i32,
+                                    info.format().as_raw() as i32,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        })
         .process(move |s, ()| {
             let Some(mut buffer) = s.dequeue_buffer() else {
                 return;
             };
+            let pts_ns = monotonic_pts_ns();
+            let (w, h, format) =
+                negotiated
+                    .lock()
+                    .map(|g| *g)
+                    .unwrap_or((width as i32, height as i32, 0));
+
             for data in buffer.datas_mut() {
                 if data.type_() != DataType::DmaBuf {
                     continue;
                 }
-                let fd = data.fd();
-                if fd < 0 {
+                let raw_fd = data.fd();
+                if raw_fd < 0 {
                     continue;
                 }
-                let pts_ns = i64::from(data.chunk().as_raw().offset);
+                let dup_fd = unsafe { libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0) };
+                if dup_fd < 0 {
+                    continue;
+                }
 
-                super::invoke_dmabuf_callback(fd, w, h, 0, pts_ns);
+                super::invoke_dmabuf_callback(dup_fd, w, h, format, pts_ns);
                 break;
             }
         })
@@ -138,14 +206,22 @@ fn run_video_capture(
     let values = match video_enum_format(width, height, fps, 1) {
         Some(v) => v,
         None => {
-            let _ = ready_tx.send(Err("Failed to build video format".into()));
+            if let Ok(mut guard) = ready_tx_cell.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(Err("Failed to build video format".into()));
+                }
+            }
             return;
         }
     };
     let pod = match Pod::from_bytes(&values) {
         Some(p) => p,
         None => {
-            let _ = ready_tx.send(Err("Failed to parse video pod".into()));
+            if let Ok(mut guard) = ready_tx_cell.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(Err("Failed to parse video pod".into()));
+                }
+            }
             return;
         }
     };
@@ -157,13 +233,15 @@ fn run_video_capture(
         StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
         &mut params,
     ) {
-        let _ = ready_tx.send(Err(format!("Stream connect: {e}")));
+        if let Ok(mut guard) = ready_tx_cell.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(Err(format!("Stream connect: {e}")));
+            }
+        }
         return;
     }
 
-    let _ = ready_tx.send(Ok(()));
-
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.load(Ordering::Relaxed) {
         pw.main_loop
             .loop_()
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
@@ -176,11 +254,13 @@ pub(crate) fn start_video_capture(
     height: u32,
     fps: u32,
 ) -> super::NapiResult<bool> {
-    let mut guard = VIDEO_STATE
-        .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    if guard.is_some() {
-        return Err(napi::Error::from_reason("Video capture already active"));
+    {
+        let guard = VIDEO_STATE
+            .lock()
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if guard.is_some() {
+            return Err(napi::Error::from_reason("Video capture already active"));
+        }
     }
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -192,37 +272,43 @@ pub(crate) fn start_video_capture(
         .spawn(move || run_video_capture(node_id, width, height, fps, s, ready_tx))
         .map_err(|e| napi::Error::from_reason(format!("Thread spawn: {e}")))?;
 
-    match ready_rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(Ok(())) => {}
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {
+            let mut guard = VIDEO_STATE
+                .lock()
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+            *guard = Some(VideoSession {
+                stop,
+                join: Some(handle),
+            });
+            Ok(true)
+        }
         Ok(Err(reason)) => {
-            stop.store(true, Ordering::SeqCst);
+            stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
-            return Err(napi::Error::from_reason(reason));
+            Err(napi::Error::from_reason(reason))
         }
         Err(_) => {
-            stop.store(true, Ordering::SeqCst);
+            stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
-            return Err(napi::Error::from_reason(
-                "Timed out waiting for video capture",
-            ));
+            Err(napi::Error::from_reason(
+                "Timed out waiting for video capture stream to reach active state",
+            ))
         }
     }
-
-    *guard = Some(VideoSession {
-        stop,
-        join: Some(handle),
-    });
-    Ok(true)
 }
 
 pub(crate) fn stop_video_capture() -> super::NapiResult<bool> {
-    let Ok(mut guard) = VIDEO_STATE.lock() else {
+    let session = {
+        let Ok(mut guard) = VIDEO_STATE.lock() else {
+            return Ok(true);
+        };
+        guard.take()
+    };
+    let Some(mut session) = session else {
         return Ok(true);
     };
-    let Some(mut session) = guard.take() else {
-        return Ok(true);
-    };
-    session.stop.store(true, Ordering::SeqCst);
+    session.stop.store(true, Ordering::Relaxed);
     if let Some(handle) = session.join.take() {
         let _ = handle.join();
     }
