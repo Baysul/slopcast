@@ -89,7 +89,8 @@ const FATAL_PATTERNS = [
   /segmentation\s*fault/i,
   /signal\s*:\s*SIG(?:SEGV|ABRT|ILL|FPE|BUS)/i,
   /ERR_MODULE_NOT_FOUND/,
-  /Failed to load resource/,
+  // Any failed subresource except the ubiquitous missing favicon.
+  /Failed to load resource(?!.*favicon)/i,
   /WebSocket is closed before the connection is established/,
   /iceConnectionState.*failed/i,
   /GPU process.*crash/i,
@@ -109,6 +110,8 @@ function killPort(port: number): void {
     if (process.platform === 'linux') {
       execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'pipe' });
     } else if (process.platform === 'win32') {
+      // No cross-platform-safe kill is available without extra tooling
+      // (taskkill needs the exact PID); keep the netstat listing for diagnosis.
       execSync(`netstat -ano | findstr :${port}`, { stdio: 'pipe' });
     }
   } catch {
@@ -460,12 +463,19 @@ async function runTest(): Promise<TestResult> {
     log('ELECTRON', `Launching Electron from ${electronBin}`);
     log('ELECTRON', `App directory: ${desktopDir}`);
 
+    // Isolate the app's userData (stream-settings.json, onboarding state) so
+    // persisted settings from a real session — e.g. a remote apiEndpoint —
+    // cannot leak into the test and point the presenter at a different server
+    // than the one the spectator joins.
+    const isolatedConfigDir = path.join(REPO_ROOT, 'test-output', 'e2e-userdata');
+
     electronApp = await electron.launch({
       executablePath: electronBin,
       args: [desktopDir],
       env: {
         ...process.env,
         NODE_ENV: 'test',
+        XDG_CONFIG_HOME: isolatedConfigDir,
       },
       timeout: 30_000,
     });
@@ -643,7 +653,9 @@ async function runTest(): Promise<TestResult> {
     });
 
     log('SPECTATOR', `Navigating to ${result.shareUrl}`);
-    await spectatorPage.goto(result.shareUrl, { waitUntil: 'networkidle', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
+    // `networkidle` never settles with an active LiveKit WebSocket; wait for
+    // the document and then poll for the connection state explicitly.
+    await spectatorPage.goto(result.shareUrl, { waitUntil: 'domcontentloaded', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
 
     // Wait for connection status badge.
     try {
