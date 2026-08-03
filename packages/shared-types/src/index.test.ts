@@ -3,8 +3,8 @@ import { test } from 'node:test';
 
 import { codecLabel, DEFAULT_STREAM_SETTINGS, fmtBitrate, fmtLoss, sanitizeStreamSettings } from './index.js';
 
-// ── sanitizeStreamSettings: corrupted or hand-edited files must never
-//    crash the app; every field falls back to a default individually. ──
+// sanitizeStreamSettings: corrupted or hand-edited files must never
+// crash the app; every field falls back to a default individually.
 
 test('non-object input yields the defaults (defensive copy)', () => {
   for (const raw of [null, undefined, 42, 'fps:60', [], true]) {
@@ -66,8 +66,6 @@ test('apiEndpoint is kept verbatim (not trimmed or normalized)', () => {
   // Documenting the current contract: the value is stored as given.
   assert.equal(sanitizeStreamSettings({ apiEndpoint: '  http://x  ' }).apiEndpoint, '  http://x  ');
 });
-
-// ── Formatters ─────────────────────────────────────────────────────────────
 
 test('fmtBitrate formats null as an em dash', () => {
   assert.equal(fmtBitrate(null), '\u2014');

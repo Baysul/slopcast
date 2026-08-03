@@ -4,7 +4,6 @@ import { ROOM_CODE_RE } from '@slopcast/shared-types';
 
 import { generateRoomCode } from './roomCodes.js';
 
-// ── Format contract ────────────────────────────────────────────────────────
 // The server and the web join form share ROOM_CODE_RE; every generated code
 // must satisfy it or join links break.
 

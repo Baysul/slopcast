@@ -6,7 +6,6 @@ import express from 'express';
 
 import { initRoutes, toHttpUrl, toWsUrl } from './routes.js';
 
-// ── URL scheme normalization ───────────────────────────────────────────────
 // The same helpers feed the LiveKit HTTP client and the WebSocket URL handed
 // to presenters/spectators; a mismatch breaks room creation or joining.
 
@@ -33,8 +32,6 @@ test('toHttpUrl rewrites localhost to 127.0.0.1', () => {
 test('toHttpUrl strips a single trailing slash', () => {
   assert.equal(toHttpUrl('http://127.0.0.1:7880/'), 'http://127.0.0.1:7880');
 });
-
-// ── Route behavior (offline: no LiveKit server required) ──────────────────
 
 async function startTestServer(): Promise<{ base: string; close: () => Promise<void> }> {
   const app = express();

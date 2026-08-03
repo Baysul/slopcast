@@ -21,7 +21,6 @@ pub(crate) use napi::Result as NapiResult;
 pub(crate) use screencast::{
     get_capture_context, resolve_audio_app_for_captured_window, resolve_audio_app_for_x11_window,
 };
-// ── Video Capture (Linux PipeWire) ──────────────────────────────────────
 pub(crate) use video::{start_video_capture, stop_video_capture};
 
 use std::cell::RefCell;

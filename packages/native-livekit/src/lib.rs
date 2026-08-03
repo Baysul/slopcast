@@ -33,8 +33,6 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
 
-// ── Shared Types ─────────────────────────────────────────────────────────
-
 #[napi(object)]
 #[derive(Clone)]
 pub struct CaptureConfig {
@@ -44,15 +42,11 @@ pub struct CaptureConfig {
     pub video_codec: Option<String>,
 }
 
-// ── Worker Commands ──────────────────────────────────────────────────────
-
 enum WorkerCmd {
     StartVideo { config: CaptureConfig },
     StopVideo,
     Shutdown,
 }
-
-// ── Singleton & Statics ──────────────────────────────────────────────────
 
 struct NativeLiveKit {
     pcm_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
@@ -63,7 +57,7 @@ struct NativeLiveKit {
 
 /// Bounded PCM queue: ~1.28 s of 10 ms audio chunks. A full channel means
 /// WebRTC audio encoding is stalled; the newest chunk is dropped rather than
-/// letting memory grow without bound (same drop-newest policy as audio_ring).
+/// letting memory grow without bound (same drop-newest policy as `audio_ring`).
 const PCM_CHANNEL_CAPACITY: usize = 128;
 
 static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
@@ -85,8 +79,6 @@ where
     };
     f(state)
 }
-
-// ── NAPI: Room Connection ────────────────────────────────────────────────
 
 #[napi]
 pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
@@ -159,8 +151,6 @@ pub fn is_livekit_room_connected() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
-// ── NAPI: Audio PCM Feed ─────────────────────────────────────────────────
-
 /// Decodes raw i16 LE PCM bytes into samples, independent of the N-API
 /// `Buffer` type so the conversion is unit-testable. On little-endian hosts
 /// the fast path casts the slice directly; odd byte counts (and big-endian
@@ -224,8 +214,6 @@ pub fn feed_pcm(pcm: napi::bindgen_prelude::Buffer) -> NapiResult<()> {
         }
     })
 }
-
-// ── NAPI: Video Track Control ────────────────────────────────────────────
 
 #[napi]
 pub fn start_video_track(config: CaptureConfig) -> NapiResult<()> {
@@ -300,8 +288,6 @@ pub fn capture_dmabuf_frame(
 pub fn get_spectator_count() -> u32 {
     SPECTATOR_COUNT.load(Ordering::Relaxed)
 }
-
-// ── Worker Thread ────────────────────────────────────────────────────────
 
 async fn run_worker(
     url: String,

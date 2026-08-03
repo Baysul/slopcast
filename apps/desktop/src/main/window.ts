@@ -3,7 +3,6 @@ import path from 'node:path';
 import { app, BrowserWindow, desktopCapturer, Menu, nativeImage, session, shell } from 'electron';
 import { getWindow, isWayland, setMainWindow } from './context';
 
-// ── Hardware-Accelerated Video Encoding ─────────────────────────────────
 // Flags must be set before app.whenReady(). Build one combined list because
 // appendSwitch stores only the *last* value for the same switch name.
 const features: string[] = [];

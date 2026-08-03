@@ -3,7 +3,6 @@ import path from 'node:path';
 import { type StreamSettings, sanitizeStreamSettings } from '@slopcast/shared-types';
 import { app } from 'electron';
 
-// ── Stream Settings Persistence ─────────────────────────────────────────
 // Stored as JSON in Electron's per-platform user-data directory
 // (%APPDATA%/<app-name> on Windows, ~/.config/<app-name> on Linux).
 const STREAM_SETTINGS_FILE = 'stream-settings.json';
@@ -40,7 +39,6 @@ export function saveStreamSettings(raw: unknown): boolean {
   }
 }
 
-// ── Onboarding State Persistence ────────────────────────────────────────
 const ONBOARDING_FILE = 'onboarding.json';
 
 export function isOnboardingCompleted(): boolean {
