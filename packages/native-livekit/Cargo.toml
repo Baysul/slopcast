@@ -19,15 +19,10 @@ crate-type = ["cdylib"]
 [dependencies]
 arc-swap = "1.9.2"
 bytemuck = "1.25.2"
+livekit = { version = "0.8", features = ["rustls-tls-native-roots"] }
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-livekit = { version = "0.8", features = ["rustls-tls-native-roots"] }
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-livekit = { version = "0.8", features = ["rustls-tls-native-roots"] }
 
 [profile.release]
 opt-level = 3

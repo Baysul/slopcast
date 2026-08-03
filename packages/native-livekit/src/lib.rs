@@ -52,11 +52,16 @@ enum WorkerCmd {
 // ── Singleton & Statics ──────────────────────────────────────────────────
 
 struct NativeLiveKit {
-    pcm_tx: tokio::sync::mpsc::UnboundedSender<Vec<i16>>,
+    pcm_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
     _stop: tokio::sync::oneshot::Sender<()>,
     _join: std::thread::JoinHandle<()>,
 }
+
+/// Bounded PCM queue: ~1.28 s of 10 ms audio chunks. A full channel means
+/// WebRTC audio encoding is stalled; the newest chunk is dropped rather than
+/// letting memory grow without bound (same drop-newest policy as audio_ring).
+const PCM_CHANNEL_CAPACITY: usize = 128;
 
 static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
 
@@ -96,7 +101,7 @@ pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
     VIDEO_ACTIVE.store(false, Ordering::Relaxed);
     VIDEO_SOURCE.store(None);
 
-    let (pcm_tx, pcm_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+    let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(PCM_CHANNEL_CAPACITY);
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
 
@@ -173,11 +178,14 @@ pub fn feed_pcm(pcm: napi::bindgen_prelude::Buffer) -> NapiResult<()> {
                 .map(|c| i16::from_le_bytes([c[0], c[1]]))
                 .collect()
         };
-        state
-            .pcm_tx
-            .send(samples)
-            .map_err(|e| napi::Error::from_reason(format!("Failed to send PCM: {e}")))?;
-        Ok(())
+        match state.pcm_tx.try_send(samples) {
+            Ok(()) => Ok(()),
+            // Channel full: WebRTC encoding is stalled, drop the newest chunk.
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(napi::Error::from_reason("PCM channel closed"))
+            }
+        }
     })
 }
 
@@ -263,7 +271,7 @@ pub fn get_spectator_count() -> u32 {
 async fn run_worker(
     url: String,
     token: String,
-    mut pcm_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<i16>>,
+    mut pcm_rx: tokio::sync::mpsc::Receiver<Vec<i16>>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerCmd>,
     mut stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
