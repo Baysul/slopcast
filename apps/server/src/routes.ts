@@ -5,12 +5,12 @@ import { RoomServiceClient } from 'livekit-server-sdk';
 import { generateRoomCode } from './roomCodes.js';
 import { presenterToken, spectatorToken } from './token.js';
 
-function toWsUrl(url: string): string {
+export function toWsUrl(url: string): string {
   if (url.startsWith('ws://') || url.startsWith('wss://')) return url;
   return url.replace(/^http(s?):\/\//, 'ws$1://');
 }
 
-function toHttpUrl(url: string): string {
+export function toHttpUrl(url: string): string {
   let normalized = url.replace(/^ws(s?):\/\//, 'http$1://');
   try {
     const parsed = new URL(normalized);

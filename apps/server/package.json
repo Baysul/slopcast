@@ -8,7 +8,8 @@
     "test:e2e": "tsx src/e2e-test.ts",
     "prebuild": "pnpm --filter @slopcast/shared-types build",
     "check": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsx --test \"src/*.test.ts\""
   },
   "dependencies": {
     "@slopcast/shared-types": "workspace:*",
