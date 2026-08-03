@@ -75,13 +75,3 @@ fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::M
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_spa_function_accessible() {
-        // SAFETY: pure lookup into a static translation table; any channel
-        // enum value is valid input.
-        let _ = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(3) };
-    }
-}

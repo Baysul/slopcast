@@ -7,6 +7,18 @@ use super::{CAPTURE_NODE_NAME, LINK_FACTORY};
 use pipewire::properties::{PropertiesBox, properties};
 use pipewire::registry::GlobalObject;
 use pipewire::spa::param::audio::{AudioInfoRaw, AudioInfoRawFlags};
+use pipewire::spa::sys::{
+    SPA_AUDIO_CHANNEL_AUX0, SPA_AUDIO_CHANNEL_AUX63, SPA_AUDIO_CHANNEL_BC, SPA_AUDIO_CHANNEL_BLC,
+    SPA_AUDIO_CHANNEL_BRC, SPA_AUDIO_CHANNEL_FC, SPA_AUDIO_CHANNEL_FCH, SPA_AUDIO_CHANNEL_FL,
+    SPA_AUDIO_CHANNEL_FLC, SPA_AUDIO_CHANNEL_FLH, SPA_AUDIO_CHANNEL_FLW, SPA_AUDIO_CHANNEL_FR,
+    SPA_AUDIO_CHANNEL_FRC, SPA_AUDIO_CHANNEL_FRH, SPA_AUDIO_CHANNEL_FRW, SPA_AUDIO_CHANNEL_LFE,
+    SPA_AUDIO_CHANNEL_LFE2, SPA_AUDIO_CHANNEL_LLFE, SPA_AUDIO_CHANNEL_MONO, SPA_AUDIO_CHANNEL_NA,
+    SPA_AUDIO_CHANNEL_RC, SPA_AUDIO_CHANNEL_RL, SPA_AUDIO_CHANNEL_RLC, SPA_AUDIO_CHANNEL_RLFE,
+    SPA_AUDIO_CHANNEL_RR, SPA_AUDIO_CHANNEL_RRC, SPA_AUDIO_CHANNEL_SL, SPA_AUDIO_CHANNEL_SR,
+    SPA_AUDIO_CHANNEL_TC, SPA_AUDIO_CHANNEL_TFC, SPA_AUDIO_CHANNEL_TFL, SPA_AUDIO_CHANNEL_TFLC,
+    SPA_AUDIO_CHANNEL_TFR, SPA_AUDIO_CHANNEL_TFRC, SPA_AUDIO_CHANNEL_TRC, SPA_AUDIO_CHANNEL_TRL,
+    SPA_AUDIO_CHANNEL_TRR, SPA_AUDIO_CHANNEL_TSL, SPA_AUDIO_CHANNEL_TSR,
+};
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
@@ -122,7 +134,7 @@ impl ChannelLayout {
         let position = info.position();
         let mut names = Vec::with_capacity(channels as usize);
         for &channel in &position[..channels as usize] {
-            let name = channel_short_name(channel)?;
+            let name = channel_short_name(channel);
             if name.starts_with("AUX") {
                 return None;
             }
@@ -134,16 +146,56 @@ impl ChannelLayout {
     }
 }
 
-fn channel_short_name(channel: u32) -> Option<String> {
-    // SAFETY: pure lookup into a static translation table; any channel enum
-    // value is valid input (returns null for unknown channels).
-    let ptr = unsafe { pipewire::spa::sys::spa_type_audio_channel_to_short_name(channel) };
-    if ptr.is_null() {
-        return None;
+/// Short names from SPA's static `spa_type_audio_channel` table
+/// (`spa/param/audio/raw.h`). The table is ABI-stable across `PipeWire`
+/// versions, but the `spa_type_audio_channel_to_short_name` lookup function is
+/// only exported by libspa >= 1.4, so it is replicated here to keep the crate
+/// buildable against older `PipeWire` (Ubuntu 24.04 ships 1.0.5).
+fn channel_short_name(channel: u32) -> String {
+    if (SPA_AUDIO_CHANNEL_AUX0..=SPA_AUDIO_CHANNEL_AUX63).contains(&channel) {
+        return format!("AUX{}", channel - SPA_AUDIO_CHANNEL_AUX0);
     }
-    // SAFETY: the SPA table is static, so the pointer outlives the copy.
-    let name = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().ok()?;
-    Some(name.into())
+    match channel {
+        SPA_AUDIO_CHANNEL_NA => "NA",
+        SPA_AUDIO_CHANNEL_MONO => "MONO",
+        SPA_AUDIO_CHANNEL_FL => "FL",
+        SPA_AUDIO_CHANNEL_FR => "FR",
+        SPA_AUDIO_CHANNEL_FC => "FC",
+        SPA_AUDIO_CHANNEL_LFE => "LFE",
+        SPA_AUDIO_CHANNEL_SL => "SL",
+        SPA_AUDIO_CHANNEL_SR => "SR",
+        SPA_AUDIO_CHANNEL_FLC => "FLC",
+        SPA_AUDIO_CHANNEL_FRC => "FRC",
+        SPA_AUDIO_CHANNEL_RC => "RC",
+        SPA_AUDIO_CHANNEL_RL => "RL",
+        SPA_AUDIO_CHANNEL_RR => "RR",
+        SPA_AUDIO_CHANNEL_TC => "TC",
+        SPA_AUDIO_CHANNEL_TFL => "TFL",
+        SPA_AUDIO_CHANNEL_TFC => "TFC",
+        SPA_AUDIO_CHANNEL_TFR => "TFR",
+        SPA_AUDIO_CHANNEL_TRL => "TRL",
+        SPA_AUDIO_CHANNEL_TRC => "TRC",
+        SPA_AUDIO_CHANNEL_TRR => "TRR",
+        SPA_AUDIO_CHANNEL_RLC => "RLC",
+        SPA_AUDIO_CHANNEL_RRC => "RRC",
+        SPA_AUDIO_CHANNEL_FLW => "FLW",
+        SPA_AUDIO_CHANNEL_FRW => "FRW",
+        SPA_AUDIO_CHANNEL_LFE2 => "LFE2",
+        SPA_AUDIO_CHANNEL_FLH => "FLH",
+        SPA_AUDIO_CHANNEL_FCH => "FCH",
+        SPA_AUDIO_CHANNEL_FRH => "FRH",
+        SPA_AUDIO_CHANNEL_TFLC => "TFLC",
+        SPA_AUDIO_CHANNEL_TFRC => "TFRC",
+        SPA_AUDIO_CHANNEL_TSL => "TSL",
+        SPA_AUDIO_CHANNEL_TSR => "TSR",
+        SPA_AUDIO_CHANNEL_LLFE => "LLFE",
+        SPA_AUDIO_CHANNEL_RLFE => "RLFE",
+        SPA_AUDIO_CHANNEL_BC => "BC",
+        SPA_AUDIO_CHANNEL_BLC => "BLC",
+        SPA_AUDIO_CHANNEL_BRC => "BRC",
+        _ => "UNK",
+    }
+    .into()
 }
 
 struct PortInfo {
@@ -688,19 +740,29 @@ mod tests {
 
     #[test]
     fn channel_short_name_maps_known_channels() {
-        assert_eq!(channel_short_name(CH_FL).as_deref(), Some("FL"));
-        assert_eq!(channel_short_name(CH_FR).as_deref(), Some("FR"));
-        assert_eq!(channel_short_name(CH_FC).as_deref(), Some("FC"));
-        assert_eq!(channel_short_name(CH_NA).as_deref(), Some("NA"));
-        assert_eq!(channel_short_name(CH_AUX0).as_deref(), Some("AUX0"));
+        assert_eq!(channel_short_name(CH_FL), "FL");
+        assert_eq!(channel_short_name(CH_FR), "FR");
+        assert_eq!(channel_short_name(CH_FC), "FC");
+        assert_eq!(channel_short_name(CH_NA), "NA");
+        assert_eq!(channel_short_name(CH_AUX0), "AUX0");
     }
 
     #[test]
-    fn channel_short_name_never_null_for_out_of_table_values() {
+    fn channel_short_name_defaults_unknown_channels_to_unk() {
         // The SPA C table returns "UNK" (a non-null string) for values outside
-        // the channel enum; document that so the null check in
-        // `channel_short_name` is not assumed to guard garbage input.
-        assert_eq!(channel_short_name(99).as_deref(), Some("UNK"));
-        assert_eq!(channel_short_name(u32::MAX).as_deref(), Some("UNK"));
+        // the channel enum; document that so callers do not expect a failure.
+        assert_eq!(channel_short_name(99), "UNK");
+        assert_eq!(channel_short_name(u32::MAX), "UNK");
+        // The AUX range ends at AUX63; anything beyond falls through to "UNK".
+        assert_eq!(channel_short_name(SPA_AUDIO_CHANNEL_AUX63 + 1), "UNK");
+    }
+
+    #[test]
+    fn channel_short_name_generates_aux_names_from_offset() {
+        assert_eq!(
+            channel_short_name(pipewire::spa::sys::SPA_AUDIO_CHANNEL_AUX42),
+            "AUX42"
+        );
+        assert_eq!(channel_short_name(SPA_AUDIO_CHANNEL_AUX63), "AUX63");
     }
 }
