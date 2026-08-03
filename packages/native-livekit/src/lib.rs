@@ -17,6 +17,9 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+mod test_stubs;
+
 use arc_swap::ArcSwapOption;
 use livekit::options::{TrackPublishOptions, VideoCodec};
 use livekit::prelude::*;
@@ -158,30 +161,63 @@ pub fn is_livekit_room_connected() -> bool {
 
 // ── NAPI: Audio PCM Feed ─────────────────────────────────────────────────
 
+/// Decodes raw i16 LE PCM bytes into samples, independent of the N-API
+/// `Buffer` type so the conversion is unit-testable. On little-endian hosts
+/// the fast path casts the slice directly; odd byte counts (and big-endian
+/// hosts) fall back to per-pair decoding, dropping a trailing half sample.
+fn decode_pcm_bytes(bytes: &[u8]) -> Vec<i16> {
+    if cfg!(target_endian = "little")
+        && let Ok(slice) = bytemuck::try_cast_slice::<u8, i16>(bytes)
+    {
+        return slice.to_vec();
+    }
+    bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect()
+}
+
+/// Recombines the high and low 32-bit timestamp integers (as passed through
+/// N-API) into a 64-bit microsecond integer. Bit-faithful: negative halves
+/// are re-interpreted as their unsigned bit patterns.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    reason = "Recombining high and low 32-bit timestamp integers into a 64-bit microsecond integer"
+)]
+fn recombine_dmabuf_timestamp(timestamp_lo: i32, timestamp_hi: i32) -> i64 {
+    ((u64::from(timestamp_lo as u32)) | (u64::from(timestamp_hi as u32) << 32)) as i64
+}
+
+/// Resolves a codec string to a `VideoCodec`, defaulting to VP9 for anything
+/// unrecognized (including `None`).
+fn parse_video_codec(codec: Option<&str>) -> VideoCodec {
+    match codec {
+        Some("vp8") => VideoCodec::VP8,
+        Some("h264") => VideoCodec::H264,
+        Some("av1") => VideoCodec::AV1,
+        _ => VideoCodec::VP9,
+    }
+}
+
+/// Drains full `samples_per_chunk`-sized chunks from the worker's buffer,
+/// leaving a partial tail queued for the next push. Off-by-one safe: a buffer
+/// with exactly `n * samples_per_chunk` samples produces exactly `n` chunks.
+fn drain_pcm_chunks(buffer: &mut VecDeque<i16>, samples_per_chunk: usize, out: &mut Vec<Vec<i16>>) {
+    while buffer.len() >= samples_per_chunk {
+        out.push(buffer.drain(..samples_per_chunk).collect());
+    }
+}
+
 #[napi]
 pub fn feed_pcm(pcm: napi::bindgen_prelude::Buffer) -> NapiResult<()> {
     with_guard(|state| {
         // PCM arrives packed as i16 LE bytes from the capture native module.
-        let bytes = pcm.as_ref();
-        let samples: Vec<i16> = if cfg!(target_endian = "little") {
-            if let Ok(slice) = bytemuck::try_cast_slice::<u8, i16>(bytes) {
-                slice.to_vec()
-            } else {
-                bytes
-                    .chunks_exact(2)
-                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                    .collect()
-            }
-        } else {
-            bytes
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect()
-        };
+        let samples = decode_pcm_bytes(pcm.as_ref());
+        // Channel full: WebRTC encoding is stalled, drop the newest chunk.
         match state.pcm_tx.try_send(samples) {
-            Ok(()) => Ok(()),
-            // Channel full: WebRTC encoding is stalled, drop the newest chunk.
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 Err(napi::Error::from_reason("PCM channel closed"))
             }
@@ -240,8 +276,7 @@ pub fn capture_dmabuf_frame(
         let Some(source) = VIDEO_SOURCE.load_full() else {
             return Err(napi::Error::from_reason("Video track not active"));
         };
-        let timestamp_us =
-            ((u64::from(timestamp_lo as u32)) | (u64::from(timestamp_hi as u32) << 32)) as i64;
+        let timestamp_us = recombine_dmabuf_timestamp(timestamp_lo, timestamp_hi);
         source.capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us);
         Ok(())
     }
@@ -340,8 +375,9 @@ async fn run_worker(
                     break;
                 };
                 buffer.extend(pcm_chunk);
-                while buffer.len() >= samples_per_10ms {
-                    let chunk: Vec<i16> = buffer.drain(..samples_per_10ms).collect();
+                let mut chunks = Vec::new();
+                drain_pcm_chunks(&mut buffer, samples_per_10ms, &mut chunks);
+                for chunk in chunks {
                     let frame = AudioFrame {
                         data: chunk.into(),
                         sample_rate: SAMPLE_RATE,
@@ -376,17 +412,7 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
     let track =
         LocalVideoTrack::create_video_track("screen_share", RtcVideoSource::Native(source.clone()));
 
-    let codec = config
-        .video_codec
-        .as_deref()
-        .and_then(|s| match s {
-            "vp8" => Some(VideoCodec::VP8),
-            "vp9" => Some(VideoCodec::VP9),
-            "h264" => Some(VideoCodec::H264),
-            "av1" => Some(VideoCodec::AV1),
-            _ => None,
-        })
-        .unwrap_or(VideoCodec::VP9);
+    let codec = parse_video_codec(config.video_codec.as_deref());
 
     match room
         .local_participant()
@@ -426,5 +452,123 @@ async fn handle_stop_video(room: &Room) {
             .local_participant()
             .unpublish_track(&pub_info.sid())
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_pcm_decodes_little_endian_i16() {
+        let bytes = 42i16.to_le_bytes();
+        assert_eq!(decode_pcm_bytes(&bytes), vec![42]);
+    }
+
+    #[test]
+    fn decode_pcm_handles_multiple_samples() {
+        let samples: Vec<i16> = vec![-32768, 0, 32767];
+        let mut bytes = Vec::new();
+        for s in &samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        assert_eq!(decode_pcm_bytes(&bytes), samples);
+    }
+
+    #[test]
+    fn decode_pcm_drops_trailing_odd_byte() {
+        // 5 bytes = 2 full samples + 1 orphan byte that must be discarded.
+        let bytes = [1u8, 0, 2, 0, 0xAB];
+        let decoded = decode_pcm_bytes(&bytes);
+        assert_eq!(decoded, vec![1, 2]);
+    }
+
+    #[test]
+    fn decode_pcm_empty_input_is_empty() {
+        assert!(decode_pcm_bytes(&[]).is_empty());
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "test fixture: 0xABCD_EF01 deliberately reinterpreted as a negative i32"
+    )]
+    fn recombine_timestamp_roundtrips_positive_values() {
+        assert_eq!(recombine_dmabuf_timestamp(0, 0), 0);
+        assert_eq!(recombine_dmabuf_timestamp(0x1234_5678, 0), 0x1234_5678);
+        assert_eq!(
+            recombine_dmabuf_timestamp(0xABCD_EF01u32 as i32, 0x0000_0001),
+            0x0000_0001_ABCD_EF01
+        );
+    }
+
+    #[test]
+    fn recombine_timestamp_handles_negative_halves_bit_faithfully() {
+        // Both halves negative: lo = 0xFFFF_FFFF, hi = 0xFFFF_FFFF → -1.
+        assert_eq!(recombine_dmabuf_timestamp(-1, -1), -1);
+        // Negative high half with zero low half → 0x8000_0000_0000_0000.
+        assert_eq!(recombine_dmabuf_timestamp(0, i32::MIN), i64::MIN);
+        // Positive hi, negative lo: lo's top bit must extend into the result.
+        assert_eq!(recombine_dmabuf_timestamp(-1, 1), 0x0000_0001_FFFF_FFFF);
+    }
+
+    #[test]
+    fn parse_video_codec_maps_known_strings() {
+        assert_eq!(parse_video_codec(Some("vp8")), VideoCodec::VP8);
+        assert_eq!(parse_video_codec(Some("vp9")), VideoCodec::VP9);
+        assert_eq!(parse_video_codec(Some("h264")), VideoCodec::H264);
+        assert_eq!(parse_video_codec(Some("av1")), VideoCodec::AV1);
+    }
+
+    #[test]
+    fn parse_video_codec_falls_back_to_vp9() {
+        assert_eq!(parse_video_codec(Some("theora")), VideoCodec::VP9);
+        assert_eq!(parse_video_codec(Some("VP9")), VideoCodec::VP9);
+        assert_eq!(parse_video_codec(Some("")), VideoCodec::VP9);
+        assert_eq!(parse_video_codec(None), VideoCodec::VP9);
+    }
+
+    #[test]
+    fn drain_chunks_emits_nothing_below_chunk_size() {
+        let mut buffer = VecDeque::from(vec![1i16, 2, 3]);
+        let mut chunks = Vec::new();
+        drain_pcm_chunks(&mut buffer, 960, &mut chunks);
+        assert!(chunks.is_empty());
+        assert_eq!(buffer.len(), 3);
+    }
+
+    #[test]
+    fn drain_chunks_splits_exact_multiples_without_remainder() {
+        let mut buffer: VecDeque<i16> = (0..1920).collect();
+        let mut chunks = Vec::new();
+        drain_pcm_chunks(&mut buffer, 960, &mut chunks);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], (0..960).collect::<Vec<i16>>());
+        assert_eq!(chunks[1], (960..1920).collect::<Vec<i16>>());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn drain_chunks_carries_partial_tail_between_pushes() {
+        let mut buffer: VecDeque<i16> = (0..1000).collect();
+        let mut chunks = Vec::new();
+        drain_pcm_chunks(&mut buffer, 960, &mut chunks);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(buffer.len(), 40);
+        // The next push fills the tail to a full chunk.
+        buffer.extend(1000..1920);
+        drain_pcm_chunks(&mut buffer, 960, &mut chunks);
+        assert_eq!(chunks.len(), 2);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn with_guard_errors_when_no_room_is_connected() {
+        // The singleton is empty in a fresh test binary; the guard must fail
+        // with the "Room not connected" reason, not poison or hang.
+        let Err(err) = with_guard(|_| Ok(())) else {
+            panic!("expected an error without a connected room");
+        };
+        assert!(err.to_string().contains("Room not connected"));
     }
 }
