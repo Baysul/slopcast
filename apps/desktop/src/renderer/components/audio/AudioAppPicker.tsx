@@ -35,24 +35,19 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
 
     const displayName = (app: AudioApp): string => app.name;
 
+    const firstMemberTitle = (members: AudioApp[], key: 'mediaTitle' | 'windowTitle'): string | undefined => {
+      for (const m of members) {
+        if (m[key]) {
+          return m[key];
+        }
+      }
+      return undefined;
+    };
+
     const groupSubLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string | null => {
       if (isDesktopAudio) return 'All system audio';
       const { members } = group;
-      let label: string | undefined;
-      for (const m of members) {
-        if (m.mediaTitle) {
-          label = m.mediaTitle;
-          break;
-        }
-      }
-      if (!label) {
-        for (const m of members) {
-          if (m.windowTitle) {
-            label = m.windowTitle;
-            break;
-          }
-        }
-      }
+      const label = firstMemberTitle(members, 'mediaTitle') ?? firstMemberTitle(members, 'windowTitle');
       if (label) {
         if (members.length > 1) return `${label} \u00B7 ${members.length} streams`;
         return label;

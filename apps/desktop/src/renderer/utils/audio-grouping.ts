@@ -5,31 +5,39 @@ export interface AudioAppGroup {
   members: AudioApp[];
 }
 
+const identityKeyFor = (app: AudioApp): string => {
+  if (app.bundleId && app.bundleId.trim().length > 0) {
+    return `b:${app.bundleId.trim().toLowerCase()}`;
+  }
+  if (app.name && app.name.trim().length > 0) {
+    return `n:${app.name.trim().toLowerCase()}`;
+  }
+  if (app.processId > 0) {
+    return `p:${app.processId}`;
+  }
+  if (app.clientId != null && app.clientId > 0) {
+    return `c:${app.clientId}`;
+  }
+  return `i:${app.id}`;
+};
+
+const mergeIntoGroup = (group: AudioAppGroup, app: AudioApp): void => {
+  group.members.push(app);
+  if (!group.representative.mediaTitle && app.mediaTitle) {
+    group.representative = app;
+  } else if (!group.representative.mediaTitle && !group.representative.windowTitle && app.windowTitle) {
+    group.representative = app;
+  }
+};
+
 export function groupAudioApps(apps: AudioApp[]): AudioAppGroup[] {
   const groups: AudioAppGroup[] = [];
   const identityMap = new Map<string, AudioAppGroup>();
   for (const app of apps) {
-    let key: string;
-    if (app.bundleId && app.bundleId.trim().length > 0) {
-      key = `b:${app.bundleId.trim().toLowerCase()}`;
-    } else if (app.name && app.name.trim().length > 0) {
-      key = `n:${app.name.trim().toLowerCase()}`;
-    } else if (app.processId > 0) {
-      key = `p:${app.processId}`;
-    } else if (app.clientId != null && app.clientId > 0) {
-      key = `c:${app.clientId}`;
-    } else {
-      key = `i:${app.id}`;
-    }
-
+    const key = identityKeyFor(app);
     const existing = identityMap.get(key);
     if (existing) {
-      existing.members.push(app);
-      if (!existing.representative.mediaTitle && app.mediaTitle) {
-        existing.representative = app;
-      } else if (!existing.representative.mediaTitle && !existing.representative.windowTitle && app.windowTitle) {
-        existing.representative = app;
-      }
+      mergeIntoGroup(existing, app);
       continue;
     }
     const group: AudioAppGroup = { representative: app, members: [app] };

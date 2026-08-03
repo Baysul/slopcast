@@ -1,6 +1,6 @@
 import type { VideoCodec } from '@slopcast/shared-types';
 import { codecLabel, RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
-import { Track } from 'livekit-client';
+import { type Room, Track } from 'livekit-client';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -23,11 +23,16 @@ import { codecOptionSuffix } from './utils/codecs';
 import './types/electron-api.d.ts';
 import './index.css';
 
-async function applySenderParameters(sender: RTCRtpSender, maxBitrate: number, maxFramerate: number): Promise<boolean> {
+async function applySenderParameters(
+  sender: RTCRtpSender,
+  maxBitrate: number,
+  maxFramerate: number,
+  failLabel = '[Presenter] Setting encoder parameters failed:',
+): Promise<boolean> {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const params = sender.getParameters();
-      if (!params || !params.transactionId) {
+      if (!params?.transactionId) {
         await new Promise((r) => setTimeout(r, 100));
         continue;
       }
@@ -47,12 +52,157 @@ async function applySenderParameters(sender: RTCRtpSender, maxBitrate: number, m
       if (attempt < 4) {
         await new Promise((r) => setTimeout(r, 100));
       } else {
-        console.warn('[Presenter] Setting encoder parameters failed:', err);
+        console.warn(failLabel, err);
       }
     }
   }
   return false;
 }
+
+const reapplyAudioIfMissing = async (
+  room: Room,
+  audioAppIdRef: React.RefObject<number | null>,
+  localStreamRef: React.RefObject<MediaStream | null>,
+  replaceAudioTrack: (targetId: number, room: Room | null) => Promise<void>,
+): Promise<void> => {
+  const currentId = audioAppIdRef.current;
+  if (currentId == null) return;
+  const hasAudio = (localStreamRef.current?.getAudioTracks().length ?? 0) > 0;
+  if (hasAudio) return;
+  console.log('[Presenter] Audio track lost after settings change, re-applying...');
+  try {
+    await replaceAudioTrack(currentId, room);
+  } catch (err) {
+    console.warn('[Presenter] audio re-apply failed:', err);
+  }
+};
+
+const stopLocalTracks = (stream: MediaStream | null): void => {
+  if (!stream) return;
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
+};
+
+const unpublishAllTracks = async (room: Room): Promise<void> => {
+  for (const pub of room.localParticipant.trackPublications.values()) {
+    const t = pub.track;
+    if (t) {
+      await room.localParticipant.unpublishTrack(t);
+    }
+  }
+};
+
+const publishWithCodec = async (
+  room: Room,
+  videoTrack: MediaStreamTrack,
+  codec: VideoCodec,
+  bitrate: number,
+  fps: number,
+): Promise<void> => {
+  videoTrack.contentHint = 'motion';
+  await room.localParticipant.publishTrack(videoTrack, {
+    source: Track.Source.ScreenShare,
+    screenShareEncoding: {
+      maxBitrate: bitrate,
+      maxFramerate: fps,
+    },
+    simulcast: false,
+    videoCodec: codec,
+  });
+  const newPub = room.localParticipant.videoTrackPublications.values().next().value;
+  const sender = (newPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+  if (sender) {
+    await applySenderParameters(
+      sender,
+      bitrate,
+      fps,
+      '[Presenter] Re-applying encoder parameters after codec switch failed:',
+    );
+  }
+};
+
+const revertToPreviousCodec = async (
+  room: Room,
+  videoTrack: MediaStreamTrack,
+  oldTrack: unknown,
+  prevCodec: VideoCodec,
+  targetCodec: VideoCodec,
+  bitrate: number,
+  fps: number,
+  setVideoCodec: (codec: VideoCodec) => void,
+): Promise<void> => {
+  if (!oldTrack || prevCodec === targetCodec) return;
+  try {
+    await publishWithCodec(room, videoTrack, prevCodec, bitrate, fps);
+    setVideoCodec(prevCodec);
+  } catch (revertErr) {
+    console.error('[Presenter] Reverting to previous codec also failed:', revertErr);
+  }
+};
+
+const logH264Sdp = (room: Room): void => {
+  try {
+    const publisher = (
+      room as {
+        engine?: { pcManager?: { publisher?: { getLocalDescription(): RTCSessionDescription | null | undefined } } };
+      }
+    ).engine?.pcManager?.publisher;
+    if (!publisher) return;
+    const desc = publisher.getLocalDescription();
+    if (!desc) return;
+    const h264Lines = desc.sdp
+      .split('\n')
+      .filter((line) => line.startsWith('a=fmtp:') && line.includes('profile-level-id'));
+    for (const line of h264Lines) {
+      console.log(`[SDP:send] H264 fmtp: ${line}`);
+    }
+  } catch {
+    console.log('[Presenter] SDP log skipped (no local description yet)');
+  }
+};
+
+const unpublishExisting = async (room: Room): Promise<void> => {
+  let hadExisting = false;
+  for (const pub of room.localParticipant.trackPublications.values()) {
+    const t = pub.track;
+    if (t) {
+      await room.localParticipant.unpublishTrack(t);
+      hadExisting = true;
+    }
+  }
+  if (hadExisting) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+};
+
+const publishVideoTrack = async (
+  room: Room,
+  videoTrack: MediaStreamTrack,
+  codec: VideoCodec,
+  bitrate: number,
+  fps: number,
+): Promise<void> => {
+  videoTrack.contentHint = 'motion';
+  await room.localParticipant.publishTrack(videoTrack, {
+    source: Track.Source.ScreenShare,
+    screenShareEncoding: {
+      maxBitrate: bitrate,
+      maxFramerate: fps,
+    },
+    simulcast: false,
+    videoCodec: codec,
+  });
+  const videoPub = room.localParticipant.videoTrackPublications.values().next().value;
+  const sender = (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+  if (sender) {
+    if (await applySenderParameters(sender, bitrate, fps)) {
+      console.log(
+        `[Presenter] Initial encoder parameters applied: fps=${fps} bitrate=${(bitrate / 1_000_000).toFixed(0)}Mbps`,
+      );
+    }
+  }
+};
 
 // Debug aid: print every live PipeWire audio stream node's full property
 // dictionary (the same view pw-dump shows) when a capture starts, so a missed
@@ -192,24 +342,11 @@ export const PresenterApp: React.FC = () => {
       if (!room) return;
       const pub = room.localParticipant.videoTrackPublications.values().next().value;
       const sender = (pub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
-      if (sender) {
-        if (await applySenderParameters(sender, br, fps)) {
-          console.log(`[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps`);
-        }
-
-        const currentId = audioAppIdRef.current;
-        if (currentId != null) {
-          const hasAudio = (localStreamRef.current?.getAudioTracks().length ?? 0) > 0;
-          if (!hasAudio) {
-            console.log('[Presenter] Audio track lost after settings change, re-applying...');
-            try {
-              await replaceAudioTrack(currentId, room);
-            } catch (err) {
-              console.warn('[Presenter] audio re-apply failed:', err);
-            }
-          }
-        }
+      if (!sender) return;
+      if (await applySenderParameters(sender, br, fps)) {
+        console.log(`[Presenter] Live encoder update: fps=${fps} bitrate=${(br / 1_000_000).toFixed(0)}Mbps`);
       }
+      await reapplyAudioIfMissing(room, audioAppIdRef, localStreamRef, replaceAudioTrack);
     };
     void update();
   }, [streamFps, bitrateLimit, isSharing, replaceAudioTrack, liveKitRoomRef, audioAppIdRef]);
@@ -217,9 +354,7 @@ export const PresenterApp: React.FC = () => {
   const replaceVideoCodec = useCallback(
     async (targetCodec: VideoCodec): Promise<void> => {
       const room = liveKitRoomRef.current;
-      if (!room) return;
-
-      if (isCodecSwitchingRef.current) return;
+      if (!room || isCodecSwitchingRef.current) return;
       isCodecSwitchingRef.current = true;
 
       if (room.options?.publishDefaults) {
@@ -243,38 +378,7 @@ export const PresenterApp: React.FC = () => {
           await new Promise((r) => setTimeout(r, 150));
         }
 
-        videoTrack.contentHint = 'motion';
-
-        await room.localParticipant.publishTrack(videoTrack, {
-          source: Track.Source.ScreenShare,
-          screenShareEncoding: {
-            maxBitrate: bitrateLimitRef.current,
-            maxFramerate: streamFpsRef.current,
-          },
-          simulcast: false,
-          videoCodec: targetCodec,
-        });
-
-        const newPub = room.localParticipant.videoTrackPublications.values().next().value;
-        const sender = (newPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
-        if (sender) {
-          try {
-            const params = sender.getParameters();
-            if (!params.encodings?.length) params.encodings = [{}];
-            for (const enc of params.encodings) {
-              enc.maxBitrate = bitrateLimitRef.current;
-              enc.maxFramerate = streamFpsRef.current;
-              enc.scaleResolutionDownBy = 1.0;
-              enc.priority = 'high';
-              enc.networkPriority = 'high';
-              (enc as { degradationPreference?: string }).degradationPreference = 'maintain-framerate';
-              enc.active = true;
-            }
-            await sender.setParameters(params);
-          } catch (err) {
-            console.warn('[Presenter] Re-applying encoder parameters after codec switch failed:', err);
-          }
-        }
+        await publishWithCodec(room, videoTrack, targetCodec, bitrateLimitRef.current, streamFpsRef.current);
 
         resetStatsPrev();
         activeVideoCodecRef.current = targetCodec;
@@ -287,23 +391,16 @@ export const PresenterApp: React.FC = () => {
         console.error('[Presenter] Live video codec switch failed:', err);
         notify('error', 'Codec switch failed', `Could not switch video codec to ${targetCodec.toUpperCase()}`);
 
-        const prevCodec = activeVideoCodecRef.current;
-        if (oldTrack && prevCodec && prevCodec !== targetCodec) {
-          try {
-            await room.localParticipant.publishTrack(videoTrack, {
-              source: Track.Source.ScreenShare,
-              screenShareEncoding: {
-                maxBitrate: bitrateLimitRef.current,
-                maxFramerate: streamFpsRef.current,
-              },
-              simulcast: false,
-              videoCodec: prevCodec,
-            });
-            setVideoCodec(prevCodec);
-          } catch (revertErr) {
-            console.error('[Presenter] Reverting to previous codec also failed:', revertErr);
-          }
-        }
+        await revertToPreviousCodec(
+          room,
+          videoTrack,
+          oldTrack,
+          activeVideoCodecRef.current,
+          targetCodec,
+          bitrateLimitRef.current,
+          streamFpsRef.current,
+          setVideoCodec,
+        );
       } finally {
         isCodecSwitchingRef.current = false;
       }
@@ -385,23 +482,13 @@ export const PresenterApp: React.FC = () => {
   }, [isWayland, resolutionRef, streamFpsRef, selectedSourceId]);
 
   const handleStopShare = useCallback(async () => {
-    const stream = localStreamRef.current;
-    if (stream) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-      localStreamRef.current = null;
-    }
+    stopLocalTracks(localStreamRef.current);
+    localStreamRef.current = null;
     setPreviewStream(null);
 
     const room = liveKitRoomRef.current;
     if (room) {
-      for (const pub of room.localParticipant.trackPublications.values()) {
-        const t = pub.track;
-        if (t) {
-          await room.localParticipant.unpublishTrack(t);
-        }
-      }
+      await unpublishAllTracks(room);
     }
 
     stopTelemetryPolling();
@@ -427,57 +514,112 @@ export const PresenterApp: React.FC = () => {
     setAutoDetectFailed,
   ]);
 
-  const handleStartShare = useCallback(async () => {
-    primeAudioContext();
-    try {
-      const videoTrack = await captureVideoTrack();
+  const resolveSystemAudioFallback = useCallback(async (): Promise<boolean> => {
+    setAutoDetectFailed(true);
+    let ctx: CaptureContext | null = null;
+    if (isWayland && window.electronAPI?.getCaptureContext) {
+      ctx = await window.electronAPI.getCaptureContext();
+      setCaptureContext(ctx);
+    }
 
+    const isMonitor = ctx?.sourceType === 'monitor' || (!isWayland && selectedSourceId?.startsWith('screen:'));
+
+    if (!isMonitor) {
+      notify('info', 'No audio detected', 'Sharing video only. Select an audio app and restart to include audio.');
+      return false;
+    }
+
+    setAutoDetectFailed(false);
+    if (!audioAppExplicitlySet) {
+      setSelectedAudioAppId(-1);
+      setAutoDetectedApp({ id: -1, name: 'Desktop Audio', processId: 0 });
+    }
+    console.log('[Presenter] No specific app resolved — using system audio (desktop audio fallback)');
+    return true;
+  }, [
+    isWayland,
+    selectedSourceId,
+    audioAppExplicitlySet,
+    setAutoDetectFailed,
+    setCaptureContext,
+    setSelectedAudioAppId,
+    setAutoDetectedApp,
+  ]);
+
+  const resolveAudioTarget = useCallback(
+    async (videoTrackLabel: string | null): Promise<number | null> => {
       let targetAudioId: number | null = selectedAudioAppId;
 
       if (targetAudioId === null && !audioAppExplicitlySet) {
         await loadAudioApps();
 
-        const app = await attemptAutoResolve(
-          isWayland ? { nameHint: videoTrack.label } : { sourceId: selectedSourceId, nameHint: videoTrack.label },
-        );
-        targetAudioId = app?.id ?? null;
+        const opts = isWayland
+          ? { nameHint: videoTrackLabel ?? undefined }
+          : { sourceId: selectedSourceId, nameHint: videoTrackLabel ?? undefined };
+        targetAudioId = (await attemptAutoResolve(opts))?.id ?? null;
       }
 
-      if (targetAudioId === null) {
-        setAutoDetectFailed(true);
-        let ctx: CaptureContext | null = null;
-        if (isWayland && window.electronAPI?.getCaptureContext) {
-          ctx = await window.electronAPI.getCaptureContext();
-          setCaptureContext(ctx);
-        }
-
-        const isMonitor = ctx?.sourceType === 'monitor' || (!isWayland && selectedSourceId?.startsWith('screen:'));
-
-        if (isMonitor) {
-          setAutoDetectFailed(false);
-          targetAudioId = -1;
-          if (!audioAppExplicitlySet) {
-            setSelectedAudioAppId(-1);
-            setAutoDetectedApp({ id: -1, name: 'Desktop Audio', processId: 0 });
-          }
-          console.log('[Presenter] No specific app resolved — using system audio (desktop audio fallback)');
-        } else {
-          notify('info', 'No audio detected', 'Sharing video only. Select an audio app and restart to include audio.');
-        }
-      } else {
-        setAutoDetectFailed(false);
-      }
-
-      let audioTrack: MediaStreamTrack | null = null;
       if (targetAudioId !== null) {
-        try {
-          audioTrack = await captureAudioTrack(targetAudioId);
-          audioAppIdRef.current = targetAudioId;
-        } catch (err) {
-          console.error('Audio capture failed (continuing video-only):', err);
-          notify('info', 'Audio unavailable', 'Sharing video only — the selected audio source could not be captured.');
-        }
+        setAutoDetectFailed(false);
+        return targetAudioId;
       }
+
+      const usedSystemAudio = await resolveSystemAudioFallback();
+      return usedSystemAudio ? -1 : null;
+    },
+    [
+      selectedAudioAppId,
+      audioAppExplicitlySet,
+      loadAudioApps,
+      isWayland,
+      selectedSourceId,
+      attemptAutoResolve,
+      resolveSystemAudioFallback,
+      setAutoDetectFailed,
+    ],
+  );
+
+  const captureAudioForTarget = useCallback(
+    async (targetAudioId: number | null): Promise<MediaStreamTrack | null> => {
+      if (targetAudioId === null) return null;
+      try {
+        const audioTrack = await captureAudioTrack(targetAudioId);
+        audioAppIdRef.current = targetAudioId;
+        return audioTrack;
+      } catch (err) {
+        console.error('Audio capture failed (continuing video-only):', err);
+        notify('info', 'Audio unavailable', 'Sharing video only — the selected audio source could not be captured.');
+        return null;
+      }
+    },
+    [captureAudioTrack, audioAppIdRef],
+  );
+
+  const cleanupFailedShare = useCallback(async (): Promise<void> => {
+    if (window.electronAPI) {
+      await window.electronAPI.stopAudioCapture();
+    }
+    const failedStream = localStreamRef.current;
+    if (failedStream) {
+      for (const track of failedStream.getTracks()) {
+        track.stop();
+      }
+      localStreamRef.current = null;
+    }
+    setPreviewStream(null);
+    if (!audioAppExplicitlySet) {
+      setSelectedAudioAppId(null);
+      setAutoDetectedApp(null);
+    }
+  }, [audioAppExplicitlySet, setSelectedAudioAppId, setAutoDetectedApp]);
+
+  const handleStartShare = useCallback(async () => {
+    primeAudioContext();
+    try {
+      const videoTrack = await captureVideoTrack();
+
+      const targetAudioId = await resolveAudioTarget(videoTrack.label);
+      const audioTrack = await captureAudioForTarget(targetAudioId);
 
       const tracks = audioTrack ? [videoTrack, audioTrack] : [videoTrack];
       const stream = new MediaStream(tracks);
@@ -493,69 +635,14 @@ export const PresenterApp: React.FC = () => {
         throw new Error('Not connected to a room');
       }
 
-      let hadExisting = false;
-      for (const pub of room.localParticipant.trackPublications.values()) {
-        const t = pub.track;
-        if (t) {
-          await room.localParticipant.unpublishTrack(t);
-          hadExisting = true;
-        }
-      }
-
-      if (hadExisting) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
+      await unpublishExisting(room);
 
       resetStatsPrev();
-
-      videoTrack.contentHint = 'motion';
-
-      await room.localParticipant.publishTrack(videoTrack, {
-        source: Track.Source.ScreenShare,
-        screenShareEncoding: {
-          maxBitrate: bitrateLimitRef.current,
-          maxFramerate: streamFpsRef.current,
-        },
-        simulcast: false,
-        videoCodec,
-      });
+      await publishVideoTrack(room, videoTrack, videoCodec, bitrateLimitRef.current, streamFpsRef.current);
       activeVideoCodecRef.current = videoCodec;
 
-      const videoPub = room.localParticipant.videoTrackPublications.values().next().value;
-      const sender = (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
-      if (sender) {
-        if (await applySenderParameters(sender, bitrateLimitRef.current, streamFpsRef.current)) {
-          console.log(
-            `[Presenter] Initial encoder parameters applied: fps=${streamFpsRef.current} bitrate=${(
-              bitrateLimitRef.current / 1_000_000
-            ).toFixed(0)}Mbps`,
-          );
-        }
-      }
-
       if (videoCodec === 'h264') {
-        try {
-          const publisher = (
-            room as {
-              engine?: {
-                pcManager?: { publisher?: { getLocalDescription(): RTCSessionDescription | null | undefined } };
-              };
-            }
-          ).engine?.pcManager?.publisher;
-          if (publisher) {
-            const desc = publisher.getLocalDescription();
-            if (desc) {
-              const h264Lines = desc.sdp
-                .split('\n')
-                .filter((line) => line.startsWith('a=fmtp:') && line.includes('profile-level-id'));
-              for (const line of h264Lines) {
-                console.log(`[SDP:send] H264 fmtp: ${line}`);
-              }
-            }
-          }
-        } catch {
-          console.log('[Presenter] SDP log skipped (no local description yet)');
-        }
+        logH264Sdp(room);
       }
 
       if (audioTrack) {
@@ -571,36 +658,12 @@ export const PresenterApp: React.FC = () => {
       console.error('Failed to capture screen:', err);
       const message = err instanceof Error ? err.message : 'Unknown capture error';
       notify('error', 'Screenshare failed to start', message);
-      if (window.electronAPI) {
-        await window.electronAPI.stopAudioCapture();
-      }
-      const failedStream = localStreamRef.current;
-      if (failedStream) {
-        for (const track of failedStream.getTracks()) {
-          track.stop();
-        }
-        localStreamRef.current = null;
-      }
-      setPreviewStream(null);
-      if (!audioAppExplicitlySet) {
-        setSelectedAudioAppId(null);
-        setAutoDetectedApp(null);
-      }
+      await cleanupFailedShare();
     }
   }, [
     captureVideoTrack,
-    selectedAudioAppId,
-    audioAppExplicitlySet,
-    loadAudioApps,
-    attemptAutoResolve,
-    isWayland,
-    selectedSourceId,
-    setAutoDetectFailed,
-    setCaptureContext,
-    setSelectedAudioAppId,
-    setAutoDetectedApp,
-    captureAudioTrack,
-    audioAppIdRef,
+    resolveAudioTarget,
+    captureAudioForTarget,
     liveKitRoomRef,
     resetStatsPrev,
     bitrateLimitRef,
@@ -609,6 +672,7 @@ export const PresenterApp: React.FC = () => {
     setTelemetry,
     startTelemetryPolling,
     handleStopShare,
+    cleanupFailedShare,
   ]);
 
   const flashCopied = useCallback((kind: 'link' | 'code') => {

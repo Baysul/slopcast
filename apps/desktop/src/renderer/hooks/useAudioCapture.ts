@@ -10,59 +10,76 @@ import { createPcmAudioTrack } from '../utils/pcm-audio';
 
 const AUDIO_APPS_POLL_MS = 3000;
 
+const wordsOf = (q: string): string[] => q.split(/[^a-z0-9]+/).filter((w) => w.length > 0);
+
+// 1. Exact name match
+const matchExactName = (apps: AudioApp[], q: string): AudioApp | null =>
+  apps.find((a) => a.name.trim().toLowerCase() === q) ?? null;
+
+const cleanName = (name: string): string =>
+  name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/exe$/, '');
+
+// 2. Cleaned name equality (handling spaces / .exe, e.g. "zenless zone zero" vs "zenlesszonezero.exe")
+const matchCleanedName = (apps: AudioApp[], qClean: string): AudioApp | null => {
+  if (qClean.length < 3) return null;
+  return (
+    apps.find((a) => {
+      const aClean = cleanName(a.name);
+      return aClean.length >= 3 && (aClean === qClean || qClean.includes(aClean) || aClean.includes(qClean));
+    }) ?? null
+  );
+};
+
+// 3. Name contained in query or query in name
+const matchNameContained = (apps: AudioApp[], q: string): AudioApp | null => {
+  const qLower = q.toLowerCase();
+  return apps.find((a) => qLower.includes(a.name.toLowerCase()) || a.name.toLowerCase().includes(qLower)) ?? null;
+};
+
+// 4. Acronym match for multi-word queries (e.g. "Final Fantasy XIV" -> "ffxiv" matching "ffxiv_dx11.exe")
+const matchAcronym = (apps: AudioApp[], q: string): AudioApp | null => {
+  const words = wordsOf(q);
+  if (words.length < 2) return null;
+  const acronym = words.map((w) => w[0]).join('');
+  if (acronym.length < 3) return null;
+  return apps.find((a) => a.name.toLowerCase().includes(acronym)) ?? null;
+};
+
+// 5. Significant word match (words with length >= 4)
+const matchSignificantWord = (apps: AudioApp[], q: string): AudioApp | null => {
+  for (const word of wordsOf(q)) {
+    if (word.length >= 4) {
+      const best = apps.find((a) => a.name.toLowerCase().includes(word));
+      if (best) return best;
+    }
+  }
+  return null;
+};
+
+// 6. First word match
+const matchFirstWord = (apps: AudioApp[], q: string): AudioApp | null => {
+  const firstWord = wordsOf(q)[0];
+  if (!firstWord) return null;
+  return apps.find((a) => a.name.toLowerCase().includes(firstWord) || firstWord.includes(a.name.toLowerCase())) ?? null;
+};
+
 export const findBestAudioMatch = (apps: AudioApp[], query: string): AudioApp | null => {
   const q = query.trim().toLowerCase();
   if (!q) return null;
 
   const qClean = q.replace(/[^a-z0-9]/g, '');
-
-  // 1. Exact name match
-  let best = apps.find((a) => a.name.trim().toLowerCase() === q);
-  if (best) return best;
-
-  // 2. Cleaned name equality (handling spaces / .exe, e.g. "zenless zone zero" vs "zenlesszonezero.exe")
-  if (qClean.length >= 3) {
-    best = apps.find((a) => {
-      const aClean = a.name
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, '')
-        .replace(/exe$/, '');
-      return aClean.length >= 3 && (aClean === qClean || qClean.includes(aClean) || aClean.includes(qClean));
-    });
-    if (best) return best;
-  }
-
-  // 3. Name contained in query or query in name
-  best = apps.find((a) => q.includes(a.name.toLowerCase()) || a.name.toLowerCase().includes(q));
-  if (best) return best;
-
-  // 4. Acronym match for multi-word queries (e.g. "Final Fantasy XIV" -> "ffxiv" matching "ffxiv_dx11.exe")
-  const words = q.split(/[^a-z0-9]+/).filter((w) => w.length > 0);
-  if (words.length >= 2) {
-    const acronym = words.map((w) => w[0]).join('');
-    if (acronym.length >= 3) {
-      best = apps.find((a) => a.name.toLowerCase().includes(acronym));
-      if (best) return best;
-    }
-  }
-
-  // 5. Significant word match (words with length >= 4)
-  for (const word of words) {
-    if (word.length >= 4) {
-      best = apps.find((a) => a.name.toLowerCase().includes(word));
-      if (best) return best;
-    }
-  }
-
-  // 6. First word match
-  const firstWord = words[0];
-  if (firstWord) {
-    best = apps.find((a) => a.name.toLowerCase().includes(firstWord) || firstWord.includes(a.name.toLowerCase()));
-    if (best) return best;
-  }
-
-  return null;
+  return (
+    matchExactName(apps, q) ??
+    matchCleanedName(apps, qClean) ??
+    matchNameContained(apps, q) ??
+    matchAcronym(apps, q) ??
+    matchSignificantWord(apps, q) ??
+    matchFirstWord(apps, q)
+  );
 };
 
 export interface UseAudioCaptureReturn {
@@ -85,6 +102,38 @@ export interface UseAudioCaptureReturn {
   attemptAutoResolve: (opts?: { sourceId?: string; nameHint?: string }) => Promise<AudioApp | null>;
   handleSelectApp: (appId: number | null, explicit?: boolean) => void;
 }
+
+const unlockMicPermissions = async (): Promise<void> => {
+  const unlock = await navigator.mediaDevices.getUserMedia({ audio: true }).catch((err) => {
+    console.warn('[useAudioCapture] mic permission denied; device labels may stay hidden:', err);
+    return null;
+  });
+  for (const t of unlock?.getTracks() ?? []) {
+    t.stop();
+  }
+};
+
+const openCaptureDevice = async (): Promise<MediaStreamTrack | null> => {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const device = await findCaptureAudioDevice();
+    if (device) {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: { exact: device.deviceId },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+      const track = stream.getAudioTracks()[0];
+      if (track) {
+        return track;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return null;
+};
 
 export function useAudioCapture(
   isSharing: boolean,
@@ -160,31 +209,11 @@ export function useAudioCapture(
       throw new Error('Native audio capture failed to start');
     }
 
-    const unlock = await navigator.mediaDevices.getUserMedia({ audio: true }).catch((err) => {
-      console.warn('[useAudioCapture] mic permission denied; device labels may stay hidden:', err);
-      return null;
-    });
-    for (const t of unlock?.getTracks() ?? []) {
-      t.stop();
-    }
+    await unlockMicPermissions();
 
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const device = await findCaptureAudioDevice();
-      if (device) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            deviceId: { exact: device.deviceId },
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-        });
-        const track = stream.getAudioTracks()[0];
-        if (track) {
-          return track;
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    const deviceTrack = await openCaptureDevice();
+    if (deviceTrack) {
+      return deviceTrack;
     }
 
     const pcmResult = createPcmAudioTrack();
