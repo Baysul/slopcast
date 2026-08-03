@@ -16,24 +16,58 @@ function findConfigFile(): string | null {
   return null;
 }
 
-export function loadConfig(): AppConfig {
-  const envServerPort = parseInt(process.env.SERVER_PORT || process.env.PORT || '', 10) || 0;
-  const envWebPort = parseInt(process.env.WEB_PORT || '', 10) || 0;
-  const envApiEndpoint = process.env.API_ENDPOINT || '';
-  const envWebsiteUrl = process.env.WEBSITE_URL || '';
-  const envLivekitUrl = process.env.LIVEKIT_URL || '';
-  const envLivekitApiKey = process.env.LIVEKIT_API_KEY || '';
-  const envLivekitApiSecret = process.env.LIVEKIT_API_SECRET || '';
+interface EnvConfig {
+  serverPort: number;
+  webPort: number;
+  apiEndpoint: string;
+  websiteUrl: string;
+  livekitUrl: string;
+  livekitApiKey: string;
+  livekitApiSecret: string;
+}
 
-  const defaults: AppConfig = {
-    serverPort: envServerPort || 3001,
-    webPort: envWebPort || 3000,
-    apiEndpoint: envApiEndpoint || `http://localhost:${envServerPort || 3001}`,
-    websiteUrl: envWebsiteUrl || `http://localhost:${envWebPort || 3000}`,
-    livekitUrl: envLivekitUrl || 'ws://localhost:7880',
-    livekitApiKey: envLivekitApiKey || 'devkey',
-    livekitApiSecret: envLivekitApiSecret || 'secret',
-  };
+const readEnv = (): EnvConfig => ({
+  serverPort: parseInt(process.env.SERVER_PORT || process.env.PORT || '', 10) || 0,
+  webPort: parseInt(process.env.WEB_PORT || '', 10) || 0,
+  apiEndpoint: process.env.API_ENDPOINT || '',
+  websiteUrl: process.env.WEBSITE_URL || '',
+  livekitUrl: process.env.LIVEKIT_URL || '',
+  livekitApiKey: process.env.LIVEKIT_API_KEY || '',
+  livekitApiSecret: process.env.LIVEKIT_API_SECRET || '',
+});
+
+const buildDefaults = (env: EnvConfig): AppConfig => ({
+  serverPort: env.serverPort || 3001,
+  webPort: env.webPort || 3000,
+  apiEndpoint: env.apiEndpoint || `http://localhost:${env.serverPort || 3001}`,
+  websiteUrl: env.websiteUrl || `http://localhost:${env.webPort || 3000}`,
+  livekitUrl: env.livekitUrl || 'ws://localhost:7880',
+  livekitApiKey: env.livekitApiKey || 'devkey',
+  livekitApiSecret: env.livekitApiSecret || 'secret',
+});
+
+const mergeConfig = (env: EnvConfig, defaults: AppConfig, fileConfig: Partial<AppConfig>): AppConfig => ({
+  serverPort: env.serverPort || fileConfig.serverPort || defaults.serverPort,
+  webPort: env.webPort || fileConfig.webPort || defaults.webPort,
+  apiEndpoint:
+    env.apiEndpoint || fileConfig.apiEndpoint || `http://localhost:${env.serverPort || fileConfig.serverPort || 3001}`,
+  websiteUrl:
+    env.websiteUrl || fileConfig.websiteUrl || `http://localhost:${env.webPort || fileConfig.webPort || 3000}`,
+  livekitUrl: env.livekitUrl || fileConfig.livekitUrl || defaults.livekitUrl,
+  livekitApiKey: env.livekitApiKey || fileConfig.livekitApiKey || defaults.livekitApiKey,
+  livekitApiSecret: env.livekitApiSecret || fileConfig.livekitApiSecret || defaults.livekitApiSecret,
+});
+
+const assertProductionConfig = (config: AppConfig): void => {
+  if (process.env.NODE_ENV !== 'production' || process.env.ALLOW_DEV_KEYS === 'true') return;
+  if (config.livekitApiKey === 'devkey' || config.livekitApiSecret === 'secret') {
+    throw new Error('Production environment requires custom LIVEKIT_API_KEY and LIVEKIT_API_SECRET');
+  }
+};
+
+export function loadConfig(): AppConfig {
+  const env = readEnv();
+  const defaults = buildDefaults(env);
 
   let config = defaults;
   const configPath = findConfigFile();
@@ -41,29 +75,13 @@ export function loadConfig(): AppConfig {
   if (configPath) {
     try {
       const fileConfig = JSON.parse(readFileSync(configPath, 'utf-8')) as Partial<AppConfig>;
-      config = {
-        serverPort: envServerPort || fileConfig.serverPort || defaults.serverPort,
-        webPort: envWebPort || fileConfig.webPort || defaults.webPort,
-        apiEndpoint:
-          envApiEndpoint ||
-          fileConfig.apiEndpoint ||
-          `http://localhost:${envServerPort || fileConfig.serverPort || 3001}`,
-        websiteUrl:
-          envWebsiteUrl || fileConfig.websiteUrl || `http://localhost:${envWebPort || fileConfig.webPort || 3000}`,
-        livekitUrl: envLivekitUrl || fileConfig.livekitUrl || defaults.livekitUrl,
-        livekitApiKey: envLivekitApiKey || fileConfig.livekitApiKey || defaults.livekitApiKey,
-        livekitApiSecret: envLivekitApiSecret || fileConfig.livekitApiSecret || defaults.livekitApiSecret,
-      };
+      config = mergeConfig(env, defaults, fileConfig);
     } catch {
       console.error('Failed to parse slopcast.config.json, using env/defaults');
     }
   }
 
-  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEV_KEYS !== 'true') {
-    if (config.livekitApiKey === 'devkey' || config.livekitApiSecret === 'secret') {
-      throw new Error('Production environment requires custom LIVEKIT_API_KEY and LIVEKIT_API_SECRET');
-    }
-  }
+  assertProductionConfig(config);
 
   return config;
 }
