@@ -104,23 +104,7 @@ export function stopNativeCapture() {
   }
 }
 
-const resolveAudioForWayland = async (
-  ctx: MainContext,
-  nameHint: string | undefined,
-): Promise<native.AudioApp | null> => {
-  // Ensure lastCaptureContext has DE info even before Layer 3 runs,
-  // so the renderer's fallback works if introspection fails entirely.
-  const detectedDe = detectDesktopEnvironment();
-  if (!lastCaptureContext || lastCaptureContext.de === 'unknown') {
-    lastCaptureContext = {
-      de: detectedDe,
-      sourceType: 'unknown',
-      mediaName: null,
-      videoNodeCount: 0,
-      screencastNodeId: null,
-    };
-  }
-
+const introspectAudioApp = async (ctx: MainContext): Promise<native.AudioApp | null> => {
   // Layer 1: PipeWire introspection — retry as xdg-desktop-portal may lag.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -136,21 +120,28 @@ const resolveAudioForWayland = async (
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
   }
+  return null;
+};
 
-  // Layer 2: Name matching via Rust.
-  const hint = nameHint ?? lastCapturedSourceName;
-  if (hint) {
-    try {
-      const app = await ctx.native.resolveAudioAppByName(hint);
-      if (app) {
-        console.log(`[resolve-audio-source] Wayland name-match "${hint}" → "${app.name}"`);
-        return app;
-      }
-    } catch (err) {
-      console.error('resolve-audio-source Wayland name-match error:', err);
+const matchAudioAppByName = async (
+  ctx: MainContext,
+  nameHint: string | null | undefined,
+  label: string,
+): Promise<native.AudioApp | null> => {
+  if (!nameHint) return null;
+  try {
+    const app = await ctx.native.resolveAudioAppByName(nameHint);
+    if (app) {
+      console.log(`[resolve-audio-source] ${label} name-match "${nameHint}" → "${app.name}"`);
+      return app;
     }
+  } catch (err) {
+    console.error(`resolve-audio-source ${label} name-match error:`, err);
   }
+  return null;
+};
 
+const inspectCaptureGraph = async (ctx: MainContext): Promise<native.AudioApp | null> => {
   // Layer 3: native video-graph introspection — reports which desktop
   // environment is streaming, whether the source is a monitor or a window,
   // and the best-matched audio app for the captured source.
@@ -177,10 +168,55 @@ const resolveAudioForWayland = async (
       screencastNodeId: null,
     };
   }
+  return null;
+};
+
+const resolveAudioForWayland = async (
+  ctx: MainContext,
+  nameHint: string | undefined,
+): Promise<native.AudioApp | null> => {
+  // Ensure lastCaptureContext has DE info even before Layer 3 runs,
+  // so the renderer's fallback works if introspection fails entirely.
+  const detectedDe = detectDesktopEnvironment();
+  if (!lastCaptureContext || lastCaptureContext.de === 'unknown') {
+    lastCaptureContext = {
+      de: detectedDe,
+      sourceType: 'unknown',
+      mediaName: null,
+      videoNodeCount: 0,
+      screencastNodeId: null,
+    };
+  }
+
+  const app =
+    (await introspectAudioApp(ctx)) ??
+    (await matchAudioAppByName(ctx, nameHint ?? lastCapturedSourceName, 'Wayland')) ??
+    (await inspectCaptureGraph(ctx));
+  if (app) return app;
 
   console.log(
     `[resolve-audio-source] Wayland: no match (introspect=null, nameHint="${nameHint ?? ''}", lastSource="${lastCapturedSourceName ?? ''}")`,
   );
+  return null;
+};
+
+const resolveAudioForX11Window = async (
+  ctx: MainContext,
+  sourceId: string | undefined,
+): Promise<native.AudioApp | null> => {
+  // Layer 1: _NET_WM_PID via X11 window ID.
+  if (!sourceId?.startsWith('window:')) return null;
+  const windowId = parseInt(sourceId.split(':')[1], 10);
+  if (Number.isNaN(windowId)) return null;
+  try {
+    const app = await ctx.native.resolveAudioAppForX11Window(windowId);
+    if (app) {
+      console.log(`[resolve-audio-source] X11 PID-match: window ${windowId} → "${app.name}"`);
+      return app;
+    }
+  } catch (err) {
+    console.error('resolve-audio-source X11 error:', err);
+  }
   return null;
 };
 
@@ -189,34 +225,8 @@ const resolveAudioForX11 = async (
   sourceId: string | undefined,
   nameHint: string | undefined,
 ): Promise<native.AudioApp | null> => {
-  // Layer 1: _NET_WM_PID via X11 window ID.
-  if (sourceId?.startsWith('window:')) {
-    const windowId = parseInt(sourceId.split(':')[1], 10);
-    if (!Number.isNaN(windowId)) {
-      try {
-        const app = await ctx.native.resolveAudioAppForX11Window(windowId);
-        if (app) {
-          console.log(`[resolve-audio-source] X11 PID-match: window ${windowId} → "${app.name}"`);
-          return app;
-        }
-      } catch (err) {
-        console.error('resolve-audio-source X11 error:', err);
-      }
-    }
-  }
-
-  // Layer 2: Name matching via Rust.
-  if (nameHint) {
-    try {
-      const app = await ctx.native.resolveAudioAppByName(nameHint);
-      if (app) {
-        console.log(`[resolve-audio-source] X11 name-match "${nameHint}" → "${app.name}"`);
-        return app;
-      }
-    } catch (err) {
-      console.error('resolve-audio-source X11 name-match error:', err);
-    }
-  }
+  const app = (await resolveAudioForX11Window(ctx, sourceId)) ?? (await matchAudioAppByName(ctx, nameHint, 'X11'));
+  if (app) return app;
 
   console.log(`[resolve-audio-source] X11: no match (sourceId="${sourceId ?? ''}", nameHint="${nameHint ?? ''}")`);
   return null;
@@ -260,7 +270,6 @@ export function registerVideoHandlers(ctx: MainContext) {
     }
   });
 
-  // ── Native Video Capture ─────────────────────────────────────────────
   // Video frames are produced by native-rust's PipeWire pw_stream and
   // delivered to native-livekit via the DMA-BUF callback bridge.
   //
