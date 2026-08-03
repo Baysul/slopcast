@@ -11,7 +11,7 @@ export interface SpectatorTelemetry {
   hasVideo: boolean;
   hasAudio: boolean;
   quality: 'excellent' | 'degraded' | 'poor';
-  framesReceived: number;
+  framesDecoded: number;
   packetsReceived: number;
   decoderImplementation: string | null;
 }
@@ -39,6 +39,8 @@ interface RTCStatLike {
 interface StatsPrev {
   bytesReceived: number;
   framesDecoded: number;
+  packetsReceived: number;
+  packetsLost: number;
   ts: number;
   init: boolean;
 }
@@ -68,7 +70,7 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
   let packetLossPct: number | null = null;
   let freezeCount = 0;
   let hasVideo = false;
-  let framesReceived = 0;
+  let framesDecoded = 0;
   let packetsReceived = 0;
   let decoderImplementation: string | null = null;
 
@@ -92,15 +94,23 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
         if (db >= 0) videoBitrate = (db * 8) / dt;
         const df = (report.framesDecoded ?? 0) - prev.framesDecoded;
         if (df >= 0) frameRate = df / dt;
-      }
-
-      const totalReceived = (report.packetsReceived ?? 0) + (report.packetsLost ?? 0);
-      if (totalReceived > 0) {
-        packetLossPct = ((report.packetsLost ?? 0) / totalReceived) * 100;
+        // Delta-based loss: cumulative loss understates recent degradation
+        // and can never recover after a burst.
+        const dl = (report.packetsLost ?? 0) - prev.packetsLost;
+        const dr = (report.packetsReceived ?? 0) - prev.packetsReceived;
+        const total = dl + dr;
+        if (total > 0) {
+          packetLossPct = (dl / total) * 100;
+        }
+      } else {
+        const totalReceived = (report.packetsReceived ?? 0) + (report.packetsLost ?? 0);
+        if (totalReceived > 0) {
+          packetLossPct = ((report.packetsLost ?? 0) / totalReceived) * 100;
+        }
       }
 
       freezeCount = report.freezeCount ?? 0;
-      framesReceived = report.framesDecoded ?? 0;
+      framesDecoded = report.framesDecoded ?? 0;
       packetsReceived = report.packetsReceived ?? 0;
     }
 
@@ -124,7 +134,7 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
     hasVideo,
     hasAudio,
     quality,
-    framesReceived,
+    framesDecoded,
     packetsReceived,
     decoderImplementation,
   };
@@ -137,6 +147,8 @@ export function createStatsPrev(stats: RTCStatsReport): StatsPrev | null {
       return {
         bytesReceived: report.bytesReceived ?? 0,
         framesDecoded: report.framesDecoded ?? 0,
+        packetsReceived: report.packetsReceived ?? 0,
+        packetsLost: report.packetsLost ?? 0,
         ts: report.timestamp ?? 0,
         init: true,
       };

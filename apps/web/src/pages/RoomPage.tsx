@@ -141,7 +141,10 @@ export const RoomPage: React.FC = () => {
       if (!managedStreamRef.current.getTracks().includes(track.mediaStreamTrack)) {
         managedStreamRef.current.addTrack(track.mediaStreamTrack);
       }
-      setMediaStream(new MediaStream(managedStreamRef.current.getTracks()));
+      // Reuse the same MediaStream object identity: mutating it in place keeps
+      // VideoPlayer's srcObject binding stable, so playback is never restarted
+      // by a track subscribe/unsubscribe.
+      setMediaStream(managedStreamRef.current);
       setConnectionStatus('live');
       setStatusText('Live');
 
@@ -182,7 +185,7 @@ export const RoomPage: React.FC = () => {
         setConnectionStatus('disconnected');
         setStatusText('Stream ended — waiting for presenter...');
       } else {
-        setMediaStream(new MediaStream(managedStreamRef.current?.getTracks() ?? []));
+        setMediaStream(managedStreamRef.current);
       }
     });
 
@@ -242,13 +245,21 @@ export const RoomPage: React.FC = () => {
     }
 
     const getToken = async (): Promise<{ token: string; livekitUrl: string }> => {
-      const res = await fetch(`${baseUrl}/api/rooms/${roomId}/token`);
-      if (!res.ok) {
-        const errData = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(errData.error || `Failed to fetch spectator token (${res.status})`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try {
+        const res = await fetch(`${baseUrl}/api/rooms/${roomId}/token`, {
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const errData = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(errData.error || `Failed to fetch spectator token (${res.status})`);
+        }
+        const data = (await res.json()) as { token: string; livekitUrl: string };
+        return data;
+      } finally {
+        clearTimeout(timeout);
       }
-      const data = (await res.json()) as { token: string; livekitUrl: string };
-      return data;
     };
 
     getToken()
@@ -278,7 +289,7 @@ export const RoomPage: React.FC = () => {
                 managedStreamRef.current.addTrack(track);
               }
             }
-            setMediaStream(new MediaStream(managedStreamRef.current.getTracks()));
+            setMediaStream(managedStreamRef.current);
             setConnectionStatus('live');
             setStatusText('Live');
           } else if (room.state === ConnectionState.Connected) {
@@ -315,6 +326,11 @@ export const RoomPage: React.FC = () => {
     };
   }, [initializeConnection]);
 
+  const decoderStalledRef = useRef(false);
+  useEffect(() => {
+    decoderStalledRef.current = decoderStalled;
+  }, [decoderStalled]);
+
   useEffect(() => {
     if (connectionStatus !== 'live') {
       if (stallCheckRef.current) {
@@ -340,7 +356,13 @@ export const RoomPage: React.FC = () => {
       const receiver = (videoTrack as { receiver?: RTCRtpReceiver }).receiver;
       if (!receiver) return;
 
-      const stats = await receiver.getStats();
+      let stats: RTCStatsReport;
+      try {
+        stats = await receiver.getStats();
+      } catch (err) {
+        console.warn('[Room] getStats failed:', err);
+        return;
+      }
       let packetsReceived = 0;
       let framesDecoded = 0;
       let codecMime: string | null = null;
@@ -385,7 +407,7 @@ export const RoomPage: React.FC = () => {
         }
       } else if (framesDecoded > 0) {
         stallStartRef.current = 0;
-        if (decoderStalled) {
+        if (decoderStalledRef.current) {
           setDecoderStalled(false);
           setStalledCodec(null);
         }
@@ -398,9 +420,24 @@ export const RoomPage: React.FC = () => {
         stallCheckRef.current = null;
       }
     };
-  }, [connectionStatus, decoderStalled]);
+  }, [connectionStatus]);
 
   const handleResync = () => initializeConnection();
+
+  // Feeds the spectator telemetry bar (VideoPlayer polls this at 2 s).
+  const getStatsFn = useCallback(async (): Promise<RTCStatsReport | null> => {
+    const room = roomRef.current;
+    if (!room) return null;
+    const videoPub = room.remoteParticipants.values().next().value?.videoTrackPublications?.values().next().value;
+    const receiver = (videoPub?.track as { receiver?: RTCRtpReceiver } | undefined)?.receiver;
+    if (!receiver) return null;
+    try {
+      return await receiver.getStats();
+    } catch (err) {
+      console.warn('[Room] getStats failed:', err);
+      return null;
+    }
+  }, []);
 
   const statusVariant = (): StatusVariant => {
     if (connectionStatus === 'live') return 'live';
@@ -421,6 +458,7 @@ export const RoomPage: React.FC = () => {
           statusText={statusText}
           onResync={handleResync}
           fullBleed
+          getStatsFn={getStatsFn}
           decoderStalled={decoderStalled}
           stalledCodec={stalledCodec}
           isFullscreen={isFullscreen}

@@ -1,3 +1,4 @@
+import { ROOM_CODE_RE } from '@slopcast/shared-types';
 import { ArrowRight, Loader2 } from 'lucide-react';
 import type React from 'react';
 import { useState } from 'react';
@@ -13,8 +14,6 @@ export const HomePage: React.FC = () => {
   const [error, setError] = useState('');
   const [joining, setJoining] = useState(false);
   const navigate = useNavigate();
-
-  const ROOM_CODE_RE = /^[a-zA-Z0-9-]{6,}$/;
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +31,7 @@ export const HomePage: React.FC = () => {
     }
 
     if (!ROOM_CODE_RE.test(code)) {
-      setError('Invalid room code format. Codes contain letters, numbers, and hyphens.');
+      setError('Invalid room code format. Codes look like abc-123-xyz.');
       return;
     }
 

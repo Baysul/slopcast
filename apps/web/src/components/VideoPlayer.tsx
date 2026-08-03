@@ -25,6 +25,24 @@ interface VideoPlayerProps {
 
 const STATS_POLL_MS = 2000;
 
+// Browsers block unmuted autoplay without a gesture: try playing at normal
+// volume first, then retry muted. Resolves to whether a user gesture is still
+// needed for audio.
+async function playWithMuteFallback(video: HTMLVideoElement): Promise<boolean> {
+  try {
+    await video.play();
+    return false;
+  } catch {
+    video.muted = true;
+    try {
+      await video.play();
+      return true;
+    } catch {
+      return true;
+    }
+  }
+}
+
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   mediaStream,
   isLive,
@@ -43,8 +61,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(1);
-  const [isFullscreenState, setIsFullscreenState] = useState(false);
-  const isFullscreen = propIsFullscreen ?? isFullscreenState;
+  const isFullscreen = propIsFullscreen ?? false;
   const [hasVideoTrack, setHasVideoTrack] = useState(false);
   const [needsUserGesture, setNeedsUserGesture] = useState(false);
 
@@ -92,25 +109,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setIsPlaying(false);
       setIsMuted(false);
 
-      video
-        .play()
-        .then(() => {
-          setIsPlaying(true);
-          unlockAudioContexts();
-        })
-        .catch(() => {
+      playWithMuteFallback(video).then((needsGesture) => {
+        setIsPlaying(true);
+        if (needsGesture) {
           video.muted = true;
           setIsMuted(true);
-          video
-            .play()
-            .then(() => {
-              setIsPlaying(true);
-              setNeedsUserGesture(true);
-            })
-            .catch(() => {
-              setNeedsUserGesture(true);
-            });
-        });
+          setNeedsUserGesture(true);
+        } else {
+          unlockAudioContexts();
+        }
+      });
     } else {
       video.srcObject = null;
       setHasVideoTrack(false);
@@ -127,23 +135,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     video.muted = false;
     setIsMuted(false);
 
-    video
-      .play()
-      .then(() => {
+    playWithMuteFallback(video)
+      .then((needsGesture) => {
         setIsPlaying(true);
-        unlockAudioContexts();
+        if (needsGesture) {
+          video.muted = true;
+          setIsMuted(true);
+          console.warn('[VideoPlayer] Play still blocked after user gesture:', needsGesture);
+        } else {
+          unlockAudioContexts();
+        }
       })
       .catch((err) => {
-        console.warn('[VideoPlayer] Play still blocked after user gesture:', err);
-        video.muted = true;
-        setIsMuted(true);
-        video
-          .play()
-          .then(() => {
-            setIsPlaying(true);
-            unlockAudioContexts();
-          })
-          .catch(console.error);
+        console.warn('[VideoPlayer] Play blocked after user gesture:', err);
       });
 
     setNeedsUserGesture(false);
@@ -187,16 +191,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setIsMuted(newVolume === 0);
     }
   };
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreenState(!!document.fullscreenElement);
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-    };
-  }, []);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
