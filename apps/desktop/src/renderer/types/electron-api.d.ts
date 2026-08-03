@@ -32,20 +32,44 @@ declare global {
       saveStreamSettings: (settings: StreamSettings) => Promise<boolean>;
       getOnboardingCompleted: () => Promise<boolean>;
       setOnboardingCompleted: () => Promise<boolean>;
-      // Native capture pipeline (native-livekit WASAPI/native-video delivery, in
-      // progress): kept for the Task-4 integration, not yet called by the renderer.
+      // Native capture pipeline (native-livekit): the renderer's only path for
+      // room connection, video publishing, and telemetry.
       connectNativeRoom: (livekitUrl: string, token: string) => Promise<boolean>;
       disconnectNativeRoom: () => Promise<boolean>;
+      isNativeRoomConnected: () => Promise<boolean>;
       startNativeCapture: (
         sourceIndex: number,
-        config: { fps: number; width: number; height: number; videoCodec?: string },
-      ) => Promise<{ ok: boolean; nodeId: number | null; error?: string }>;
+        config: { fps: number; width: number; height: number; videoCodec?: string; maxBitrate?: number },
+      ) => Promise<{ ok: boolean; nodeId: number | null; videoEnabled: boolean; error?: string }>;
+      updateNativeVideo: (config: {
+        fps: number;
+        width: number;
+        height: number;
+        videoCodec?: string;
+        maxBitrate?: number;
+      }) => Promise<boolean>;
       stopNativeCapture: () => Promise<boolean>;
       stopVideoCapture: () => Promise<boolean>;
       isNativeCaptureActive: () => Promise<boolean>;
       getSpectatorCount: () => Promise<number>;
-      onAudioPcmData: (callback: (buffer: ArrayBuffer) => void) => () => void;
+      getNativeTelemetry: () => Promise<NativeTelemetry | null>;
       onAudioWave?: (callback: (waves: AudioAppWave[]) => void) => () => void;
     };
   }
+}
+
+export interface NativeTelemetry {
+  videoCodec: string | null;
+  videoBytesSent: number | null;
+  videoPacketsSent: number | null;
+  videoPacketsLost: number | null;
+  videoFramesSent: number | null;
+  videoWidth: number | null;
+  videoHeight: number | null;
+  audioCodec: string | null;
+  audioBytesSent: number | null;
+  audioPacketsSent: number | null;
+  audioPacketsLost: number | null;
+  rttMs: number | null;
+  timestampMs: number | null;
 }

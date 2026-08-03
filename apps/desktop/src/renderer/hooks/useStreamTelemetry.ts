@@ -1,7 +1,7 @@
 import { codecLabel } from '@slopcast/shared-types';
-import type { Room } from 'livekit-client';
 import { useCallback, useRef, useState } from 'react';
 import { idleTelemetry, type StreamTelemetry } from '../components/telemetry/StreamTelemetryBar';
+import type { NativeTelemetry } from '../types/electron-api';
 
 const STATS_POLL_MS = 1000;
 const STATS_HISTORY_MAX = 48;
@@ -14,24 +14,6 @@ interface StatsPrev {
   aBytes: number;
   aTs: number;
   aInit: boolean;
-}
-
-interface RTCStatLike {
-  type: string;
-  kind?: string;
-  timestamp?: number;
-  codecId?: string;
-  bytesSent?: number;
-  packetsSent?: number;
-  packetsLost?: number;
-  framesSent?: number;
-  nominated?: boolean;
-  state?: string;
-  currentRoundTripTime?: number;
-  mimeType?: string;
-  implementation?: string;
-  frameWidth?: number;
-  frameHeight?: number;
 }
 
 interface StatsSnapshot {
@@ -53,104 +35,60 @@ interface TickInputs {
   height: number | null;
   targetFrameRate: number | null;
   hasAudio: boolean;
-  elapsedMs: number;
 }
 
-const applyVideoDelta = (snap: StatsSnapshot, report: RTCStatLike, prev: StatsPrev): void => {
-  const ts = report.timestamp ?? 0;
-  if (!prev.vInit || ts <= prev.vTs) return;
-  const dt = (ts - prev.vTs) / 1000;
-  const db = (report.bytesSent ?? 0) - prev.vBytes;
+const applyVideoDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPrev): void => {
+  if (t.timestampMs == null || t.videoBytesSent == null) return;
+  if (!prev.vInit || t.timestampMs <= prev.vTs) return;
+  const dt = (t.timestampMs - prev.vTs) / 1000;
+  const db = t.videoBytesSent - prev.vBytes;
   if (db >= 0) snap.videoBps = (db * 8) / dt;
-  if (typeof report.framesSent === 'number') {
-    const df = report.framesSent - prev.vFrames;
+  if (t.videoFramesSent != null) {
+    const df = t.videoFramesSent - prev.vFrames;
     if (df >= 0) snap.fps = df / dt;
   }
 };
 
-const applyAudioDelta = (snap: StatsSnapshot, report: RTCStatLike, prev: StatsPrev): void => {
-  const ts = report.timestamp ?? 0;
-  if (!prev.aInit || ts <= prev.aTs) return;
-  const dt = (ts - prev.aTs) / 1000;
-  const db = (report.bytesSent ?? 0) - prev.aBytes;
+const applyAudioDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPrev): void => {
+  if (t.timestampMs == null || t.audioBytesSent == null) return;
+  if (!prev.aInit || t.timestampMs <= prev.aTs) return;
+  const dt = (t.timestampMs - prev.aTs) / 1000;
+  const db = t.audioBytesSent - prev.aBytes;
   if (db >= 0) snap.audioBps = (db * 8) / dt;
 };
 
-const codecOf = (report: RTCStatLike, stats: RTCStatsReport): RTCStatLike | undefined => {
-  if (!report.codecId) return undefined;
-  return stats.get(report.codecId) as RTCStatLike | undefined;
-};
-
-const foldVideoReport = (snap: StatsSnapshot, report: RTCStatLike, stats: RTCStatsReport, prev: StatsPrev): void => {
-  const codecReport = codecOf(report, stats);
-  snap.videoMime = codecReport?.mimeType ?? null;
-  snap.videoEnc = codecReport?.implementation ?? null;
-  snap.encWidth = report.frameWidth ?? null;
-  snap.encHeight = report.frameHeight ?? null;
-  snap.packetsSent += report.packetsSent || 0;
-  snap.packetsLost += report.packetsLost || 0;
-  applyVideoDelta(snap, report, prev);
-  prev.vInit = true;
-  prev.vBytes = report.bytesSent ?? prev.vBytes;
-  prev.vFrames = typeof report.framesSent === 'number' ? report.framesSent : prev.vFrames;
-  prev.vTs = report.timestamp || prev.vTs;
-};
-
-const foldAudioReport = (snap: StatsSnapshot, report: RTCStatLike, stats: RTCStatsReport, prev: StatsPrev): void => {
-  const codecReport = codecOf(report, stats);
-  snap.audioMime = codecReport?.mimeType ?? null;
-  snap.packetsSent += report.packetsSent || 0;
-  snap.packetsLost += report.packetsLost || 0;
-  applyAudioDelta(snap, report, prev);
-  prev.aInit = true;
-  prev.aBytes = report.bytesSent ?? prev.aBytes;
-  prev.aTs = report.timestamp || prev.aTs;
-};
-
-const foldCandidatePair = (snap: StatsSnapshot, report: RTCStatLike): void => {
-  if ((report.nominated || report.state === 'succeeded') && typeof report.currentRoundTripTime === 'number') {
-    snap.rttMs = report.currentRoundTripTime * 1000;
-  }
-};
-
-const foldReport = (snap: StatsSnapshot, report: RTCStatLike, stats: RTCStatsReport, prev: StatsPrev): void => {
-  if (report.type === 'outbound-rtp' && report.kind === 'video') {
-    foldVideoReport(snap, report, stats, prev);
-  } else if (report.type === 'outbound-rtp' && report.kind === 'audio') {
-    foldAudioReport(snap, report, stats, prev);
-  } else if (report.type === 'candidate-pair') {
-    foldCandidatePair(snap, report);
-  }
-};
-
-const collectStats = async (
-  videoSender: RTCRtpSender,
-  audioSender: RTCRtpSender | undefined,
-  prev: StatsPrev,
-): Promise<StatsSnapshot> => {
+// Native-livekit reports cumulative libwebrtc counters; deltas are computed
+// here exactly like the old renderer-side getStats() path did.
+const foldNativeTelemetry = (t: NativeTelemetry, prev: StatsPrev): StatsSnapshot => {
   const snap: StatsSnapshot = {
-    videoMime: null,
+    videoMime: t.videoCodec,
     videoEnc: null,
-    audioMime: null,
+    audioMime: t.audioCodec,
     videoBps: null,
     audioBps: null,
     fps: null,
-    packetsSent: 0,
-    packetsLost: 0,
-    rttMs: null,
-    encWidth: null,
-    encHeight: null,
+    packetsSent: (t.videoPacketsSent ?? 0) + (t.audioPacketsSent ?? 0),
+    packetsLost: (t.videoPacketsLost ?? 0) + (t.audioPacketsLost ?? 0),
+    rttMs: t.rttMs,
+    encWidth: t.videoWidth,
+    encHeight: t.videoHeight,
   };
 
-  const audioStatsPromise = audioSender ? audioSender.getStats() : Promise.resolve(null);
-  const [videoStats, audioStats] = await Promise.all([videoSender.getStats(), audioStatsPromise]);
-
-  for (const stats of [videoStats, audioStats]) {
-    if (!stats) continue;
-    for (const reportRaw of stats.values()) {
-      foldReport(snap, reportRaw as RTCStatLike, stats, prev);
-    }
+  applyVideoDelta(snap, t, prev);
+  if (t.videoBytesSent != null) {
+    prev.vInit = true;
+    prev.vBytes = t.videoBytesSent;
+    prev.vFrames = t.videoFramesSent ?? prev.vFrames;
+    prev.vTs = t.timestampMs ?? prev.vTs;
   }
+
+  applyAudioDelta(snap, t, prev);
+  if (t.audioBytesSent != null) {
+    prev.aInit = true;
+    prev.aBytes = t.audioBytesSent;
+    prev.aTs = t.timestampMs ?? prev.aTs;
+  }
+
   return snap;
 };
 
@@ -183,27 +121,19 @@ const smoothTelemetry = (snap: StatsSnapshot, fpsBuf: number[], brBuf: number[],
   return { sFps, sBr, lossPct, bitrateHistory };
 };
 
-const collectTickInputs = (localStream: MediaStream | null, broadcastStart: number | null): TickInputs => {
-  const now = performance.now();
-  const vTrack = localStream?.getVideoTracks()[0] ?? null;
-  const settings = vTrack?.getSettings() ?? null;
-  return {
-    width: settings?.width ?? null,
-    height: settings?.height ?? null,
-    targetFrameRate: settings?.frameRate ?? (vTrack ? 60 : null),
-    hasAudio: (localStream?.getAudioTracks().length ?? 0) > 0,
-    elapsedMs: broadcastStart ? now - broadcastStart : 0,
-  };
-};
-
-const telemetryWithoutSender = (p: StreamTelemetry, inputs: TickInputs, spectatorCount: number): StreamTelemetry => ({
+const telemetryWithoutSender = (
+  p: StreamTelemetry,
+  inputs: TickInputs,
+  spectatorCount: number,
+  elapsedMs: number,
+): StreamTelemetry => ({
   ...p,
   live: true,
   width: inputs.width,
   height: inputs.height,
   targetFrameRate: inputs.targetFrameRate,
   hasAudio: inputs.hasAudio,
-  elapsedMs: inputs.elapsedMs,
+  elapsedMs,
   spectatorCount,
   videoBitrate: null,
   audioBitrate: null,
@@ -216,6 +146,7 @@ const buildTelemetryUpdate = (
   inputs: TickInputs,
   smoothed: Smoothed,
   spectatorCount: number,
+  elapsedMs: number,
 ): StreamTelemetry => ({
   live: true,
   videoCodec: snap.videoMime ? codecLabel(snap.videoMime) : p.videoCodec,
@@ -231,16 +162,16 @@ const buildTelemetryUpdate = (
   packetLossPct: smoothed.lossPct,
   rttMs: snap.rttMs ?? p.rttMs,
   bitrateHistory: smoothed.bitrateHistory,
-  elapsedMs: inputs.elapsedMs,
+  elapsedMs,
   spectatorCount,
 });
 
 const orDash = (value: number | string | null): string => {
-  if (value == null) return '–';
+  if (value == null) return '\u2013';
   return String(value);
 };
 
-interface TelemetryLogInput {
+const telemetryLogLine = (i: {
   videoMime: string | null;
   encWidth: number | null;
   width: number | null;
@@ -252,25 +183,13 @@ interface TelemetryLogInput {
   lossPct: number;
   rttMs: number | null;
   spectatorCount: number;
-}
-
-const telemetryLogLine = (i: TelemetryLogInput): string => {
-  const fpsText = i.sFps != null ? String(Math.round(i.sFps)) : '–';
-  const brText = i.sBr != null ? (i.sBr / 1_000_000).toFixed(1) : '–';
-  const rttText = i.rttMs != null ? String(Math.round(i.rttMs)) : '–';
+}): string => {
+  const fpsText = i.sFps != null ? String(Math.round(i.sFps)) : '\u2013';
+  const brText = i.sBr != null ? (i.sBr / 1_000_000).toFixed(1) : '\u2013';
+  const rttText = i.rttMs != null ? String(Math.round(i.rttMs)) : '\u2013';
   const widthText = orDash(i.encWidth ?? i.width);
   const heightText = orDash(i.encHeight ?? i.height);
-  return `[Telemetry] ${orDash(i.videoMime)} ${widthText}×${heightText} ${fpsText}/${orDash(i.targetFrameRate)}fps ${brText}Mbps loss ${i.lossPct.toFixed(2)}% rtt ${rttText}ms · ${i.spectatorCount} spectator(s)`;
-};
-
-const videoSenderOf = (room: Room | null): RTCRtpSender | undefined => {
-  const videoPub = room?.localParticipant.videoTrackPublications.values().next().value;
-  return (videoPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
-};
-
-const audioSenderOf = (room: Room | null): RTCRtpSender | undefined => {
-  const audioPub = room?.localParticipant.audioTrackPublications.values().next().value;
-  return (audioPub?.track as { sender?: RTCRtpSender } | undefined)?.sender;
+  return `[Telemetry] ${orDash(i.videoMime)} ${widthText}\u00d7${heightText} ${fpsText}/${orDash(i.targetFrameRate)}fps ${brText}Mbps loss ${i.lossPct.toFixed(2)}% rtt ${rttText}ms \u00b7 ${i.spectatorCount} spectator(s)`;
 };
 
 const maybeLogTelemetry = (
@@ -301,10 +220,7 @@ const maybeLogTelemetry = (
 export interface UseStreamTelemetryReturn {
   telemetry: StreamTelemetry;
   setTelemetry: React.Dispatch<React.SetStateAction<StreamTelemetry>>;
-  startTelemetryPolling: (
-    liveKitRoomRef: React.RefObject<Room | null>,
-    localStreamRef: React.RefObject<MediaStream | null>,
-  ) => void;
+  startTelemetryPolling: (getInputs: () => TickInputs) => void;
   stopTelemetryPolling: () => void;
   resetStatsPrev: () => void;
 }
@@ -338,45 +254,42 @@ export function useStreamTelemetry(): UseStreamTelemetryReturn {
     setTelemetry(idleTelemetry());
   }, []);
 
-  const startTelemetryPolling = useCallback(
-    (liveKitRoomRef: React.RefObject<Room | null>, localStreamRef: React.RefObject<MediaStream | null>) => {
-      if (telemetryPollRef.current) return;
-      broadcastStartRef.current = performance.now();
+  const startTelemetryPolling = useCallback((getInputs: () => TickInputs) => {
+    if (telemetryPollRef.current) return;
+    broadcastStartRef.current = performance.now();
 
-      const fpsBuf: number[] = [];
-      const brBuf: number[] = [];
-      let tick = 0;
+    const fpsBuf: number[] = [];
+    const brBuf: number[] = [];
+    let tick = 0;
 
-      const tickStats = async (): Promise<void> => {
-        tick++;
+    const tickStats = async (): Promise<void> => {
+      tick++;
 
-        const inputs = collectTickInputs(localStreamRef.current, broadcastStartRef.current);
-        const room = liveKitRoomRef.current;
-        const spectatorCount = room ? room.remoteParticipants.size : 0;
+      const inputs = getInputs();
+      const elapsedMs = broadcastStartRef.current ? performance.now() - broadcastStartRef.current : 0;
+      const spectatorCount = (await window.electronAPI?.getSpectatorCount()) ?? 0;
 
-        const videoSender = videoSenderOf(room);
-        if (!videoSender) {
-          setTelemetry((p) => telemetryWithoutSender(p, inputs, spectatorCount));
-          return;
-        }
+      const t = await window.electronAPI?.getNativeTelemetry();
+      if (!t || (t.videoBytesSent == null && t.audioBytesSent == null)) {
+        setTelemetry((p) => telemetryWithoutSender(p, inputs, spectatorCount, elapsedMs));
+        return;
+      }
 
-        try {
-          const snap = await collectStats(videoSender, audioSenderOf(room), statsPrevRef.current);
-          const smoothed = smoothTelemetry(snap, fpsBuf, brBuf, bitrateHistoryRef.current);
-          bitrateHistoryRef.current = smoothed.bitrateHistory;
-          setTelemetry((p) => buildTelemetryUpdate(p, snap, inputs, smoothed, spectatorCount));
-          maybeLogTelemetry(tick, snap, inputs, smoothed, spectatorCount);
-        } catch (err) {
-          console.warn('Transient getStats failure:', err);
-        }
-      };
+      try {
+        const snap = foldNativeTelemetry(t, statsPrevRef.current);
+        const smoothed = smoothTelemetry(snap, fpsBuf, brBuf, bitrateHistoryRef.current);
+        bitrateHistoryRef.current = smoothed.bitrateHistory;
+        setTelemetry((p) => buildTelemetryUpdate(p, snap, inputs, smoothed, spectatorCount, elapsedMs));
+        maybeLogTelemetry(tick, snap, inputs, smoothed, spectatorCount);
+      } catch (err) {
+        console.warn('Transient native telemetry failure:', err);
+      }
+    };
 
-      telemetryPollRef.current = setInterval(() => {
-        void tickStats();
-      }, STATS_POLL_MS);
-    },
-    [],
-  );
+    telemetryPollRef.current = setInterval(() => {
+      void tickStats();
+    }, STATS_POLL_MS);
+  }, []);
 
   return {
     telemetry,

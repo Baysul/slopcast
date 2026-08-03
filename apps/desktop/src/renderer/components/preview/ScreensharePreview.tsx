@@ -1,10 +1,9 @@
 import { ScreenShare } from 'lucide-react';
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { type StreamTelemetry, StreamTelemetryBar } from '../telemetry/StreamTelemetryBar';
 
 export interface ScreensharePreviewProps {
-  previewStream: MediaStream | null;
   isSharing: boolean;
   roomCode: string;
   canStartShare: boolean;
@@ -13,34 +12,16 @@ export interface ScreensharePreviewProps {
   onCopyLink: () => void;
 }
 
+// Capture and encoding run entirely in native code (PipeWire -> native-livekit),
+// so the renderer has no MediaStream to preview. The card shows the live state
+// and telemetry instead of a video element.
 export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
-  ({ previewStream, isSharing, roomCode, canStartShare, copied, telemetry, onCopyLink }) => {
-    const previewVideoRef = useRef<HTMLVideoElement | null>(null);
-
-    useEffect(() => {
-      const el = previewVideoRef.current;
-      if (!el) return;
-      if (el.srcObject !== previewStream) {
-        el.srcObject = previewStream;
-      }
-      if (previewStream) {
-        el.muted = true;
-        el.play().catch(() => console.warn('Video autoplay blocked until user gesture'));
-      }
-    }, [previewStream]);
-
+  ({ isSharing, roomCode, canStartShare, copied, telemetry, onCopyLink }) => {
     return (
       <Card className="overflow-hidden shadow-2xl transition-all duration-300">
         <CardContent className="p-0">
           <div className="relative bg-black aspect-video flex items-center justify-center">
-            <video
-              ref={previewVideoRef}
-              autoPlay
-              playsInline
-              muted
-              aria-label="Screen share preview"
-              className={`w-full h-full object-contain ${isSharing ? 'block' : 'hidden'}`}
-            />
+            {isSharing && <StreamTelemetryBar telemetry={telemetry} />}
             {!isSharing && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-6">
                 {!roomCode ? (
@@ -77,7 +58,13 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
                 )}
               </div>
             )}
-            {isSharing && <StreamTelemetryBar telemetry={telemetry} />}
+            {isSharing && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <span className="p-3 rounded-full bg-safelight/10">
+                  <ScreenShare className="size-7 text-safelight" aria-hidden="true" />
+                </span>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>

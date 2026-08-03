@@ -35,9 +35,6 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
-      livekit-client:
-        specifier: ^2.21.0
-        version: 2.21.0(@types/dom-mediacapture-record@1.0.22)
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@19.2.8)
