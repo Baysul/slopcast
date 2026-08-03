@@ -8,20 +8,9 @@ export interface AppConfig {
   livekitApiSecret: string;
 }
 
-export type ClientRole = 'presenter' | 'spectator';
-export type ClientOrigin = 'desktop' | 'web';
-
-export interface Participant {
-  id: string;
-  role: ClientRole;
-  origin: ClientOrigin;
-  joinedAt: number;
-}
-
-export interface ErrorPayload {
-  message: string;
-  code?: string;
-}
+/// The canonical room-code format, validated identically by the server and the
+/// web join form: `abc-123-xyz`.
+export const ROOM_CODE_RE = /^[a-z]{3}-[0-9]{3}-[a-z]{3}$/;
 
 export interface AudioApp {
   id: number;
@@ -39,16 +28,14 @@ export interface AudioAppWave {
   columns: number[];
 }
 
+/// Waveform columns below this amplitude delta are not worth re-rendering;
+/// shared by the main-process push filter and the renderer meter store so the
+/// two epsilons can never drift apart.
+export const WAVE_EPSILON = 0.002;
+
 export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1';
 
 export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['av1', 'vp9', 'h264', 'vp8'];
-
-export const VIDEO_CODEC_LABEL_LK: Record<VideoCodec, string> = {
-  vp8: 'VP8',
-  h264: 'H.264',
-  vp9: 'VP9',
-  av1: 'AV1',
-};
 
 export type ResolutionPreset = '480p' | '720p' | '1080p' | '1440p' | '2160p';
 
@@ -107,9 +94,12 @@ export const fmtLoss = (pct: number | null): string => {
 };
 
 export function sanitizeStreamSettings(raw: unknown): StreamSettings {
-  const d = DEFAULT_STREAM_SETTINGS;
-  if (typeof raw !== 'object' || raw === null) return d;
+  if (typeof raw !== 'object' || raw === null) {
+    // Defensive copy: callers could otherwise mutate the shared default.
+    return { ...DEFAULT_STREAM_SETTINGS };
+  }
   const o = raw as Record<string, unknown>;
+  const d = DEFAULT_STREAM_SETTINGS;
   const num = (v: unknown, min: number, max: number, fallback: number): number =>
     typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : fallback;
   const codec = (v: unknown): VideoCodec =>
