@@ -7,13 +7,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": [
-      "**",
-      "!.pnpm-store",
-      "!**/node_modules",
-      "!**/dist",
-      "!**/target"
-    ]
+    "includes": ["**", "!.pnpm-store", "!**/node_modules", "!**/dist", "!**/target"]
   },
   "formatter": {
     "enabled": true,
@@ -39,7 +33,14 @@
       "style": {
         "noNonNullAssertion": "error",
         "noNestedTernary": "error",
-        "noUselessElse": "error"
+        "noUselessElse": "error",
+        "useConst": "error",
+        "useTemplate": "error",
+        "useSelfClosingElements": "error",
+        "useSingleVarDeclarator": "error",
+        "useCollapsedElseIf": "error",
+        "useImportType": "error",
+        "useExportType": "error"
       },
       "complexity": {
         "noExcessiveCognitiveComplexity": {
@@ -66,9 +67,7 @@
   },
   "overrides": [
     {
-      "includes": [
-        "**/*.css"
-      ],
+      "includes": ["**/*.css"],
       "linter": {
         "rules": {
           "suspicious": {
@@ -78,9 +77,7 @@
       }
     },
     {
-      "includes": [
-        "apps/server/src/e2e-test.ts"
-      ],
+      "includes": ["apps/server/src/e2e-test.ts"],
       "linter": {
         "rules": {
           "suspicious": {
