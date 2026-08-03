@@ -643,3 +643,100 @@ fn create_audio_capture_format() -> Option<Vec<u8>> {
 
 const MAX_AUDIO_FRAME_BYTES: usize = 192_000;
 const AUDIO_STREAM_NAME: &str = "slopcast-audio-capture";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_negative_number_means_system_audio() {
+        assert_eq!(
+            parse_target_id(&Either::B(-1)).unwrap_or_else(|e| panic!("system audio: {e}")),
+            None
+        );
+        assert_eq!(
+            parse_target_id(&Either::B(-5)).unwrap_or_else(|e| panic!("system audio: {e}")),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_positive_number_is_node_id() {
+        assert_eq!(
+            parse_target_id(&Either::B(0)).unwrap_or_else(|e| panic!("node 0: {e}")),
+            Some(0)
+        );
+        assert_eq!(
+            parse_target_id(&Either::B(42)).unwrap_or_else(|e| panic!("node 42: {e}")),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn parse_numeric_string_is_node_id() {
+        assert_eq!(
+            parse_target_id(&Either::A("123".into())).unwrap_or_else(|e| panic!("node 123: {e}")),
+            Some(123)
+        );
+        // Whitespace is trimmed before parsing.
+        assert_eq!(
+            parse_target_id(&Either::A(" 7 ".into())).unwrap_or_else(|e| panic!("node 7: {e}")),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn parse_string_minus_one_is_not_system_audio() {
+        // Only the numeric -1 selects system audio; a "-1" string is an
+        // invalid node id, not a mode switch.
+        assert!(parse_target_id(&Either::A("-1".into())).is_err());
+    }
+
+    #[test]
+    fn parse_non_numeric_string_is_an_error() {
+        assert!(parse_target_id(&Either::A("not-a-node".into())).is_err());
+        assert!(parse_target_id(&Either::A(String::new())).is_err());
+    }
+
+    #[test]
+    fn port_channel_from_name_takes_last_underscore_suffix() {
+        assert_eq!(
+            port_channel_from_name(Some("playback_FL")),
+            Some("FL".into())
+        );
+        assert_eq!(port_channel_from_name(Some("capture_1")), Some("1".into()));
+    }
+
+    #[test]
+    fn port_channel_from_name_missing_or_trailing_underscore_is_none() {
+        assert_eq!(port_channel_from_name(Some("playback")), None);
+        assert_eq!(port_channel_from_name(Some("playback_")), None);
+        assert_eq!(port_channel_from_name(None), None);
+    }
+
+    #[test]
+    fn parse_json_name_extracts_plain_name() {
+        let json = r#"{"name":"alsa_output.pci-0000_00_1f.3.analog-stereo","description":"Built-in Audio"}"#;
+        assert_eq!(
+            parse_json_name(json).as_deref(),
+            Some("alsa_output.pci-0000_00_1f.3.analog-stereo")
+        );
+    }
+
+    #[test]
+    fn parse_json_name_handles_escaped_quotes_and_backslashes() {
+        let json = r#"{"name":"weird \"name\" with \\ backslash"}"#;
+        assert_eq!(
+            parse_json_name(json).as_deref(),
+            Some("weird \"name\" with \\ backslash")
+        );
+    }
+
+    #[test]
+    fn parse_json_name_rejects_malformed_input() {
+        assert_eq!(parse_json_name(""), None);
+        assert_eq!(parse_json_name(r#"{"description":"no name key"}"#), None);
+        assert_eq!(parse_json_name(r#"{"name":"unterminated"#), None);
+        assert_eq!(parse_json_name(r#"{"name": 42}"#), None);
+    }
+}

@@ -9,6 +9,9 @@ use std::collections::HashMap;
 
 mod audio_ring;
 
+#[cfg(test)]
+mod test_stubs;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]

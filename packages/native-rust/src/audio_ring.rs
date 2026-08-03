@@ -314,6 +314,18 @@ pub fn reset_audio_ring_stats() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // The ring's counters and producer are process-global statics, so tests
+    // that start/stop the ring or read stats race each other when run in
+    // parallel. Serialize them.
+    static RING_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_ring_tests() -> std::sync::MutexGuard<'static, ()> {
+        RING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn test_calculate_slot_capacity() {
@@ -329,7 +341,112 @@ mod tests {
     }
 
     #[test]
+    fn align_up_rounds_up_to_alignment() {
+        assert_eq!(align_up(0, 4), 0);
+        assert_eq!(align_up(1, 4), 4);
+        assert_eq!(align_up(4, 4), 4);
+        assert_eq!(align_up(17, 8), 24);
+        assert_eq!(align_up(42, 0), 42);
+        // Saturating: usize::MAX stays usize::MAX instead of wrapping.
+        assert_eq!(align_up(usize::MAX, 4), usize::MAX);
+    }
+
+    #[test]
+    fn align_down_floors_to_alignment() {
+        assert_eq!(align_down(0, 4), 0);
+        assert_eq!(align_down(1, 4), 0);
+        assert_eq!(align_down(4, 4), 4);
+        assert_eq!(align_down(23, 8), 16);
+        assert_eq!(align_down(42, 0), 42);
+    }
+
+    #[test]
+    fn slot_capacity_falls_back_when_channels_zero() {
+        // Zero channels would divide by nothing; the default slot size must
+        // be returned instead of 0 (a zero-sized slot would make every
+        // push_pcm_bytes chunk a no-op).
+        assert_eq!(
+            calculate_slot_capacity(48_000, 0, 2, 100, 2),
+            DEFAULT_SLOT_CAPACITY
+        );
+        assert_eq!(
+            calculate_slot_capacity(48_000, 2, 0, 100, 2),
+            DEFAULT_SLOT_CAPACITY
+        );
+    }
+
+    #[test]
+    fn slot_capacity_respects_minimum_floor_and_headroom_clamp() {
+        // A tiny interval must still clear the 8 KiB floor.
+        let cap = calculate_slot_capacity(8_000, 1, 1, 1, 1);
+        // 8 bytes/s of mono u8: far below the floor, so exactly 8192 remains.
+        assert_eq!(cap, 8192);
+
+        // headroom 0 is treated as 1 (max(1)), not as "zero everything".
+        let zero_headroom = calculate_slot_capacity(48_000, 2, 2, 100, 0);
+        assert_eq!(zero_headroom, calculate_slot_capacity(48_000, 2, 2, 100, 1));
+
+        // max_interval_ms 0 still yields the floor, not 0.
+        assert!(calculate_slot_capacity(48_000, 2, 2, 0, 2) >= 8192);
+    }
+
+    #[test]
+    fn push_without_started_ring_is_a_noop() {
+        let _guard = lock_ring_tests();
+        stop_audio_ring();
+        reset_audio_ring_stats();
+        push_pcm_bytes(&[1, 2, 3, 4]);
+        let stats = get_audio_ring_stats();
+        assert_eq!(stats.captured_chunks, 0);
+        assert_eq!(stats.captured_bytes, 0);
+        assert_eq!(stats.ring_drops, 0);
+        assert_eq!(stats.truncated_bytes, 0);
+    }
+
+    #[test]
+    fn push_empty_bytes_is_a_noop() {
+        let _guard = lock_ring_tests();
+        start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
+        reset_audio_ring_stats();
+        push_pcm_bytes(&[]);
+        let stats = get_audio_ring_stats();
+        assert_eq!(stats.captured_chunks, 0);
+        assert_eq!(stats.captured_bytes, 0);
+        stop_audio_ring();
+    }
+
+    #[test]
+    fn push_fully_unaligned_payload_counts_truncation_only() {
+        let _guard = lock_ring_tests();
+        start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
+        reset_audio_ring_stats();
+        // 2 bytes < one 4-byte frame: nothing capturable remains.
+        push_pcm_bytes(&[9, 9]);
+        let stats = get_audio_ring_stats();
+        assert_eq!(stats.captured_chunks, 0);
+        assert_eq!(stats.captured_bytes, 0);
+        assert_eq!(stats.truncated_bytes, 2);
+        stop_audio_ring();
+    }
+
+    #[test]
+    fn stats_reset_zeroes_every_counter() {
+        let _guard = lock_ring_tests();
+        start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
+        push_pcm_bytes(&[0u8; 64]);
+        reset_audio_ring_stats();
+        let stats = get_audio_ring_stats();
+        assert_eq!(stats.captured_chunks, 0);
+        assert_eq!(stats.captured_bytes, 0);
+        assert_eq!(stats.ring_drops, 0);
+        assert_eq!(stats.tsfn_drops, 0);
+        assert_eq!(stats.truncated_bytes, 0);
+        stop_audio_ring();
+    }
+
+    #[test]
     fn test_push_pcm_bytes_alignment_and_oversized() {
+        let _guard = lock_ring_tests();
         start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
         reset_audio_ring_stats();
 
@@ -347,6 +464,7 @@ mod tests {
 
     #[test]
     fn test_oversized_payload_splitting() {
+        let _guard = lock_ring_tests();
         start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
         reset_audio_ring_stats();
 

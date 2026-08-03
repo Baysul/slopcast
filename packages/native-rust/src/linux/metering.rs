@@ -261,6 +261,33 @@ fn meter_stream(
     })
 }
 
+/// Decimates a mono sample window into `METER_WAVE_COLUMNS` interleaved
+/// (min, max) amplitude pairs. Raw per-column extrema; silence renders as a
+/// flat line. NaN samples are treated as 0.0 — a NaN in any column would
+/// poison both the min and the max, and the JS side renders the pair directly.
+fn decimate_wave(window: &[f32], wave: &mut [f32]) {
+    let len = window.len();
+    let bucket = len.div_ceil(METER_WAVE_COLUMNS);
+    for c in 0..METER_WAVE_COLUMNS {
+        let start = c * bucket;
+        let end = ((c + 1) * bucket).min(len);
+        if start >= end {
+            wave[c * 2] = 0.0;
+            wave[c * 2 + 1] = 0.0;
+            continue;
+        }
+        let mut min = f32::MAX;
+        let mut max = f32::MIN;
+        for sample in &window[start..end] {
+            let sample = if sample.is_nan() { 0.0 } else { *sample };
+            min = min.min(sample);
+            max = max.max(sample);
+        }
+        wave[c * 2] = min;
+        wave[c * 2 + 1] = max;
+    }
+}
+
 /// Decimates every meter's sample window into `METER_WAVE_COLUMNS` interleaved
 /// (min, max) amplitude pairs and publishes them. Runs on the worker thread
 /// only; raw per-column extrema need no smoothing — silence renders as a flat
@@ -297,25 +324,7 @@ fn run_wave_pass(meters: &mut HashMap<u32, MeterStream>) {
             wave.fill(0.0);
             continue;
         }
-        let len = meter.window.len();
-        let bucket = len.div_ceil(METER_WAVE_COLUMNS);
-        for c in 0..METER_WAVE_COLUMNS {
-            let start = c * bucket;
-            let end = ((c + 1) * bucket).min(len);
-            if start >= end {
-                wave[c * 2] = 0.0;
-                wave[c * 2 + 1] = 0.0;
-                continue;
-            }
-            let mut min = f32::MAX;
-            let mut max = f32::MIN;
-            for sample in &meter.window[start..end] {
-                min = min.min(*sample);
-                max = max.max(*sample);
-            }
-            wave[c * 2] = min;
-            wave[c * 2 + 1] = max;
-        }
+        decimate_wave(&meter.window, &mut wave);
     }
 }
 
@@ -475,4 +484,109 @@ pub(crate) fn stop_audio_metering() -> NapiResult<bool> {
             });
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_wave() -> Vec<f32> {
+        vec![f32::MAX; METER_WAVE_COLUMNS * 2]
+    }
+
+    #[test]
+    fn decimate_wave_empty_window_writes_zeros() {
+        let mut wave = fresh_wave();
+        decimate_wave(&[], &mut wave);
+        assert!(wave.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn decimate_wave_single_sample_fills_first_column_only() {
+        let mut wave = fresh_wave();
+        decimate_wave(&[0.25], &mut wave);
+        // bucket = ceil(1/96) = 1: only column 0 holds the sample.
+        assert!((wave[0] - 0.25).abs() < f32::EPSILON);
+        assert!((wave[1] - 0.25).abs() < f32::EPSILON);
+        assert!(wave[2..].iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "test fixtures: usize indices converted to f32 samples"
+    )]
+    fn decimate_wave_captures_extrema_per_column() {
+        let mut wave = fresh_wave();
+        // 96 samples over 96 columns → exactly one sample per column.
+        let samples: Vec<f32> = (0..METER_WAVE_COLUMNS).map(|i| i as f32 / 10.0).collect();
+        decimate_wave(&samples, &mut wave);
+        for c in 0..METER_WAVE_COLUMNS {
+            let expected = c as f32 / 10.0;
+            assert!((wave[c * 2] - expected).abs() < f32::EPSILON);
+            assert!((wave[c * 2 + 1] - expected).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "test fixtures: i32 indices converted to f32 samples"
+    )]
+    fn decimate_wave_buckets_oversized_windows_with_div_ceil() {
+        // 191 samples: bucket = ceil(191/96) = 2, so columns 0..94 hold two
+        // samples each and the last column holds a single trailing sample.
+        let mut wave = fresh_wave();
+        let samples: Vec<f32> = (0..191).map(|i| i as f32 / 191.0).collect();
+        decimate_wave(&samples, &mut wave);
+        // Column 0 bucket: samples 0 and 1.
+        assert!((wave[0] - 0.0).abs() < f32::EPSILON);
+        assert!((wave[1] - 1.0 / 191.0).abs() < f32::EPSILON);
+        // Last column holds the final sample only.
+        let last_min = wave[95 * 2];
+        let last_max = wave[95 * 2 + 1];
+        assert!((last_min - 190.0 / 191.0).abs() < f32::EPSILON);
+        assert!((last_max - 190.0 / 191.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decimate_wave_shorter_windows_zero_pad_tail_columns() {
+        let mut wave = fresh_wave();
+        // 10 samples → bucket 1; columns 10..96 must be zeroed, not retain
+        // stale data from a previous pass.
+        let samples = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        decimate_wave(&samples, &mut wave);
+        assert!((wave[9 * 2] - 1.0).abs() < f32::EPSILON);
+        assert!(wave[10 * 2].abs() < f32::EPSILON);
+        assert!(wave[10 * 2 + 1].abs() < f32::EPSILON);
+        assert!(wave[95 * 2].abs() < f32::EPSILON);
+        assert!(wave[95 * 2 + 1].abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decimate_wave_treats_nan_samples_as_silence() {
+        let mut wave = fresh_wave();
+        decimate_wave(&[f32::NAN, 0.5], &mut wave);
+        // Column 0 holds only the NaN (→ 0.0); column 1 holds the 0.5 sample.
+        assert!(wave[0].abs() < f32::EPSILON);
+        assert!(wave[1].abs() < f32::EPSILON);
+        assert!((wave[2] - 0.5).abs() < f32::EPSILON);
+        assert!((wave[3] - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decimate_wave_mixed_sign_keeps_raw_min_max() {
+        let mut wave = fresh_wave();
+        // 192 samples → bucket 2: column 0 = [-0.9, 0.4], column 1 = [-0.2, 0.8].
+        let mut samples = vec![0.0; 192];
+        samples[0] = -0.9;
+        samples[1] = 0.4;
+        samples[2] = -0.2;
+        samples[3] = 0.8;
+        decimate_wave(&samples, &mut wave);
+        assert!((wave[0] - (-0.9)).abs() < f32::EPSILON);
+        assert!((wave[1] - 0.4).abs() < f32::EPSILON);
+        assert!((wave[2] - (-0.2)).abs() < f32::EPSILON);
+        assert!((wave[3] - 0.8).abs() < f32::EPSILON);
+    }
 }

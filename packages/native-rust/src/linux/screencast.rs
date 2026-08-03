@@ -625,6 +625,76 @@ mod tests {
     }
 
     #[test]
+    fn classifies_kde_multi_digit_output_names() {
+        for suffix in ["DP-10", "DP-12", "HDMI-A-10", "eDP-2", "DisplayPort-0"] {
+            assert_eq!(
+                classify_kde_screencast(suffix),
+                KdeScreencast::Monitor,
+                "{suffix:?} must classify as a monitor"
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_dash_digit_suffix_with_dot_or_underscore_as_window() {
+        // Desktop-file-like names that *look* like outputs (dash + digits) but
+        // carry a dot/underscore must stay window-classified.
+        for suffix in ["org.kde.foo-1", "steam_app_123", "app-2_test"] {
+            assert_eq!(
+                classify_kde_screencast(suffix),
+                KdeScreencast::Window,
+                "{suffix:?} must classify as a window"
+            );
+        }
+    }
+
+    #[test]
+    fn portal_window_name_prefers_portal_keys_over_media_name() {
+        let props = HashMap::from([
+            (
+                "portal.screencast.application",
+                "ffxiv_dx11.exe".to_string(),
+            ),
+            ("portal.screencast.title", "FINAL FANTASY XIV".to_string()),
+            ("media.name", "Playback".to_string()),
+        ]);
+        let name = extract_portal_window_name_from_map(|k| props.get(k).cloned());
+        assert_eq!(name.as_deref(), Some("ffxiv_dx11.exe"));
+    }
+
+    #[test]
+    fn portal_window_name_skips_generic_pipewire_names() {
+        let props = HashMap::from([
+            ("media.name", "pipewire-screencast".to_string()),
+            ("node.name", "pipewire_system".to_string()),
+            ("application.name", "xdg-desktop-portal".to_string()),
+        ]);
+        assert_eq!(
+            extract_portal_window_name_from_map(|k| props.get(k).cloned()),
+            None
+        );
+    }
+
+    #[test]
+    fn portal_window_name_accepts_media_name_when_not_generic() {
+        let props = HashMap::from([("media.name", "firefox".to_string())]);
+        let name = extract_portal_window_name_from_map(|k| props.get(k).cloned());
+        assert_eq!(name.as_deref(), Some("firefox"));
+    }
+
+    #[test]
+    fn portal_window_name_rejects_kwin_gnome_application_names() {
+        for app in ["kwin_wayland", "gnome-shell", "xdg-desktop-portal"] {
+            let props = HashMap::from([("application.name", app.to_string())]);
+            assert_eq!(
+                extract_portal_window_name_from_map(|k| props.get(k).cloned()),
+                None,
+                "{app:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn resolve_from_video_scan_rejects_monitors_and_regions() {
         let monitor_scan = VideoScan {
             de: Some("kde"),

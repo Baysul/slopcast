@@ -1446,6 +1446,48 @@ pub fn stop_video_capture() -> NapiResult<bool> {
 mod tests {
     use super::*;
 
+    fn pcm16(channels: u16, rate: u32, bits: u16) -> WAVEFORMATEX {
+        WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_PCM_TAG,
+            nChannels: channels,
+            nSamplesPerSec: rate,
+            nAvgBytesPerSec: rate * u32::from(channels) * u32::from(bits / 8),
+            nBlockAlign: channels * (bits / 8),
+            wBitsPerSample: bits,
+            cbSize: 0,
+        }
+    }
+
+    fn extensible(
+        channels: u16,
+        bits: u16,
+        valid_bits: u16,
+        subformat: GUID,
+        mask: u32,
+        cb_size: u16,
+    ) -> WAVEFORMATEXTENSIBLE {
+        WAVEFORMATEXTENSIBLE {
+            Format: WAVEFORMATEX {
+                wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
+                nChannels: channels,
+                nSamplesPerSec: 48_000,
+                nAvgBytesPerSec: 48_000 * u32::from(channels) * u32::from(bits / 8),
+                nBlockAlign: channels * (bits / 8),
+                wBitsPerSample: bits,
+                cbSize: cb_size,
+            },
+            Samples: WAVEFORMATEXTENSIBLE_0 {
+                wValidBitsPerSample: valid_bits,
+            },
+            SubFormat: subformat,
+            dwChannelMask: mask,
+        }
+    }
+
+    fn parse(fmt: &WAVEFORMATEX) -> Result<AudioFormat, String> {
+        parse_wave_format(fmt as *const WAVEFORMATEX)
+    }
+
     #[test]
     fn test_resampler_initialization() {
         let mut resampler = StereoResampler::new(44_100, 48_000);
@@ -1455,5 +1497,307 @@ mod tests {
         assert!(!outputs.is_empty());
         // The first output frame should NOT be silence (0.0, 0.0)
         assert_eq!(outputs[0], (1.0, 1.0));
+    }
+
+    #[test]
+    fn resampler_passthrough_at_same_rate() {
+        let mut resampler = StereoResampler::new(48_000, 48_000);
+        let mut outputs = Vec::new();
+        for i in 0..100 {
+            resampler.process_frame((i as f32, -i as f32), |f| outputs.push(f));
+        }
+        assert_eq!(outputs.len(), 100);
+        assert_eq!(outputs[50], (50.0, -50.0));
+    }
+
+    #[test]
+    fn resampler_upsamples_44100_to_48000() {
+        let mut resampler = StereoResampler::new(44_100, 48_000);
+        let mut outputs = Vec::new();
+        for _i in 0..441 {
+            resampler.process_frame((1.0, 1.0), |f| outputs.push(f));
+        }
+        // 441 input frames must produce at least 480 output frames; the
+        // phase accumulator must not drop or duplicate the last frame.
+        assert!(outputs.len() >= 480, "got {} outputs", outputs.len());
+        assert_eq!(outputs[0], (1.0, 1.0));
+    }
+
+    #[test]
+    fn resampler_downsamples_48000_to_44100() {
+        let mut resampler = StereoResampler::new(48_000, 44_100);
+        let mut outputs = Vec::new();
+        for _i in 0..480 {
+            resampler.process_frame((1.0, 1.0), |f| outputs.push(f));
+        }
+        assert!(outputs.len() <= 442, "got {} outputs", outputs.len());
+    }
+
+    #[test]
+    fn resampler_phase_accumulates_across_frames_without_reset() {
+        let mut resampler = StereoResampler::new(44_100, 48_000);
+        let mut outputs = Vec::new();
+        // 1 input frame per call; the while-loop phase must keep advancing
+        // so the total output count matches a single bulk pass.
+        for _ in 0..882 {
+            resampler.process_frame((1.0, 1.0), |f| outputs.push(f));
+        }
+        let mut bulk = StereoResampler::new(44_100, 48_000);
+        let mut bulk_outputs = Vec::new();
+        bulk.process_frame((1.0, 1.0), |f| bulk_outputs.push(f));
+        for _ in 0..881 {
+            bulk.process_frame((1.0, 1.0), |f| bulk_outputs.push(f));
+        }
+        assert_eq!(outputs.len(), bulk_outputs.len());
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_null_pointer() {
+        assert!(parse_wave_format(std::ptr::null()).is_err());
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_zeroed_format() {
+        let zero = WAVEFORMATEX {
+            wFormatTag: 0,
+            nChannels: 0,
+            nSamplesPerSec: 0,
+            nAvgBytesPerSec: 0,
+            nBlockAlign: 0,
+            wBitsPerSample: 0,
+            cbSize: 0,
+        };
+        assert!(parse(&zero).is_err());
+    }
+
+    #[test]
+    fn parse_wave_format_accepts_plain_pcm_16_stereo() {
+        let fmt = pcm16(2, 48_000, 16);
+        let parsed = parse(&fmt).unwrap_or_else(|e| panic!("valid PCM16: {e}"));
+        assert_eq!(parsed.channels, 2);
+        assert_eq!(parsed.sample_rate, 48_000);
+        assert_eq!(parsed.container_bits, 16);
+        assert_eq!(parsed.valid_bits, 16);
+        assert_eq!(parsed.sample_type, SampleType::Int);
+        assert_eq!(parsed.channel_mask, None);
+    }
+
+    #[test]
+    fn parse_wave_format_accepts_plain_pcm_24_and_32() {
+        for bits in [24, 32] {
+            let fmt = pcm16(2, 48_000, bits);
+            let parsed = parse(&fmt).unwrap_or_else(|e| panic!("valid PCM: {e}"));
+            assert_eq!(parsed.container_bits, bits);
+            assert_eq!(parsed.valid_bits, bits);
+        }
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_unsupported_container_bits() {
+        let fmt = pcm16(2, 48_000, 20);
+        assert!(parse(&fmt).is_err());
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_block_align_below_minimum() {
+        let mut fmt = pcm16(2, 48_000, 16);
+        fmt.nBlockAlign = 2; // minimum is 4 (2ch * 2 bytes)
+        assert!(parse(&fmt).is_err());
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_unknown_format_tag() {
+        let mut fmt = pcm16(2, 48_000, 16);
+        fmt.wFormatTag = 0xDEAD;
+        assert!(parse(&fmt).is_err());
+    }
+
+    #[test]
+    fn parse_wave_format_extensible_float_reads_valid_bits_and_mask() {
+        let fmt = extensible(
+            2,
+            32,
+            24,
+            KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+            KSAUDIO_SPEAKER_STEREO,
+            22,
+        );
+        let parsed = parse(&fmt.Format).unwrap_or_else(|e| panic!("extensible float: {e}"));
+        assert_eq!(parsed.sample_type, SampleType::Float);
+        assert_eq!(parsed.valid_bits, 24);
+        assert_eq!(parsed.channel_mask, Some(KSAUDIO_SPEAKER_STEREO));
+    }
+
+    #[test]
+    fn parse_wave_format_extensible_pcm_subformat() {
+        let fmt = extensible(1, 16, 16, KSDATAFORMAT_SUBTYPE_PCM, 0, 22);
+        let parsed = parse(&fmt.Format).unwrap_or_else(|e| panic!("extensible pcm: {e}"));
+        assert_eq!(parsed.sample_type, SampleType::Int);
+        assert_eq!(parsed.channel_mask, None);
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_unsupported_extensible_subformat() {
+        let bogus = GUID::from_u128(0xDEAD_BEEF_CAFE_F00D_1234_5678_9ABC_DEF0);
+        let fmt = extensible(2, 32, 32, bogus, 0, 22);
+        assert!(parse(&fmt.Format).is_err());
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_oversized_valid_bits() {
+        let fmt = extensible(2, 16, 17, KSDATAFORMAT_SUBTYPE_PCM, 0, 22);
+        assert!(parse(&fmt.Format).is_err());
+
+        let fmt_f32 = extensible(2, 32, 24, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 0, 22);
+        assert!(parse(&fmt_f32.Format).is_err());
+    }
+
+    #[test]
+    fn parse_wave_format_rejects_extensible_without_subformat_bytes() {
+        let fmt = extensible(2, 32, 32, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 0, 0);
+        assert!(parse(&fmt.Format).is_err());
+    }
+
+    #[test]
+    fn fast_format_classifies_common_layouts() {
+        let f32st = AudioFormat {
+            channels: 2,
+            sample_rate: 48_000,
+            container_bits: 32,
+            valid_bits: 32,
+            block_align: 8,
+            sample_type: SampleType::Float,
+            channel_mask: None,
+        };
+        assert_eq!(f32st.fast_format(), FastFormat::StereoF32);
+
+        let i16st = AudioFormat {
+            channels: 2,
+            sample_rate: 48_000,
+            container_bits: 16,
+            valid_bits: 16,
+            block_align: 4,
+            sample_type: SampleType::Int,
+            channel_mask: None,
+        };
+        assert_eq!(i16st.fast_format(), FastFormat::StereoI16);
+
+        let f32mono = AudioFormat {
+            channels: 1,
+            sample_rate: 48_000,
+            container_bits: 32,
+            valid_bits: 32,
+            block_align: 4,
+            sample_type: SampleType::Float,
+            channel_mask: None,
+        };
+        assert_eq!(f32mono.fast_format(), FastFormat::MonoF32);
+    }
+
+    #[test]
+    fn fast_format_generic_for_everything_else() {
+        let generic = AudioFormat {
+            channels: 6,
+            sample_rate: 48_000,
+            container_bits: 24,
+            valid_bits: 24,
+            block_align: 18,
+            sample_type: SampleType::Int,
+            channel_mask: Some(0x3F),
+        };
+        assert_eq!(generic.fast_format(), FastFormat::Generic);
+    }
+
+    #[test]
+    fn extract_stereo_f32_duplicates_mono_channel() {
+        let fmt = AudioFormat {
+            channels: 1,
+            sample_rate: 48_000,
+            container_bits: 32,
+            valid_bits: 32,
+            block_align: 4,
+            sample_type: SampleType::Float,
+            channel_mask: None,
+        };
+        let frame = 0.5f32.to_le_bytes();
+        let (l, r) = extract_stereo_f32(&frame, &fmt);
+        assert!((l - 0.5).abs() < 1e-6);
+        assert!((r - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extract_stereo_f32_converts_i16_with_valid_bits_shift() {
+        let fmt = AudioFormat {
+            channels: 2,
+            sample_rate: 48_000,
+            container_bits: 16,
+            valid_bits: 12,
+            block_align: 4,
+            sample_type: SampleType::Int,
+            channel_mask: None,
+        };
+        // 0x0800 = 2048 with only 12 valid bits: shifted up to 0x8000, i.e. -1.0.
+        let frame = [0x00, 0x08, 0x00, 0x08];
+        let (l, r) = extract_stereo_f32(&frame, &fmt);
+        assert!((l - (-1.0)).abs() < 1e-4, "l = {l}");
+        assert!((r - (-1.0)).abs() < 1e-4, "r = {r}");
+    }
+
+    #[test]
+    fn extract_stereo_f32_sign_extends_i24() {
+        let fmt = AudioFormat {
+            channels: 1,
+            sample_rate: 48_000,
+            container_bits: 24,
+            valid_bits: 24,
+            block_align: 3,
+            sample_type: SampleType::Int,
+            channel_mask: None,
+        };
+        // -0.5 in 24-bit: 0xFFC00000 >> 8 = 0xFFC000.
+        let frame = [0x00, 0xC0, 0xFF];
+        let (l, _r) = extract_stereo_f32(&frame, &fmt);
+        assert!((l - (-0.5)).abs() < 1e-4, "l = {l}");
+    }
+
+    #[test]
+    fn extract_stereo_f32_returns_silence_for_nan_and_short_frames() {
+        let fmt = AudioFormat {
+            channels: 2,
+            sample_rate: 48_000,
+            container_bits: 32,
+            valid_bits: 32,
+            block_align: 8,
+            sample_type: SampleType::Float,
+            channel_mask: None,
+        };
+        let mut nan_frame = [0u8; 8];
+        nan_frame[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+        nan_frame[4..].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert_eq!(extract_stereo_f32(&nan_frame, &fmt), (0.0, 0.0));
+
+        assert_eq!(extract_stereo_f32(&[0u8; 4], &fmt), (0.0, 0.0));
+    }
+
+    #[test]
+    fn validate_target_pid_maps_system_audio_sentinels() {
+        assert_eq!(
+            validate_target_pid(-1).unwrap_or_else(|e| panic!("system audio: {e}")),
+            SYSTEM_AUDIO_PID_DEFAULT
+        );
+        assert_eq!(
+            validate_target_pid(0).unwrap_or_else(|e| panic!("system audio: {e}")),
+            SYSTEM_AUDIO_PID_DEFAULT
+        );
+        assert_eq!(
+            validate_target_pid(1234).unwrap_or_else(|e| panic!("pid: {e}")),
+            1234
+        );
+    }
+
+    #[test]
+    fn validate_target_pid_rejects_other_negatives() {
+        assert!(validate_target_pid(-2).is_err());
+        assert!(validate_target_pid(i32::MIN).is_err());
     }
 }

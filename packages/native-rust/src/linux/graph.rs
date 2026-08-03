@@ -517,3 +517,190 @@ impl GraphTracker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pipewire::spa::param::audio::{AudioInfoRaw, AudioInfoRawFlags};
+
+    // Values from the SPA audio channel enum (spa/param/audio/raw.h).
+    const CH_NA: u32 = 1;
+    const CH_FL: u32 = 3;
+    const CH_FR: u32 = 4;
+    const CH_FC: u32 = 5;
+    const CH_AUX0: u32 = 4096;
+    const MAX_POSITION: usize = 64;
+
+    fn app_node_info(
+        pid: Option<u32>,
+        binary: Option<&str>,
+        client_id: Option<u32>,
+        app_name: Option<&str>,
+    ) -> AppNodeInfo {
+        AppNodeInfo {
+            pid,
+            binary: binary.map(str::to_string),
+            client_id,
+            app_name: app_name.map(str::to_string),
+        }
+    }
+
+    fn info_with_position(channels: u32, position: &[u32]) -> AudioInfoRaw {
+        let mut info = AudioInfoRaw::new();
+        info.set_channels(channels);
+        let mut pos = [CH_NA; MAX_POSITION];
+        pos[..position.len()].copy_from_slice(position);
+        info.set_position(pos);
+        info
+    }
+
+    #[test]
+    fn target_matches_on_node_id() {
+        let target = TargetSpec {
+            node_id: Some(7),
+            ..TargetSpec::default()
+        };
+        assert!(target.matches(7, &AppNodeInfo::default()));
+        assert!(!target.matches(8, &AppNodeInfo::default()));
+    }
+
+    #[test]
+    fn target_matches_on_client_id_pid_binary_and_name() {
+        let target = TargetSpec {
+            client_id: Some(42),
+            pid: Some(1000),
+            binary: Some("firefox".into()),
+            app_name: Some("Firefox".into()),
+            ..TargetSpec::default()
+        };
+        assert!(target.matches(1, &app_node_info(Some(1000), None, None, None)));
+        assert!(target.matches(1, &app_node_info(None, None, Some(42), None)));
+        assert!(target.matches(1, &app_node_info(None, Some("firefox"), None, None)));
+        assert!(target.matches(1, &app_node_info(None, None, None, Some("firefox"))));
+    }
+
+    #[test]
+    fn target_matches_app_name_case_insensitively() {
+        let target = TargetSpec {
+            app_name: Some("Spotify".into()),
+            ..TargetSpec::default()
+        };
+        assert!(target.matches(1, &app_node_info(None, None, None, Some("spotify"))));
+        assert!(!target.matches(1, &app_node_info(None, None, None, Some("VLC"))));
+    }
+
+    #[test]
+    fn target_matches_binary_exactly() {
+        let target = TargetSpec {
+            binary: Some("zenlesszonezero.exe".into()),
+            ..TargetSpec::default()
+        };
+        assert!(target.matches(
+            1,
+            &app_node_info(None, Some("zenlesszonezero.exe"), None, None)
+        ));
+        assert!(!target.matches(1, &app_node_info(None, Some("zenless.exe"), None, None)));
+    }
+
+    #[test]
+    fn system_audio_is_not_part_of_matches() {
+        // `system_audio` is honored one level up in `is_linkable_app`
+        // (`self.target.system_audio || ...`); `matches` itself only compares
+        // the learned target fields.
+        let target = TargetSpec {
+            system_audio: true,
+            ..TargetSpec::default()
+        };
+        assert!(!target.matches(1, &app_node_info(None, None, None, Some("x"))));
+    }
+
+    #[test]
+    fn learn_only_fills_matching_node_id() {
+        let mut target = TargetSpec {
+            node_id: Some(5),
+            ..TargetSpec::default()
+        };
+        target.learn(4, &app_node_info(Some(9), None, None, None));
+        assert!(target.pid.is_none());
+        target.learn(5, &app_node_info(Some(9), None, None, None));
+        assert_eq!(target.pid, Some(9));
+    }
+
+    #[test]
+    fn learn_keeps_first_non_none_field() {
+        let mut target = TargetSpec {
+            node_id: Some(5),
+            ..TargetSpec::default()
+        };
+        target.learn(5, &app_node_info(Some(9), Some("bin"), None, Some("name")));
+        target.learn(5, &app_node_info(Some(10), Some("bin2"), Some(7), None));
+        // First values win: the second learn must not overwrite pid/binary/name.
+        assert_eq!(target.pid, Some(9));
+        assert_eq!(target.binary.as_deref(), Some("bin"));
+        assert_eq!(target.app_name.as_deref(), Some("name"));
+        assert_eq!(target.client_id, Some(7));
+    }
+
+    #[test]
+    fn layout_stereo_uses_fl_fr() {
+        assert_eq!(ChannelLayout::stereo().position, "FL,FR");
+    }
+
+    #[test]
+    fn layout_from_audio_info_requires_positioned_format() {
+        let mut info = info_with_position(2, &[CH_FL, CH_FR]);
+        info.set_flags(AudioInfoRawFlags::UNPOSITIONED);
+        assert!(ChannelLayout::from_audio_info(&info).is_none());
+    }
+
+    #[test]
+    fn layout_from_audio_info_stereo() {
+        let info = info_with_position(2, &[CH_FL, CH_FR]);
+        let layout =
+            ChannelLayout::from_audio_info(&info).unwrap_or_else(|| panic!("stereo layout"));
+        assert_eq!(layout.position, "FL,FR");
+    }
+
+    #[test]
+    fn layout_from_audio_info_rejects_zero_or_oversized_channel_counts() {
+        let zero = info_with_position(0, &[]);
+        assert!(ChannelLayout::from_audio_info(&zero).is_none());
+
+        let big = info_with_position(9, &[CH_NA; 9]);
+        assert!(ChannelLayout::from_audio_info(&big).is_none());
+    }
+
+    #[test]
+    fn layout_from_audio_info_rejects_aux_channels() {
+        let aux = info_with_position(2, &[CH_AUX0, CH_AUX0]);
+        assert!(ChannelLayout::from_audio_info(&aux).is_none());
+    }
+
+    #[test]
+    fn layout_from_audio_info_keeps_na_channel_position() {
+        // NA ("N/A, silent") is a valid position token in the SPA table and
+        // passes through as "NA" rather than rejecting the layout.
+        let na = info_with_position(2, &[CH_NA, CH_FC]);
+        let layout =
+            ChannelLayout::from_audio_info(&na).unwrap_or_else(|| panic!("layout with NA"));
+        assert_eq!(layout.position, "NA,FC");
+    }
+
+    #[test]
+    fn channel_short_name_maps_known_channels() {
+        assert_eq!(channel_short_name(CH_FL).as_deref(), Some("FL"));
+        assert_eq!(channel_short_name(CH_FR).as_deref(), Some("FR"));
+        assert_eq!(channel_short_name(CH_FC).as_deref(), Some("FC"));
+        assert_eq!(channel_short_name(CH_NA).as_deref(), Some("NA"));
+        assert_eq!(channel_short_name(CH_AUX0).as_deref(), Some("AUX0"));
+    }
+
+    #[test]
+    fn channel_short_name_never_null_for_out_of_table_values() {
+        // The SPA C table returns "UNK" (a non-null string) for values outside
+        // the channel enum; document that so the null check in
+        // `channel_short_name` is not assumed to guard garbage input.
+        assert_eq!(channel_short_name(99).as_deref(), Some("UNK"));
+        assert_eq!(channel_short_name(u32::MAX).as_deref(), Some("UNK"));
+    }
+}

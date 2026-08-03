@@ -263,7 +263,7 @@ pub(super) fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcEntry, are_processes_related, is_generic_launcher, resolve_pid_by_binary,
+        ProcEntry, are_processes_related, is_generic_launcher, is_valid_pid, resolve_pid_by_binary,
         resolve_pid_by_name,
     };
 
@@ -328,5 +328,94 @@ mod tests {
         );
         assert_eq!(resolve_pid_by_name(&procs, "ZenlessZoneZero"), Some(200));
         assert_eq!(resolve_pid_by_binary(&procs, "ffxiv_dx11.exe"), Some(234));
+    }
+
+    #[test]
+    fn resolve_pid_by_name_requires_two_character_search_key() {
+        let procs = vec![ProcEntry {
+            pid: 100,
+            comm: "vim".into(),
+            cmdline: "/usr/bin/vim\0".into(),
+        }];
+        assert_eq!(resolve_pid_by_name(&procs, ""), None);
+        assert_eq!(resolve_pid_by_name(&procs, "v"), None);
+        assert_eq!(resolve_pid_by_name(&procs, "vi"), Some(100));
+    }
+
+    #[test]
+    fn resolve_pid_by_name_ignores_leading_whitespace_words() {
+        let procs = vec![ProcEntry {
+            pid: 100,
+            comm: "firefox".into(),
+            cmdline: "/usr/bin/firefox\0".into(),
+        }];
+        // The first whitespace-separated word is the search key.
+        assert_eq!(resolve_pid_by_name(&procs, "  firefox"), Some(100));
+    }
+
+    #[test]
+    fn resolve_pid_by_binary_is_ambiguous_when_two_processes_match() {
+        let procs = vec![
+            ProcEntry {
+                pid: 100,
+                comm: "node".into(),
+                cmdline: "/usr/bin/node\0".into(),
+            },
+            ProcEntry {
+                pid: 200,
+                comm: "node".into(),
+                cmdline: "/usr/bin/node\0".into(),
+            },
+        ];
+        assert_eq!(resolve_pid_by_binary(&procs, "node"), None);
+    }
+
+    #[test]
+    fn resolve_pid_by_name_returns_first_match_even_if_ambiguous() {
+        let procs = vec![
+            ProcEntry {
+                pid: 100,
+                comm: "node".into(),
+                cmdline: "/usr/bin/node\0".into(),
+            },
+            ProcEntry {
+                pid: 200,
+                comm: "node".into(),
+                cmdline: "/usr/bin/node\0".into(),
+            },
+        ];
+        assert_eq!(resolve_pid_by_name(&procs, "node"), Some(100));
+    }
+
+    #[test]
+    fn is_valid_pid_checks_proc_existence() {
+        assert!(is_valid_pid(
+            std::process::id()
+                .try_into()
+                .unwrap_or_else(|e| panic!("pid fits i32: {e}"))
+        ));
+        assert!(!is_valid_pid(999_999_999));
+        assert!(!is_valid_pid(0));
+        assert!(!is_valid_pid(-1));
+    }
+
+    #[test]
+    fn relates_process_to_its_parent() {
+        let our_pid = std::process::id();
+        // SAFETY: getppid() always returns a valid parent pid for this process.
+        let parent = unsafe { libc::getppid() }
+            .try_into()
+            .unwrap_or_else(|e| panic!("parent pid fits u32: {e}"));
+        assert!(are_processes_related(our_pid, parent));
+        assert!(are_processes_related(parent, our_pid));
+    }
+
+    #[test]
+    fn unrelated_pids_are_not_related() {
+        let our_pid = std::process::id();
+        // A pid a few thousand above ours cannot share an ancestor chain with
+        // us: our chain ends at the shell (a session daemon, excluded).
+        assert!(!are_processes_related(our_pid, our_pid + 5000));
+        assert!(!are_processes_related(our_pid + 5000, our_pid));
     }
 }
