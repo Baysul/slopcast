@@ -5,6 +5,8 @@ use pipewire::spa::pod::{Object, Pod, Value};
 use pipewire::spa::utils::{Fraction, Rectangle, SpaTypes};
 use pipewire::stream::{StreamFlags, StreamRc, StreamState};
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -120,7 +122,9 @@ fn run_video_capture(
         }
     };
 
-    let negotiated = Arc::new(Mutex::new((width as i32, height as i32, 0i32)));
+    // Negotiated format is written by param_changed and read by process, both
+    // on the PipeWire mainloop thread — a RefCell suffices, no lock per frame.
+    let negotiated = Rc::new(RefCell::new((width as i32, height as i32, 0i32)));
     let neg_clone = negotiated.clone();
 
     let ready_tx_cell = Arc::new(Mutex::new(Some(ready_tx)));
@@ -160,13 +164,11 @@ fn run_video_capture(
                         let info = VideoInfoRaw::from_raw(raw_info);
                         let sz = info.size();
                         if sz.width > 0 && sz.height > 0 {
-                            if let Ok(mut g) = neg_clone.lock() {
-                                *g = (
-                                    sz.width as i32,
-                                    sz.height as i32,
-                                    info.format().as_raw() as i32,
-                                );
-                            }
+                            *neg_clone.borrow_mut() = (
+                                sz.width as i32,
+                                sz.height as i32,
+                                info.format().as_raw() as i32,
+                            );
                         }
                     }
                 }
@@ -177,11 +179,7 @@ fn run_video_capture(
                 return;
             };
             let pts_ns = monotonic_pts_ns();
-            let (w, h, format) =
-                negotiated
-                    .lock()
-                    .map(|g| *g)
-                    .unwrap_or((width as i32, height as i32, 0));
+            let (w, h, format) = *negotiated.borrow();
 
             for data in buffer.datas_mut() {
                 if data.type_() != DataType::DmaBuf {

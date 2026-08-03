@@ -1,0 +1,478 @@
+use super::{CAPTURE_NODE_NAME, pw_init};
+use crate::AudioAppWave;
+use arc_swap::ArcSwapOption;
+use crossbeam_queue::ArrayQueue;
+use napi::Result as NapiResult;
+use napi::threadsafe_function::ThreadsafeFunctionCallMode;
+use pipewire::properties::properties;
+use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw};
+use pipewire::spa::param::format::MediaType;
+use pipewire::spa::param::{ParamType, format_utils};
+use pipewire::spa::pod::{Object, Pod, Value};
+use pipewire::spa::utils::SpaTypes;
+use pipewire::stream::{StreamFlags, StreamListener, StreamRc};
+use pipewire::types::ObjectType;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
+
+// ---------- Per-app audio waveform metering ----------
+
+const METER_WAVE_COLUMNS: usize = 96;
+/// ~85 ms of mono audio at 48 kHz: long enough for an organic, filled
+/// waveform strip rather than a jittery oscilloscope trace.
+const METER_WAVE_WINDOW: usize = 4096;
+const METER_WAVE_INTERVAL_MS: u64 = 33;
+const METER_DEFAULT_RATE: u32 = 48_000;
+const METER_DEFAULT_CHANNELS: u16 = 2;
+// A meter whose ring has received no samples for this long is considered
+// paused: its rolling window holds stale audio, so the pass publishes silence
+// instead of re-decimating old samples.
+const METER_STALE_MS: u64 = 150;
+// Mono sample queue between the process callback and the wave pass. Holds over
+// two worst-case pass gaps (~2 × 50 ms × 48 kHz); a stalled pass only drops
+// the newest samples, which the decimated waveform renders invisible.
+const METER_RING_CAPACITY: usize = 4096;
+
+/// Per-app meter state shared between the worker thread and the JS thread.
+/// The process callback pushes mono samples into the lock-free ring and the
+/// wave pass drains it; `wave` is published to the JS thread under its mutex.
+struct MeterLevel {
+    samples: ArrayQueue<f32>,
+    rate: AtomicU32,
+    channels: AtomicU16,
+    /// `METER_WAVE_COLUMNS` interleaved (min, max) amplitude pairs in [-1, 1].
+    wave: Mutex<Vec<f32>>,
+}
+
+impl MeterLevel {
+    fn new() -> Self {
+        Self {
+            samples: ArrayQueue::new(METER_RING_CAPACITY),
+            rate: AtomicU32::new(METER_DEFAULT_RATE),
+            channels: AtomicU16::new(METER_DEFAULT_CHANNELS),
+            wave: Mutex::new(vec![0.0; METER_WAVE_COLUMNS * 2]),
+        }
+    }
+}
+
+struct MeterStream {
+    _stream: StreamRc,
+    _listener: StreamListener<Arc<MeterLevel>>,
+    level: Arc<MeterLevel>,
+    /// Rolling mono window drained from `level.samples`, capped at
+    /// `METER_WAVE_WINDOW`. Worker-thread only, so it is a plain `Vec`.
+    window: Vec<f32>,
+    /// Pass timestamp of the last time new samples were drained from the ring.
+    /// Worker-thread only.
+    last_feed: Instant,
+}
+
+struct MeterSession {
+    stop: Arc<AtomicBool>,
+    join: thread::JoinHandle<()>,
+}
+
+static METER_STATE: Mutex<Option<MeterSession>> = Mutex::new(None);
+
+/// Registered by the Electron main process; the meter worker pushes the
+/// waveform snapshot through this instead of the main process polling
+/// `get_audio_wave`, which held the meter locks on the JS thread every 33 ms.
+static AUDIO_WAVE_CALLBACK: ArcSwapOption<crate::WaveThreadsafeFunction> =
+    ArcSwapOption::const_empty();
+
+pub(crate) fn set_audio_wave_callback(
+    callback: Arc<crate::WaveThreadsafeFunction>,
+) -> napi::Result<()> {
+    AUDIO_WAVE_CALLBACK.store(Some(callback));
+    Ok(())
+}
+
+pub(crate) fn clear_audio_wave_callback() {
+    AUDIO_WAVE_CALLBACK.store(None);
+}
+
+/// Non-destructive snapshot of every meter's published wave; dropped (not
+/// queued) if the main process is busy, since the next 33 ms tick supersedes it.
+fn invoke_wave_callback(waves: Vec<AudioAppWave>) {
+    let guard = AUDIO_WAVE_CALLBACK.load();
+    let Some(callback) = guard.as_ref() else {
+        return;
+    };
+    let _ = callback.call(Ok(waves), ThreadsafeFunctionCallMode::NonBlocking);
+}
+
+fn wave_snapshot(meters: &HashMap<u32, MeterStream>) -> Vec<AudioAppWave> {
+    let mut out = Vec::with_capacity(meters.len());
+    for (&id, meter) in meters {
+        let Ok(wave) = meter.level.wave.lock() else {
+            continue;
+        };
+        out.push(AudioAppWave {
+            id: id.cast_signed(),
+            columns: wave.iter().map(|&v| f64::from(v)).collect(),
+        });
+    }
+    out
+}
+
+/// `EnumFormat` param offering exactly F32LE with native rate/channels, so meter
+/// streams never force format conversion in the graph.
+fn meter_format_param() -> Option<Vec<u8>> {
+    let mut audio_info = AudioInfoRaw::new();
+    audio_info.set_format(AudioFormat::F32LE);
+    let obj = Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties: audio_info.into(),
+    };
+    let serialized = pipewire::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(obj),
+    )
+    .ok()?;
+    Some(serialized.0.into_inner())
+}
+
+/// Downmixes the meter's latest buffer quantum to mono and pushes it into the
+/// lock-free ring. Pushing drops the newest samples when the ring is full (a
+/// stalled wave pass) rather than blocking; the decimated envelope renders
+/// such a few-ms gap invisible.
+fn meter_process_quantum(stream: &pipewire::stream::Stream, level: &Arc<MeterLevel>) {
+    let Some(mut buffer) = stream.dequeue_buffer() else {
+        return;
+    };
+    let channels = usize::from(level.channels.load(Ordering::Relaxed).max(1));
+    let inv_channels = 1.0 / f32::from(level.channels.load(Ordering::Relaxed).max(1));
+    // Negotiated F32LE buffers are interleaved in a single data; the
+    // multi-data branch is a fallback that treats each data as its own mono
+    // stream.
+    let interleaved = buffer.datas_mut().len() <= 1;
+    for data in buffer.datas_mut() {
+        let start = data.chunk().offset() as usize;
+        let size = data.chunk().size() as usize;
+        let Some(bytes) = data.data() else { continue };
+        let end = start.saturating_add(size).min(bytes.len());
+        let Some(slice) = bytes.get(start..end) else {
+            continue;
+        };
+        if interleaved && channels > 1 {
+            for frame in slice.chunks_exact(channels * 4) {
+                let mut sum = 0.0f32;
+                for ch in 0..channels {
+                    let off = ch * 4;
+                    sum += f32::from_le_bytes([
+                        frame[off],
+                        frame[off + 1],
+                        frame[off + 2],
+                        frame[off + 3],
+                    ]);
+                }
+                if level.samples.push(sum * inv_channels).is_err() {
+                    return;
+                }
+            }
+        } else {
+            for sample in slice.chunks_exact(4) {
+                let s = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                if level.samples.push(s).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Creates a capture stream tapped into the given application node. AUTOCONNECT
+/// links the app's output ports to the meter's input ports additively — the
+/// app's existing links (speaker playback) are never touched.
+///
+/// The process callback only downmixes each quantum to mono and queues it; all
+/// FFT work happens on the worker thread between loop iterations, so the audio
+/// path stays allocation-free.
+fn meter_stream(
+    core: &pipewire::core::CoreRc,
+    node_id: u32,
+    level: Arc<MeterLevel>,
+) -> Option<MeterStream> {
+    let stream = StreamRc::new(
+        core.clone(),
+        "slopcast-audio-meter",
+        properties! {
+            "media.class" => "Stream/Input/Audio",
+            "node.name" => format!("slopcast-meter-{node_id}"),
+            "node.description" => "Slopcast Audio Meter",
+            "node.dont-move" => "true",
+            "node.dont-reconnect" => "true",
+            "node.dont-fallback" => "true",
+        },
+    )
+    .ok()?;
+
+    let listener = stream
+        .add_local_listener_with_user_data(level.clone())
+        .param_changed(|_stream, level, _id, param| {
+            let Some(pod) = param else { return };
+            let Ok((media_type, _)) = format_utils::parse_format(pod) else {
+                return;
+            };
+            if media_type != MediaType::Audio {
+                return;
+            }
+            let mut info = AudioInfoRaw::new();
+            if info.parse(pod).is_err() {
+                return;
+            }
+            let rate = info.rate();
+            if rate > 0 {
+                level.rate.store(rate, Ordering::Relaxed);
+            }
+            let channels = u16::try_from(info.channels()).unwrap_or(METER_DEFAULT_CHANNELS);
+            if channels > 0 {
+                level.channels.store(channels, Ordering::Relaxed);
+            }
+        })
+        .process(|stream, level| meter_process_quantum(stream, level))
+        .register()
+        .ok()?;
+
+    let values = meter_format_param()?;
+    let pod = Pod::from_bytes(&values)?;
+    let mut params = [pod];
+    stream
+        .connect(
+            pipewire::spa::utils::Direction::Input,
+            Some(node_id),
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            &mut params,
+        )
+        .ok()?;
+
+    Some(MeterStream {
+        _stream: stream,
+        _listener: listener,
+        level,
+        window: Vec::with_capacity(METER_WAVE_WINDOW),
+        last_feed: Instant::now(),
+    })
+}
+
+/// Decimates every meter's sample window into `METER_WAVE_COLUMNS` interleaved
+/// (min, max) amplitude pairs and publishes them. Runs on the worker thread
+/// only; raw per-column extrema need no smoothing — silence renders as a flat
+/// line, and overlapping windows (~60% at 48 kHz) keep motion continuous.
+/// Meters whose ring has been silent for `METER_STALE_MS` publish zeros: their
+/// window still holds pre-pause audio, and re-decimating it would pin the bars
+/// instead of letting them flatline.
+fn run_wave_pass(meters: &mut HashMap<u32, MeterStream>) {
+    for meter in meters.values_mut() {
+        let level = &meter.level;
+        let mut fed = false;
+        while let Some(sample) = level.samples.pop() {
+            meter.window.push(sample);
+            fed = true;
+        }
+        let overflow = meter.window.len().saturating_sub(METER_WAVE_WINDOW);
+        if overflow > 0 {
+            meter.window.drain(0..overflow);
+        }
+        if meter.window.is_empty() {
+            continue;
+        }
+
+        let now = Instant::now();
+        if fed {
+            meter.last_feed = now;
+        }
+        let stale = now.duration_since(meter.last_feed) > Duration::from_millis(METER_STALE_MS);
+
+        let Ok(mut wave) = level.wave.lock() else {
+            continue;
+        };
+        if stale {
+            wave.fill(0.0);
+            continue;
+        }
+        let len = meter.window.len();
+        let bucket = len.div_ceil(METER_WAVE_COLUMNS);
+        for c in 0..METER_WAVE_COLUMNS {
+            let start = c * bucket;
+            let end = ((c + 1) * bucket).min(len);
+            if start >= end {
+                wave[c * 2] = 0.0;
+                wave[c * 2 + 1] = 0.0;
+                continue;
+            }
+            let mut min = f32::MAX;
+            let mut max = f32::MIN;
+            for sample in &meter.window[start..end] {
+                min = min.min(*sample);
+                max = max.max(*sample);
+            }
+            wave[c * 2] = min;
+            wave[c * 2 + 1] = max;
+        }
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "run_meter_session is spawned in a thread::spawn(move || ...) closure that must own all Arc values"
+)]
+fn run_meter_session(stop: Arc<AtomicBool>, ready_tx: mpsc::Sender<Result<(), String>>) {
+    pipewire::init();
+
+    let Ok(pw) = pw_init() else {
+        let _ = ready_tx.send(Err("PipeWire init failed".into()));
+        return;
+    };
+    let registry = match pw.core.get_registry() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = ready_tx.send(Err(e.to_string()));
+            return;
+        }
+    };
+
+    let meters: Rc<RefCell<HashMap<u32, MeterStream>>> = Rc::new(RefCell::new(HashMap::new()));
+    let our_pid = std::process::id();
+
+    let _reg_listener = registry
+        .add_listener_local()
+        .global({
+            let meters = meters.clone();
+            let core = pw.core.clone();
+            move |global| {
+                let Some(props) = global.props else { return };
+                if global.type_ != ObjectType::Node {
+                    return;
+                }
+                if props.get("media.class") != Some("Stream/Output/Audio") {
+                    return;
+                }
+                let name = props
+                    .get("application.name")
+                    .or_else(|| props.get("node.name"))
+                    .or_else(|| props.get("media.name"))
+                    .unwrap_or("");
+                if name.is_empty()
+                    || name.contains(CAPTURE_NODE_NAME)
+                    || name.to_lowercase().contains("slopcast")
+                {
+                    return;
+                }
+                if props
+                    .get("application.process.id")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    == Some(our_pid)
+                {
+                    return;
+                }
+
+                let mut map = meters.borrow_mut();
+                if map.contains_key(&global.id) {
+                    return;
+                }
+                let level = Arc::new(MeterLevel::new());
+                let Some(meter) = meter_stream(&core, global.id, level) else {
+                    return;
+                };
+                map.insert(global.id, meter);
+            }
+        })
+        .global_remove({
+            let meters = meters.clone();
+            move |id| {
+                meters.borrow_mut().remove(&id);
+            }
+        })
+        .register();
+
+    let mut last_wave = Instant::now();
+
+    let _ = ready_tx.send(Ok(()));
+
+    while !stop.load(Ordering::SeqCst) {
+        // 50ms bound only limits idle sleeping; with live audio the loop wakes
+        // on stream buffer events as they arrive, so metering latency is
+        // unaffected while a tight timeout would just spin the thread.
+        pw.main_loop
+            .loop_()
+            .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
+
+        let now = Instant::now();
+        if now.duration_since(last_wave) >= Duration::from_millis(METER_WAVE_INTERVAL_MS) {
+            last_wave = now;
+            let mut meter_map = meters.borrow_mut();
+            run_wave_pass(&mut meter_map);
+            invoke_wave_callback(wave_snapshot(&meter_map));
+        }
+    }
+
+    meters.borrow_mut().clear();
+}
+
+pub(crate) fn start_audio_metering() -> NapiResult<bool> {
+    let mut guard = METER_STATE
+        .lock()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    if guard.is_some() {
+        return Ok(true);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+
+    let join = {
+        let stop = stop.clone();
+        thread::Builder::new()
+            .name("pw-audio-metering".into())
+            .spawn(move || run_meter_session(stop, ready_tx))
+            .map_err(|e| {
+                napi::Error::from_reason(format!("Failed to spawn metering worker: {e}"))
+            })?
+    };
+
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            return Err(napi::Error::from_reason(reason));
+        }
+        Err(_) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            return Err(napi::Error::from_reason(
+                "Timed out starting audio metering",
+            ));
+        }
+    }
+
+    *guard = Some(MeterSession { stop, join });
+    Ok(true)
+}
+
+pub(crate) fn stop_audio_metering() -> NapiResult<bool> {
+    let Ok(mut guard) = METER_STATE.lock() else {
+        eprintln!("[meter] state lock poisoned; nothing to stop");
+        return Ok(true);
+    };
+    if let Some(session) = guard.take() {
+        session.stop.store(true, Ordering::SeqCst);
+        // Reap off-thread: the meter thread only checks the stop flag between
+        // 50 ms loop iterations, and a join here would stall the main process.
+        // A new metering session may start concurrently; the old one exits
+        // within one iteration and its streams are dropped with it.
+        let _ = thread::Builder::new()
+            .name("pw-meter-reaper".into())
+            .spawn(move || {
+                let _ = session.join.join();
+            });
+    }
+    Ok(true)
+}
