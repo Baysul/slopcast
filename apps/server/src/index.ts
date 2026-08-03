@@ -47,14 +47,12 @@ app.use((req, res, next) => {
     res.status(204).end();
     return;
   }
-  res.setHeader(
-    'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; connect-src 'self' ws: wss: http: https:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'",
-  );
   next();
 });
 
-app.use('/api/rooms', roomCreateLimiter);
+// Mounted on the POST path only: a prefix-mount would also rate-limit
+// /api/rooms/:code/token, capping spectators at the create limit.
+app.post('/api/rooms', roomCreateLimiter);
 app.use('/api/rooms/:code/token', spectatorTokenLimiter);
 app.use(
   initRoutes(

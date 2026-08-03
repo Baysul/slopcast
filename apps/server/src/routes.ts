@@ -1,10 +1,9 @@
+import { ROOM_CODE_RE } from '@slopcast/shared-types';
 import { Router as createRouter, type Router } from 'express';
 import { RoomServiceClient } from 'livekit-server-sdk';
 
 import { generateRoomCode } from './roomCodes.js';
 import { presenterToken, spectatorToken } from './token.js';
-
-const ROOM_CODE_RE = /^[a-z]{3}-[0-9]{3}-[a-z]{3}$/;
 
 function toWsUrl(url: string): string {
   if (url.startsWith('ws://') || url.startsWith('wss://')) return url;
@@ -104,8 +103,17 @@ export function initRoutes(
 
     const identity = `presenter-${code}-${Date.now()}`;
     const nativeIdentity = `audio-${code}-${Date.now()}`;
-    const token = await presenterToken(apiKey, apiSecret, code, identity);
-    const nativeToken = await presenterToken(apiKey, apiSecret, code, nativeIdentity);
+    let token: string;
+    let nativeToken: string;
+    try {
+      token = await presenterToken(apiKey, apiSecret, code, identity);
+      nativeToken = await presenterToken(apiKey, apiSecret, code, nativeIdentity);
+    } catch (err) {
+      allocatedCodes.delete(code);
+      console.error('Token minting failed for room code, code not allocated:', err);
+      res.status(500).json({ error: 'Failed to create room, please try again' });
+      return;
+    }
 
     res.json({
       code,
@@ -128,29 +136,6 @@ export function initRoutes(
     const token = await spectatorToken(apiKey, apiSecret, code, identity);
 
     res.json({ token, identity, livekitUrl: livekitWsUrl });
-  });
-
-  router.get('/api/rooms/:code', async (req, res) => {
-    const { code } = req.params;
-    if (!ROOM_CODE_RE.test(code)) {
-      res.status(400).json({ error: 'Invalid room code format' });
-      return;
-    }
-    try {
-      const participants = await roomClient.listParticipants(code);
-      res.json({
-        code,
-        participantCount: participants.length,
-        participants: participants.map((p) => ({
-          id: p.identity,
-          name: p.name,
-          isPublisher: p.isPublisher,
-        })),
-      });
-    } catch (err) {
-      console.error(`Room lookup failed for ${code}:`, err);
-      res.status(404).json({ error: 'Room not found' });
-    }
   });
 
   return router;

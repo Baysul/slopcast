@@ -17,8 +17,9 @@ export function spectatorToken(apiKey: string, apiSecret: string, room: string, 
   //    desktop header (spoofable via curl, but keeps honest web clients from
   //    minting presenter tokens).
   // 3. RATE LIMITING: the server applies per-IP rate limits to prevent brute-
-  //    force room-code guessing. Room codes are CSPRNG-generated (128-bit
-  //    entropy) and unguessable without the share link.
+  //    force room-code guessing. Room codes are CSPRNG-generated (~38 bits of
+  //    entropy) and unguessable within the rate-limit window without the
+  //    share link.
   //
   // This trade-off prioritises frictionless web-spectator join (no auth) while
   // relying on the SFU's unconditional publish enforcement as the chokepoint.
