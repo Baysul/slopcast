@@ -61,57 +61,87 @@ function computeQuality(
   return 'excellent';
 }
 
+interface VideoStats {
+  videoCodec: string | null;
+  width: number | null;
+  height: number | null;
+  frameRate: number | null;
+  videoBitrate: number | null;
+  packetLossPct: number | null;
+  freezeCount: number;
+  hasVideo: boolean;
+  framesDecoded: number;
+  packetsReceived: number;
+}
+
+const applyVideoDelta = (acc: VideoStats, report: RTCStatLike, prev: StatsPrev): void => {
+  const ts = report.timestamp ?? 0;
+  if (!prev.init || ts <= prev.ts) return;
+  const dt = (ts - prev.ts) / 1000;
+  const db = (report.bytesReceived ?? 0) - prev.bytesReceived;
+  if (db >= 0) acc.videoBitrate = (db * 8) / dt;
+  const df = (report.framesDecoded ?? 0) - prev.framesDecoded;
+  if (df >= 0) acc.frameRate = df / dt;
+  // Delta-based loss: cumulative loss understates recent degradation
+  // and can never recover after a burst.
+  const dl = (report.packetsLost ?? 0) - prev.packetsLost;
+  const dr = (report.packetsReceived ?? 0) - prev.packetsReceived;
+  const total = dl + dr;
+  if (total > 0) {
+    acc.packetLossPct = (dl / total) * 100;
+  }
+};
+
+const foldInboundVideo = (
+  acc: VideoStats,
+  report: RTCStatLike,
+  stats: RTCStatsReport,
+  prev: StatsPrev | null,
+): void => {
+  const ts = report.timestamp ?? 0;
+
+  if (report.codecId) {
+    const codec = stats.get(report.codecId) as RTCStatLike | undefined;
+    acc.videoCodec = codecLabel(codec?.mimeType);
+  }
+
+  acc.width = report.frameWidth ?? acc.width;
+  acc.height = report.frameHeight ?? acc.height;
+
+  if (prev?.init && ts > prev.ts) {
+    applyVideoDelta(acc, report, prev);
+  } else {
+    const totalReceived = (report.packetsReceived ?? 0) + (report.packetsLost ?? 0);
+    if (totalReceived > 0) {
+      acc.packetLossPct = ((report.packetsLost ?? 0) / totalReceived) * 100;
+    }
+  }
+
+  acc.freezeCount = report.freezeCount ?? 0;
+  acc.framesDecoded = report.framesDecoded ?? 0;
+  acc.packetsReceived = report.packetsReceived ?? 0;
+};
+
 export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, hasAudio: boolean): SpectatorTelemetry {
-  let videoCodec: string | null = null;
-  let width: number | null = null;
-  let height: number | null = null;
-  let frameRate: number | null = null;
-  let videoBitrate: number | null = null;
-  let packetLossPct: number | null = null;
-  let freezeCount = 0;
-  let hasVideo = false;
-  let framesDecoded = 0;
-  let packetsReceived = 0;
+  const video: VideoStats = {
+    videoCodec: null,
+    width: null,
+    height: null,
+    frameRate: null,
+    videoBitrate: null,
+    packetLossPct: null,
+    freezeCount: 0,
+    hasVideo: false,
+    framesDecoded: 0,
+    packetsReceived: 0,
+  };
   let decoderImplementation: string | null = null;
 
   for (const reportRaw of stats.values()) {
     const report = reportRaw as RTCStatLike;
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
-      hasVideo = true;
-      const ts = report.timestamp ?? 0;
-
-      if (report.codecId) {
-        const codec = stats.get(report.codecId) as RTCStatLike | undefined;
-        videoCodec = codecLabel(codec?.mimeType);
-      }
-
-      width = report.frameWidth ?? width;
-      height = report.frameHeight ?? height;
-
-      if (prev?.init && ts > prev.ts) {
-        const dt = (ts - prev.ts) / 1000;
-        const db = (report.bytesReceived ?? 0) - prev.bytesReceived;
-        if (db >= 0) videoBitrate = (db * 8) / dt;
-        const df = (report.framesDecoded ?? 0) - prev.framesDecoded;
-        if (df >= 0) frameRate = df / dt;
-        // Delta-based loss: cumulative loss understates recent degradation
-        // and can never recover after a burst.
-        const dl = (report.packetsLost ?? 0) - prev.packetsLost;
-        const dr = (report.packetsReceived ?? 0) - prev.packetsReceived;
-        const total = dl + dr;
-        if (total > 0) {
-          packetLossPct = (dl / total) * 100;
-        }
-      } else {
-        const totalReceived = (report.packetsReceived ?? 0) + (report.packetsLost ?? 0);
-        if (totalReceived > 0) {
-          packetLossPct = ((report.packetsLost ?? 0) / totalReceived) * 100;
-        }
-      }
-
-      freezeCount = report.freezeCount ?? 0;
-      framesDecoded = report.framesDecoded ?? 0;
-      packetsReceived = report.packetsReceived ?? 0;
+      video.hasVideo = true;
+      foldInboundVideo(video, report, stats, prev);
     }
 
     if (report.type === 'codec' && report.mimeType?.toUpperCase()?.includes('VIDEO')) {
@@ -121,21 +151,21 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
     }
   }
 
-  const quality = computeQuality(videoBitrate, frameRate, packetLossPct, freezeCount);
+  const quality = computeQuality(video.videoBitrate, video.frameRate, video.packetLossPct, video.freezeCount);
 
   return {
-    videoCodec,
-    width,
-    height,
-    frameRate,
-    videoBitrate,
-    packetLossPct,
-    freezeCount,
-    hasVideo,
+    videoCodec: video.videoCodec,
+    width: video.width,
+    height: video.height,
+    frameRate: video.frameRate,
+    videoBitrate: video.videoBitrate,
+    packetLossPct: video.packetLossPct,
+    freezeCount: video.freezeCount,
+    hasVideo: video.hasVideo,
     hasAudio,
     quality,
-    framesDecoded,
-    packetsReceived,
+    framesDecoded: video.framesDecoded,
+    packetsReceived: video.packetsReceived,
     decoderImplementation,
   };
 }

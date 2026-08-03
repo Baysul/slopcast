@@ -10,6 +10,149 @@ import { VideoPlayer } from '../components/VideoPlayer';
 
 type StatusVariant = 'live' | 'disconnected' | 'info';
 
+const DECODER_STALL_THRESHOLD_MS = 8000;
+const DECODER_STALL_CHECK_MS = 2000;
+
+const logH264Sdp = (room: Room): void => {
+  try {
+    const sub = (
+      room as { engine?: { pcManager?: { subscriber?: { getRemoteDescription(): RTCSessionDescription | null } } } }
+    ).engine?.pcManager?.subscriber;
+    if (!sub) return;
+    const desc = sub.getRemoteDescription();
+    if (!desc) return;
+    const h264Lines = desc.sdp
+      .split('\n')
+      .filter((line) => line.startsWith('a=fmtp:') && line.includes('profile-level-id'));
+    for (const line of h264Lines) {
+      console.log(`[SDP:recv] H264 remote fmtp: ${line}`);
+    }
+  } catch {
+    /* diagnostic-only */
+  }
+};
+
+const collectExistingTracks = (room: Room): MediaStreamTrack[] => {
+  const tracks: MediaStreamTrack[] = [];
+  for (const participant of room.remoteParticipants.values()) {
+    for (const pub of participant.trackPublications.values()) {
+      if (pub.track?.mediaStreamTrack) {
+        tracks.push(pub.track.mediaStreamTrack);
+      }
+    }
+  }
+  return tracks;
+};
+
+const attachExistingTracks = (
+  room: Room,
+  managedStreamRef: React.RefObject<MediaStream | null>,
+  setMediaStream: (stream: MediaStream | null) => void,
+  setConnectionStatus: (status: 'connecting' | 'live' | 'disconnected' | 'closed' | 'error') => void,
+  setStatusText: (text: string) => void,
+): void => {
+  const existingTracks = collectExistingTracks(room);
+  if (existingTracks.length === 0) {
+    if (room.state === ConnectionState.Connected) {
+      setStatusText('Connected — waiting for stream...');
+    }
+    return;
+  }
+  if (!managedStreamRef.current) {
+    managedStreamRef.current = new MediaStream();
+  }
+  for (const track of existingTracks) {
+    if (!managedStreamRef.current.getTracks().includes(track)) {
+      managedStreamRef.current.addTrack(track);
+    }
+  }
+  setMediaStream(managedStreamRef.current);
+  setConnectionStatus('live');
+  setStatusText('Live');
+};
+
+const firstVideoReceiver = (room: Room): RTCRtpReceiver | undefined => {
+  const videoPub = room.remoteParticipants.values().next().value?.videoTrackPublications?.values().next().value;
+  const videoTrack = videoPub?.track;
+  return (videoTrack as { receiver?: RTCRtpReceiver } | undefined)?.receiver;
+};
+
+interface VideoStatSnapshot {
+  packetsReceived: number;
+  framesDecoded: number;
+  codecMime: string | null;
+  decoderImpl: string | null;
+}
+
+const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapshot> => {
+  const empty: VideoStatSnapshot = { packetsReceived: 0, framesDecoded: 0, codecMime: null, decoderImpl: null };
+  let stats: RTCStatsReport;
+  try {
+    stats = await receiver.getStats();
+  } catch (err) {
+    console.warn('[Room] getStats failed:', err);
+    return empty;
+  }
+
+  const snapshot: VideoStatSnapshot = { ...empty };
+  for (const reportRaw of stats.values()) {
+    const report = reportRaw as {
+      type: string;
+      kind?: string;
+      packetsReceived?: number;
+      framesDecoded?: number;
+      mimeType?: string;
+      implementation?: string;
+    };
+    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+      snapshot.packetsReceived = report.packetsReceived ?? 0;
+      snapshot.framesDecoded = report.framesDecoded ?? 0;
+    }
+    if (report.type === 'codec' && report.mimeType?.toUpperCase()?.includes('VIDEO')) {
+      snapshot.codecMime = report.mimeType ?? null;
+      snapshot.decoderImpl = report.implementation ?? null;
+    }
+  }
+  return snapshot;
+};
+
+const evaluateStall = (
+  stats: VideoStatSnapshot,
+  stallStartRef: React.RefObject<number>,
+  decoderStalledRef: React.RefObject<boolean>,
+  setDecoderStalled: (v: boolean) => void,
+  setStalledCodec: (v: string | null) => void,
+): void => {
+  if (stats.packetsReceived > 0 && stats.framesDecoded === 0) {
+    if (stallStartRef.current === 0) {
+      stallStartRef.current = Date.now();
+      console.warn(
+        `[Room] Decoder stall suspected: packets=${stats.packetsReceived} framesDecoded=${stats.framesDecoded} codec=${stats.codecMime} impl=${stats.decoderImpl}`,
+      );
+    }
+
+    if (Date.now() - stallStartRef.current >= DECODER_STALL_THRESHOLD_MS) {
+      setDecoderStalled(true);
+      if (stats.codecMime) {
+        setStalledCodec(stats.codecMime.replace(/^video\//i, '').toUpperCase());
+      }
+      console.error(
+        `[Room] Decoder stall confirmed after ${DECODER_STALL_THRESHOLD_MS}ms: ` +
+          `packets=${stats.packetsReceived} framesDecoded=${stats.framesDecoded} codec=${stats.codecMime} impl=${stats.decoderImpl}`,
+      );
+    }
+    return;
+  }
+
+  if (stats.framesDecoded > 0) {
+    stallStartRef.current = 0;
+    if (decoderStalledRef.current) {
+      setDecoderStalled(false);
+      setStalledCodec(null);
+    }
+  }
+};
+
 export const RoomPage: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
@@ -34,9 +177,6 @@ export const RoomPage: React.FC = () => {
   const stallCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stallStartRef = useRef<number>(0);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const DECODER_STALL_THRESHOLD_MS = 8000;
-  const DECODER_STALL_CHECK_MS = 2000;
 
   const resetIdleTimer = useCallback(() => {
     setShowFullscreenControls(true);
@@ -147,25 +287,7 @@ export const RoomPage: React.FC = () => {
       setMediaStream(managedStreamRef.current);
       setConnectionStatus('live');
       setStatusText('Live');
-
-      try {
-        const sub = (
-          room as { engine?: { pcManager?: { subscriber?: { getRemoteDescription(): RTCSessionDescription | null } } } }
-        ).engine?.pcManager?.subscriber;
-        if (sub) {
-          const desc = sub.getRemoteDescription();
-          if (desc) {
-            const h264Lines = desc.sdp
-              .split('\n')
-              .filter((line) => line.startsWith('a=fmtp:') && line.includes('profile-level-id'));
-            for (const line of h264Lines) {
-              console.log(`[SDP:recv] H264 remote fmtp: ${line}`);
-            }
-          }
-        }
-      } catch {
-        /* diagnostic-only */
-      }
+      logH264Sdp(room);
     });
 
     room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
@@ -272,29 +394,7 @@ export const RoomPage: React.FC = () => {
             return;
           }
           setParticipantCount(room.remoteParticipants.size);
-          const existingTracks: MediaStreamTrack[] = [];
-          for (const participant of room.remoteParticipants.values()) {
-            for (const pub of participant.trackPublications.values()) {
-              if (pub.track?.mediaStreamTrack) {
-                existingTracks.push(pub.track.mediaStreamTrack);
-              }
-            }
-          }
-          if (existingTracks.length > 0) {
-            if (!managedStreamRef.current) {
-              managedStreamRef.current = new MediaStream();
-            }
-            for (const track of existingTracks) {
-              if (!managedStreamRef.current.getTracks().includes(track)) {
-                managedStreamRef.current.addTrack(track);
-              }
-            }
-            setMediaStream(managedStreamRef.current);
-            setConnectionStatus('live');
-            setStatusText('Live');
-          } else if (room.state === ConnectionState.Connected) {
-            setStatusText('Connected — waiting for stream...');
-          }
+          attachExistingTracks(room, managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
         });
       })
       .catch((err) => {
@@ -349,69 +449,11 @@ export const RoomPage: React.FC = () => {
       const room = roomRef.current;
       if (!room) return;
 
-      const videoPub = room.remoteParticipants.values().next().value?.videoTrackPublications?.values().next().value;
-      const videoTrack = videoPub?.track;
-      if (!videoTrack) return;
-
-      const receiver = (videoTrack as { receiver?: RTCRtpReceiver }).receiver;
+      const receiver = firstVideoReceiver(room);
       if (!receiver) return;
 
-      let stats: RTCStatsReport;
-      try {
-        stats = await receiver.getStats();
-      } catch (err) {
-        console.warn('[Room] getStats failed:', err);
-        return;
-      }
-      let packetsReceived = 0;
-      let framesDecoded = 0;
-      let codecMime: string | null = null;
-      let decoderImpl: string | null = null;
-
-      for (const reportRaw of stats.values()) {
-        const report = reportRaw as {
-          type: string;
-          kind?: string;
-          packetsReceived?: number;
-          framesDecoded?: number;
-          mimeType?: string;
-          implementation?: string;
-        };
-        if (report.type === 'inbound-rtp' && report.kind === 'video') {
-          packetsReceived = report.packetsReceived ?? 0;
-          framesDecoded = report.framesDecoded ?? 0;
-        }
-        if (report.type === 'codec' && report.mimeType?.toUpperCase()?.includes('VIDEO')) {
-          codecMime = report.mimeType ?? null;
-          decoderImpl = report.implementation ?? null;
-        }
-      }
-
-      if (packetsReceived > 0 && framesDecoded === 0) {
-        if (stallStartRef.current === 0) {
-          stallStartRef.current = Date.now();
-          console.warn(
-            `[Room] Decoder stall suspected: packets=${packetsReceived} framesDecoded=${framesDecoded} codec=${codecMime} impl=${decoderImpl}`,
-          );
-        }
-
-        if (Date.now() - stallStartRef.current >= DECODER_STALL_THRESHOLD_MS) {
-          setDecoderStalled(true);
-          if (codecMime) {
-            setStalledCodec(codecMime.replace(/^video\//i, '').toUpperCase());
-          }
-          console.error(
-            `[Room] Decoder stall confirmed after ${DECODER_STALL_THRESHOLD_MS}ms: ` +
-              `packets=${packetsReceived} framesDecoded=${framesDecoded} codec=${codecMime} impl=${decoderImpl}`,
-          );
-        }
-      } else if (framesDecoded > 0) {
-        stallStartRef.current = 0;
-        if (decoderStalledRef.current) {
-          setDecoderStalled(false);
-          setStalledCodec(null);
-        }
-      }
+      const stats = await readVideoStats(receiver);
+      evaluateStall(stats, stallStartRef, decoderStalledRef, setDecoderStalled, setStalledCodec);
     }, DECODER_STALL_CHECK_MS);
 
     return () => {

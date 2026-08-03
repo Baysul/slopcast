@@ -43,28 +43,39 @@ async function playWithMuteFallback(video: HTMLVideoElement): Promise<boolean> {
   }
 }
 
-export const VideoPlayer: React.FC<VideoPlayerProps> = ({
-  mediaStream,
-  isLive,
-  statusText,
-  onResync,
-  fullBleed,
-  getStatsFn,
-  decoderStalled,
-  stalledCodec,
-  isFullscreen: propIsFullscreen,
-  showFullscreenControls = true,
-}) => {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+const getOverlayClass = (isFullscreen: boolean, showFullscreenControls: boolean): string => {
+  if (isFullscreen) {
+    return showFullscreenControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none';
+  }
+  return 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto';
+};
 
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [volume, setVolume] = useState(1);
-  const isFullscreen = propIsFullscreen ?? false;
-  const [hasVideoTrack, setHasVideoTrack] = useState(false);
-  const [needsUserGesture, setNeedsUserGesture] = useState(false);
+const applyPlayResult = (
+  video: HTMLVideoElement,
+  needsGesture: boolean,
+  setIsPlaying: (v: boolean) => void,
+  setIsMuted: (v: boolean) => void,
+  setNeedsUserGesture: (v: boolean) => void,
+  warn: boolean,
+): void => {
+  setIsPlaying(true);
+  if (!needsGesture) {
+    unlockAudioContexts();
+    return;
+  }
+  video.muted = true;
+  setIsMuted(true);
+  setNeedsUserGesture(true);
+  if (warn) {
+    console.warn('[VideoPlayer] Play still blocked after user gesture:', needsGesture);
+  }
+};
 
+const useSpectatorTelemetry = (
+  isLive: boolean,
+  getStatsFn: (() => Promise<RTCStatsReport | null>) | undefined,
+  mediaStream: MediaStream | null,
+): { telemetry: SpectatorTelemetry | null } => {
   const [telemetry, setTelemetry] = useState<SpectatorTelemetry | null>(null);
   const statsPrevRef = useRef<ReturnType<typeof createStatsPrev>>(null);
   const telemetryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -97,6 +108,43 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [isLive, getStatsFn, mediaStream]);
 
+  return { telemetry };
+};
+
+interface PlaybackControls {
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  isPlaying: boolean;
+  isMuted: boolean;
+  volume: number;
+  hasVideoTrack: boolean;
+  needsUserGesture: boolean;
+  audioTrackCount: number;
+  handleUserGesture: () => void;
+  togglePlay: () => void;
+  toggleMute: () => void;
+  handleVolumeChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  toggleFullscreen: () => void;
+}
+
+const fullscreenTarget = (container: HTMLDivElement | null, fullBleed: boolean): HTMLElement => {
+  if (!fullBleed) {
+    return container || document.documentElement;
+  }
+  return (container?.closest('.min-h-screen') as HTMLElement) || container || document.documentElement;
+};
+
+const usePlaybackControls = (mediaStream: MediaStream | null, fullBleed?: boolean): PlaybackControls => {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [hasVideoTrack, setHasVideoTrack] = useState(false);
+  const [needsUserGesture, setNeedsUserGesture] = useState(false);
+  const audioTrackCount = mediaStream?.getAudioTracks().length ?? 0;
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -110,14 +158,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setIsMuted(false);
 
       playWithMuteFallback(video).then((needsGesture) => {
-        setIsPlaying(true);
-        if (needsGesture) {
-          video.muted = true;
-          setIsMuted(true);
-          setNeedsUserGesture(true);
-        } else {
-          unlockAudioContexts();
-        }
+        applyPlayResult(video, needsGesture, setIsPlaying, setIsMuted, setNeedsUserGesture, false);
       });
     } else {
       video.srcObject = null;
@@ -137,14 +178,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     playWithMuteFallback(video)
       .then((needsGesture) => {
-        setIsPlaying(true);
-        if (needsGesture) {
-          video.muted = true;
-          setIsMuted(true);
-          console.warn('[VideoPlayer] Play still blocked after user gesture:', needsGesture);
-        } else {
-          unlockAudioContexts();
-        }
+        applyPlayResult(video, needsGesture, setIsPlaying, setIsMuted, setNeedsUserGesture, true);
       })
       .catch((err) => {
         console.warn('[VideoPlayer] Play blocked after user gesture:', err);
@@ -165,12 +199,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isPlaying) {
       video.pause();
       setIsPlaying(false);
-    } else {
-      video
-        .play()
-        .then(() => setIsPlaying(true))
-        .catch(console.error);
+      return;
     }
+
+    video
+      .play()
+      .then(() => setIsPlaying(true))
+      .catch(console.error);
   };
 
   const toggleMute = () => {
@@ -193,173 +228,273 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   };
 
   const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      const target = fullBleed
-        ? (containerRef.current?.closest('.min-h-screen') as HTMLElement) ||
-          containerRef.current ||
-          document.documentElement
-        : containerRef.current || document.documentElement;
-      target.requestFullscreen().catch(console.error);
-    } else {
+    if (document.fullscreenElement) {
       document.exitFullscreen().catch(console.error);
+      return;
     }
+    fullscreenTarget(containerRef.current, !!fullBleed).requestFullscreen().catch(console.error);
   };
 
-  const GestureIcon = isPlaying ? Volume2 : Play;
-  const audioTrackCount = mediaStream?.getAudioTracks().length ?? 0;
+  return {
+    videoRef,
+    containerRef,
+    isPlaying,
+    isMuted,
+    volume,
+    hasVideoTrack,
+    needsUserGesture,
+    audioTrackCount,
+    handleUserGesture,
+    togglePlay,
+    toggleMute,
+    handleVolumeChange,
+    toggleFullscreen,
+  };
+};
 
-  let overlayControlsClass = 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto';
-  if (isFullscreen) {
-    overlayControlsClass = showFullscreenControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none';
-  }
+const WaitingOverlay: React.FC<{ statusText?: string; onResync?: () => void }> = ({ statusText, onResync }) => (
+  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-10">
+    <Radio className="w-8 h-8 text-white/20 mb-3" />
+    <p className="text-sm text-white/40 max-w-xs">{statusText || 'Waiting for presenter...'}</p>
+    {onResync && (
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onResync}
+        className="gap-2 mt-6 border-white/10 text-white/50 hover:text-white/80 hover:bg-white/5"
+      >
+        <RefreshCw className="w-3.5 h-3.5" />
+        <span>Reconnect</span>
+      </Button>
+    )}
+  </div>
+);
+
+const GestureOverlay: React.FC<{
+  isPlaying: boolean;
+  audioTrackCount: number;
+  onUserGesture: () => void;
+}> = ({ isPlaying, audioTrackCount, onUserGesture }) => {
+  const GestureIcon = isPlaying ? Volume2 : Play;
+  const title = isPlaying ? 'Click to enable audio' : 'Click to watch';
+  const subtitle = isPlaying ? 'Video is playing — tap to hear audio' : 'Video and audio will play after click';
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-20">
+      <button
+        type="button"
+        onClick={onUserGesture}
+        className="flex flex-col items-center gap-4 px-8 py-6 bg-safelight/20 border border-safelight/40 rounded-2xl
+                   text-white hover:bg-safelight/30 transition-all backdrop-blur-md cursor-pointer"
+      >
+        <GestureIcon className="w-10 h-10 text-safelight" />
+        <span className="font-semibold text-base">{title}</span>
+        {audioTrackCount > 0 && <span className="text-xs text-white/40">{subtitle}</span>}
+      </button>
+    </div>
+  );
+};
+
+const DecoderStallOverlay: React.FC<{ stalledCodec?: string | null; onResync?: () => void }> = ({
+  stalledCodec,
+  onResync,
+}) => {
+  const detail = stalledCodec
+    ? `Receiving ${stalledCodec} packets but no frames are decoding. The stream may use an incompatible codec profile.`
+    : 'Receiving video data but frames are not displaying.';
+  return (
+    <div
+      data-decoder-stalled="true"
+      className="absolute inset-0 flex flex-col items-center justify-center bg-black/85 z-20 p-6"
+    >
+      <AlertTriangle className="w-8 h-8 text-safelight mb-3" />
+      <p className="text-sm font-medium text-white/90 mb-1">Video decoder issue</p>
+      <p className="text-xs text-white/50 mb-5 max-w-xs text-center">{detail}</p>
+      {onResync && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onResync}
+          className="gap-2 border-safelight/20 text-safelight hover:text-safelight-hover hover:bg-safelight/10"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          <span>Reconnect</span>
+        </Button>
+      )}
+    </div>
+  );
+};
+
+const MediaControls: React.FC<{
+  telemetry: SpectatorTelemetry | null;
+  isPlaying: boolean;
+  isMuted: boolean;
+  volume: number;
+  isFullscreen: boolean;
+  onTogglePlay: () => void;
+  onToggleMute: () => void;
+  onVolumeChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onToggleFullscreen: () => void;
+  onResync?: () => void;
+  overlayClass: string;
+}> = ({
+  telemetry,
+  isPlaying,
+  isMuted,
+  volume,
+  isFullscreen,
+  onTogglePlay,
+  onToggleMute,
+  onVolumeChange,
+  onToggleFullscreen,
+  onResync,
+  overlayClass,
+}) => {
+  const playLabel = isPlaying ? 'Pause' : 'Play';
+  const muteLabel = isMuted ? 'Unmute' : 'Mute';
+  const fullscreenLabel = isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen';
+  const PlayIcon = isPlaying ? Pause : Play;
+  const VolumeIcon = isMuted || volume === 0 ? VolumeX : Volume2;
+  const FullscreenIcon = isFullscreen ? Minimize : Maximize;
+  const volumeValue = isMuted ? 0 : volume;
+  const controlClass =
+    'p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black';
+  return (
+    <div
+      className={`absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 transition-opacity duration-300 flex items-end justify-between gap-4 ${overlayClass}`}
+    >
+      {telemetry?.hasVideo && <SpectatorTelemetryBar telemetry={telemetry} />}
+
+      <div className="flex items-center gap-2 shrink-0 ml-auto">
+        <button type="button" onClick={onTogglePlay} className={controlClass} title={playLabel} aria-label={playLabel}>
+          <PlayIcon className="w-5 h-5" />
+        </button>
+
+        <div className="flex items-center gap-2 bg-black/30 px-3 py-1.5 rounded-xl backdrop-blur-sm">
+          <button
+            type="button"
+            onClick={onToggleMute}
+            className="text-white/60 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded-md"
+            title={muteLabel}
+            aria-label={muteLabel}
+          >
+            <VolumeIcon className="w-4 h-4" />
+          </button>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={volumeValue}
+            onChange={onVolumeChange}
+            aria-label="Volume"
+            className="w-14 accent-safelight h-1 bg-white/20 rounded-full cursor-pointer"
+          />
+        </div>
+
+        {onResync && (
+          <button
+            type="button"
+            onClick={onResync}
+            className={controlClass}
+            title="Reconnect stream"
+            aria-label="Reconnect stream"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={onToggleFullscreen}
+          className={controlClass}
+          title={fullscreenLabel}
+          aria-label={fullscreenLabel}
+        >
+          <FullscreenIcon className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export const VideoPlayer: React.FC<VideoPlayerProps> = ({
+  mediaStream,
+  isLive,
+  statusText,
+  onResync,
+  fullBleed,
+  getStatsFn,
+  decoderStalled,
+  stalledCodec,
+  isFullscreen: propIsFullscreen,
+  showFullscreenControls = true,
+}) => {
+  const isFullscreen = propIsFullscreen ?? false;
+  const { telemetry } = useSpectatorTelemetry(isLive, getStatsFn, mediaStream);
+  const {
+    videoRef,
+    containerRef,
+    isPlaying,
+    isMuted,
+    volume,
+    hasVideoTrack,
+    needsUserGesture,
+    audioTrackCount,
+    handleUserGesture,
+    togglePlay,
+    toggleMute,
+    handleVolumeChange,
+    toggleFullscreen,
+  } = usePlaybackControls(mediaStream, fullBleed);
+
+  const overlayControlsClass = getOverlayClass(isFullscreen, showFullscreenControls);
+
+  const showWaiting = !isLive || !hasVideoTrack;
+  const showGesture = needsUserGesture && isLive && hasVideoTrack;
+  const showStall = decoderStalled && isLive && hasVideoTrack;
+  const visualizerStream = isLive && mediaStream ? mediaStream : null;
+  const containerClass = fullBleed
+    ? 'h-screen max-h-screen'
+    : 'aspect-video rounded-2xl overflow-hidden border border-border';
+  const videoClass = hasVideoTrack && isLive ? 'block' : 'hidden';
+  const cursorClass = isFullscreen && !showFullscreenControls ? 'cursor-none' : '';
 
   return (
     <div
       ref={containerRef}
-      className={`relative w-full bg-black select-none flex items-center justify-center group ${
-        isFullscreen && !showFullscreenControls ? 'cursor-none' : ''
-      } ${fullBleed ? 'h-screen max-h-screen' : 'aspect-video rounded-2xl overflow-hidden border border-border'}`}
+      className={`relative w-full bg-black select-none flex items-center justify-center group ${cursorClass} ${containerClass}`}
     >
       {/* biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
       <video
         ref={videoRef}
         playsInline
         onDoubleClick={toggleFullscreen}
-        className={`w-full h-full object-contain cursor-pointer ${hasVideoTrack && isLive ? 'block' : 'hidden'}`}
+        className={`w-full h-full object-contain cursor-pointer ${videoClass}`}
       />
 
-      {(!isLive || !hasVideoTrack) && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-10">
-          <Radio className="w-8 h-8 text-white/20 mb-3" />
-          <p className="text-sm text-white/40 max-w-xs">{statusText || 'Waiting for presenter...'}</p>
-          {onResync && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onResync}
-              className="gap-2 mt-6 border-white/10 text-white/50 hover:text-white/80 hover:bg-white/5"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Reconnect</span>
-            </Button>
-          )}
-        </div>
+      {showWaiting && <WaitingOverlay statusText={statusText} onResync={onResync} />}
+      {showGesture && (
+        <GestureOverlay isPlaying={isPlaying} audioTrackCount={audioTrackCount} onUserGesture={handleUserGesture} />
       )}
-
-      {needsUserGesture && isLive && hasVideoTrack && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-20">
-          <button
-            type="button"
-            onClick={handleUserGesture}
-            className="flex flex-col items-center gap-4 px-8 py-6 bg-safelight/20 border border-safelight/40 rounded-2xl
-                       text-white hover:bg-safelight/30 transition-all backdrop-blur-md cursor-pointer"
-          >
-            <GestureIcon className="w-10 h-10 text-safelight" />
-            <span className="font-semibold text-base">{isPlaying ? 'Click to enable audio' : 'Click to watch'}</span>
-            {audioTrackCount > 0 && (
-              <span className="text-xs text-white/40">
-                {isPlaying ? 'Video is playing — tap to hear audio' : 'Video and audio will play after click'}
-              </span>
-            )}
-          </button>
-        </div>
-      )}
-
-      {decoderStalled && isLive && hasVideoTrack && (
-        <div
-          data-decoder-stalled="true"
-          className="absolute inset-0 flex flex-col items-center justify-center bg-black/85 z-20 p-6"
-        >
-          <AlertTriangle className="w-8 h-8 text-safelight mb-3" />
-          <p className="text-sm font-medium text-white/90 mb-1">Video decoder issue</p>
-          <p className="text-xs text-white/50 mb-5 max-w-xs text-center">
-            {stalledCodec
-              ? `Receiving ${stalledCodec} packets but no frames are decoding. The stream may use an incompatible codec profile.`
-              : 'Receiving video data but frames are not displaying.'}
-          </p>
-          <div className="flex items-center gap-3">
-            {onResync && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onResync}
-                className="gap-2 border-safelight/20 text-safelight hover:text-safelight-hover hover:bg-safelight/10"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Reconnect</span>
-              </Button>
-            )}
-          </div>
-        </div>
-      )}
+      {showStall && <DecoderStallOverlay stalledCodec={stalledCodec} onResync={onResync} />}
 
       <div className={`absolute top-4 right-16 z-20 transition-opacity duration-300 ${overlayControlsClass}`}>
-        {isLive && mediaStream && <AudioVisualizer mediaStream={mediaStream} showStatus />}
+        {visualizerStream && <AudioVisualizer mediaStream={visualizerStream} showStatus />}
       </div>
 
-      {isLive && (
-        <div
-          className={`absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 transition-opacity duration-300 flex items-end justify-between gap-4 ${overlayControlsClass}`}
-        >
-          {telemetry?.hasVideo && <SpectatorTelemetryBar telemetry={telemetry} />}
-
-          <div className="flex items-center gap-2 shrink-0 ml-auto">
-            <button
-              type="button"
-              onClick={togglePlay}
-              className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-              title={isPlaying ? 'Pause' : 'Play'}
-              aria-label={isPlaying ? 'Pause' : 'Play'}
-            >
-              {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
-            </button>
-
-            <div className="flex items-center gap-2 bg-black/30 px-3 py-1.5 rounded-xl backdrop-blur-sm">
-              <button
-                type="button"
-                onClick={toggleMute}
-                className="text-white/60 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded-md"
-                title={isMuted ? 'Unmute' : 'Mute'}
-                aria-label={isMuted ? 'Unmute' : 'Mute'}
-              >
-                {isMuted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-              </button>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={isMuted ? 0 : volume}
-                onChange={handleVolumeChange}
-                aria-label="Volume"
-                className="w-14 accent-safelight h-1 bg-white/20 rounded-full cursor-pointer"
-              />
-            </div>
-
-            {onResync && (
-              <button
-                type="button"
-                onClick={onResync}
-                className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-                title="Reconnect stream"
-                aria-label="Reconnect stream"
-              >
-                <RefreshCw className="w-4 h-4" />
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              className="p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
-              title="Toggle fullscreen"
-              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-            >
-              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-      )}
+      <MediaControls
+        telemetry={telemetry}
+        isPlaying={isPlaying}
+        isMuted={isMuted}
+        volume={volume}
+        isFullscreen={isFullscreen}
+        onTogglePlay={togglePlay}
+        onToggleMute={toggleMute}
+        onVolumeChange={handleVolumeChange}
+        onToggleFullscreen={toggleFullscreen}
+        onResync={onResync}
+        overlayClass={overlayControlsClass}
+      />
     </div>
   );
 };
