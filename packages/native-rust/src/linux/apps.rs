@@ -69,8 +69,8 @@ fn collect_client_pids(
     let reg_cell = bind_registry.clone();
     let core_rc = core.clone();
 
-    let procs = Rc::new(iter_proc());
-    let procs_cb = procs.clone();
+    let proc_list = Rc::new(iter_proc());
+    let proc_list_cb = proc_list.clone();
 
     let _reg_listener = registry
         .add_listener_local()
@@ -88,7 +88,7 @@ fn collect_client_pids(
                     })
                     .or_else(|| {
                         (!app_name.is_empty())
-                            .then(|| resolve_pid_by_name(&procs_cb, app_name))
+                            .then(|| resolve_pid_by_name(&proc_list_cb, app_name))
                             .flatten()
                     });
                 if let Some(pid) = pid {
@@ -119,11 +119,11 @@ fn collect_client_pids(
                     })
                     .or_else(|| {
                         resolve_pid_by_binary(
-                            &procs_cb,
+                            &proc_list_cb,
                             props.get("application.process.binary").unwrap_or(""),
                         )
                     })
-                    .or_else(|| resolve_pid_by_name(&procs_cb, stream_name))
+                    .or_else(|| resolve_pid_by_name(&proc_list_cb, stream_name))
                     .unwrap_or(0);
 
                 if pid == our_pid || stream_name.to_lowercase().contains("slopcast") {
@@ -265,6 +265,8 @@ pub(crate) fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
 /// registry props merged with bound-node info props, the same view `pw-dump`
 /// prints. Debugging aid for auto-resolve misses: the renderer logs these when
 /// a capture starts so the captured window can be matched against real nodes.
+type NodePropList = Vec<(u32, HashMap<String, String>)>;
+
 pub(crate) fn dump_audio_sources() -> NapiResult<Vec<HashMap<String, String>>> {
     pipewire::init();
     let pw = pw_init().map_err(|e| napi::Error::from_reason(format!("PipeWire init: {e}")))?;
@@ -272,7 +274,7 @@ pub(crate) fn dump_audio_sources() -> NapiResult<Vec<HashMap<String, String>>> {
         .core
         .get_registry()
         .map_err(|e| napi::Error::from_reason(format!("Registry: {e}")))?;
-    let nodes: Rc<RefCell<Vec<(u32, HashMap<String, String>)>>> = Rc::new(RefCell::new(Vec::new()));
+    let nodes: Rc<RefCell<NodePropList>> = Rc::new(RefCell::new(Vec::new()));
     let bindings: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
         Rc::new(RefCell::new(Vec::new()));
     let bind_core = pw.core.clone();

@@ -1,10 +1,15 @@
+#![allow(
+    clippy::ref_as_ptr,
+    clippy::inline_always,
+    reason = "the windows-rs #[implement] macro generates #[inline(always)] Interface helpers with raw-pointer casts"
+)]
+
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use napi::threadsafe_function::ThreadsafeFunction;
 use napi::{Either, Result as NapiResult};
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, S_FALSE, S_OK, WAIT_OBJECT_0};
@@ -42,7 +47,7 @@ use crate::AudioApp;
 
 const KSDATAFORMAT_SUBTYPE_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 const PROCESS_LOOPBACK_MIN_BUILD: u32 = 20348;
-const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
+const RPC_E_CHANGED_MODE: i32 = -2_147_410_682;
 const WASAPI_BUFFER_DURATION_100NS: i64 = 200_000; // 20 ms
 const KSAUDIO_SPEAKER_STEREO: u32 = 0x3;
 const TARGET_OUTPUT_SAMPLE_RATE: u32 = 48_000;
@@ -81,7 +86,10 @@ const SYSTEM_AUDIO_PID_ALL: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SendHandle(HANDLE);
+// SAFETY: `HANDLE` is a plain pointer-sized kernel handle with no thread-local
+// state; `OwnedHandle`/`SendHandle` only transfer or close it on owning threads.
 unsafe impl Send for SendHandle {}
+// SAFETY: see `Send` impl above — handles are freely shareable across threads.
 unsafe impl Sync for SendHandle {}
 
 struct CoTaskMemPtr<T>(*mut T);
@@ -202,7 +210,11 @@ impl AudioFormat {
     }
 }
 
-#[inline(always)]
+#[inline]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "samples are clamped to [-1, 1] before scaling by 32767, so the product always fits in i16"
+)]
 fn push_i16_stereo(buf: &mut Vec<u8>, l: f32, r: f32) {
     let l_i16 = (l.clamp(-1.0, 1.0) * I16_MAX_F32).round() as i16;
     let r_i16 = (r.clamp(-1.0, 1.0) * I16_MAX_F32).round() as i16;
@@ -230,6 +242,11 @@ impl StereoResampler {
         }
     }
 
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "linear-interpolation blend factor needs no more than f32 precision"
+    )]
     fn process_frame<F>(&mut self, current_frame: (f32, f32), mut emit_output: F)
     where
         F: FnMut((f32, f32)),
@@ -275,7 +292,7 @@ fn validate_target_pid(pid: i32) -> NapiResult<u32> {
     if pid == -1 || pid == 0 {
         Ok(SYSTEM_AUDIO_PID_DEFAULT)
     } else if pid > 0 {
-        Ok(pid as u32)
+        Ok(u32::try_from(pid).unwrap_or(0))
     } else {
         Err(napi::Error::from_reason(format!(
             "Invalid target process ID: {pid}. Must be -1 (system audio), 0, or a positive PID"
@@ -290,38 +307,38 @@ impl WasapiManager {
         }
     }
 
-    pub fn stop_audio_capture(&self) -> NapiResult<bool> {
+    pub fn stop_audio_capture(&self) -> bool {
         let Ok(mut guard) = self.state.lock() else {
-            return Ok(true);
+            return true;
         };
         if let Some(state) = guard.as_mut() {
-            self.stop_capture_locked(state);
+            Self::stop_capture_locked(state);
         }
-        Ok(true)
+        true
     }
 
-    pub fn is_audio_capture_active(&self) -> NapiResult<bool> {
+    pub fn is_audio_capture_active(&self) -> bool {
         let Ok(mut guard) = self.state.lock() else {
-            return Ok(false);
+            return false;
         };
         let Some(state) = guard.as_mut() else {
-            return Ok(false);
+            return false;
         };
         if !state.is_active {
-            return Ok(false);
+            return false;
         }
         if state
             .capture_thread
             .as_ref()
-            .is_some_and(|t| t.is_finished())
+            .is_some_and(std::thread::JoinHandle::is_finished)
         {
-            self.stop_capture_locked(state);
-            return Ok(false);
+            Self::stop_capture_locked(state);
+            return false;
         }
-        Ok(true)
+        true
     }
 
-    fn stop_capture_locked(&self, state: &mut WasapiState) {
+    fn stop_capture_locked(state: &mut WasapiState) {
         crate::audio_ring::stop_audio_ring();
         state.is_active = false;
         let join = state.capture_thread.take();
@@ -367,10 +384,12 @@ impl WasapiManager {
         };
 
         let stop_event = OwnedHandle::new(
+            // SAFETY: standard event-object creation; the returned handle is
+            // wrapped in OwnedHandle, which closes it exactly once.
             unsafe { CreateEventA(None, false, false, PCSTR::null()) }
                 .map_err(|e| napi_err("CreateEventA", e))?,
         )
-        .map_err(|e| napi::Error::from_reason(e))?;
+        .map_err(napi::Error::from_reason)?;
 
         let (startup_tx, startup_rx) = channel::<Result<CaptureMode, String>>();
         let (run_tx, run_rx) = channel::<()>();
@@ -405,7 +424,7 @@ impl WasapiManager {
                     capture_thread: None,
                     mode: None,
                 });
-                self.stop_capture_locked(state);
+                Self::stop_capture_locked(state);
 
                 if let Err(e) = crate::audio_ring::start_audio_ring() {
                     return Err(cleanup_failed_startup(run_tx, stop_raw, join, e));
@@ -443,8 +462,12 @@ fn cleanup_failed_startup(
     msg: String,
 ) -> napi::Error {
     drop(run_tx);
+    // SAFETY: `stop_raw` is a valid CreateEventA handle; signalling it lets a
+    // capture thread blocked on the event exit before we join it.
     let _ = unsafe { SetEvent(stop_raw) };
     let _ = join.join();
+    // SAFETY: the capture thread has joined, so `stop_raw` is no longer
+    // referenced and can be closed exactly once here.
     let _ = unsafe { CloseHandle(stop_raw) };
     napi::Error::from_reason(msg)
 }
@@ -453,15 +476,24 @@ fn napi_err(context: &str, e: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(format!("{context}: {e}"))
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "dwOSVersionInfoSize is the fixed OSVERSIONINFOW struct size, far below u32::MAX"
+)]
 fn os_build_number() -> Option<u32> {
     // SAFETY: all-zero is a valid OSVERSIONINFOW bit pattern.
     let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
-    info.dwOSVersionInfoSize = size_of::<OSVERSIONINFOW>() as u32;
+    info.dwOSVersionInfoSize = u32::try_from(size_of::<OSVERSIONINFOW>()).unwrap_or(0);
     // SAFETY: `info` is a valid, correctly sized out-buffer that outlives the call.
-    let status = unsafe { RtlGetVersion(&mut info) };
+    let status = unsafe { RtlGetVersion(&raw mut info) };
     status.is_ok().then_some(info.dwBuildNumber)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    reason = "one parse routine covering the WASAPI format matrix; format tags and cbSize are 16-bit values typed u32 by the windows crate"
+)]
 fn parse_wave_format(fmt_ptr: *const WAVEFORMATEX) -> Result<AudioFormat, String> {
     if fmt_ptr.is_null() {
         return Err("Null WAVEFORMATEX pointer".into());
@@ -592,6 +624,11 @@ fn parse_wave_format(fmt_ptr: *const WAVEFORMATEX) -> Result<AudioFormat, String
     }
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "normalized sample values; f32 is the WebRTC sink format"
+)]
 fn extract_stereo_f32(frame_bytes: &[u8], format: &AudioFormat) -> (f32, f32) {
     let bytes_per_sample = format.container_bits as usize / 8;
     if bytes_per_sample == 0 || frame_bytes.len() < bytes_per_sample * format.channels as usize {
@@ -678,8 +715,14 @@ fn extract_stereo_f32(frame_bytes: &[u8], format: &AudioFormat) -> (f32, f32) {
     }
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "dwSize is the fixed PROCESSENTRY32W struct size, far below u32::MAX"
+)]
 fn snapshot_process_names() -> HashMap<u32, String> {
     let mut map = HashMap::new();
+    // SAFETY: returns a snapshot handle (or INVALID_HANDLE_VALUE, rejected by
+    // OwnedHandle::new), which owns the snapshot until closed.
     let Ok(snapshot_raw) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
         return map;
     };
@@ -687,9 +730,13 @@ fn snapshot_process_names() -> HashMap<u32, String> {
         return map;
     };
     let snapshot_handle = snapshot.handle();
+    // SAFETY: PROCESSENTRY32W is a POD struct; zeroing produces a valid
+    // default that Process32FirstW overwrites.
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
-    entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-    if unsafe { Process32FirstW(snapshot_handle, &mut entry).is_ok() } {
+    entry.dwSize = u32::try_from(size_of::<PROCESSENTRY32W>()).unwrap_or(0);
+    // SAFETY: `snapshot_handle` is a valid open snapshot; `entry` is a
+    // writable buffer of the exact struct type the API expects.
+    if unsafe { Process32FirstW(snapshot_handle, &raw mut entry).is_ok() } {
         loop {
             let end = entry
                 .szExeFile
@@ -698,7 +745,9 @@ fn snapshot_process_names() -> HashMap<u32, String> {
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
             map.insert(entry.th32ProcessID, name);
-            if unsafe { Process32NextW(snapshot_handle, &mut entry).is_err() } {
+            // SAFETY: same as Process32FirstW above — the snapshot and the
+            // entry buffer remain valid for the whole enumeration.
+            if unsafe { Process32NextW(snapshot_handle, &raw mut entry).is_err() } {
                 break;
             }
         }
@@ -722,6 +771,10 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
     result
 }
 
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "Windows PIDs are far below i32::MAX; AudioApp fields are i32 for the napi boundary"
+)]
 fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
     let names = snapshot_process_names();
     // SAFETY: COM was initialized on this thread by the caller. Every interface
@@ -841,6 +894,10 @@ fn leak_activation_params(params: Box<AUDIOCLIENT_ACTIVATION_PARAMS>) {
     std::mem::forget(params);
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "cbSize is the fixed AUDIOCLIENT_ACTIVATION_PARAMS struct size, far below u32::MAX"
+)]
 fn activate_process_loopback(
     target_pid: u32,
     stop_event: Option<HANDLE>,
@@ -864,9 +921,9 @@ fn activate_process_loopback(
                 wReserved3: 0,
                 Anonymous: PROPVARIANT_0_0_0 {
                     blob: BLOB {
-                        cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: (&mut *activation_params as *mut AUDIOCLIENT_ACTIVATION_PARAMS)
-                            .cast::<u8>(),
+                        cbSize: u32::try_from(size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>())
+                            .unwrap_or(0),
+                        pBlobData: (&raw mut *activation_params).cast::<u8>(),
                     },
                 },
             }),
@@ -886,7 +943,7 @@ fn activate_process_loopback(
         ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
             &IAudioClient::IID,
-            Some(&raw_prop as *const PROPVARIANT),
+            Some(&raw const raw_prop),
             &callback,
         )?
     };
@@ -901,7 +958,7 @@ fn activate_process_loopback(
     let mut result = HRESULT(0);
     // SAFETY: called exactly once, after activation completed; both out-params
     // are valid and outlive the call.
-    unsafe { operation.GetActivateResult(&mut result, &mut audio_client) }?;
+    unsafe { operation.GetActivateResult(&raw mut result, &raw mut audio_client) }?;
     result.ok()?;
     let unknown =
         audio_client.ok_or_else(|| Error::new(E_FAIL, "Activation returned no interface"))?;
@@ -923,6 +980,10 @@ fn activate_system_loopback() -> windows::core::Result<(IAudioClient, CoTaskMemP
     }
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "WAVEFORMATEXTENSIBLE format tag and cbSize are 16-bit values; the constants are u32 only because the windows crate types them so"
+)]
 fn make_loopback_format() -> WAVEFORMATEXTENSIBLE {
     const CHANNELS: u16 = STEREO_CHANNELS;
     const SAMPLE_RATE: u32 = TARGET_OUTPUT_SAMPLE_RATE;
@@ -963,6 +1024,8 @@ impl<'a> BufferGuard<'a> {
 
     fn release(&mut self) {
         if !self.released {
+            // SAFETY: `capture_client` is a valid interface owned by this
+            // session; ReleaseBuffer must be called exactly once per GetBuffer.
             unsafe {
                 let _ = self.capture_client.ReleaseBuffer(self.frames);
             }
@@ -1004,6 +1067,12 @@ impl CaptureSession {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::similar_names,
+        reason = "single conversion routine covering every WASAPI fast path; per-arm f32/i16 sample bindings are named by format and samples are clamped to [-1, 1] before scaling to i16"
+    )]
     fn drain_packets(&mut self) -> Result<(), String> {
         self.pcm_buffer.clear();
         let frame_size = self.format.block_align as usize;
@@ -1025,7 +1094,7 @@ impl CaptureSession {
                 let mut frames: u32 = 0;
                 let mut flags: u32 = 0;
                 self.capture_client
-                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                    .GetBuffer(&raw mut data, &raw mut frames, &raw mut flags, None, None)
                     .map_err(|e| format!("GetBuffer: {e}"))?;
 
                 let mut guard = BufferGuard::new(&self.capture_client, frames);
@@ -1047,10 +1116,9 @@ impl CaptureSession {
                         }
                     }
                 } else {
-                    let packet_bytes = match (frames as usize).checked_mul(frame_size) {
-                        Some(b) => b,
-                        None => return Err("Overflow calculating packet byte length".into()),
-                    };
+                    let packet_bytes = (frames as usize)
+                        .checked_mul(frame_size)
+                        .ok_or("Overflow calculating packet byte length")?;
                     let raw_bytes = std::slice::from_raw_parts(data, packet_bytes);
 
                     if is_passthrough_rate {
@@ -1081,12 +1149,12 @@ impl CaptureSession {
                                     let r_f32 = f32::from_bits(r_bits);
                                     let l_f32 = if l_f32.is_nan() { 0.0 } else { l_f32 };
                                     let r_f32 = if r_f32.is_nan() { 0.0 } else { r_f32 };
-                                    let l_i16 =
+                                    let l_s16 =
                                         (l_f32.clamp(-1.0, 1.0) * I16_MAX_F32).round() as i16;
-                                    let r_i16 =
+                                    let r_s16 =
                                         (r_f32.clamp(-1.0, 1.0) * I16_MAX_F32).round() as i16;
-                                    let l_bytes = l_i16.to_le_bytes();
-                                    let r_bytes = r_i16.to_le_bytes();
+                                    let l_bytes = l_s16.to_le_bytes();
+                                    let r_bytes = r_s16.to_le_bytes();
                                     let out = &mut out_slice[i * STEREO_I16_BYTES_PER_FRAME
                                         ..(i + 1) * STEREO_I16_BYTES_PER_FRAME];
                                     out[0] = l_bytes[0];
@@ -1115,9 +1183,9 @@ impl CaptureSession {
                                     ]);
                                     let val_f32 = f32::from_bits(bits);
                                     let val_f32 = if val_f32.is_nan() { 0.0 } else { val_f32 };
-                                    let val_i16 =
+                                    let val_s16 =
                                         (val_f32.clamp(-1.0, 1.0) * I16_MAX_F32).round() as i16;
-                                    let bytes = val_i16.to_le_bytes();
+                                    let bytes = val_s16.to_le_bytes();
                                     let out = &mut out_slice[i * STEREO_I16_BYTES_PER_FRAME
                                         ..(i + 1) * STEREO_I16_BYTES_PER_FRAME];
                                     out[0] = bytes[0];
@@ -1137,12 +1205,12 @@ impl CaptureSession {
                                 {
                                     let (out_l, out_r) =
                                         extract_stereo_f32(frame_chunk, &self.format);
-                                    let l_i16 =
+                                    let l_s16 =
                                         (out_l.clamp(-1.0, 1.0) * I16_MAX_F32).round() as i16;
-                                    let r_i16 =
+                                    let r_s16 =
                                         (out_r.clamp(-1.0, 1.0) * I16_MAX_F32).round() as i16;
-                                    let l_bytes = l_i16.to_le_bytes();
-                                    let r_bytes = r_i16.to_le_bytes();
+                                    let l_bytes = l_s16.to_le_bytes();
+                                    let r_bytes = r_s16.to_le_bytes();
                                     let out = &mut out_slice[i * STEREO_I16_BYTES_PER_FRAME
                                         ..(i + 1) * STEREO_I16_BYTES_PER_FRAME];
                                     out[0] = l_bytes[0];
@@ -1278,7 +1346,7 @@ fn build_capture_session(
     let explicit_format = make_loopback_format();
     let format_ptr: *const WAVEFORMATEX = match mix_format_ptr.as_ref() {
         Some(ptr) => ptr.as_ptr(),
-        None => &explicit_format.Format,
+        None => &raw const explicit_format.Format,
     };
 
     let audio_format =
@@ -1343,6 +1411,7 @@ fn run_capture(
             let _ = startup_tx.send(Ok(mode));
             if run_rx.recv().is_err() {
                 if com_ok {
+                    // SAFETY: balances the successful CoInitializeEx at the top.
                     unsafe { CoUninitialize() };
                 }
                 return Err("Capture start aborted by caller".into());
@@ -1352,6 +1421,7 @@ fn run_capture(
         Err(e) => {
             let _ = startup_tx.send(Err(e.clone()));
             if com_ok {
+                // SAFETY: balances the successful CoInitializeEx at the top.
                 unsafe { CoUninitialize() };
             }
             return Err(e);
@@ -1371,11 +1441,11 @@ pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bo
     MANAGER.start_audio_capture(target_app_id)
 }
 
-pub fn stop_audio_capture() -> NapiResult<bool> {
+pub fn stop_audio_capture() -> bool {
     MANAGER.stop_audio_capture()
 }
 
-pub fn is_audio_capture_active() -> NapiResult<bool> {
+pub fn is_audio_capture_active() -> bool {
     MANAGER.is_audio_capture_active()
 }
 
@@ -1387,6 +1457,10 @@ pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
     None
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keeps the platform-module signature uniform with the fallible linux implementation"
+)]
 pub fn dump_audio_sources() -> NapiResult<Vec<std::collections::HashMap<String, String>>> {
     Ok(Vec::new())
 }
@@ -1401,29 +1475,23 @@ pub fn get_capture_context() -> NapiResult<crate::CaptureContext> {
     ))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keeps the platform-module signature uniform with the fallible linux implementation"
+)]
 pub fn start_audio_metering() -> NapiResult<bool> {
     Ok(false)
 }
 
-pub fn stop_audio_metering() -> NapiResult<bool> {
-    Ok(true)
+pub fn stop_audio_metering() -> bool {
+    true
 }
 
-pub fn set_audio_wave_callback(
-    _callback: std::sync::Arc<crate::WaveThreadsafeFunction>,
-) -> NapiResult<()> {
-    Ok(())
-}
+pub fn set_audio_wave_callback(_callback: std::sync::Arc<crate::WaveThreadsafeFunction>) {}
 
 pub fn clear_audio_wave_callback() {}
 
-pub fn set_dmabuf_callback(
-    _callback: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
-) -> NapiResult<()> {
-    Err(napi::Error::from_reason(
-        "DMA-BUF video capture is only available on Linux",
-    ))
-}
+pub fn set_dmabuf_callback(_callback: std::sync::Arc<crate::DmaBufFrameCallback>) {}
 
 pub fn clear_dmabuf_callback() {}
 
@@ -1438,8 +1506,8 @@ pub fn start_video_capture(
     ))
 }
 
-pub fn stop_video_capture() -> NapiResult<bool> {
-    Ok(true)
+pub fn stop_video_capture() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -1458,6 +1526,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "WAVE_FORMAT_EXTENSIBLE is 0xFFFE, a 16-bit value typed u32 by the windows crate"
+    )]
     fn extensible(
         channels: u16,
         bits: u16,
@@ -1485,7 +1557,7 @@ mod tests {
     }
 
     fn parse(fmt: &WAVEFORMATEX) -> Result<AudioFormat, String> {
-        parse_wave_format(fmt as *const WAVEFORMATEX)
+        parse_wave_format(std::ptr::from_ref(fmt))
     }
 
     #[test]
@@ -1500,6 +1572,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "test inputs are small integers that round-trip exactly in f32"
+    )]
     fn resampler_passthrough_at_same_rate() {
         let mut resampler = StereoResampler::new(48_000, 48_000);
         let mut outputs = Vec::new();

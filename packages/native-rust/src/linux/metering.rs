@@ -85,11 +85,8 @@ static METER_STATE: Mutex<Option<MeterSession>> = Mutex::new(None);
 static AUDIO_WAVE_CALLBACK: ArcSwapOption<crate::WaveThreadsafeFunction> =
     ArcSwapOption::const_empty();
 
-pub(crate) fn set_audio_wave_callback(
-    callback: Arc<crate::WaveThreadsafeFunction>,
-) -> napi::Result<()> {
+pub(crate) fn set_audio_wave_callback(callback: Arc<crate::WaveThreadsafeFunction>) {
     AUDIO_WAVE_CALLBACK.store(Some(callback));
-    Ok(())
 }
 
 pub(crate) fn clear_audio_wave_callback() {
@@ -466,10 +463,10 @@ pub(crate) fn start_audio_metering() -> NapiResult<bool> {
     Ok(true)
 }
 
-pub(crate) fn stop_audio_metering() -> NapiResult<bool> {
+pub(crate) fn stop_audio_metering() -> bool {
     let Ok(mut guard) = METER_STATE.lock() else {
         eprintln!("[meter] state lock poisoned; nothing to stop");
-        return Ok(true);
+        return true;
     };
     if let Some(session) = guard.take() {
         session.stop.store(true, Ordering::SeqCst);
@@ -483,7 +480,7 @@ pub(crate) fn stop_audio_metering() -> NapiResult<bool> {
                 let _ = session.join.join();
             });
     }
-    Ok(true)
+    true
 }
 
 #[cfg(test)]

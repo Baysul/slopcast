@@ -13,7 +13,7 @@ pub(super) struct ProcEntry {
 // every 3 s renderer poll plus each capture session start. Cache the scan for
 // a second; a freshly launched app being invisible for <1 s is irrelevant to
 // both callers.
-const PROC_CACHE_TTL: Duration = Duration::from_millis(1000);
+const PROC_CACHE_TTL: Duration = Duration::from_secs(1);
 static PROC_CACHE: Mutex<Option<(Instant, Vec<ProcEntry>)>> = Mutex::new(None);
 
 pub(super) fn iter_proc() -> Vec<ProcEntry> {
@@ -21,10 +21,10 @@ pub(super) fn iter_proc() -> Vec<ProcEntry> {
     let Ok(mut cache) = PROC_CACHE.lock() else {
         return Vec::new();
     };
-    if let Some((at, entries)) = cache.as_ref() {
-        if now.duration_since(*at) < PROC_CACHE_TTL {
-            return entries.clone();
-        }
+    if let Some((at, entries)) = cache.as_ref()
+        && now.duration_since(*at) < PROC_CACHE_TTL
+    {
+        return entries.clone();
     }
     let entries = scan_proc();
     *cache = Some((now, entries.clone()));
@@ -108,13 +108,13 @@ fn get_ancestor_pids(pid: u32) -> Vec<u32> {
             break;
         }
         ancestors.push(current);
-        let Some(ppid) = get_parent_pid(current) else {
+        let Some(parent) = get_parent_pid(current) else {
             break;
         };
-        if ppid == current || ppid <= 1 || is_system_or_session_daemon(ppid) {
+        if parent == current || parent <= 1 || is_system_or_session_daemon(parent) {
             break;
         }
-        current = ppid;
+        current = parent;
     }
     ancestors
 }

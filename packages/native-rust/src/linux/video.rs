@@ -24,10 +24,12 @@ fn monotonic_pts_ns() -> i64 {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    // SAFETY: `ts` is a fully initialized stack `timespec` that outlives the
+    // call; CLOCK_MONOTONIC is always supported on Linux.
     unsafe {
-        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts);
     }
-    (ts.tv_sec as i64) * 1_000_000_000 + (ts.tv_nsec as i64)
+    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
 }
 
 fn video_enum_format(width: u32, height: u32, fps_num: u32, fps_denom: u32) -> Option<Vec<u8>> {
@@ -90,6 +92,11 @@ fn video_format_props(info: &VideoInfoRaw) -> Vec<pipewire::spa::pod::Property> 
     props
 }
 
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_wrap,
+    reason = "one cohesive PipeWire stream setup sequence; resolutions and format ids are far below i32::MAX and the N-API frame callback requires i32"
+)]
 fn run_video_capture(
     node_id: u32,
     width: u32,
@@ -134,42 +141,48 @@ fn run_video_capture(
         .add_local_listener_with_user_data(())
         .state_changed(move |_stream, _old, state, _error| match state {
             StreamState::Streaming | StreamState::Paused => {
-                if let Ok(mut guard) = ready_tx_state.lock() {
-                    if let Some(tx) = guard.take() {
-                        let _ = tx.send(Ok(()));
-                    }
+                if let Ok(mut guard) = ready_tx_state.lock()
+                    && let Some(tx) = guard.take()
+                {
+                    let _ = tx.send(Ok(()));
                 }
             }
             StreamState::Unconnected | StreamState::Connecting => {}
             StreamState::Error(e) => {
-                if let Ok(mut guard) = ready_tx_state.lock() {
-                    if let Some(tx) = guard.take() {
-                        let _ = tx.send(Err(format!("Stream state error: {e}")));
-                    }
+                if let Ok(mut guard) = ready_tx_state.lock()
+                    && let Some(tx) = guard.take()
+                {
+                    let _ = tx.send(Err(format!("Stream state error: {e}")));
                 }
             }
         })
         .param_changed(move |_stream, _user_data, id, param| {
-            if id == ParamType::Format.as_raw() {
-                if let Some(pod) = param {
-                    let mut raw_info: pipewire::spa::sys::spa_video_info_raw =
-                        unsafe { std::mem::zeroed() };
-                    let res = unsafe {
-                        pipewire::spa::sys::spa_format_video_raw_parse(
-                            pod.as_raw_ptr(),
-                            &mut raw_info,
-                        )
-                    };
-                    if res >= 0 {
-                        let info = VideoInfoRaw::from_raw(raw_info);
-                        let sz = info.size();
-                        if sz.width > 0 && sz.height > 0 {
-                            *neg_clone.borrow_mut() = (
-                                sz.width as i32,
-                                sz.height as i32,
-                                info.format().as_raw() as i32,
-                            );
-                        }
+            if id == ParamType::Format.as_raw()
+                && let Some(pod) = param
+            {
+                let mut raw_info: pipewire::spa::sys::spa_video_info_raw =
+                    // SAFETY: `spa_video_info_raw` is a POD C struct; zeroing
+                    // yields a valid default that `spa_format_video_raw_parse`
+                    // overwrites before returning.
+                    unsafe { std::mem::zeroed() };
+                // SAFETY: `pod.as_raw_ptr()` points to a live, valid Pod for
+                // the duration of the call and `raw_info` is a writable buffer
+                // of the exact C type the parser expects.
+                let res = unsafe {
+                    pipewire::spa::sys::spa_format_video_raw_parse(
+                        pod.as_raw_ptr(),
+                        &raw mut raw_info,
+                    )
+                };
+                if res >= 0 {
+                    let info = VideoInfoRaw::from_raw(raw_info);
+                    let sz = info.size();
+                    if sz.width > 0 && sz.height > 0 {
+                        *neg_clone.borrow_mut() = (
+                            sz.width as i32,
+                            sz.height as i32,
+                            info.format().as_raw() as i32,
+                        );
                     }
                 }
             }
@@ -189,7 +202,12 @@ fn run_video_capture(
                 if raw_fd < 0 {
                     continue;
                 }
-                let dup_fd = unsafe { libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0) };
+                let dup_fd = unsafe {
+                    // SAFETY: `raw_fd` is a valid open descriptor from a
+                    // dequeued PipeWire buffer; F_DUPFD_CLOEXEC duplicates it
+                    // and returns a new valid descriptor.
+                    libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0)
+                };
                 if dup_fd < 0 {
                     continue;
                 }
@@ -201,27 +219,21 @@ fn run_video_capture(
         .register()
         .ok();
 
-    let values = match video_enum_format(width, height, fps, 1) {
-        Some(v) => v,
-        None => {
-            if let Ok(mut guard) = ready_tx_cell.lock() {
-                if let Some(tx) = guard.take() {
-                    let _ = tx.send(Err("Failed to build video format".into()));
-                }
-            }
-            return;
+    let Some(values) = video_enum_format(width, height, fps, 1) else {
+        if let Ok(mut guard) = ready_tx_cell.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(Err("Failed to build video format".into()));
         }
+        return;
     };
-    let pod = match Pod::from_bytes(&values) {
-        Some(p) => p,
-        None => {
-            if let Ok(mut guard) = ready_tx_cell.lock() {
-                if let Some(tx) = guard.take() {
-                    let _ = tx.send(Err("Failed to parse video pod".into()));
-                }
-            }
-            return;
+    let Some(pod) = Pod::from_bytes(&values) else {
+        if let Ok(mut guard) = ready_tx_cell.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(Err("Failed to parse video pod".into()));
         }
+        return;
     };
     let mut params = [pod];
 
@@ -231,10 +243,10 @@ fn run_video_capture(
         StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
         &mut params,
     ) {
-        if let Ok(mut guard) = ready_tx_cell.lock() {
-            if let Some(tx) = guard.take() {
-                let _ = tx.send(Err(format!("Stream connect: {e}")));
-            }
+        if let Ok(mut guard) = ready_tx_cell.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(Err(format!("Stream connect: {e}")));
         }
         return;
     }
@@ -296,19 +308,19 @@ pub(crate) fn start_video_capture(
     }
 }
 
-pub(crate) fn stop_video_capture() -> super::NapiResult<bool> {
+pub(crate) fn stop_video_capture() -> bool {
     let session = {
         let Ok(mut guard) = VIDEO_STATE.lock() else {
-            return Ok(true);
+            return true;
         };
         guard.take()
     };
     let Some(mut session) = session else {
-        return Ok(true);
+        return true;
     };
     session.stop.store(true, Ordering::Relaxed);
     if let Some(handle) = session.join.take() {
         let _ = handle.join();
     }
-    Ok(true)
+    true
 }

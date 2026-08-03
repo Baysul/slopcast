@@ -16,13 +16,10 @@ pub(crate) fn resolve_audio_app_for_x11_window(window_id: u32) -> Option<AudioAp
         return None;
     }
 
-    let atom_name = match std::ffi::CString::new("_NET_WM_PID") {
-        Ok(name) => name,
-        Err(_) => {
-            // SAFETY: balances the XOpenDisplay above; display is valid.
-            unsafe { x11::xlib::XCloseDisplay(display) };
-            return None;
-        }
+    let Ok(atom_name) = std::ffi::CString::new("_NET_WM_PID") else {
+        // SAFETY: balances the XOpenDisplay above; display is valid.
+        unsafe { x11::xlib::XCloseDisplay(display) };
+        return None;
     };
     // SAFETY: `display` is a valid open display and `atom_name` is a valid
     // NUL-terminated C string; both outlive the call.
@@ -256,10 +253,10 @@ fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     }
 
     // Layer 4: Match desktop file name suffix if not generic.
-    if !is_generic_launcher(suffix) {
-        if let Some(app) = crate::find_best_audio_match(&apps, suffix) {
-            return Some(app);
-        }
+    if !is_generic_launcher(suffix)
+        && let Some(app) = crate::find_best_audio_match(&apps, suffix)
+    {
+        return Some(app);
     }
 
     None
@@ -287,7 +284,7 @@ struct VideoScan {
 
 /// Collect only the xdg-desktop-portal metadata keys (`portal.screencast.*`)
 /// from the screencast video node's registry + info props — the portal's own
-/// record of the captured window, without dumping the whole PipeWire node.
+/// record of the captured window, without dumping the whole `PipeWire` node.
 fn merge_portal_props(
     out: &mut Option<HashMap<String, String>>,
     registry: &HashMap<String, String>,
@@ -303,6 +300,10 @@ fn merge_portal_props(
     *out = Some(merged);
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single-pass PipeWire registry scan whose bindings must stay inline with their capture-scan mutations"
+)]
 fn inspect_video_graph() -> Option<VideoScan> {
     pipewire::init();
     let pw = pw_init().ok()?;

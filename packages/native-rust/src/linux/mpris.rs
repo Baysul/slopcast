@@ -4,6 +4,7 @@ use std::thread;
 
 use zbus::MessageStream;
 use zbus::export::ordered_stream::OrderedStreamExt;
+use zbus::names::{InterfaceName, MemberName};
 use zbus::zvariant::{OwnedValue, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,16 +39,15 @@ impl MprisState {
     }
 
     fn remove(&mut self, name: &str) {
-        if name.starts_with("org.mpris.MediaPlayer2.") {
-            if let Some(removed) = self.players.remove(name) {
-                if let Some(uniq) = removed.unique_name {
-                    self.unique_to_well_known.remove(&uniq);
-                }
-            }
-        } else if name.starts_with(':') {
-            if let Some(well_known) = self.unique_to_well_known.remove(name) {
-                self.players.remove(&well_known);
-            }
+        if name.starts_with("org.mpris.MediaPlayer2.")
+            && let Some(removed) = self.players.remove(name)
+            && let Some(uniq) = removed.unique_name
+        {
+            self.unique_to_well_known.remove(&uniq);
+        } else if name.starts_with(':')
+            && let Some(well_known) = self.unique_to_well_known.remove(name)
+        {
+            self.players.remove(&well_known);
         }
     }
 
@@ -84,24 +84,24 @@ impl MprisState {
         };
 
         if iface == "org.mpris.MediaPlayer2" {
-            if let Some(v) = changed.get("Identity") {
-                if let Value::Str(s) = &**v {
-                    cached.player.identity = s.to_string();
-                }
+            if let Some(v) = changed.get("Identity")
+                && let Value::Str(s) = &**v
+            {
+                cached.player.identity = s.to_string();
             }
-            if let Some(v) = changed.get("DesktopEntry") {
-                if let Value::Str(s) = &**v {
-                    cached.player.desktop_entry = Some(s.to_string());
-                }
+            if let Some(v) = changed.get("DesktopEntry")
+                && let Value::Str(s) = &**v
+            {
+                cached.player.desktop_entry = Some(s.to_string());
             }
         } else if iface == "org.mpris.MediaPlayer2.Player" {
-            if let Some(v) = changed.get("PlaybackStatus") {
-                if let Value::Str(s) = &**v {
-                    cached.player.playing = s.as_str() == "Playing";
-                }
+            if let Some(v) = changed.get("PlaybackStatus")
+                && let Value::Str(s) = &**v
+            {
+                cached.player.playing = s.as_str() == "Playing";
             }
             if let Some(v) = changed.get("Metadata") {
-                cached.player.title = extract_title_from_value(&**v);
+                cached.player.title = extract_title_from_value(v);
             }
         }
     }
@@ -164,8 +164,8 @@ async fn run_mpris_monitor(state: Arc<RwLock<MprisState>>) {
     let mut stream = MessageStream::from(&conn);
     while let Some(Ok(msg)) = stream.next().await {
         let header = msg.header();
-        let iface = header.interface().map(|i| i.as_str());
-        let member = header.member().map(|m| m.as_str());
+        let iface = header.interface().map(InterfaceName::as_str);
+        let member = header.member().map(MemberName::as_str);
 
         match (iface, member) {
             (Some("org.freedesktop.DBus"), Some("NameOwnerChanged")) => {
@@ -176,7 +176,7 @@ async fn run_mpris_monitor(state: Arc<RwLock<MprisState>>) {
                 }
             }
             (Some("org.freedesktop.DBus.Properties"), Some("PropertiesChanged")) => {
-                let sender = header.sender().map(|s| s.to_string());
+                let sender = header.sender().map(ToString::to_string);
                 if let Ok((iface, changed_props, _invalidated)) =
                     msg.body()
                         .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
@@ -214,15 +214,13 @@ async fn handle_name_owner_changed(
                 guard.remove(&old_owner);
             }
         }
-    } else {
-        if let Some(cached) = fetch_player_info(conn, &name).await {
-            if let Ok(mut guard) = state.write() {
-                if !old_owner.is_empty() {
-                    guard.remove(&old_owner);
-                }
-                guard.insert(cached);
-            }
+    } else if let Some(cached) = fetch_player_info(conn, &name).await
+        && let Ok(mut guard) = state.write()
+    {
+        if !old_owner.is_empty() {
+            guard.remove(&old_owner);
         }
+        guard.insert(cached);
     }
 }
 
@@ -243,14 +241,12 @@ async fn handle_properties_changed(
         if let Ok(mut guard) = state.write() {
             guard.update_properties(sender, iface, changed_props);
         }
-    } else if let Some(s) = sender {
-        if s.starts_with("org.mpris.MediaPlayer2.") {
-            if let Some(cached) = fetch_player_info(conn, s).await {
-                if let Ok(mut guard) = state.write() {
-                    guard.insert(cached);
-                }
-            }
-        }
+    } else if let Some(s) = sender
+        && s.starts_with("org.mpris.MediaPlayer2.")
+        && let Some(cached) = fetch_player_info(conn, s).await
+        && let Ok(mut guard) = state.write()
+    {
+        guard.insert(cached);
     }
 }
 
@@ -309,7 +305,7 @@ async fn fetch_player_info(conn: &zbus::Connection, bus_name: &str) -> Option<Ca
 
     let title = player_props
         .get("Metadata")
-        .and_then(|v| extract_title_from_value(&**v));
+        .and_then(|v| extract_title_from_value(v));
 
     Some(CachedPlayer {
         well_known_name: bus_name.to_string(),
@@ -390,27 +386,28 @@ async fn dbus_get_name_owner(conn: &zbus::Connection, bus_name: &str) -> Option<
 }
 
 fn extract_title_from_value(val: &Value) -> Option<String> {
-    match val {
-        Value::Dict(dict) => {
-            for (key, val) in dict.iter() {
-                if let Value::Str(k) = key {
-                    if k.as_str() == "xesam:title" {
-                        if let Value::Str(s) = val {
-                            if !s.is_empty() {
-                                return Some(s.to_string());
-                            }
-                        } else if let Value::Value(inner) = val {
-                            if let Value::Str(s) = &**inner {
-                                if !s.is_empty() {
-                                    return Some(s.to_string());
-                                }
-                            }
-                        }
-                    }
+    let Value::Dict(dict) = val else {
+        return None;
+    };
+    for (key, val) in dict.iter() {
+        let Value::Str(k) = key else {
+            continue;
+        };
+        if k.as_str() != "xesam:title" {
+            continue;
+        }
+        match val {
+            Value::Str(s) if !s.is_empty() => return Some(s.to_string()),
+            Value::Value(inner) => {
+                let Value::Str(s) = &**inner else {
+                    continue;
+                };
+                if !s.is_empty() {
+                    return Some(s.to_string());
                 }
             }
-            None
+            _ => {}
         }
-        _ => None,
     }
+    None
 }

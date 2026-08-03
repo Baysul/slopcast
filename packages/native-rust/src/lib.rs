@@ -36,12 +36,12 @@ mod unsupported_platform {
         ))
     }
 
-    pub fn stop_audio_capture() -> napi::Result<bool> {
-        Ok(true)
+    pub fn stop_audio_capture() -> bool {
+        true
     }
 
-    pub fn is_audio_capture_active() -> napi::Result<bool> {
-        Ok(false)
+    pub fn is_audio_capture_active() -> bool {
+        false
     }
 
     pub fn switch_audio_capture(_: &napi::Either<String, i32>) -> napi::Result<bool> {
@@ -68,15 +68,11 @@ mod unsupported_platform {
         Ok(false)
     }
 
-    pub fn stop_audio_metering() -> napi::Result<bool> {
-        Ok(true)
+    pub fn stop_audio_metering() -> bool {
+        true
     }
 
-    pub fn set_audio_wave_callback(
-        _: std::sync::Arc<crate::WaveThreadsafeFunction>,
-    ) -> napi::Result<()> {
-        Ok(())
-    }
+    pub fn set_audio_wave_callback(_: std::sync::Arc<crate::WaveThreadsafeFunction>) {}
 
     pub fn clear_audio_wave_callback() -> napi::Result<()> {
         Ok(())
@@ -88,11 +84,7 @@ mod unsupported_platform {
         Ok(())
     }
 
-    pub fn set_dmabuf_callback(
-        _: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
-    ) -> napi::Result<()> {
-        Ok(())
-    }
+    pub fn set_dmabuf_callback(_: std::sync::Arc<crate::DmaBufFrameCallback>) {}
 
     pub fn clear_dmabuf_callback() -> napi::Result<()> {
         Ok(())
@@ -104,8 +96,8 @@ mod unsupported_platform {
         ))
     }
 
-    pub fn stop_video_capture() -> napi::Result<bool> {
-        Ok(true)
+    pub fn stop_video_capture() -> bool {
+        true
     }
 
     pub fn is_video_capture_active() -> napi::Result<bool> {
@@ -149,6 +141,8 @@ pub struct AudioAppWave {
 /// meter worker at ~33 ms cadence.
 pub type WaveThreadsafeFunction = ThreadsafeFunction<Vec<AudioAppWave>, ()>;
 
+pub(crate) type DmaBufFrameCallback = ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>;
+
 /// Wayland video-capture introspection for the desktop main process: which
 /// desktop environment is streaming, whether the source is a monitor or a
 /// window, and the best-matched audio application for the captured source.
@@ -170,6 +164,10 @@ pub struct CaptureContext {
     pub window_caption: Option<String>,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "nine ordered match strategies are clearer as one cascade than as separate helpers"
+)]
 pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
     let label_trim = label.trim();
     if label_trim.is_empty() {
@@ -231,16 +229,16 @@ pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<Au
     }
 
     // 2. Cleaned name equality (handling spaces / .exe, e.g. "zenless zone zero" vs "zenlesszonezero.exe")
-    if !lower_clean.is_empty() {
-        if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, _, name_clean, _, _)| {
+    if !lower_clean.is_empty()
+        && let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, _, name_clean, _, _)| {
             let stem = name_clean.trim_end_matches("exe");
             !stem.is_empty()
                 && (stem == lower_clean
                     || lower_clean.contains(stem)
                     || stem.contains(&lower_clean))
-        }) {
-            return Some((*a).clone());
-        }
+        })
+    {
+        return Some((*a).clone());
     }
 
     // 3. Name contained in label
@@ -260,44 +258,42 @@ pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<Au
     }
 
     // 5. Acronym match (e.g. "Final Fantasy XIV" -> "ffxiv" matching "ffxiv_dx11.exe")
-    if acronym.len() >= 3 {
-        if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
+    if acronym.len() >= 3
+        && let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
             name_lower.starts_with(&acronym) || name_lower.contains(&acronym)
-        }) {
-            return Some((*a).clone());
-        }
+        })
+    {
+        return Some((*a).clone());
     }
 
     // 6. Cmdline match (e.g. /proc/pid/cmdline containing "final fantasy xiv")
-    if lower.len() >= 3 {
-        if let Some((a, _, _, _, _)) = norm_apps
+    if lower.len() >= 3
+        && let Some((a, _, _, _, _)) = norm_apps
             .iter()
             .find(|(_, _, _, _, cmdline)| !cmdline.is_empty() && cmdline.contains(&lower))
+    {
+        return Some((*a).clone());
+    }
+
+    // 7. Significant word match (word length >= 4)
+    for word in &words {
+        if word.len() >= 4
+            && let Some((a, _, _, _, _)) = norm_apps
+                .iter()
+                .find(|(_, name_lower, _, _, _)| name_lower.contains(word))
         {
             return Some((*a).clone());
         }
     }
 
-    // 7. Significant word match (word length >= 4)
-    for word in &words {
-        if word.len() >= 4 {
-            if let Some((a, _, _, _, _)) = norm_apps
-                .iter()
-                .find(|(_, name_lower, _, _, _)| name_lower.contains(word))
-            {
-                return Some((*a).clone());
-            }
-        }
-    }
-
     // 8. First word match
-    if !first_word.is_empty() {
-        if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
+    if !first_word.is_empty()
+        && let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
             !name_lower.is_empty()
                 && (name_lower.contains(first_word) || first_word.contains(name_lower))
-        }) {
-            return Some((*a).clone());
-        }
+        })
+    {
+        return Some((*a).clone());
     }
 
     // 9. Window title match
@@ -374,7 +370,7 @@ pub fn start_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Re
 /// Returns an error if the capture state lock is poisoned.
 #[napi]
 pub fn stop_audio_capture() -> napi::Result<bool> {
-    platform::stop_audio_capture()
+    Ok(platform::stop_audio_capture())
 }
 
 /// Switches the active capture to a new target application.
@@ -397,7 +393,7 @@ pub fn switch_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::R
 /// Returns an error if the capture state lock is poisoned.
 #[napi]
 pub fn is_audio_capture_active() -> napi::Result<bool> {
-    platform::is_audio_capture_active()
+    Ok(platform::is_audio_capture_active())
 }
 
 pub struct ResolveAudioAppForX11WindowTask {
@@ -426,7 +422,7 @@ impl napi::Task for ResolveAudioAppForX11WindowTask {
 pub fn resolve_audio_app_for_x11_window(
     window_id: i32,
 ) -> napi::Result<napi::bindgen_prelude::AsyncTask<ResolveAudioAppForX11WindowTask>> {
-    let wid = if window_id > 0 { window_id as u32 } else { 0 };
+    let wid = u32::try_from(window_id).unwrap_or(0);
     Ok(napi::bindgen_prelude::AsyncTask::new(
         ResolveAudioAppForX11WindowTask { window_id: wid },
     ))
@@ -561,7 +557,7 @@ pub fn start_audio_metering() -> napi::Result<bool> {
 /// Returns an error if the meter state lock is poisoned.
 #[napi]
 pub fn stop_audio_metering() -> napi::Result<bool> {
-    platform::stop_audio_metering()
+    Ok(platform::stop_audio_metering())
 }
 
 /// Registers a callback that receives the current waveform readings for all
@@ -577,7 +573,8 @@ pub fn stop_audio_metering() -> napi::Result<bool> {
 pub fn set_audio_wave_callback(
     callback: std::sync::Arc<crate::WaveThreadsafeFunction>,
 ) -> napi::Result<()> {
-    platform::set_audio_wave_callback(callback)
+    platform::set_audio_wave_callback(callback);
+    Ok(())
 }
 
 /// Clears the registered waveform callback.
@@ -598,7 +595,12 @@ pub struct AudioRingStats {
 }
 
 /// Returns current telemetry counters for the audio ring buffer.
+#[must_use]
 #[napi]
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "telemetry counters are far below i64::MAX; the napi struct fields are i64"
+)]
 pub fn get_audio_ring_stats() -> AudioRingStats {
     let s = audio_ring::get_audio_ring_stats();
     AudioRingStats {
@@ -627,7 +629,8 @@ pub fn reset_audio_ring_stats() {
 pub fn set_audio_data_callback(
     callback: std::sync::Arc<audio_ring::AudioThreadsafeFunction>,
 ) -> napi::Result<()> {
-    audio_ring::set_audio_data_callback(callback)
+    audio_ring::set_audio_data_callback(callback);
+    Ok(())
 }
 
 /// Clears the registered PCM audio data callback.
@@ -636,33 +639,50 @@ pub fn clear_audio_data_callback() {
     audio_ring::clear_audio_data_callback();
 }
 
-/// Registers a callback for receiving DMA-BUF video frames from the PipeWire
-/// capture thread. Each frame is packed as `[fd, width, height, format, pts_lo, pts_hi]`.
-/// The callback owns the fd and must close it.
+/// Registers a callback for receiving `DMA-BUF` video frames from the
+/// `PipeWire` capture thread. Each frame is packed as
+/// `[fd, width, height, format, pts_lo, pts_hi]`. The callback owns the fd
+/// and must close it.
+///
+/// # Errors
+///
+/// Returns an error if the platform module rejects the callback.
 #[napi]
-pub fn set_dmabuf_callback(
-    callback: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,
-) -> napi::Result<()> {
-    platform::set_dmabuf_callback(callback)
+pub fn set_dmabuf_callback(callback: std::sync::Arc<DmaBufFrameCallback>) -> napi::Result<()> {
+    platform::set_dmabuf_callback(callback);
+    Ok(())
 }
 
 /// Clears the DMA-BUF callback. Frames produced after this call are dropped.
+///
+/// # Errors
+///
+/// Always returns `Ok`.
 #[napi]
 pub fn clear_dmabuf_callback() -> napi::Result<()> {
     platform::clear_dmabuf_callback();
     Ok(())
 }
 
-/// Starts PipeWire video capture from a screencast node.
+/// Starts `PipeWire` video capture from a screencast node.
+///
+/// # Errors
+///
+/// Returns an error if the capture thread fails to start or the stream does
+/// not reach an active state within five seconds.
 #[napi]
 pub fn start_video_capture(node_id: u32, width: u32, height: u32, fps: u32) -> napi::Result<bool> {
     platform::start_video_capture(node_id, width, height, fps)
 }
 
-/// Stops the active PipeWire video capture session.
+/// Stops the active `PipeWire` video capture session.
+///
+/// # Errors
+///
+/// Always returns `Ok`.
 #[napi]
 pub fn stop_video_capture() -> napi::Result<bool> {
-    platform::stop_video_capture()
+    Ok(platform::stop_video_capture())
 }
 
 #[cfg(test)]

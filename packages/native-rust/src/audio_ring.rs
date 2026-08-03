@@ -54,9 +54,8 @@ static AUDIO_PRODUCER: ArcSwapOption<AudioProducer> = ArcSwapOption::const_empty
 static AUDIO_RING_LIFECYCLE: Mutex<Option<AudioRingSession>> = Mutex::new(None);
 static AUDIO_CALLBACK: ArcSwapOption<AudioThreadsafeFunction> = ArcSwapOption::const_empty();
 
-pub fn set_audio_data_callback(callback: Arc<AudioThreadsafeFunction>) -> napi::Result<()> {
+pub fn set_audio_data_callback(callback: Arc<AudioThreadsafeFunction>) {
     AUDIO_CALLBACK.store(Some(callback));
-    Ok(())
 }
 
 pub fn clear_audio_data_callback() {
@@ -103,7 +102,7 @@ pub fn calculate_slot_capacity(
 }
 
 /// RT-safe lock-free non-blocking push of PCM audio bytes into the global audio ring buffer.
-/// Safe to call directly from PipeWire or WASAPI real-time process callbacks.
+/// Safe to call directly from `PipeWire` or WASAPI real-time process callbacks.
 pub fn push_pcm_bytes(bytes: &[u8]) {
     if bytes.is_empty() {
         return;

@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
+type ReadySenderCell = Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>;
+
 fn parse_target_id(target: &Either<String, i32>) -> NapiResult<Option<u32>> {
     match target {
         Either::B(n) if *n < 0 => Ok(None),
@@ -278,94 +280,93 @@ fn run_capture_session(
 
     let ready_tx_cell = Rc::new(RefCell::new(Some(ready_tx)));
 
-    let setup_pcm_stream = |node_id: u32,
-                            ready_cell: &Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>|
-     -> Option<(StreamRc, StreamListener<()>)> {
-        let values = create_audio_capture_format()?;
-        let pod = Pod::from_bytes(&values)?;
-        let mut params = [pod];
+    let setup_pcm_stream =
+        |node_id: u32, ready_cell: &ReadySenderCell| -> Option<(StreamRc, StreamListener<()>)> {
+            let values = create_audio_capture_format()?;
+            let pod = Pod::from_bytes(&values)?;
+            let mut params = [pod];
 
-        let stream = StreamRc::new(
-            pw.core.clone(),
-            AUDIO_STREAM_NAME,
-            properties! {
-                "media.class" => "Stream/Input/Audio",
-                "node.name" => AUDIO_STREAM_NAME,
-                "node.description" => "Slopcast Audio Capture",
-                "node.dont-move" => "true",
-                "node.dont-reconnect" => "true",
-            },
-        )
-        .ok()?;
-
-        let ready_cell_clone = ready_cell.clone();
-        let listener = stream
-            .add_local_listener_with_user_data(())
-            .state_changed(move |_stream, _old, state, _error| match state {
-                StreamState::Streaming | StreamState::Paused => {
-                    if let Some(tx) = ready_cell_clone.borrow_mut().take() {
-                        let _ = tx.send(Ok(()));
-                    }
-                }
-                StreamState::Unconnected | StreamState::Connecting => {}
-                StreamState::Error(e) => {
-                    if let Some(tx) = ready_cell_clone.borrow_mut().take() {
-                        let _ = tx.send(Err(format!("PCM stream error: {e}")));
-                    }
-                }
-            })
-            .process(move |s, ()| {
-                let Some(mut buffer) = s.dequeue_buffer() else {
-                    return;
-                };
-                thread_local! {
-                    static PCM_SCRATCH: std::cell::RefCell<Vec<u8>> =
-                        std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES));
-                }
-                PCM_SCRATCH.with(|cell| {
-                    let mut all_bytes = cell.borrow_mut();
-                    all_bytes.clear();
-                    for data in buffer.datas_mut() {
-                        let start = data.chunk().offset() as usize;
-                        let size = data.chunk().size() as usize;
-                        let Some(bytes) = data.data() else {
-                            continue;
-                        };
-                        let end = start.saturating_add(size).min(bytes.len());
-                        let Some(slice) = bytes.get(start..end) else {
-                            continue;
-                        };
-                        all_bytes.extend_from_slice(slice);
-                    }
-                    if !all_bytes.is_empty() {
-                        invoke_audio_data_callback(&all_bytes);
-                    }
-                });
-            })
-            .register()
+            let stream = StreamRc::new(
+                pw.core.clone(),
+                AUDIO_STREAM_NAME,
+                properties! {
+                    "media.class" => "Stream/Input/Audio",
+                    "node.name" => AUDIO_STREAM_NAME,
+                    "node.description" => "Slopcast Audio Capture",
+                    "node.dont-move" => "true",
+                    "node.dont-reconnect" => "true",
+                },
+            )
             .ok()?;
 
-        if let Err(e) = stream.connect(
-            pipewire::spa::utils::Direction::Input,
-            Some(node_id),
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-            &mut params,
-        ) {
-            eprintln!("[audio-capture] stream connect: {e}");
-            if let Some(tx) = ready_cell.borrow_mut().take() {
-                let _ = tx.send(Err(format!("PCM stream connect failed: {e}")));
-            }
-            None
-        } else {
-            Some((stream, listener))
-        }
-    };
+            let ready_cell_clone = ready_cell.clone();
+            let listener = stream
+                .add_local_listener_with_user_data(())
+                .state_changed(move |_stream, _old, state, _error| match state {
+                    StreamState::Streaming | StreamState::Paused => {
+                        if let Some(tx) = ready_cell_clone.borrow_mut().take() {
+                            let _ = tx.send(Ok(()));
+                        }
+                    }
+                    StreamState::Unconnected | StreamState::Connecting => {}
+                    StreamState::Error(e) => {
+                        if let Some(tx) = ready_cell_clone.borrow_mut().take() {
+                            let _ = tx.send(Err(format!("PCM stream error: {e}")));
+                        }
+                    }
+                })
+                .process(move |s, ()| {
+                    let Some(mut buffer) = s.dequeue_buffer() else {
+                        return;
+                    };
+                    thread_local! {
+                        static PCM_SCRATCH: std::cell::RefCell<Vec<u8>> =
+                            std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES));
+                    }
+                    PCM_SCRATCH.with(|cell| {
+                        let mut all_bytes = cell.borrow_mut();
+                        all_bytes.clear();
+                        for data in buffer.datas_mut() {
+                            let start = data.chunk().offset() as usize;
+                            let size = data.chunk().size() as usize;
+                            let Some(bytes) = data.data() else {
+                                continue;
+                            };
+                            let end = start.saturating_add(size).min(bytes.len());
+                            let Some(slice) = bytes.get(start..end) else {
+                                continue;
+                            };
+                            all_bytes.extend_from_slice(slice);
+                        }
+                        if !all_bytes.is_empty() {
+                            invoke_audio_data_callback(&all_bytes);
+                        }
+                    });
+                })
+                .register()
+                .ok()?;
 
-    if capture_node_id != 0 {
-        if let Some((s, l)) = setup_pcm_stream(capture_node_id, &ready_tx_cell) {
-            _pcm_stream = Some(s);
-            _pcm_listener = Some(l);
-        }
+            if let Err(e) = stream.connect(
+                pipewire::spa::utils::Direction::Input,
+                Some(node_id),
+                StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+                &mut params,
+            ) {
+                eprintln!("[audio-capture] stream connect: {e}");
+                if let Some(tx) = ready_cell.borrow_mut().take() {
+                    let _ = tx.send(Err(format!("PCM stream connect failed: {e}")));
+                }
+                None
+            } else {
+                Some((stream, listener))
+            }
+        };
+
+    if capture_node_id != 0
+        && let Some((s, l)) = setup_pcm_stream(capture_node_id, &ready_tx_cell)
+    {
+        _pcm_stream = Some(s);
+        _pcm_listener = Some(l);
     }
 
     let mut metadata_watch: Option<(
@@ -574,31 +575,35 @@ pub(crate) fn switch_audio_capture(target_app_id: &Either<String, i32>) -> NapiR
     Ok(true)
 }
 
-pub(crate) fn stop_audio_capture() -> NapiResult<bool> {
+pub(crate) fn stop_audio_capture() -> bool {
     let Ok(mut state_guard) = CAPTURE_STATE.lock() else {
         eprintln!("[capture] state lock poisoned; nothing to stop");
-        return Ok(true);
+        return true;
     };
     if let Some(state) = state_guard.as_mut() {
         stop_session(state);
     }
-    Ok(true)
+    true
 }
 
-pub(crate) fn is_audio_capture_active() -> NapiResult<bool> {
+pub(crate) fn is_audio_capture_active() -> bool {
     let Ok(mut state_guard) = CAPTURE_STATE.lock() else {
         eprintln!("[capture] state lock poisoned; reporting inactive");
-        return Ok(false);
+        return false;
     };
     let Some(state) = state_guard.as_mut() else {
-        return Ok(false);
+        return false;
     };
     if state.session.as_ref().is_some_and(|s| s.join.is_finished()) {
         stop_session(state);
     }
-    Ok(state.is_active)
+    state.is_active
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "samples are clamped to [-1, 1] before scaling by 32767, so the product always fits in i16"
+)]
 fn invoke_audio_data_callback(data: &[u8]) {
     // PipeWire delivers f32 LE frames; we downmix to packed i16 LE bytes so the
     // N-API boundary transfers one binary buffer instead of ~960 JS numbers.
