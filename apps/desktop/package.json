@@ -22,7 +22,8 @@
     "dist:linux:appimage": "pnpm build && electron-builder build --linux AppImage",
     "dist:linux:deb": "pnpm build && electron-builder build --linux deb",
     "dist:linux:tar": "pnpm build && electron-builder build --linux --dir && cd release && mv linux-unpacked Slopcast-$npm_package_version-linux-amd64 && tar -czf Slopcast-$npm_package_version-linux-amd64.tar.gz Slopcast-$npm_package_version-linux-amd64",
-    "dist:win": "pnpm build && electron-builder build --win"
+    "dist:win": "pnpm build && electron-builder build --win",
+    "test": "node --test \"tests/*.test.ts\""
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.3",
