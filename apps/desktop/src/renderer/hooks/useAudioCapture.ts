@@ -100,24 +100,34 @@ export function useAudioCapture(
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
 
   const audioAppIdRef = useRef<number | null>(null);
+  const hasAudioAppsRef = useRef(false);
 
+  // Keep the list identity stable across polls so memoized consumers
+  // (AudioAppPicker, audioAppGroups) don't re-render on unchanged data.
   const loadAudioApps = useCallback(async () => {
-    if (window.electronAPI) {
-      const apps = await window.electronAPI.getAudioApps();
-      setAudioApps(apps);
-    }
+    if (!window.electronAPI) return;
+    const apps = await window.electronAPI.getAudioApps();
+    setAudioApps((prev) => {
+      const same =
+        prev.length === apps.length && prev.every((app, i) => app.id === apps[i]?.id && app.name === apps[i]?.name);
+      return same ? prev : apps;
+    });
   }, []);
 
   // Audio apps auto-refresh
   useEffect(() => {
+    hasAudioAppsRef.current = audioApps.length > 0;
+  }, [audioApps.length]);
+
+  useEffect(() => {
     void loadAudioApps();
     const interval = setInterval(() => {
-      if (document.visibilityState === 'visible' && (!isSharing || audioApps.length === 0)) {
+      if (document.visibilityState === 'visible' && (!isSharing || !hasAudioAppsRef.current)) {
         void loadAudioApps();
       }
     }, AUDIO_APPS_POLL_MS);
     return () => clearInterval(interval);
-  }, [loadAudioApps, isSharing, audioApps.length]);
+  }, [loadAudioApps, isSharing]);
 
   // Audio waveform metering
   useEffect(() => {
@@ -126,7 +136,6 @@ export function useAudioCapture(
 
     let cancelled = false;
     let cleanupListener: (() => void) | null = null;
-    let fallbackInterval: ReturnType<typeof setInterval> | null = null;
 
     const handleWave = (waves: Array<{ id: number; columns: number[] }>) => {
       if (cancelled) return;
@@ -135,21 +144,12 @@ export function useAudioCapture(
 
     void api.startAudioMetering().then((started) => {
       if (!started || cancelled) return;
-
-      if (api.onAudioWave) {
-        cleanupListener = api.onAudioWave(handleWave);
-      } else {
-        fallbackInterval = setInterval(() => {
-          if (document.visibilityState !== 'visible') return;
-          void api.getAudioWave().then(handleWave);
-        }, 100);
-      }
+      cleanupListener = api.onAudioWave?.(handleWave) ?? null;
     });
 
     return () => {
       cancelled = true;
       if (cleanupListener) cleanupListener();
-      if (fallbackInterval) clearInterval(fallbackInterval);
       void api.stopAudioMetering().catch((err) => console.warn('[useAudioCapture] stopAudioMetering failed:', err));
     };
   }, []);

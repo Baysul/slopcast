@@ -38,7 +38,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Error, GUID, HRESULT, IUnknown, Interface, PCSTR, Ref, implement};
 
-use crate::{AudioApp, AudioAppWave};
+use crate::AudioApp;
 
 const KSDATAFORMAT_SUBTYPE_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 const PROCESS_LOOPBACK_MIN_BUILD: u32 = 20348;
@@ -324,25 +324,35 @@ impl WasapiManager {
     fn stop_capture_locked(&self, state: &mut WasapiState) {
         crate::audio_ring::stop_audio_ring();
         state.is_active = false;
-        if let Some(SendHandle(stop_handle)) = state.stop_event.take() {
-            // SAFETY: `stop_handle` was created by CreateEventA in start_audio_capture, is
-            // only signalled here, and is still a valid handle before the join and close.
+        let join = state.capture_thread.take();
+        let stop_handle = state.stop_event.take();
+        if let Some(SendHandle(handle)) = stop_handle {
+            // SAFETY: `handle` was created by CreateEventA in start_audio_capture,
+            // is only signalled here, and is still a valid handle until the reaper
+            // closes it after the thread has joined.
             unsafe {
-                let _ = SetEvent(stop_handle);
+                let _ = SetEvent(handle);
             }
-            if let Some(join) = state.capture_thread.take() {
-                let _ = join.join();
-            }
-            // SAFETY: the capture thread has joined, so the event is no longer referenced
-            // by it and is closed exactly once here.
-            unsafe {
-                let _ = CloseHandle(stop_handle);
-            }
-        } else if let Some(join) = state.capture_thread.take() {
-            let _ = join.join();
         }
         state.mode = None;
         state.target_pid = None;
+        if let Some(join) = join {
+            // Reap off-thread: a stalled WASAPI capture read must never block
+            // the Electron main process. The stop event is closed only after
+            // the thread has joined, keeping its reference valid.
+            let _ = std::thread::Builder::new()
+                .name("wasapi-reaper".into())
+                .spawn(move || {
+                    let _ = join.join();
+                    if let Some(SendHandle(handle)) = stop_handle {
+                        // SAFETY: the capture thread has joined, so the event is
+                        // no longer referenced by it and is closed exactly once here.
+                        unsafe {
+                            let _ = CloseHandle(handle);
+                        }
+                    }
+                });
+        }
     }
 
     pub fn start_audio_capture(&self, target_app_id: &Either<String, i32>) -> NapiResult<bool> {
@@ -1399,9 +1409,13 @@ pub fn stop_audio_metering() -> NapiResult<bool> {
     Ok(true)
 }
 
-pub fn get_audio_wave() -> NapiResult<Vec<AudioAppWave>> {
-    Ok(Vec::new())
+pub fn set_audio_wave_callback(
+    _callback: std::sync::Arc<crate::WaveThreadsafeFunction>,
+) -> NapiResult<()> {
+    Ok(())
 }
+
+pub fn clear_audio_wave_callback() {}
 
 pub fn set_dmabuf_callback(
     _callback: std::sync::Arc<ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>>,

@@ -69,8 +69,14 @@ mod unsupported_platform {
         Ok(true)
     }
 
-    pub fn get_audio_wave() -> napi::Result<Vec<crate::AudioAppWave>> {
-        Ok(Vec::new())
+    pub fn set_audio_wave_callback(
+        _: std::sync::Arc<crate::WaveThreadsafeFunction>,
+    ) -> napi::Result<()> {
+        Ok(())
+    }
+
+    pub fn clear_audio_wave_callback() -> napi::Result<()> {
+        Ok(())
     }
 
     pub fn set_audio_data_callback(
@@ -135,6 +141,10 @@ pub struct AudioAppWave {
     /// audio, each value in [-1, 1].
     pub columns: Vec<f64>,
 }
+
+/// Cross-thread callback for the per-app waveform snapshots pushed by the
+/// meter worker at ~33 ms cadence.
+pub type WaveThreadsafeFunction = ThreadsafeFunction<Vec<AudioAppWave>, ()>;
 
 /// Wayland video-capture introspection for the desktop main process: which
 /// desktop environment is streaming, whether the source is a monitor or a
@@ -551,15 +561,26 @@ pub fn stop_audio_metering() -> napi::Result<bool> {
     platform::stop_audio_metering()
 }
 
-/// Returns the current waveform readings for all metered applications. Each
-/// entry carries 96 interleaved (min, max) amplitude pairs.
+/// Registers a callback that receives the current waveform readings for all
+/// metered applications. Each entry carries 96 interleaved (min, max)
+/// amplitude pairs. The meter worker pushes at ~33 ms cadence; the callback is
+/// invoked non-blocking, so ticks are dropped (never queued) when the main
+/// process is busy.
 ///
 /// # Errors
 ///
-/// Always returns `Ok`.
+/// Returns an error if the platform module rejects the callback.
 #[napi]
-pub fn get_audio_wave() -> napi::Result<Vec<AudioAppWave>> {
-    platform::get_audio_wave()
+pub fn set_audio_wave_callback(
+    callback: std::sync::Arc<crate::WaveThreadsafeFunction>,
+) -> napi::Result<()> {
+    platform::set_audio_wave_callback(callback)
+}
+
+/// Clears the registered waveform callback.
+#[napi]
+pub fn clear_audio_wave_callback() {
+    platform::clear_audio_wave_callback();
 }
 
 /// Telemetry counters for the audio ring buffer.

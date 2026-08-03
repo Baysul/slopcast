@@ -1,7 +1,8 @@
+import { WAVE_EPSILON } from '@slopcast/shared-types';
+
 type WaveCallback = (columns: number[]) => void;
 
 export const WAVE_COLUMN_COUNT = 96;
-const NOTIFY_EPSILON = 0.002;
 
 // Columns above this amplitude count as active (silence is exactly zero).
 const ACTIVE_AMP = 0.002;
@@ -17,7 +18,7 @@ export function waveIsActive(columns: number[]): boolean {
 function waveChanged(prev: number[], next: number[]): boolean {
   if (prev.length !== next.length) return true;
   for (let i = 0; i < next.length; i++) {
-    if (Math.abs((prev[i] ?? 0) - (next[i] ?? 0)) > NOTIFY_EPSILON) {
+    if (Math.abs((prev[i] ?? 0) - (next[i] ?? 0)) > WAVE_EPSILON) {
       return true;
     }
   }
