@@ -19,20 +19,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveStreamSettings: (settings) => ipcRenderer.invoke('save-stream-settings', settings),
   getOnboardingCompleted: () => ipcRenderer.invoke('get-onboarding-completed'),
   setOnboardingCompleted: () => ipcRenderer.invoke('set-onboarding-completed'),
-  // Native capture pipeline (native-livekit WASAPI/native-video delivery, in
-  // progress): kept for the Task-4 integration, not yet called by the renderer.
+  // Native capture pipeline (native-livekit): the renderer's only path for
+  // room connection, video publishing, and telemetry.
   connectNativeRoom: (livekitUrl, token) => ipcRenderer.invoke('connect-native-room', livekitUrl, token),
   disconnectNativeRoom: () => ipcRenderer.invoke('disconnect-native-room'),
+  isNativeRoomConnected: () => ipcRenderer.invoke('is-native-room-connected'),
   startNativeCapture: (sourceIndex, config) => ipcRenderer.invoke('start-native-capture', sourceIndex, config),
+  updateNativeVideo: (config) => ipcRenderer.invoke('update-native-video', config),
   stopNativeCapture: () => ipcRenderer.invoke('stop-native-capture'),
   stopVideoCapture: () => ipcRenderer.invoke('stop-video-capture'),
   isNativeCaptureActive: () => ipcRenderer.invoke('is-native-capture-active'),
   getSpectatorCount: () => ipcRenderer.invoke('get-spectator-count'),
-  onAudioPcmData: (callback) => {
-    const handler = (_event, buffer) => callback(buffer);
-    ipcRenderer.on('audio-pcm-data', handler);
-    return () => ipcRenderer.removeListener('audio-pcm-data', handler);
-  },
+  getNativeTelemetry: () => ipcRenderer.invoke('get-native-telemetry'),
   onAudioWave: (callback) => {
     const handler = (_event, waves) => callback(waves);
     ipcRenderer.on('audio-wave-update', handler);

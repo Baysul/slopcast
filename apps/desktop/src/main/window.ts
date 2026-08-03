@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { app, BrowserWindow, desktopCapturer, Menu, nativeImage, session, shell } from 'electron';
+import { app, BrowserWindow, Menu, nativeImage, session, shell } from 'electron';
 import { getWindow, isWayland, setMainWindow } from './context';
 
 // Flags must be set before app.whenReady(). Build one combined list because
@@ -50,10 +50,9 @@ function resolveIconPath(): string | null {
 
 export interface WindowDeps {
   stopNativeCapture: () => void;
-  setLastCapturedSourceName: (name: string) => void;
 }
 
-export function createWindow({ stopNativeCapture, setLastCapturedSourceName }: WindowDeps) {
+export function createWindow({ stopNativeCapture }: WindowDeps) {
   const iconPath = resolveIconPath();
   let icon: Electron.NativeImage | undefined;
   if (iconPath) {
@@ -137,12 +136,10 @@ export function createWindow({ stopNativeCapture, setLastCapturedSourceName }: W
   win.setMenuBarVisibility(false);
   win.maximize();
 
-  // Auto-grant media so the renderer can open the virtual capture mic
-  // without an interactive portal prompt after screenshare start.
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback) => {
     const url = wc?.getURL() ?? '';
     const isApp = url.startsWith('file://') || url.startsWith('http://localhost:');
-    if ((permission === 'media' || permission === 'display-capture' || permission === 'mediaKeySystem') && isApp) {
+    if ((permission === 'media' || permission === 'mediaKeySystem') && isApp) {
       callback(true);
       return;
     }
@@ -151,33 +148,7 @@ export function createWindow({ stopNativeCapture, setLastCapturedSourceName }: W
   session.defaultSession.setPermissionCheckHandler((wc, permission) => {
     const url = wc?.getURL() ?? '';
     const isApp = url.startsWith('file://') || url.startsWith('http://localhost:');
-    return (
-      (permission === 'media' || (permission as string) === 'display-capture' || permission === 'mediaKeySystem') &&
-      isApp
-    );
-  });
-
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
-    desktopCapturer
-      .getSources({ types: ['window', 'screen'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false })
-      .then((sources) => {
-        if (sources.length === 0) {
-          console.warn(
-            '[setDisplayMediaRequestHandler] desktopCapturer returned 0 sources, using default screen fallback',
-          );
-          callback({ video: { id: 'screen:0:0', name: 'Entire Screen' } as Electron.DesktopCapturerSource });
-          return;
-        }
-        // Prefer a window source: this app shares windows, not full screens.
-        const source = sources.find((s) => s.id.startsWith('window')) ?? sources[0];
-        setLastCapturedSourceName(source.name);
-        console.log(`[setDisplayMediaRequestHandler] storing source name="${source.name}" (id=${source.id})`);
-        callback({ video: source });
-      })
-      .catch((err) => {
-        console.error('[setDisplayMediaRequestHandler] getSources failed, using fallback:', err);
-        callback({ video: { id: 'screen:0:0', name: 'Entire Screen' } as Electron.DesktopCapturerSource });
-      });
+    return (permission === 'media' || permission === 'mediaKeySystem') && isApp;
   });
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;

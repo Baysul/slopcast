@@ -65,13 +65,9 @@ export function registerAudioDataCallback() {
   if (audioDataCallbackRegistered) return;
   try {
     native.setAudioDataCallback((err: Error | null, arg: Buffer) => {
-      const win = getWindow();
-      if (err || !win || win.isDestroyed()) return;
-      try {
-        win.webContents.send('audio-pcm-data', arg);
-      } catch (_sendErr) {
-        // Window may be navigating or destroyed
-      }
+      if (err) return;
+      // PCM flows straight into the native WebRTC publisher; the renderer no
+      // longer touches audio bytes (no JS audio track is published anymore).
       try {
         nativeLiveKit.feedPcm(arg);
       } catch (_feedErr) {
@@ -285,7 +281,7 @@ export function registerVideoHandlers(ctx: MainContext) {
     async (
       _event,
       _sourceIndex: number,
-      config: { fps: number; width: number; height: number; videoCodec?: string },
+      config: { fps: number; width: number; height: number; videoCodec?: string; maxBitrate?: number },
     ) => {
       try {
         // Activate the portal on Wayland to create the screencast
@@ -303,8 +299,8 @@ export function registerVideoHandlers(ctx: MainContext) {
         lastCapturedSourceName = source.name;
         console.log(`[native-capture] portal source: "${source.name}"`);
 
-        // Discover the screencast node ID from PipeWire now that the
-        // portal has created it. On X11 there is no screencast node.
+        // Video publishing requires the PipeWire screencast node, which only
+        // exists on Wayland. Elsewhere the share degrades to audio-only.
         let nodeId: number | null = null;
         if (ctx.isWayland) {
           try {
@@ -319,25 +315,60 @@ export function registerVideoHandlers(ctx: MainContext) {
           }
         }
 
-        ctx.nativeLiveKit.startVideoTrack({
-          width: config.width,
-          height: config.height,
-          fps: config.fps,
-          videoCodec: config.videoCodec ?? undefined,
-        });
-
         if (nodeId !== null) {
+          ctx.nativeLiveKit.startVideoTrack({
+            width: config.width,
+            height: config.height,
+            fps: config.fps,
+            videoCodec: config.videoCodec ?? undefined,
+            maxBitrate: config.maxBitrate ?? undefined,
+          });
           ctx.registerDmabufCallback();
           ctx.native.startVideoCapture(nodeId, config.width, config.height, config.fps);
         }
 
-        return { ok: true, nodeId };
+        return { ok: true, nodeId, videoEnabled: nodeId !== null };
       } catch (err) {
         console.error('start-native-capture IPC error:', err);
         return { ok: false, error: String(err) };
       }
     },
   );
+
+  // Live re-publish of the video track with new encoder settings (codec, fps,
+  // bitrate, resolution). Restarts the track without re-triggering the portal;
+  // the PipeWire capture stream keeps feeding frames to the new source.
+  ipcMain.handle(
+    'update-native-video',
+    async (
+      _event,
+      config: { fps: number; width: number; height: number; videoCodec?: string; maxBitrate?: number },
+    ) => {
+      try {
+        if (!ctx.isWayland) return false;
+        ctx.nativeLiveKit.startVideoTrack({
+          width: config.width,
+          height: config.height,
+          fps: config.fps,
+          videoCodec: config.videoCodec ?? undefined,
+          maxBitrate: config.maxBitrate ?? undefined,
+        });
+        return true;
+      } catch (err) {
+        console.error('update-native-video IPC error:', err);
+        return false;
+      }
+    },
+  );
+
+  ipcMain.handle('get-native-telemetry', () => {
+    try {
+      return ctx.nativeLiveKit.getNativeTelemetry();
+    } catch (err) {
+      console.error('get-native-telemetry IPC error:', err);
+      return null;
+    }
+  });
 
   ipcMain.handle('stop-video-capture', () => {
     try {

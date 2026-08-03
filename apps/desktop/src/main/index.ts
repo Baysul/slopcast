@@ -7,13 +7,7 @@ import type { MainContext } from './context';
 import { getWindow, isWayland } from './context';
 import { registerRoomHandlers } from './room';
 import { isOnboardingCompleted, loadStreamSettings, saveStreamSettings, setOnboardingCompleted } from './settings';
-import {
-  registerAudioDataCallback,
-  registerDmabufCallback,
-  registerVideoHandlers,
-  setLastCapturedSourceName,
-  stopNativeCapture,
-} from './video';
+import { registerAudioDataCallback, registerDmabufCallback, registerVideoHandlers, stopNativeCapture } from './video';
 import { createWindow } from './window';
 
 const appConfig = loadConfig();
@@ -77,7 +71,6 @@ app.whenReady().then(() => {
 
   createWindow({
     stopNativeCapture,
-    setLastCapturedSourceName,
   });
 });
 
