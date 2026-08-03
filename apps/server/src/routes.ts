@@ -24,6 +24,60 @@ export function toHttpUrl(url: string): string {
   return normalized;
 }
 
+class AllocationError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+const allocateUniqueCode = async (
+  roomClient: RoomServiceClient,
+  allocatedCodes: Map<string, number>,
+): Promise<string> => {
+  let active: Awaited<ReturnType<RoomServiceClient['listRooms']>>;
+  try {
+    active = await roomClient.listRooms();
+  } catch (err) {
+    console.error('Room creation failed, SFU unreachable:', err);
+    throw new AllocationError('Streaming service is temporarily unavailable, please try again', 503);
+  }
+  const names = new Set(active.map((r) => r.name));
+
+  for (let attempts = 0; attempts <= 5; attempts++) {
+    let code: string;
+    do {
+      code = generateRoomCode();
+    } while (allocatedCodes.has(code));
+    allocatedCodes.set(code, Date.now());
+    if (!names.has(code)) return code;
+    allocatedCodes.delete(code);
+  }
+
+  throw new AllocationError('Could not allocate a unique room code, try again', 503);
+};
+
+const mintPresenterTokens = async (
+  apiKey: string,
+  apiSecret: string,
+  code: string,
+  allocatedCodes: Map<string, number>,
+): Promise<{ token: string; identity: string; nativeToken: string; nativeIdentity: string }> => {
+  const identity = `presenter-${code}-${Date.now()}`;
+  const nativeIdentity = `audio-${code}-${Date.now()}`;
+  try {
+    const token = await presenterToken(apiKey, apiSecret, code, identity);
+    const nativeToken = await presenterToken(apiKey, apiSecret, code, nativeIdentity);
+    return { token, identity, nativeToken, nativeIdentity };
+  } catch (err) {
+    allocatedCodes.delete(code);
+    console.error('Token minting failed for room code, code not allocated:', err);
+    throw new AllocationError('Failed to create room, please try again', 500);
+  }
+};
+
 export function initRoutes(
   host: string,
   apiKey: string,
@@ -73,57 +127,18 @@ export function initRoutes(
 
     sweepExpiredCodes();
 
-    let code: string;
-    do {
-      code = generateRoomCode();
-    } while (allocatedCodes.has(code));
-    allocatedCodes.set(code, Date.now());
-
     try {
-      const active = await roomClient.listRooms();
-      const names = new Set(active.map((r) => r.name));
-      for (let attempts = 0; names.has(code) && attempts < 5; attempts++) {
-        allocatedCodes.delete(code);
-        do {
-          code = generateRoomCode();
-        } while (allocatedCodes.has(code));
-        allocatedCodes.set(code, Date.now());
-      }
-      if (names.has(code)) {
-        allocatedCodes.delete(code);
-        res.status(503).json({ error: 'Could not allocate a unique room code, try again' });
-        return;
-      }
+      const code = await allocateUniqueCode(roomClient, allocatedCodes);
+      const tokens = await mintPresenterTokens(apiKey, apiSecret, code, allocatedCodes);
+      res.json({ code, shareUrl: `${websiteUrl}/room/${code}`, ...tokens, livekitUrl: livekitWsUrl });
     } catch (err) {
-      allocatedCodes.delete(code);
-      console.error('Room creation failed, SFU unreachable:', err);
-      res.status(503).json({ error: 'Streaming service is temporarily unavailable, please try again' });
-      return;
+      if (!(err instanceof AllocationError)) {
+        console.error('Room creation failed:', err);
+      }
+      res.status(err instanceof AllocationError ? err.status : 500).json({
+        error: err instanceof AllocationError ? err.message : 'Failed to create room, please try again',
+      });
     }
-
-    const identity = `presenter-${code}-${Date.now()}`;
-    const nativeIdentity = `audio-${code}-${Date.now()}`;
-    let token: string;
-    let nativeToken: string;
-    try {
-      token = await presenterToken(apiKey, apiSecret, code, identity);
-      nativeToken = await presenterToken(apiKey, apiSecret, code, nativeIdentity);
-    } catch (err) {
-      allocatedCodes.delete(code);
-      console.error('Token minting failed for room code, code not allocated:', err);
-      res.status(500).json({ error: 'Failed to create room, please try again' });
-      return;
-    }
-
-    res.json({
-      code,
-      shareUrl: `${websiteUrl}/room/${code}`,
-      token,
-      identity,
-      nativeToken,
-      nativeIdentity,
-      livekitUrl: livekitWsUrl,
-    });
   });
 
   router.get('/api/rooms/:code/token', async (req, res) => {
