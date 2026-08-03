@@ -170,6 +170,7 @@ fn decode_pcm_bytes(bytes: &[u8]) -> Vec<i16> {
 /// Recombines the high and low 32-bit timestamp integers (as passed through
 /// N-API) into a 64-bit microsecond integer. Bit-faithful: negative halves
 /// are re-interpreted as their unsigned bit patterns.
+#[cfg(any(target_os = "linux", test))]
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
