@@ -33,9 +33,10 @@ export interface AudioApp {
   mediaTitle?: string | null;
 }
 
-export interface AudioAppLevel {
+export interface AudioAppWave {
   id: number;
-  level: number;
+  /** 96 interleaved (min, max) amplitude pairs of the last ~85 ms of audio. */
+  columns: number[];
 }
 
 export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1';

@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   switchAudioCapture: (targetId) => ipcRenderer.invoke('switch-audio-capture', targetId),
   startAudioMetering: () => ipcRenderer.invoke('start-audio-metering'),
   stopAudioMetering: () => ipcRenderer.invoke('stop-audio-metering'),
-  getAudioLevels: () => ipcRenderer.invoke('get-audio-levels'),
+  getAudioWave: () => ipcRenderer.invoke('get-audio-wave'),
   getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
   clipboardWriteText: (text) => ipcRenderer.invoke('clipboard-write-text', text),
   resolveAudioSource: (opts) => ipcRenderer.invoke('resolve-audio-source', opts),
@@ -35,5 +35,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_event, buffer) => callback(buffer);
     ipcRenderer.on('audio-pcm-data', handler);
     return () => ipcRenderer.removeListener('audio-pcm-data', handler);
+  },
+  onAudioWave: (callback) => {
+    const handler = (_event, waves) => callback(waves);
+    ipcRenderer.on('audio-wave-update', handler);
+    return () => ipcRenderer.removeListener('audio-wave-update', handler);
   },
 });

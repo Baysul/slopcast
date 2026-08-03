@@ -250,7 +250,58 @@ function createWindow() {
   });
 }
 
+const AUDIO_WAVE_PUSH_MS = 33;
+// Matches the renderer store's notify epsilon: below this, meters would not
+// redraw anyway, so the IPC wakeup is pure waste.
+const AUDIO_WAVE_EPSILON = 0.002;
+
+let audioMeteringTimer: ReturnType<typeof setInterval> | null = null;
+let lastPushedWave = new Map<number, number[]>();
+
+// Sends only when a column actually moved; the native meter reports the live
+// waveform, so skipping quiet ticks loses no data.
+function waveChanged(prev: number[] | undefined, next: number[]): boolean {
+  if (!prev || prev.length !== next.length) return true;
+  for (let i = 0; i < next.length; i++) {
+    if (Math.abs((prev[i] ?? 0) - (next[i] ?? 0)) > AUDIO_WAVE_EPSILON) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pushWaveIfChanged(wc: Electron.WebContents, waves: native.AudioAppWave[]) {
+  const changed = waves.some(({ id, columns }) => waveChanged(lastPushedWave.get(id), columns));
+  if (!changed) return;
+  lastPushedWave = new Map(waves.map(({ id, columns }) => [id, columns]));
+  wc.send('audio-wave-update', waves);
+}
+
+function stopAudioMeteringPush() {
+  if (audioMeteringTimer) {
+    clearInterval(audioMeteringTimer);
+    audioMeteringTimer = null;
+  }
+  lastPushedWave = new Map();
+}
+
+function startAudioMeteringPush(wc: Electron.WebContents) {
+  stopAudioMeteringPush();
+  audioMeteringTimer = setInterval(() => {
+    if (wc.isDestroyed()) {
+      stopAudioMeteringPush();
+      return;
+    }
+    try {
+      pushWaveIfChanged(wc, native.getAudioWave());
+    } catch (err) {
+      console.error('Error fetching/sending audio wave:', err);
+    }
+  }, AUDIO_WAVE_PUSH_MS);
+}
+
 function stopNativeCapture() {
+  stopAudioMeteringPush();
   try {
     native.stopAudioCapture();
     console.log('🛑 Audio capture stopped');
@@ -456,9 +507,13 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('start-audio-metering', () => {
+  ipcMain.handle('start-audio-metering', (event) => {
     try {
-      return native.startAudioMetering();
+      const ok = native.startAudioMetering();
+      if (ok) {
+        startAudioMeteringPush(event.sender);
+      }
+      return ok;
     } catch (err) {
       console.error('start-audio-metering IPC error:', err);
       return false;
@@ -467,6 +522,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('stop-audio-metering', () => {
     try {
+      stopAudioMeteringPush();
       return native.stopAudioMetering();
     } catch (err) {
       console.error('stop-audio-metering IPC error:', err);
@@ -474,11 +530,11 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('get-audio-levels', () => {
+  ipcMain.handle('get-audio-wave', () => {
     try {
-      return native.getAudioLevels();
+      return native.getAudioWave();
     } catch (err) {
-      console.error('get-audio-levels IPC error:', err);
+      console.error('get-audio-wave IPC error:', err);
       return [];
     }
   });

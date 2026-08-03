@@ -69,7 +69,7 @@ mod unsupported_platform {
         Ok(true)
     }
 
-    pub fn get_audio_levels() -> napi::Result<Vec<crate::AudioAppLevel>> {
+    pub fn get_audio_wave() -> napi::Result<Vec<crate::AudioAppWave>> {
         Ok(Vec::new())
     }
 
@@ -128,10 +128,12 @@ pub struct AudioApp {
 }
 
 #[napi(object)]
-#[derive(Debug, Clone, Copy)]
-pub struct AudioAppLevel {
+#[derive(Debug, Clone)]
+pub struct AudioAppWave {
     pub id: i32,
-    pub level: f64,
+    /// 96 interleaved (min, max) amplitude pairs of the last ~85 ms of mono
+    /// audio, each value in [-1, 1].
+    pub columns: Vec<f64>,
 }
 
 /// Wayland video-capture introspection for the desktop main process: which
@@ -529,7 +531,7 @@ pub fn get_capture_context() -> napi::Result<napi::bindgen_prelude::AsyncTask<Ge
     Ok(napi::bindgen_prelude::AsyncTask::new(GetCaptureContextTask))
 }
 
-/// Starts per-app audio level metering.
+/// Starts per-app audio waveform metering.
 ///
 /// # Errors
 ///
@@ -549,14 +551,15 @@ pub fn stop_audio_metering() -> napi::Result<bool> {
     platform::stop_audio_metering()
 }
 
-/// Returns current audio level readings for all metered applications.
+/// Returns the current waveform readings for all metered applications. Each
+/// entry carries 96 interleaved (min, max) amplitude pairs.
 ///
 /// # Errors
 ///
 /// Always returns `Ok`.
 #[napi]
-pub fn get_audio_levels() -> napi::Result<Vec<AudioAppLevel>> {
-    platform::get_audio_levels()
+pub fn get_audio_wave() -> napi::Result<Vec<AudioAppWave>> {
+    platform::get_audio_wave()
 }
 
 /// Telemetry counters for the audio ring buffer.
@@ -684,10 +687,13 @@ mod tests {
         assert_eq!(cloned_app.media_title.as_deref(), Some("Song Title"));
         assert!(format!("{audio_app:?}").contains("TestApp"));
 
-        let level = AudioAppLevel { id: 1, level: 0.75 };
-        let cloned_level = level;
-        assert_eq!(cloned_level.id, 1);
-        assert!((cloned_level.level - 0.75).abs() < f64::EPSILON);
+        let wave = AudioAppWave {
+            id: 1,
+            columns: vec![0.75],
+        };
+        let cloned_wave = wave.clone();
+        assert_eq!(cloned_wave.id, 1);
+        assert!((cloned_wave.columns[0] - 0.75).abs() < f64::EPSILON);
 
         let context = CaptureContext {
             de: "kde".to_string(),

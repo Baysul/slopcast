@@ -38,7 +38,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Error, GUID, HRESULT, IUnknown, Interface, PCSTR, Ref, implement};
 
-use crate::{AudioApp, AudioAppLevel};
+use crate::{AudioApp, AudioAppWave};
 
 const KSDATAFORMAT_SUBTYPE_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 const PROCESS_LOOPBACK_MIN_BUILD: u32 = 20348;
@@ -1399,7 +1399,7 @@ pub fn stop_audio_metering() -> NapiResult<bool> {
     Ok(true)
 }
 
-pub fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
+pub fn get_audio_wave() -> NapiResult<Vec<AudioAppWave>> {
     Ok(Vec::new())
 }
 

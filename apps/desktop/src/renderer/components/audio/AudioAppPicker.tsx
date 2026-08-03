@@ -11,7 +11,6 @@ export interface AudioAppPickerProps {
   audioAppGroups?: AudioAppGroup[];
   selectedAudioAppId: number | null;
   autoDetectedApp?: AudioApp | null;
-  audioLevels: ReadonlyMap<number, number>;
   onSelectApp: (appId: number | null, explicit?: boolean) => void;
   onRefresh?: () => void;
   disabled?: boolean;
@@ -31,16 +30,7 @@ const DESKTOP_AUDIO_GROUP: AudioAppGroup = {
 };
 
 export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
-  ({
-    audioApps,
-    audioAppGroups,
-    selectedAudioAppId,
-    autoDetectedApp,
-    audioLevels,
-    onSelectApp,
-    onRefresh,
-    disabled = false,
-  }) => {
+  ({ audioApps, audioAppGroups, selectedAudioAppId, autoDetectedApp, onSelectApp, onRefresh, disabled = false }) => {
     const groups = audioAppGroups ?? groupAudioApps(audioApps);
 
     const displayName = (app: AudioApp): string => app.name;
@@ -83,9 +73,7 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
       const isDesktopAudio = representative.id === -1;
       const isSelected = members.some((m) => m.id === selectedAudioAppId);
       const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
-      const level = isDesktopAudio
-        ? Array.from(audioLevels.values()).reduce((max, l) => Math.max(max, l), 0)
-        : members.reduce((max, m) => Math.max(max, audioLevels.get(m.id) ?? 0), 0);
+      const memberIds = members.map((m) => m.id);
       const btnClass = `flex items-center justify-between p-3 rounded-lg border transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
         isSelected,
       )} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`;
@@ -108,7 +96,7 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold truncate min-w-0">{displayName(representative)}</span>
-              <AudioLevelMeter level={level} />
+              <AudioLevelMeter appId={representative.id} memberIds={memberIds} />
             </div>
             {(() => {
               const label = groupSubLabel(group, isDesktopAudio);

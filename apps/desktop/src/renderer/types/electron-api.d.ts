@@ -1,4 +1,4 @@
-import type { AudioApp, AudioAppLevel, StreamSettings } from '@slopcast/shared-types';
+import type { AudioApp, AudioAppWave, StreamSettings } from '@slopcast/shared-types';
 import type { CaptureContext } from './index';
 
 declare global {
@@ -15,7 +15,7 @@ declare global {
       switchAudioCapture: (targetId: number) => Promise<boolean>;
       startAudioMetering: () => Promise<boolean>;
       stopAudioMetering: () => Promise<boolean>;
-      getAudioLevels: () => Promise<AudioAppLevel[]>;
+      getAudioWave: () => Promise<AudioAppWave[]>;
       getDesktopSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
       clipboardWriteText: (text: string) => Promise<boolean>;
       resolveAudioSource: (opts?: { sourceId?: string; nameHint?: string }) => Promise<AudioApp | null>;
@@ -47,6 +47,7 @@ declare global {
       isNativeCaptureActive: () => Promise<boolean>;
       getSpectatorCount: () => Promise<number>;
       onAudioPcmData: (callback: (buffer: ArrayBuffer) => void) => () => void;
+      onAudioWave?: (callback: (waves: AudioAppWave[]) => void) => () => void;
     };
   }
 }

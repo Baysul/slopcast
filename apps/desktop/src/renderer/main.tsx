@@ -130,10 +130,11 @@ export const PresenterApp: React.FC = () => {
     videoCodec,
   });
 
+  const localStreamRef = useRef<MediaStream | null>(null);
+
   const {
     audioApps,
     audioAppGroups,
-    audioLevels,
     selectedAudioAppId,
     setSelectedAudioAppId,
     audioAppExplicitlySet,
@@ -150,11 +151,10 @@ export const PresenterApp: React.FC = () => {
     replaceAudioTrack,
     attemptAutoResolve,
     handleSelectApp,
-  } = useAudioCapture(isSharing, liveKitRoomRef);
+  } = useAudioCapture(isSharing, liveKitRoomRef, localStreamRef);
 
   const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } = useStreamTelemetry();
 
-  const localStreamRef = useRef<MediaStream | null>(null);
   const activeVideoCodecRef = useRef<VideoCodec>(videoCodec);
   const isCodecSwitchingRef = useRef(false);
 
@@ -687,7 +687,6 @@ export const PresenterApp: React.FC = () => {
             audioAppGroups={audioAppGroups}
             selectedAudioAppId={selectedAudioAppId}
             autoDetectedApp={autoDetectedApp}
-            audioLevels={audioLevels}
             onSelectApp={handleSelectApp}
             onRefresh={loadAudioApps}
           />

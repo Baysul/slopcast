@@ -1,10 +1,11 @@
 import type { AudioApp } from '@slopcast/shared-types';
-import type { Room } from 'livekit-client';
+import { type Room, Track } from 'livekit-client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { notify } from '../lib/toast';
 import type { CaptureContext } from '../types';
 import { findCaptureAudioDevice } from '../utils/audio-devices';
 import { groupAudioApps } from '../utils/audio-grouping';
+import { audioWaveStore } from '../utils/audio-level-store';
 import { createPcmAudioTrack } from '../utils/pcm-audio';
 
 const AUDIO_APPS_POLL_MS = 3000;
@@ -67,7 +68,6 @@ export const findBestAudioMatch = (apps: AudioApp[], query: string): AudioApp | 
 export interface UseAudioCaptureReturn {
   audioApps: AudioApp[];
   audioAppGroups: ReturnType<typeof groupAudioApps>;
-  audioLevels: ReadonlyMap<number, number>;
   selectedAudioAppId: number | null;
   setSelectedAudioAppId: React.Dispatch<React.SetStateAction<number | null>>;
   audioAppExplicitlySet: boolean;
@@ -89,9 +89,9 @@ export interface UseAudioCaptureReturn {
 export function useAudioCapture(
   isSharing: boolean,
   liveKitRoomRef: React.RefObject<Room | null>,
+  localStreamRef: React.RefObject<MediaStream | null>,
 ): UseAudioCaptureReturn {
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
-  const [audioLevels, setAudioLevels] = useState<ReadonlyMap<number, number>>(new Map());
   const audioAppGroups = useMemo(() => groupAudioApps(audioApps), [audioApps]);
   const [selectedAudioAppId, setSelectedAudioAppId] = useState<number | null>(null);
   const [audioAppExplicitlySet, setAudioAppExplicitlySet] = useState(false);
@@ -100,10 +100,6 @@ export function useAudioCapture(
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
 
   const audioAppIdRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    audioAppIdRef.current = selectedAudioAppId;
-  }, [selectedAudioAppId]);
 
   const loadAudioApps = useCallback(async () => {
     if (window.electronAPI) {
@@ -123,44 +119,37 @@ export function useAudioCapture(
     return () => clearInterval(interval);
   }, [loadAudioApps, isSharing, audioApps.length]);
 
-  // Audio level metering
+  // Audio waveform metering
   useEffect(() => {
     const api = window.electronAPI;
     if (!api?.startAudioMetering) return;
 
     let cancelled = false;
-    let interval: ReturnType<typeof setInterval> | null = null;
+    let cleanupListener: (() => void) | null = null;
+    let fallbackInterval: ReturnType<typeof setInterval> | null = null;
+
+    const handleWave = (waves: Array<{ id: number; columns: number[] }>) => {
+      if (cancelled) return;
+      audioWaveStore.updateWave(waves);
+    };
 
     void api.startAudioMetering().then((started) => {
       if (!started || cancelled) return;
-      interval = setInterval(() => {
-        if (document.visibilityState !== 'visible') return;
-        void api.getAudioLevels().then((levels) => {
-          if (cancelled) return;
-          setAudioLevels((prev) => {
-            let changed = false;
-            const next = new Map<number, number>();
-            for (const { id, level } of levels) {
-              const prevLevel = prev.get(id) ?? 0;
-              const decayed = Math.max(level, prevLevel * 0.82);
-              next.set(id, decayed);
-              if (Math.abs(decayed - prevLevel) > 0.005) {
-                changed = true;
-              }
-            }
-            if (prev.size !== next.size) {
-              changed = true;
-            }
-            if (!changed) return prev;
-            return next;
-          });
-        });
-      }, 100);
+
+      if (api.onAudioWave) {
+        cleanupListener = api.onAudioWave(handleWave);
+      } else {
+        fallbackInterval = setInterval(() => {
+          if (document.visibilityState !== 'visible') return;
+          void api.getAudioWave().then(handleWave);
+        }, 100);
+      }
     });
 
     return () => {
       cancelled = true;
-      if (interval) clearInterval(interval);
+      if (cleanupListener) cleanupListener();
+      if (fallbackInterval) clearInterval(fallbackInterval);
       void api.stopAudioMetering().catch((err) => console.warn('[useAudioCapture] stopAudioMetering failed:', err));
     };
   }, []);
@@ -247,6 +236,27 @@ export function useAudioCapture(
     [audioApps],
   );
 
+  // Starts capture for a target when sharing began video-only: captures a
+  // fresh track from the virtual node and publishes it to the room.
+  const startAudioMidShare = useCallback(
+    async (targetId: number): Promise<void> => {
+      const track = await captureAudioTrack(targetId);
+      if (!track) {
+        throw new Error('Audio capture produced no track');
+      }
+      const room = liveKitRoomRef.current;
+      if (!room) {
+        track.stop();
+        throw new Error('Not connected to a room');
+      }
+      localStreamRef.current?.addTrack(track);
+      await room.localParticipant.publishTrack(track, {
+        source: Track.Source.ScreenShareAudio,
+      });
+    },
+    [captureAudioTrack, liveKitRoomRef, localStreamRef],
+  );
+
   const handleSelectApp = useCallback((appId: number | null, explicit?: boolean) => {
     setAudioAppExplicitlySet(explicit ?? true);
     setSelectedAudioAppId(appId);
@@ -256,33 +266,41 @@ export function useAudioCapture(
   // Real-time audio source switching while sharing
   useEffect(() => {
     if (!isSharing) return;
-    if (selectedAudioAppId === null) return;
+    const newId = selectedAudioAppId;
+    if (newId === null) return;
 
+    // audioAppIdRef tracks the target the native layer actually captures, so
+    // `prevId` is the real previous target, not the UI selection.
     const prevId = audioAppIdRef.current;
-    if (prevId === selectedAudioAppId) return;
-    if (prevId == null && selectedAudioAppId != null) {
-      audioAppIdRef.current = selectedAudioAppId;
-      return;
-    }
+    if (prevId === newId) return;
 
-    const switchAudio = async () => {
+    const applyAudio = async () => {
       try {
-        await replaceAudioTrack(selectedAudioAppId, liveKitRoomRef.current);
-        setSelectedAudioAppId(selectedAudioAppId);
+        if (prevId === null) {
+          await startAudioMidShare(newId);
+        } else {
+          await replaceAudioTrack(newId, liveKitRoomRef.current);
+        }
+        audioAppIdRef.current = newId;
         setAutoDetectedApp(null);
         setAudioAppExplicitlySet(true);
       } catch (err) {
         console.error('[useAudioCapture] audio switch failed:', err);
-        notify('error', 'Audio switch failed', 'Could not switch to the selected audio source.');
+        notify(
+          'error',
+          prevId === null ? 'Audio start failed' : 'Audio switch failed',
+          prevId === null
+            ? 'Could not start capturing the selected audio source.'
+            : 'Could not switch to the selected audio source.',
+        );
       }
     };
-    void switchAudio();
-  }, [selectedAudioAppId, isSharing, replaceAudioTrack, liveKitRoomRef]);
+    void applyAudio();
+  }, [selectedAudioAppId, isSharing, startAudioMidShare, replaceAudioTrack, liveKitRoomRef]);
 
   return {
     audioApps,
     audioAppGroups,
-    audioLevels,
     selectedAudioAppId,
     setSelectedAudioAppId,
     audioAppExplicitlySet,

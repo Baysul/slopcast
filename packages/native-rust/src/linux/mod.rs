@@ -1,4 +1,5 @@
-use crate::{AudioApp, AudioAppLevel};
+use crate::{AudioApp, AudioAppWave};
+use crossbeam_queue::ArrayQueue;
 mod kwin;
 mod mpris;
 mod video;
@@ -16,10 +17,10 @@ use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CAPTURE_NODE_NAME: &str = "Slopcast-Window-Audio";
 const CAPTURE_NODE_DESCRIPTION: &str = "Slopcast-Window-Audio";
@@ -2216,17 +2217,62 @@ pub(crate) fn get_capture_context() -> NapiResult<crate::CaptureContext> {
     })
 }
 
-// ---------- Per-app audio level metering ----------
+// ---------- Per-app audio waveform metering ----------
+
+const METER_WAVE_COLUMNS: usize = 96;
+/// ~85 ms of mono audio at 48 kHz: long enough for an organic, filled
+/// waveform strip rather than a jittery oscilloscope trace.
+const METER_WAVE_WINDOW: usize = 4096;
+const METER_WAVE_INTERVAL_MS: u64 = 33;
+const METER_DEFAULT_RATE: u32 = 48_000;
+const METER_DEFAULT_CHANNELS: u16 = 2;
+// A meter whose ring has received no samples for this long is considered
+// paused: its rolling window holds stale audio, so the pass publishes silence
+// instead of re-decimating old samples.
+const METER_STALE_MS: u64 = 150;
+// Mono sample queue between the process callback and the wave pass. Holds over
+// two worst-case pass gaps (~2 × 50 ms × 48 kHz); a stalled pass only drops
+// the newest samples, which the decimated waveform renders invisible.
+const METER_RING_CAPACITY: usize = 4096;
+
+/// Per-app meter state shared between the worker thread and the JS thread.
+/// The process callback pushes mono samples into the lock-free ring and the
+/// wave pass drains it; `wave` is published to the JS thread under its mutex.
+struct MeterLevel {
+    samples: ArrayQueue<f32>,
+    rate: AtomicU32,
+    channels: AtomicU16,
+    /// `METER_WAVE_COLUMNS` interleaved (min, max) amplitude pairs in [-1, 1].
+    wave: Mutex<Vec<f32>>,
+}
+
+impl MeterLevel {
+    fn new() -> Self {
+        Self {
+            samples: ArrayQueue::new(METER_RING_CAPACITY),
+            rate: AtomicU32::new(METER_DEFAULT_RATE),
+            channels: AtomicU16::new(METER_DEFAULT_CHANNELS),
+            wave: Mutex::new(vec![0.0; METER_WAVE_COLUMNS * 2]),
+        }
+    }
+}
 
 struct MeterStream {
     _stream: StreamRc,
-    _listener: StreamListener<Arc<AtomicU32>>,
+    _listener: StreamListener<Arc<MeterLevel>>,
+    level: Arc<MeterLevel>,
+    /// Rolling mono window drained from `level.samples`, capped at
+    /// `METER_WAVE_WINDOW`. Worker-thread only, so it is a plain `Vec`.
+    window: Vec<f32>,
+    /// Pass timestamp of the last time new samples were drained from the ring.
+    /// Worker-thread only.
+    last_feed: Instant,
 }
 
 struct MeterSession {
     stop: Arc<AtomicBool>,
     join: thread::JoinHandle<()>,
-    levels: Arc<Mutex<HashMap<u32, Arc<AtomicU32>>>>,
+    levels: Arc<Mutex<HashMap<u32, Arc<MeterLevel>>>>,
 }
 
 static METER_STATE: Mutex<Option<MeterSession>> = Mutex::new(None);
@@ -2249,13 +2295,66 @@ fn meter_format_param() -> Option<Vec<u8>> {
     Some(serialized.0.into_inner())
 }
 
+/// Downmixes the meter's latest buffer quantum to mono and pushes it into the
+/// lock-free ring. Pushing drops the newest samples when the ring is full (a
+/// stalled wave pass) rather than blocking; the decimated envelope renders
+/// such a few-ms gap invisible.
+fn meter_process_quantum(stream: &pipewire::stream::Stream, level: &Arc<MeterLevel>) {
+    let Some(mut buffer) = stream.dequeue_buffer() else {
+        return;
+    };
+    let channels = usize::from(level.channels.load(Ordering::Relaxed).max(1));
+    let inv_channels = 1.0 / f32::from(level.channels.load(Ordering::Relaxed).max(1));
+    // Negotiated F32LE buffers are interleaved in a single data; the
+    // multi-data branch is a fallback that treats each data as its own mono
+    // stream.
+    let interleaved = buffer.datas_mut().len() <= 1;
+    for data in buffer.datas_mut() {
+        let start = data.chunk().offset() as usize;
+        let size = data.chunk().size() as usize;
+        let Some(bytes) = data.data() else { continue };
+        let end = start.saturating_add(size).min(bytes.len());
+        let Some(slice) = bytes.get(start..end) else {
+            continue;
+        };
+        if interleaved && channels > 1 {
+            for frame in slice.chunks_exact(channels * 4) {
+                let mut sum = 0.0f32;
+                for ch in 0..channels {
+                    let off = ch * 4;
+                    sum += f32::from_le_bytes([
+                        frame[off],
+                        frame[off + 1],
+                        frame[off + 2],
+                        frame[off + 3],
+                    ]);
+                }
+                if level.samples.push(sum * inv_channels).is_err() {
+                    return;
+                }
+            }
+        } else {
+            for sample in slice.chunks_exact(4) {
+                let s = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                if level.samples.push(s).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Creates a capture stream tapped into the given application node. AUTOCONNECT
 /// links the app's output ports to the meter's input ports additively — the
 /// app's existing links (speaker playback) are never touched.
+///
+/// The process callback only downmixes each quantum to mono and queues it; all
+/// FFT work happens on the worker thread between loop iterations, so the audio
+/// path stays allocation-free.
 fn meter_stream(
     core: &pipewire::core::CoreRc,
     node_id: u32,
-    level: Arc<AtomicU32>,
+    level: Arc<MeterLevel>,
 ) -> Option<MeterStream> {
     let stream = StreamRc::new(
         core.clone(),
@@ -2272,29 +2371,29 @@ fn meter_stream(
     .ok()?;
 
     let listener = stream
-        .add_local_listener_with_user_data(level)
-        .process(|stream, level| {
-            let Some(mut buffer) = stream.dequeue_buffer() else {
+        .add_local_listener_with_user_data(level.clone())
+        .param_changed(|_stream, level, _id, param| {
+            let Some(pod) = param else { return };
+            let Ok((media_type, _)) = format_utils::parse_format(pod) else {
                 return;
             };
-            let mut peak: f32 = 0.0;
-            for data in buffer.datas_mut() {
-                let start = data.chunk().offset() as usize;
-                let size = data.chunk().size() as usize;
-                let Some(bytes) = data.data() else { continue };
-                let end = start.saturating_add(size).min(bytes.len());
-                let Some(slice) = bytes.get(start..end) else {
-                    continue;
-                };
-                for sample in slice.chunks_exact(4) {
-                    let mag =
-                        f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]).abs();
-                    peak = peak.max(mag);
-                }
+            if media_type != MediaType::Audio {
+                return;
             }
-            let peak = peak.clamp(0.0, 1.0);
-            level.fetch_max(peak.to_bits(), Ordering::Relaxed);
+            let mut info = AudioInfoRaw::new();
+            if info.parse(pod).is_err() {
+                return;
+            }
+            let rate = info.rate();
+            if rate > 0 {
+                level.rate.store(rate, Ordering::Relaxed);
+            }
+            let channels = u16::try_from(info.channels()).unwrap_or(METER_DEFAULT_CHANNELS);
+            if channels > 0 {
+                level.channels.store(channels, Ordering::Relaxed);
+            }
         })
+        .process(|stream, level| meter_process_quantum(stream, level))
         .register()
         .ok()?;
 
@@ -2313,7 +2412,68 @@ fn meter_stream(
     Some(MeterStream {
         _stream: stream,
         _listener: listener,
+        level,
+        window: Vec::with_capacity(METER_WAVE_WINDOW),
+        last_feed: Instant::now(),
     })
+}
+
+/// Decimates every meter's sample window into `METER_WAVE_COLUMNS` interleaved
+/// (min, max) amplitude pairs and publishes them. Runs on the worker thread
+/// only; raw per-column extrema need no smoothing — silence renders as a flat
+/// line, and overlapping windows (~60% at 48 kHz) keep motion continuous.
+/// Meters whose ring has been silent for `METER_STALE_MS` publish zeros: their
+/// window still holds pre-pause audio, and re-decimating it would pin the bars
+/// instead of letting them flatline.
+fn run_wave_pass(meters: &mut HashMap<u32, MeterStream>) {
+    for meter in meters.values_mut() {
+        let level = &meter.level;
+        let mut fed = false;
+        while let Some(sample) = level.samples.pop() {
+            meter.window.push(sample);
+            fed = true;
+        }
+        let overflow = meter.window.len().saturating_sub(METER_WAVE_WINDOW);
+        if overflow > 0 {
+            meter.window.drain(0..overflow);
+        }
+        if meter.window.is_empty() {
+            continue;
+        }
+
+        let now = Instant::now();
+        if fed {
+            meter.last_feed = now;
+        }
+        let stale = now.duration_since(meter.last_feed) > Duration::from_millis(METER_STALE_MS);
+
+        let Ok(mut wave) = level.wave.lock() else {
+            continue;
+        };
+        if stale {
+            wave.fill(0.0);
+            continue;
+        }
+        let len = meter.window.len();
+        let bucket = len.div_ceil(METER_WAVE_COLUMNS);
+        for c in 0..METER_WAVE_COLUMNS {
+            let start = c * bucket;
+            let end = ((c + 1) * bucket).min(len);
+            if start >= end {
+                wave[c * 2] = 0.0;
+                wave[c * 2 + 1] = 0.0;
+                continue;
+            }
+            let mut min = f32::MAX;
+            let mut max = f32::MIN;
+            for sample in &meter.window[start..end] {
+                min = min.min(*sample);
+                max = max.max(*sample);
+            }
+            wave[c * 2] = min;
+            wave[c * 2 + 1] = max;
+        }
+    }
 }
 
 #[allow(
@@ -2322,7 +2482,7 @@ fn meter_stream(
 )]
 fn run_meter_session(
     stop: Arc<AtomicBool>,
-    levels: Arc<Mutex<HashMap<u32, Arc<AtomicU32>>>>,
+    levels: Arc<Mutex<HashMap<u32, Arc<MeterLevel>>>>,
     ready_tx: mpsc::Sender<Result<(), String>>,
 ) {
     pipewire::init();
@@ -2379,7 +2539,7 @@ fn run_meter_session(
                 if map.contains_key(&global.id) {
                     return;
                 }
-                let level = Arc::new(AtomicU32::new(0));
+                let level = Arc::new(MeterLevel::new());
                 let Some(meter) = meter_stream(&core, global.id, level.clone()) else {
                     return;
                 };
@@ -2402,12 +2562,24 @@ fn run_meter_session(
         })
         .register();
 
+    let mut last_wave = Instant::now();
+
     let _ = ready_tx.send(Ok(()));
 
     while !stop.load(Ordering::SeqCst) {
+        // 50ms bound only limits idle sleeping; with live audio the loop wakes
+        // on stream buffer events as they arrive, so metering latency is
+        // unaffected while a tight timeout would just spin the thread.
         pw.main_loop
             .loop_()
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
+
+        let now = Instant::now();
+        if now.duration_since(last_wave) >= Duration::from_millis(METER_WAVE_INTERVAL_MS) {
+            last_wave = now;
+            let mut meter_map = meters.borrow_mut();
+            run_wave_pass(&mut meter_map);
+        }
     }
 
     meters.borrow_mut().clear();
@@ -2471,32 +2643,33 @@ pub(crate) fn stop_audio_metering() -> NapiResult<bool> {
     Ok(true)
 }
 
-pub(crate) fn get_audio_levels() -> NapiResult<Vec<AudioAppLevel>> {
+pub(crate) fn get_audio_wave() -> NapiResult<Vec<AudioAppWave>> {
     let Ok(guard) = METER_STATE.lock() else {
-        eprintln!("[meter] state lock poisoned; reporting no levels");
+        eprintln!("[meter] state lock poisoned; reporting no wave");
         return Ok(Vec::new());
     };
     let Some(session) = guard.as_ref() else {
         return Ok(Vec::new());
     };
     let Ok(levels) = session.levels.lock() else {
-        eprintln!("[meter] levels lock poisoned; reporting no levels");
+        eprintln!("[meter] levels lock poisoned; reporting no wave");
         return Ok(Vec::new());
     };
-    Ok(levels
-        .iter()
-        .map(|(id, level)| {
-            let raw = f32::from_bits(level.swap(0, Ordering::Relaxed));
-            AudioAppLevel {
-                id: (*id).cast_signed(),
-                level: if raw.is_finite() {
-                    f64::from(raw.clamp(0.0, 1.0))
-                } else {
-                    0.0
-                },
-            }
-        })
-        .collect())
+    // Non-destructive read: the waveform is a continuous signal, so sampling
+    // it at the push cadence loses nothing and main-process timing jitter
+    // cannot distort the values.
+    let mut out = Vec::with_capacity(levels.len());
+    for (id, level) in levels.iter() {
+        let Ok(wave) = level.wave.lock() else {
+            eprintln!("[meter] wave lock poisoned; skipping app {id}");
+            continue;
+        };
+        out.push(AudioAppWave {
+            id: (*id).cast_signed(),
+            columns: wave.iter().map(|&v| f64::from(v)).collect(),
+        });
+    }
+    Ok(out)
 }
 
 fn invoke_audio_data_callback(data: &[u8]) {
