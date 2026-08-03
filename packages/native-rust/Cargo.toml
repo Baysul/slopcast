@@ -19,7 +19,6 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
-ringbuf = "0.5.1"
 arc-swap = "1.9.2"
 crossbeam-queue = "0.3"
 

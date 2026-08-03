@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_push_pcm_bytes_alignment_and_oversized() {
-        start_audio_ring_with_capacity(8192, 4).expect("ring start");
+        start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
         reset_audio_ring_stats();
 
         // Push 18 bytes (4 frames = 16 bytes, 2 unaligned trailing bytes)
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_oversized_payload_splitting() {
-        start_audio_ring_with_capacity(8192, 4).expect("ring start");
+        start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
         reset_audio_ring_stats();
 
         // Push 20,000 bytes (larger than 8,192 byte slot capacity)
