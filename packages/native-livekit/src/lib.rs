@@ -21,14 +21,17 @@ use std::sync::{Arc, Mutex};
 mod test_stubs;
 
 use arc_swap::ArcSwapOption;
-use livekit::options::{TrackPublishOptions, VideoCodec};
+use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 use livekit::prelude::*;
 use livekit::track::{LocalTrack, LocalVideoTrack, TrackSource};
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::AudioSourceOptions;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::prelude::{RtcAudioSource, RtcVideoSource, VideoResolution};
+use livekit::webrtc::stats::RtcStats;
 use livekit::webrtc::video_source::native::NativeVideoSource;
+use std::collections::HashMap;
+use std::time::Duration;
 
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
@@ -40,11 +43,35 @@ pub struct CaptureConfig {
     pub height: u32,
     pub fps: u32,
     pub video_codec: Option<String>,
+    pub max_bitrate: Option<f64>,
+}
+
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct NativeTelemetry {
+    pub video_codec: Option<String>,
+    pub video_bytes_sent: Option<f64>,
+    pub video_packets_sent: Option<f64>,
+    pub video_packets_lost: Option<f64>,
+    pub video_frames_sent: Option<f64>,
+    pub video_width: Option<u32>,
+    pub video_height: Option<u32>,
+    pub audio_codec: Option<String>,
+    pub audio_bytes_sent: Option<f64>,
+    pub audio_packets_sent: Option<f64>,
+    pub audio_packets_lost: Option<f64>,
+    pub rtt_ms: Option<f64>,
+    pub timestamp_ms: Option<f64>,
 }
 
 enum WorkerCmd {
-    StartVideo { config: CaptureConfig },
+    StartVideo {
+        config: CaptureConfig,
+    },
     StopVideo,
+    GetTelemetry {
+        reply: std::sync::mpsc::Sender<NativeTelemetry>,
+    },
     Shutdown,
 }
 
@@ -290,6 +317,102 @@ pub fn get_spectator_count() -> u32 {
     SPECTATOR_COUNT.load(Ordering::Relaxed)
 }
 
+/// Collects the latest libwebrtc stats for the local published tracks on the
+/// worker thread (stats queries must run on the tokio runtime) and returns the
+/// result over a bounded blocking channel. Falls back to an empty snapshot if
+/// the worker cannot answer within 500 ms.
+#[napi]
+pub fn get_native_telemetry() -> NativeTelemetry {
+    let Ok(guard) = LIVEKIT.lock() else {
+        return NativeTelemetry::default();
+    };
+    let Some(state) = guard.as_ref() else {
+        return NativeTelemetry::default();
+    };
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    if state
+        .cmd_tx
+        .send(WorkerCmd::GetTelemetry { reply: reply_tx })
+        .is_err()
+    {
+        return NativeTelemetry::default();
+    }
+    drop(guard);
+    reply_rx
+        .recv_timeout(Duration::from_millis(500))
+        .unwrap_or_default()
+}
+
+async fn collect_telemetry(room: &Room) -> NativeTelemetry {
+    let mut telemetry = NativeTelemetry::default();
+    for (_sid, publication) in room.local_participant().track_publications() {
+        let Some(track) = publication.track() else {
+            continue;
+        };
+        let Ok(stats) = track.get_stats().await else {
+            continue;
+        };
+        fold_stats(&mut telemetry, &stats);
+    }
+    telemetry
+}
+
+// Byte counters and epoch-millisecond timestamps stay well below 2^53, so the
+// f64 conversion loses no precision in practice (NAPI objects cannot carry u64).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Byte counters and epoch-millisecond timestamps stay well below 2^53; f64 is exact in this range"
+)]
+fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
+    let mut video_ssrc = None;
+    let mut audio_ssrc = None;
+    let mut codecs = HashMap::<String, String>::new();
+
+    for stat in stats {
+        match stat {
+            RtcStats::Codec(codec) => {
+                codecs.insert(codec.rtc.id.clone(), codec.codec.mime_type.clone());
+            }
+            RtcStats::OutboundRtp(outbound) => {
+                let mime = codecs.get(&outbound.stream.codec_id);
+                match outbound.stream.kind.as_str() {
+                    "video" => {
+                        video_ssrc = Some(outbound.stream.ssrc);
+                        telemetry.video_codec = mime.cloned();
+                        telemetry.video_bytes_sent = Some(outbound.sent.bytes_sent as f64);
+                        telemetry.video_packets_sent = Some(outbound.sent.packets_sent as f64);
+                        telemetry.video_frames_sent =
+                            Some(f64::from(outbound.outbound.frames_sent));
+                        telemetry.video_width = Some(outbound.outbound.frame_width);
+                        telemetry.video_height = Some(outbound.outbound.frame_height);
+                        telemetry.timestamp_ms = Some(outbound.rtc.timestamp as f64);
+                    }
+                    "audio" => {
+                        audio_ssrc = Some(outbound.stream.ssrc);
+                        telemetry.audio_codec = mime.cloned();
+                        telemetry.audio_bytes_sent = Some(outbound.sent.bytes_sent as f64);
+                        telemetry.audio_packets_sent = Some(outbound.sent.packets_sent as f64);
+                    }
+                    _ => {}
+                }
+            }
+            RtcStats::RemoteInboundRtp(inbound) => {
+                if inbound.remote_inbound.round_trip_time > 0.0 {
+                    telemetry.rtt_ms = Some(inbound.remote_inbound.round_trip_time * 1000.0);
+                }
+                if let Ok(packets_lost) = u64::try_from(inbound.received.packets_lost.max(0)) {
+                    if Some(inbound.stream.ssrc) == video_ssrc {
+                        telemetry.video_packets_lost = Some(packets_lost as f64);
+                    } else if Some(inbound.stream.ssrc) == audio_ssrc {
+                        telemetry.audio_packets_lost = Some(packets_lost as f64);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn run_worker(
     url: String,
     token: String,
@@ -338,6 +461,10 @@ async fn run_worker(
                     }
                     WorkerCmd::StopVideo => {
                         handle_stop_video(&room).await;
+                    }
+                    WorkerCmd::GetTelemetry { reply } => {
+                        let telemetry = collect_telemetry(&room).await;
+                        let _ = reply.send(telemetry);
                     }
                     WorkerCmd::Shutdown => {
                         break;
@@ -401,6 +528,18 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
 
     let codec = parse_video_codec(config.video_codec.as_deref());
 
+    let encoding = config.max_bitrate.map(|bitrate| VideoEncoding {
+        // The renderer sends the bitrate limit from its settings UI as a whole
+        // number; rounding the f64 to u64 is exact for all sane values.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "Bitrate limits from the settings UI are whole numbers; rounding is exact"
+        )]
+        max_bitrate: bitrate.round() as u64,
+        max_framerate: f64::from(config.fps),
+    });
+
     match room
         .local_participant()
         .publish_track(
@@ -408,6 +547,7 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
                 video_codec: codec,
+                video_encoding: encoding,
                 ..Default::default()
             },
         )
@@ -445,6 +585,114 @@ async fn handle_stop_video(room: &Room) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use livekit::webrtc::stats::dictionaries as d;
+    use livekit::webrtc::stats::{CodecStats, OutboundRtpStats, RemoteInboundRtpStats};
+
+    fn codec_stats(id: &str, mime: &str) -> RtcStats {
+        RtcStats::Codec(CodecStats {
+            rtc: d::RtcStats {
+                id: id.into(),
+                timestamp: 0,
+            },
+            codec: d::CodecStats {
+                mime_type: mime.into(),
+                ..Default::default()
+            },
+        })
+    }
+
+    fn outbound_stats(kind: &str, ssrc: u32, codec_id: &str, bytes: u64, frames: u32) -> RtcStats {
+        RtcStats::OutboundRtp(OutboundRtpStats {
+            rtc: d::RtcStats {
+                id: format!("out-{kind}"),
+                timestamp: 1_750_000_000_000,
+            },
+            stream: d::RtpStreamStats {
+                ssrc,
+                kind: kind.into(),
+                codec_id: codec_id.into(),
+                ..Default::default()
+            },
+            sent: d::SentRtpStreamStats {
+                packets_sent: 100,
+                bytes_sent: bytes,
+            },
+            outbound: d::OutboundRtpStreamStats {
+                frames_sent: frames,
+                frame_width: 1920,
+                frame_height: 1080,
+                ..Default::default()
+            },
+        })
+    }
+
+    fn remote_inbound_stats(ssrc: u32, packets_lost: i64, rtt_s: f64) -> RtcStats {
+        RtcStats::RemoteInboundRtp(RemoteInboundRtpStats {
+            rtc: d::RtcStats {
+                id: format!("inb-{ssrc}"),
+                timestamp: 0,
+            },
+            stream: d::RtpStreamStats {
+                ssrc,
+                ..Default::default()
+            },
+            received: d::ReceivedRtpStreamStats {
+                packets_lost,
+                ..Default::default()
+            },
+            remote_inbound: d::RemoteInboundRtpStreamStats {
+                round_trip_time: rtt_s,
+                ..Default::default()
+            },
+        })
+    }
+
+    #[test]
+    fn fold_stats_extracts_outbound_video_and_audio() {
+        let stats = [
+            codec_stats("codec-v", "video/VP8"),
+            codec_stats("codec-a", "audio/OPUS"),
+            outbound_stats("video", 11, "codec-v", 2_000_000, 1200),
+            outbound_stats("audio", 22, "codec-a", 400_000, 0),
+        ];
+        let mut t = NativeTelemetry::default();
+        fold_stats(&mut t, &stats);
+        assert_eq!(t.video_codec.as_deref(), Some("video/VP8"));
+        assert_eq!(t.video_bytes_sent, Some(2_000_000.0));
+        assert_eq!(t.video_packets_sent, Some(100.0));
+        assert_eq!(t.video_frames_sent, Some(1200.0));
+        assert_eq!(t.video_width, Some(1920));
+        assert_eq!(t.video_height, Some(1080));
+        assert_eq!(t.timestamp_ms, Some(1_750_000_000_000.0));
+        assert_eq!(t.audio_codec.as_deref(), Some("audio/OPUS"));
+        assert_eq!(t.audio_bytes_sent, Some(400_000.0));
+        assert_eq!(t.audio_packets_sent, Some(100.0));
+    }
+
+    #[test]
+    fn fold_stats_attributes_packets_lost_by_ssrc_and_reports_rtt() {
+        let stats = [
+            outbound_stats("video", 11, "codec-v", 0, 0),
+            outbound_stats("audio", 22, "codec-a", 0, 0),
+            remote_inbound_stats(11, -3, 0.05),
+            remote_inbound_stats(22, 7, 0.0),
+        ];
+        let mut t = NativeTelemetry::default();
+        fold_stats(&mut t, &stats);
+        // Negative lost values clamp to 0; RTT of 0.0 (unmeasured) is ignored.
+        assert_eq!(t.video_packets_lost, Some(0.0));
+        assert_eq!(t.audio_packets_lost, Some(7.0));
+        assert_eq!(t.rtt_ms, Some(50.0));
+    }
+
+    #[test]
+    fn fold_stats_ignores_unrelated_stat_types() {
+        let mut t = NativeTelemetry::default();
+        fold_stats(&mut t, &[]);
+        assert!(t.video_bytes_sent.is_none());
+        assert!(t.audio_codec.is_none());
+        assert!(t.rtt_ms.is_none());
+    }
 
     #[test]
     fn decode_pcm_decodes_little_endian_i16() {
