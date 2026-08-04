@@ -2,18 +2,9 @@
   "name": "@slopcast/native-rust",
   "version": "0.1.0",
   "private": true,
-  "main": "index.js",
-  "types": "index.d.ts",
   "scripts": {
-    "prepare": "napi build --platform --release",
-    "dev": "napi build --platform",
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
     "check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo xtask check-targets",
     "rust:fmt": "cargo fmt",
     "rust:check": "cargo fmt --check"
-  },
-  "devDependencies": {
-    "@napi-rs/cli": "^3.7.2"
   }
 }

@@ -2,86 +2,10 @@ use super::apps::list_audio_applications;
 use super::procinfo::{are_processes_related, is_generic_launcher};
 use super::{kwin, pw_init, sync_registry};
 use crate::AudioApp;
-use napi::Result as NapiResult;
 use pipewire::spa::utils::dict::DictRef;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-
-pub(crate) fn resolve_audio_app_for_x11_window(window_id: u32) -> Option<AudioApp> {
-    // SAFETY: null selects the default display from $DISPLAY; failure returns
-    // null, which is checked immediately.
-    let display = unsafe { x11::xlib::XOpenDisplay(std::ptr::null()) };
-    if display.is_null() {
-        return None;
-    }
-
-    let Ok(atom_name) = std::ffi::CString::new("_NET_WM_PID") else {
-        // SAFETY: balances the XOpenDisplay above; display is valid.
-        unsafe { x11::xlib::XCloseDisplay(display) };
-        return None;
-    };
-    // SAFETY: `display` is a valid open display and `atom_name` is a valid
-    // NUL-terminated C string; both outlive the call.
-    let atom = unsafe { x11::xlib::XInternAtom(display, atom_name.as_ptr(), 1) };
-    if atom == 0 {
-        // SAFETY: balances the XOpenDisplay above; `display` is valid.
-        unsafe { x11::xlib::XCloseDisplay(display) };
-        return None;
-    }
-
-    let mut actual_type: x11::xlib::Atom = 0;
-    let mut actual_format: std::os::raw::c_int = 0;
-    let mut nitems: std::os::raw::c_ulong = 0;
-    let mut bytes_after: std::os::raw::c_ulong = 0;
-    let mut prop: *mut u8 = std::ptr::null_mut();
-
-    // SAFETY: `display` and `atom` are valid; every out-pointer references a
-    // live stack variable and `prop` starts null, so a failed call leaves
-    // nothing to free.
-    let status = unsafe {
-        x11::xlib::XGetWindowProperty(
-            display,
-            x11::xlib::Window::from(window_id),
-            atom,
-            0,
-            1,
-            0,
-            x11::xlib::XA_CARDINAL,
-            &raw mut actual_type,
-            &raw mut actual_format,
-            &raw mut nitems,
-            &raw mut bytes_after,
-            &raw mut prop,
-        )
-    };
-
-    let pid = if status == 0 && !prop.is_null() && nitems > 0 && actual_format == 32 {
-        #[allow(
-            clippy::cast_ptr_alignment,
-            reason = "Xlib guarantees 4-byte alignment for 32-bit format data"
-        )]
-        // SAFETY: the call succeeded with one 32-bit item returned, so `prop`
-        // points to at least one Xlib-allocated u32.
-        Some(unsafe { *(prop as *const u32) })
-    } else {
-        None
-    };
-
-    if !prop.is_null() {
-        // SAFETY: `prop` was allocated by Xlib in the XGetWindowProperty above.
-        unsafe { x11::xlib::XFree(prop.cast::<std::ffi::c_void>()) };
-    }
-    // SAFETY: balances the XOpenDisplay above; `display` is still valid.
-    unsafe { x11::xlib::XCloseDisplay(display) };
-
-    let pid = pid?;
-    let apps = list_audio_applications().ok()?;
-    apps.into_iter().find(|app| {
-        let app_pid = app.process_id.cast_unsigned();
-        are_processes_related(app_pid, pid)
-    })
-}
 
 fn extract_portal_window_name_from_map<F>(get_prop: F) -> Option<String>
 where
@@ -465,9 +389,9 @@ pub(crate) fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     resolve_from_video_scan(&scan)
 }
 
-pub(crate) fn get_capture_context() -> NapiResult<crate::CaptureContext> {
+pub(crate) fn get_capture_context() -> Result<crate::CaptureContext, String> {
     let scan = inspect_video_graph()
-        .ok_or_else(|| napi::Error::from_reason("PipeWire video node introspection failed"))?;
+        .ok_or_else(|| "PipeWire video node introspection failed".to_string())?;
     let node_id = scan.screencast_node_id;
     let app = resolve_from_video_scan(&scan);
     let (window_pid, window_caption) = if scan.de == Some("kde") {
@@ -489,6 +413,13 @@ pub(crate) fn get_capture_context() -> NapiResult<crate::CaptureContext> {
         video_node_count: scan.video_node_count.cast_signed(),
         app,
         screencast_node_id: node_id,
+        // `object.serial` values stay far below 2^53, so the f64 conversion
+        // is exact for every serial that can occur in practice.
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "object.serial is monotonically increasing from 1 and stays below 2^53 in any real session"
+        )]
+        highest_serial: (scan.highest_serial != 0).then_some(scan.highest_serial as f64),
         portal_props: scan.portal_props,
         window_pid,
         window_caption,

@@ -68,7 +68,7 @@ impl MprisState {
         &mut self,
         sender: Option<&str>,
         iface: &str,
-        changed: HashMap<String, OwnedValue>,
+        changed: &HashMap<String, OwnedValue>,
     ) {
         let well_known = sender.and_then(|s| {
             if s.starts_with("org.mpris.MediaPlayer2.") {
@@ -239,7 +239,7 @@ async fn handle_properties_changed(
 
     if is_known {
         if let Ok(mut guard) = state.write() {
-            guard.update_properties(sender, iface, changed_props);
+            guard.update_properties(sender, iface, &changed_props);
         }
     } else if let Some(s) = sender
         && s.starts_with("org.mpris.MediaPlayer2.")

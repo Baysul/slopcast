@@ -1,6 +1,5 @@
 mod apps;
 mod capture;
-mod dmabuf;
 mod graph;
 mod kwin;
 mod metering;
@@ -12,21 +11,15 @@ mod mpris;
 mod portal;
 mod procinfo;
 mod screencast;
-mod video;
 
 pub(crate) use apps::{dump_audio_sources, list_audio_applications};
 pub(crate) use capture::{
     is_audio_capture_active, start_audio_capture, stop_audio_capture, switch_audio_capture,
 };
-pub(crate) use dmabuf::{clear_dmabuf_callback, invoke_dmabuf_callback, set_dmabuf_callback};
 pub(crate) use metering::{
-    clear_audio_wave_callback, set_audio_wave_callback, start_audio_metering, stop_audio_metering,
+    clear_wave_callback, set_wave_callback, start_audio_metering, stop_audio_metering,
 };
-pub(crate) use napi::Result as NapiResult;
-pub(crate) use screencast::{
-    get_capture_context, resolve_audio_app_for_captured_window, resolve_audio_app_for_x11_window,
-};
-pub(crate) use video::{start_video_capture, stop_video_capture};
+pub(crate) use screencast::{get_capture_context, resolve_audio_app_for_captured_window};
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -40,6 +33,17 @@ const LINK_FACTORY: &str = "link-factory";
 struct PwCtx {
     main_loop: pipewire::main_loop::MainLoopRc,
     core: pipewire::core::CoreRc,
+}
+
+/// Runs the global `PipeWire` library init exactly once on the main thread,
+/// before the event loop serves IPC. libwebrtc's statically-linked `pw_*`
+/// dlopen shims capture pipewire-rs's references in the same binary; the Tauri
+/// backend arms them (`native_livekit::arm_pipewire_shims`) before calling this
+/// so `pw_init` reaches the real libpipewire. Completing the once here keeps
+/// later worker-thread calls (the renderer polls `getAudioApps` every 3s) on
+/// the fast path.
+pub(crate) fn ensure_pipewire_init() {
+    pipewire::init();
 }
 
 fn pw_init() -> Result<PwCtx, String> {

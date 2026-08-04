@@ -1,122 +1,17 @@
-#![allow(
-    clippy::needless_pass_by_value,
-    reason = "napi-rs #[napi] function signatures must take ownership of Either/String params for JS type conversion"
-)]
-
-use napi::threadsafe_function::ThreadsafeFunction;
-use napi_derive::napi;
 use std::collections::HashMap;
 
 mod audio_ring;
-
-#[cfg(test)]
-mod test_stubs;
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-mod unsupported_platform {
-    use crate::AudioApp;
-
-    pub fn list_audio_applications() -> napi::Result<Vec<AudioApp>> {
-        Err(napi::Error::from_reason(
-            "Native audio capture is not supported on this platform",
-        ))
-    }
-
-    pub fn dump_audio_sources() -> napi::Result<Vec<std::collections::HashMap<String, String>>> {
-        Ok(Vec::new())
-    }
-
-    pub fn start_audio_capture(_: &napi::Either<String, i32>) -> napi::Result<bool> {
-        Err(napi::Error::from_reason(
-            "Native audio capture is not supported on this platform",
-        ))
-    }
-
-    pub fn stop_audio_capture() -> bool {
-        true
-    }
-
-    pub fn is_audio_capture_active() -> bool {
-        false
-    }
-
-    pub fn switch_audio_capture(_: &napi::Either<String, i32>) -> napi::Result<bool> {
-        Err(napi::Error::from_reason(
-            "Native audio capture is not supported on this platform",
-        ))
-    }
-
-    pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
-        None
-    }
-
-    pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
-        None
-    }
-
-    pub fn get_capture_context() -> napi::Result<crate::CaptureContext> {
-        Err(napi::Error::from_reason(
-            "Capture context is only available on Linux",
-        ))
-    }
-
-    pub fn start_audio_metering() -> napi::Result<bool> {
-        Ok(false)
-    }
-
-    pub fn stop_audio_metering() -> bool {
-        true
-    }
-
-    pub fn set_audio_wave_callback(_: std::sync::Arc<crate::WaveThreadsafeFunction>) {}
-
-    pub fn clear_audio_wave_callback() -> napi::Result<()> {
-        Ok(())
-    }
-
-    pub fn set_audio_data_callback(
-        _: std::sync::Arc<ThreadsafeFunction<napi::bindgen_prelude::Buffer, ()>>,
-    ) -> napi::Result<()> {
-        Ok(())
-    }
-
-    pub fn set_dmabuf_callback(_: std::sync::Arc<crate::DmaBufFrameCallback>) {}
-
-    pub fn clear_dmabuf_callback() -> napi::Result<()> {
-        Ok(())
-    }
-
-    pub fn start_video_capture(_: u32, _: u32, _: u32, _: u32) -> napi::Result<bool> {
-        Err(napi::Error::from_reason(
-            "Video capture is not supported on this platform",
-        ))
-    }
-
-    pub fn stop_video_capture() -> bool {
-        true
-    }
-
-    pub fn is_video_capture_active() -> napi::Result<bool> {
-        Ok(false)
-    }
-
-    pub fn list_screen_sources() -> napi::Result<Vec<napi::Unknown<'static>>> {
-        Ok(Vec::new())
-    }
-}
 
 #[cfg(target_os = "linux")]
 use crate::linux as platform;
 #[cfg(target_os = "windows")]
 use crate::windows as platform;
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-use unsupported_platform as platform;
 
-#[napi(object)]
 #[derive(Debug, Clone)]
 pub struct AudioApp {
     pub id: i32,
@@ -128,7 +23,6 @@ pub struct AudioApp {
     pub media_title: Option<String>,
 }
 
-#[napi(object)]
 #[derive(Debug, Clone)]
 pub struct AudioAppWave {
     pub id: i32,
@@ -137,16 +31,18 @@ pub struct AudioAppWave {
     pub columns: Vec<f64>,
 }
 
-/// Cross-thread callback for the per-app waveform snapshots pushed by the
-/// meter worker at ~33 ms cadence.
-pub type WaveThreadsafeFunction = ThreadsafeFunction<Vec<AudioAppWave>, ()>;
-
-pub(crate) type DmaBufFrameCallback = ThreadsafeFunction<(i32, i32, i32, i32, i32, i32), ()>;
+/// Target for an exclusive audio capture session. `Id` carries the numeric
+/// target — a `PipeWire` node ID on Linux, a process ID on Windows; negative
+/// IDs select system audio on both platforms. `Label` carries a per-platform
+/// textual target (a node ID string on Linux, a PID string on Windows).
+pub enum AudioTarget {
+    Id(i32),
+    Label(String),
+}
 
 /// Wayland video-capture introspection for the desktop main process: which
 /// desktop environment is streaming, whether the source is a monitor or a
 /// window, and the best-matched audio application for the captured source.
-#[napi(object)]
 #[derive(Debug, Clone)]
 pub struct CaptureContext {
     pub de: String,
@@ -155,6 +51,11 @@ pub struct CaptureContext {
     pub video_node_count: i32,
     pub app: Option<AudioApp>,
     pub screencast_node_id: Option<u32>,
+    /// `object.serial` of the newest `kwin-screencast-*` node — the main
+    /// process snapshots it before triggering the portal and only accepts a
+    /// node created *after* that point, so lingering or preview streams are
+    /// never mistaken for the live capture.
+    pub highest_serial: Option<f64>,
     /// xdg-desktop-portal screencast metadata (`portal.screencast.*`) for the
     /// captured window — the portal's own record of what was picked.
     pub portal_props: Option<HashMap<String, String>>,
@@ -168,7 +69,7 @@ pub struct CaptureContext {
     clippy::too_many_lines,
     reason = "nine ordered match strategies are clearer as one cascade than as separate helpers"
 )]
-pub(crate) fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
+pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp> {
     let label_trim = label.trim();
     if label_trim.is_empty() {
         return None;
@@ -318,49 +219,54 @@ fn title_matches(title: &str, lower: &str, first_word: &str) -> bool {
 }
 
 #[must_use]
-#[napi]
 pub fn init_engine() -> String {
     "Native engine initialized".into()
 }
 
-/// Lists active audio applications visible to the native layer.
-pub struct ListAudioAppsTask;
-
-impl napi::Task for ListAudioAppsTask {
-    type Output = Vec<AudioApp>;
-    type JsValue = Vec<AudioApp>;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        platform::list_audio_applications()
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output)
-    }
+/// Runs the global `PipeWire` library init exactly once on the main thread,
+/// before the event loop serves IPC. On Linux this is only safe after
+/// libwebrtc's `pw_*` dlopen shims are armed (`native_livekit::arm_pipewire_shims`)
+/// — see the Linux module. No-op on other platforms.
+#[cfg(target_os = "linux")]
+pub fn ensure_pipewire_init() {
+    platform::ensure_pipewire_init();
 }
 
-/// Lists active audio applications visible to the native layer asynchronously.
+#[cfg(not(target_os = "linux"))]
+pub fn ensure_pipewire_init() {}
+
+/// Lists active audio applications visible to the native layer.
 ///
 /// # Errors
 ///
 /// Returns an error if the platform-specific audio enumeration fails.
-#[napi(ts_return_type = "Promise<Array<AudioApp>>")]
-pub fn list_audio_applications() -> napi::Result<napi::bindgen_prelude::AsyncTask<ListAudioAppsTask>>
-{
-    Ok(napi::bindgen_prelude::AsyncTask::new(ListAudioAppsTask))
+pub fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
+    platform::list_audio_applications()
+}
+
+/// Dumps the full property dictionaries of every live audio stream node —
+/// registry props merged with bound-node info props, the same view `pw-dump`
+/// prints. Debugging aid for auto-resolve misses.
+///
+/// # Errors
+///
+/// Returns an error if `PipeWire` node enumeration fails.
+pub fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, String> {
+    platform::dump_audio_sources()
 }
 
 /// Starts exclusive audio capture for the given application.
 ///
-/// `target_app_id` can be a `PipeWire` node ID (as a number) or an application
-/// name (as a string). Pass `-1` to capture system audio (every application).
+/// `target` is an `AudioTarget` — a `PipeWire` node ID (Linux) or process ID
+/// (Windows) with negative values selecting system audio, or a per-platform
+/// textual target.
 ///
 /// # Errors
 ///
-/// Returns an error if `PipeWire` node creation or linking fails.
-#[napi]
-pub fn start_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Result<bool> {
-    platform::start_audio_capture(&target_app_id)
+/// Returns an error if `PipeWire` node creation / WASAPI activation or linking
+/// fails.
+pub fn start_audio_capture(target: &AudioTarget) -> Result<bool, String> {
+    platform::start_audio_capture(target)
 }
 
 /// Stops the active audio capture session.
@@ -368,22 +274,19 @@ pub fn start_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Re
 /// # Errors
 ///
 /// Returns an error if the capture state lock is poisoned.
-#[napi]
-pub fn stop_audio_capture() -> napi::Result<bool> {
+pub fn stop_audio_capture() -> Result<bool, String> {
     Ok(platform::stop_audio_capture())
 }
 
-/// Switches the active capture to a new target application.
-///
-/// `target_app_id` can be a `PipeWire` node ID (as a number) or an application
-/// name (as a string). Pass `-1` to capture system audio (every application).
+/// Switches the active capture to a new target application. See
+/// `start_audio_capture` for the target semantics.
 ///
 /// # Errors
 ///
-/// Returns an error if sending the switch command to the capture thread fails.
-#[napi]
-pub fn switch_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::Result<bool> {
-    platform::switch_audio_capture(&target_app_id)
+/// Returns an error if no capture session is active or sending the switch
+/// command to the capture thread fails.
+pub fn switch_audio_capture(target: &AudioTarget) -> Result<bool, String> {
+    platform::switch_audio_capture(target)
 }
 
 /// Returns `true` if an audio capture session is currently active.
@@ -391,153 +294,33 @@ pub fn switch_audio_capture(target_app_id: napi::Either<String, i32>) -> napi::R
 /// # Errors
 ///
 /// Returns an error if the capture state lock is poisoned.
-#[napi]
-pub fn is_audio_capture_active() -> napi::Result<bool> {
+pub fn is_audio_capture_active() -> Result<bool, String> {
     Ok(platform::is_audio_capture_active())
 }
 
-pub struct ResolveAudioAppForX11WindowTask {
-    window_id: u32,
-}
-
-impl napi::Task for ResolveAudioAppForX11WindowTask {
-    type Output = Option<AudioApp>;
-    type JsValue = Option<AudioApp>;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(platform::resolve_audio_app_for_x11_window(self.window_id))
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-/// Resolves the audio application for the given X11 window ID asynchronously.
-///
-/// # Errors
-///
-/// Always returns `Ok`.
-#[napi(ts_return_type = "Promise<AudioApp | null>")]
-pub fn resolve_audio_app_for_x11_window(
-    window_id: i32,
-) -> napi::Result<napi::bindgen_prelude::AsyncTask<ResolveAudioAppForX11WindowTask>> {
-    let wid = u32::try_from(window_id).unwrap_or(0);
-    Ok(napi::bindgen_prelude::AsyncTask::new(
-        ResolveAudioAppForX11WindowTask { window_id: wid },
-    ))
-}
-
-pub struct ResolveAudioAppForCapturedWindowTask;
-
-impl napi::Task for ResolveAudioAppForCapturedWindowTask {
-    type Output = Option<AudioApp>;
-    type JsValue = Option<AudioApp>;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(platform::resolve_audio_app_for_captured_window())
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-/// Resolves the audio application for the currently portal-captured window asynchronously.
-///
-/// # Errors
-///
-/// Always returns `Ok`.
-#[napi(ts_return_type = "Promise<AudioApp | null>")]
-pub fn resolve_audio_app_for_captured_window()
--> napi::Result<napi::bindgen_prelude::AsyncTask<ResolveAudioAppForCapturedWindowTask>> {
-    Ok(napi::bindgen_prelude::AsyncTask::new(
-        ResolveAudioAppForCapturedWindowTask,
-    ))
-}
-
-pub struct DumpAudioSourcesTask;
-
-impl napi::Task for DumpAudioSourcesTask {
-    type Output = Vec<std::collections::HashMap<String, String>>;
-    type JsValue = Vec<std::collections::HashMap<String, String>>;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        platform::dump_audio_sources()
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-/// Dumps the full property dictionaries of every live audio stream node asynchronously.
-///
-/// # Errors
-///
-/// Returns an error if `PipeWire` node enumeration fails.
-#[napi(ts_return_type = "Promise<Array<Record<string, string>>>")]
-pub fn dump_audio_sources() -> napi::Result<napi::bindgen_prelude::AsyncTask<DumpAudioSourcesTask>>
-{
-    Ok(napi::bindgen_prelude::AsyncTask::new(DumpAudioSourcesTask))
-}
-
-pub struct ResolveAudioAppByNameTask {
-    label: String,
-}
-
-impl napi::Task for ResolveAudioAppByNameTask {
-    type Output = Option<AudioApp>;
-    type JsValue = Option<AudioApp>;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        let apps = platform::list_audio_applications()?;
-        Ok(find_best_audio_match(&apps, &self.label))
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-/// Resolves the best-matching audio application by name asynchronously.
+/// Resolves the best-matching audio application for a label.
 ///
 /// # Errors
 ///
 /// Delegates to `list_audio_applications` and propagates its errors.
-#[napi(ts_return_type = "Promise<AudioApp | null>")]
-pub fn resolve_audio_app_by_name(
-    label: String,
-) -> napi::Result<napi::bindgen_prelude::AsyncTask<ResolveAudioAppByNameTask>> {
-    Ok(napi::bindgen_prelude::AsyncTask::new(
-        ResolveAudioAppByNameTask { label },
-    ))
+pub fn resolve_audio_app_by_name(label: &str) -> Result<Option<AudioApp>, String> {
+    let apps = platform::list_audio_applications()?;
+    Ok(find_best_audio_match(&apps, label))
 }
 
-pub struct GetCaptureContextTask;
-
-impl napi::Task for GetCaptureContextTask {
-    type Output = CaptureContext;
-    type JsValue = CaptureContext;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        platform::get_capture_context()
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output)
-    }
+/// Resolves the audio application for the currently portal-captured window.
+#[must_use]
+pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
+    platform::resolve_audio_app_for_captured_window()
 }
 
-/// Returns a snapshot of the currently active `PipeWire` video capture context asynchronously.
+/// Returns a snapshot of the currently active `PipeWire` video capture context.
 ///
 /// # Errors
 ///
 /// Returns an error if `PipeWire` video node introspection fails.
-#[napi(ts_return_type = "Promise<CaptureContext>")]
-pub fn get_capture_context() -> napi::Result<napi::bindgen_prelude::AsyncTask<GetCaptureContextTask>>
-{
-    Ok(napi::bindgen_prelude::AsyncTask::new(GetCaptureContextTask))
+pub fn get_capture_context() -> Result<CaptureContext, String> {
+    platform::get_capture_context()
 }
 
 /// Starts per-app audio waveform metering.
@@ -545,8 +328,7 @@ pub fn get_capture_context() -> napi::Result<napi::bindgen_prelude::AsyncTask<Ge
 /// # Errors
 ///
 /// Returns an error if the `PipeWire` meter thread fails to start.
-#[napi]
-pub fn start_audio_metering() -> napi::Result<bool> {
+pub fn start_audio_metering() -> Result<bool, String> {
     platform::start_audio_metering()
 }
 
@@ -555,36 +337,25 @@ pub fn start_audio_metering() -> napi::Result<bool> {
 /// # Errors
 ///
 /// Returns an error if the meter state lock is poisoned.
-#[napi]
-pub fn stop_audio_metering() -> napi::Result<bool> {
+pub fn stop_audio_metering() -> Result<bool, String> {
     Ok(platform::stop_audio_metering())
 }
 
 /// Registers a callback that receives the current waveform readings for all
 /// metered applications. Each entry carries 96 interleaved (min, max)
 /// amplitude pairs. The meter worker pushes at ~33 ms cadence; the callback is
-/// invoked non-blocking, so ticks are dropped (never queued) when the main
-/// process is busy.
-///
-/// # Errors
-///
-/// Returns an error if the platform module rejects the callback.
-#[napi]
-pub fn set_audio_wave_callback(
-    callback: std::sync::Arc<crate::WaveThreadsafeFunction>,
-) -> napi::Result<()> {
-    platform::set_audio_wave_callback(callback);
-    Ok(())
+/// invoked non-blocking, so ticks are dropped (never queued) when the caller
+/// is busy.
+pub fn set_wave_callback(callback: Box<dyn Fn(Vec<AudioAppWave>) + Send + Sync>) {
+    platform::set_wave_callback(callback);
 }
 
 /// Clears the registered waveform callback.
-#[napi]
-pub fn clear_audio_wave_callback() {
-    platform::clear_audio_wave_callback();
+pub fn clear_wave_callback() {
+    platform::clear_wave_callback();
 }
 
 /// Telemetry counters for the audio ring buffer.
-#[napi(object)]
 #[derive(Debug, Clone, Copy)]
 pub struct AudioRingStats {
     pub captured_chunks: i64,
@@ -596,10 +367,9 @@ pub struct AudioRingStats {
 
 /// Returns current telemetry counters for the audio ring buffer.
 #[must_use]
-#[napi]
 #[allow(
     clippy::cast_possible_wrap,
-    reason = "telemetry counters are far below i64::MAX; the napi struct fields are i64"
+    reason = "telemetry counters are far below i64::MAX; the public stats keep the historical i64 field types"
 )]
 pub fn get_audio_ring_stats() -> AudioRingStats {
     let s = audio_ring::get_audio_ring_stats();
@@ -613,7 +383,6 @@ pub fn get_audio_ring_stats() -> AudioRingStats {
 }
 
 /// Resets telemetry counters for the audio ring buffer.
-#[napi]
 pub fn reset_audio_ring_stats() {
     audio_ring::reset_audio_ring_stats();
 }
@@ -621,68 +390,13 @@ pub fn reset_audio_ring_stats() {
 /// Registers a callback that receives converted PCM audio data as 16-bit
 /// signed integer samples (48 kHz, 2 channel). The conversion from F32LE
 /// happens in Rust before the callback fires.
-///
-/// # Errors
-///
-/// Returns an error if the platform module rejects the callback.
-#[napi]
-pub fn set_audio_data_callback(
-    callback: std::sync::Arc<audio_ring::AudioThreadsafeFunction>,
-) -> napi::Result<()> {
+pub fn set_audio_data_callback(callback: Box<dyn Fn(Vec<i16>) + Send + Sync>) {
     audio_ring::set_audio_data_callback(callback);
-    Ok(())
 }
 
 /// Clears the registered PCM audio data callback.
-#[napi]
 pub fn clear_audio_data_callback() {
     audio_ring::clear_audio_data_callback();
-}
-
-/// Registers a callback for receiving `DMA-BUF` video frames from the
-/// `PipeWire` capture thread. Each frame is packed as
-/// `[fd, width, height, format, pts_lo, pts_hi]`. The callback owns the fd
-/// and must close it.
-///
-/// # Errors
-///
-/// Returns an error if the platform module rejects the callback.
-#[napi]
-pub fn set_dmabuf_callback(callback: std::sync::Arc<DmaBufFrameCallback>) -> napi::Result<()> {
-    platform::set_dmabuf_callback(callback);
-    Ok(())
-}
-
-/// Clears the DMA-BUF callback. Frames produced after this call are dropped.
-///
-/// # Errors
-///
-/// Always returns `Ok`.
-#[napi]
-pub fn clear_dmabuf_callback() -> napi::Result<()> {
-    platform::clear_dmabuf_callback();
-    Ok(())
-}
-
-/// Starts `PipeWire` video capture from a screencast node.
-///
-/// # Errors
-///
-/// Returns an error if the capture thread fails to start or the stream does
-/// not reach an active state within five seconds.
-#[napi]
-pub fn start_video_capture(node_id: u32, width: u32, height: u32, fps: u32) -> napi::Result<bool> {
-    platform::start_video_capture(node_id, width, height, fps)
-}
-
-/// Stops the active `PipeWire` video capture session.
-///
-/// # Errors
-///
-/// Always returns `Ok`.
-#[napi]
-pub fn stop_video_capture() -> napi::Result<bool> {
-    Ok(platform::stop_video_capture())
 }
 
 #[cfg(test)]
@@ -746,6 +460,7 @@ mod tests {
             video_node_count: 1,
             app: Some(audio_app),
             screencast_node_id: Some(123),
+            highest_serial: Some(999.0),
             portal_props: Some(HashMap::from([(
                 "portal.screencast.title".to_string(),
                 "Test Window".to_string(),

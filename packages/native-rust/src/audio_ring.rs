@@ -1,6 +1,4 @@
 use arc_swap::ArcSwapOption;
-use napi::bindgen_prelude::Buffer;
-use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,8 +17,11 @@ pub const PCM_FRAME_SIZE: usize = (DEFAULT_CHANNELS as usize) * DEFAULT_SAMPLE_B
 /// At 48 kHz stereo 16-bit PCM (192,000 B/s), 16 KiB covers ~85.33 ms (4,096 frames).
 pub const DEFAULT_SLOT_CAPACITY: usize = 16_384;
 
-pub type AudioThreadsafeFunction =
-    ThreadsafeFunction<Buffer, (), Buffer, napi::Status, true, false, AUDIO_QUEUE_CAPACITY>;
+/// PCM data callback: 48 kHz stereo 16-bit signed integer samples. The ring
+/// worker converts each frame-aligned byte chunk to `i16` samples before
+/// invoking the callback; the boxed `Fn` (not a thread-safe function) is
+/// called synchronously on the ring worker thread, so it must never block.
+pub type AudioDataCallback = dyn Fn(Vec<i16>) + Send + Sync;
 
 struct AudioProducer {
     data_queue: Arc<crossbeam_queue::ArrayQueue<Vec<u8>>>,
@@ -52,10 +53,10 @@ static TRUNCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 static AUDIO_PRODUCER: ArcSwapOption<AudioProducer> = ArcSwapOption::const_empty();
 static AUDIO_RING_LIFECYCLE: Mutex<Option<AudioRingSession>> = Mutex::new(None);
-static AUDIO_CALLBACK: ArcSwapOption<AudioThreadsafeFunction> = ArcSwapOption::const_empty();
+static AUDIO_CALLBACK: ArcSwapOption<Box<AudioDataCallback>> = ArcSwapOption::const_empty();
 
-pub fn set_audio_data_callback(callback: Arc<AudioThreadsafeFunction>) {
-    AUDIO_CALLBACK.store(Some(callback));
+pub fn set_audio_data_callback(callback: Box<dyn Fn(Vec<i16>) + Send + Sync>) {
+    AUDIO_CALLBACK.store(Some(Arc::new(callback)));
 }
 
 pub fn clear_audio_data_callback() {
@@ -226,15 +227,14 @@ pub fn start_audio_ring_with_capacity(
                         if !chunk.is_empty() {
                             let cb_guard = AUDIO_CALLBACK.load();
                             if let Some(cb) = cb_guard.as_ref() {
-                                let status = cb.call(
-                                    Ok(Buffer::from(chunk.as_slice())),
-                                    ThreadsafeFunctionCallMode::NonBlocking,
-                                );
-                                if status != napi::Status::Ok {
-                                    TSFN_DROPS.fetch_add(1, Ordering::Relaxed);
-                                    TRUNCATED_BYTES
-                                        .fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                                }
+                                // Chunks are frame-aligned (the push path
+                                // truncates unaligned tails), so every pair of
+                                // bytes decodes exactly to one i16 sample.
+                                let samples: Vec<i16> = chunk
+                                    .chunks_exact(2)
+                                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                    .collect();
+                                cb(samples);
                             }
                         }
                         let _ = free_slots_worker.push(chunk);

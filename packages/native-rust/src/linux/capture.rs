@@ -1,6 +1,6 @@
 use super::graph::{ChannelLayout, DefaultSinkWatch, GraphTracker, TargetSpec};
 use super::{ADAPTER_FACTORY, CAPTURE_NODE_DESCRIPTION, CAPTURE_NODE_NAME, pw_init};
-use napi::{Either, Result as NapiResult};
+use crate::AudioTarget;
 use pipewire::properties::{PropertiesBox, properties};
 use pipewire::registry::GlobalObject;
 use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw};
@@ -18,14 +18,15 @@ use std::time::Duration;
 
 type ReadySenderCell = Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>;
 
-fn parse_target_id(target: &Either<String, i32>) -> NapiResult<Option<u32>> {
+fn parse_target_id(target: &AudioTarget) -> Result<Option<u32>, String> {
     match target {
-        Either::B(n) if *n < 0 => Ok(None),
-        Either::B(n) => Ok(Some((*n).cast_unsigned())),
-        Either::A(s) => {
-            let n = s.trim().parse::<u32>().map_err(|_| {
-                napi::Error::from_reason("A PipeWire node ID or -1 (system audio) is required")
-            })?;
+        AudioTarget::Id(n) if *n < 0 => Ok(None),
+        AudioTarget::Id(n) => Ok(Some((*n).cast_unsigned())),
+        AudioTarget::Label(s) => {
+            let n = s
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "A PipeWire node ID or -1 (system audio) is required".to_string())?;
             Ok(Some(n))
         }
     }
@@ -465,9 +466,9 @@ fn run_capture_session(
     }
 }
 
-fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
+fn spawn_capture_session(target: TargetSpec) -> Result<CaptureSession, String> {
     crate::audio_ring::start_audio_ring()
-        .map_err(|e| napi::Error::from_reason(format!("Failed to start audio ring: {e}")))?;
+        .map_err(|e| format!("Failed to start audio ring: {e}"))?;
     let shared = Arc::new(Mutex::new(SessionShared::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -481,7 +482,7 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
             .spawn(move || run_capture_session(target, shared, stop, ready_tx, target_rx))
             .map_err(|e| {
                 crate::audio_ring::stop_audio_ring();
-                napi::Error::from_reason(format!("Failed to spawn PipeWire worker: {e}"))
+                format!("Failed to spawn PipeWire worker: {e}")
             })?
     };
 
@@ -491,15 +492,13 @@ fn spawn_capture_session(target: TargetSpec) -> NapiResult<CaptureSession> {
             crate::audio_ring::stop_audio_ring();
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
-            return Err(napi::Error::from_reason(reason));
+            return Err(reason);
         }
         Err(_) => {
             crate::audio_ring::stop_audio_ring();
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
-            return Err(napi::Error::from_reason(
-                "Timed out waiting for PipeWire session",
-            ));
+            return Err("Timed out waiting for PipeWire session".into());
         }
     }
     // The worker thread only sends ready after confirming capture_node_id,
@@ -529,11 +528,11 @@ fn stop_session(state: &mut CaptureState) {
     state.is_active = false;
 }
 
-pub(crate) fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
+pub(crate) fn start_audio_capture(target_app_id: &AudioTarget) -> Result<bool, String> {
     let node_id = parse_target_id(target_app_id)?;
     let mut state_guard = CAPTURE_STATE
         .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        .map_err(|e| format!("Audio capture state lock poisoned: {e}"))?;
     let state = state_guard.get_or_insert_with(CaptureState::new);
     stop_session(state);
 
@@ -548,20 +547,16 @@ pub(crate) fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiRe
     Ok(true)
 }
 
-pub(crate) fn switch_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
+pub(crate) fn switch_audio_capture(target_app_id: &AudioTarget) -> Result<bool, String> {
     let node_id = parse_target_id(target_app_id)?;
     let mut state_guard = CAPTURE_STATE
         .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        .map_err(|e| format!("Audio capture state lock poisoned: {e}"))?;
     let Some(state) = state_guard.as_mut() else {
-        return Err(napi::Error::from_reason(
-            "No active audio capture session to switch",
-        ));
+        return Err("No active audio capture session to switch".into());
     };
     let Some(session) = &state.session else {
-        return Err(napi::Error::from_reason(
-            "No active audio capture session to switch",
-        ));
+        return Err("No active audio capture session to switch".into());
     };
 
     let target = TargetSpec {
@@ -569,9 +564,10 @@ pub(crate) fn switch_audio_capture(target_app_id: &Either<String, i32>) -> NapiR
         system_audio: node_id.is_none(),
         ..TargetSpec::default()
     };
-    session.target_tx.send(target).map_err(|e| {
-        napi::Error::from_reason(format!("Failed to send audio target switch: {e}"))
-    })?;
+    session
+        .target_tx
+        .send(target)
+        .map_err(|e| format!("Failed to send audio target switch: {e}"))?;
     Ok(true)
 }
 
@@ -656,11 +652,11 @@ mod tests {
     #[test]
     fn parse_negative_number_means_system_audio() {
         assert_eq!(
-            parse_target_id(&Either::B(-1)).unwrap_or_else(|e| panic!("system audio: {e}")),
+            parse_target_id(&AudioTarget::Id(-1)).unwrap_or_else(|e| panic!("system audio: {e}")),
             None
         );
         assert_eq!(
-            parse_target_id(&Either::B(-5)).unwrap_or_else(|e| panic!("system audio: {e}")),
+            parse_target_id(&AudioTarget::Id(-5)).unwrap_or_else(|e| panic!("system audio: {e}")),
             None
         );
     }
@@ -668,11 +664,11 @@ mod tests {
     #[test]
     fn parse_positive_number_is_node_id() {
         assert_eq!(
-            parse_target_id(&Either::B(0)).unwrap_or_else(|e| panic!("node 0: {e}")),
+            parse_target_id(&AudioTarget::Id(0)).unwrap_or_else(|e| panic!("node 0: {e}")),
             Some(0)
         );
         assert_eq!(
-            parse_target_id(&Either::B(42)).unwrap_or_else(|e| panic!("node 42: {e}")),
+            parse_target_id(&AudioTarget::Id(42)).unwrap_or_else(|e| panic!("node 42: {e}")),
             Some(42)
         );
     }
@@ -680,12 +676,14 @@ mod tests {
     #[test]
     fn parse_numeric_string_is_node_id() {
         assert_eq!(
-            parse_target_id(&Either::A("123".into())).unwrap_or_else(|e| panic!("node 123: {e}")),
+            parse_target_id(&AudioTarget::Label("123".into()))
+                .unwrap_or_else(|e| panic!("node 123: {e}")),
             Some(123)
         );
         // Whitespace is trimmed before parsing.
         assert_eq!(
-            parse_target_id(&Either::A(" 7 ".into())).unwrap_or_else(|e| panic!("node 7: {e}")),
+            parse_target_id(&AudioTarget::Label(" 7 ".into()))
+                .unwrap_or_else(|e| panic!("node 7: {e}")),
             Some(7)
         );
     }
@@ -694,13 +692,13 @@ mod tests {
     fn parse_string_minus_one_is_not_system_audio() {
         // Only the numeric -1 selects system audio; a "-1" string is an
         // invalid node id, not a mode switch.
-        assert!(parse_target_id(&Either::A("-1".into())).is_err());
+        assert!(parse_target_id(&AudioTarget::Label("-1".into())).is_err());
     }
 
     #[test]
     fn parse_non_numeric_string_is_an_error() {
-        assert!(parse_target_id(&Either::A("not-a-node".into())).is_err());
-        assert!(parse_target_id(&Either::A(String::new())).is_err());
+        assert!(parse_target_id(&AudioTarget::Label("not-a-node".into())).is_err());
+        assert!(parse_target_id(&AudioTarget::Label(String::new())).is_err());
     }
 
     #[test]

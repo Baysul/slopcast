@@ -3,12 +3,18 @@ use super::procinfo::{
 };
 use super::{CAPTURE_NODE_NAME, mpris, pw_init, sync_registry};
 use crate::AudioApp;
-use napi::Result as NapiResult;
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Mutex;
+
+/// Serializes `PipeWire` enumeration: the renderer polls `getAudioApps` every
+/// 3s on tokio blocking threads, and `libpipewire` contexts/registries are not
+/// safe to touch concurrently. The global `pipewire::init()` once is completed
+/// at startup (`ensure_pipewire_init`); this gate orders the per-call sessions.
+static PW_ACCESS: Mutex<()> = Mutex::new(());
 
 /// Best-effort window/tab title for an audio stream node, used by the UI to tell
 /// same-named applications apart. Browsers put the tab title in `media.name`;
@@ -247,13 +253,16 @@ fn contains_fuzzy(a: &str, b: &str) -> bool {
     a.contains(b) || b.contains(a)
 }
 
-pub(crate) fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
+pub(crate) fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
+    let _gate = PW_ACCESS
+        .lock()
+        .map_err(|_| String::from("PipeWire access lock poisoned"))?;
     pipewire::init();
-    let pw = pw_init().map_err(|e| napi::Error::from_reason(format!("PipeWire init: {e}")))?;
+    let pw = pw_init().map_err(|e| format!("PipeWire init: {e}"))?;
     let registry = pw
         .core
         .get_registry()
-        .map_err(|e| napi::Error::from_reason(format!("Registry: {e}")))?;
+        .map_err(|e| format!("Registry: {e}"))?;
     let apps = Rc::new(RefCell::new(Vec::<AudioApp>::new()));
     collect_client_pids(&pw.core, &pw.main_loop, &registry, &apps);
     let mut apps = apps.take();
@@ -267,13 +276,16 @@ pub(crate) fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
 /// a capture starts so the captured window can be matched against real nodes.
 type NodePropList = Vec<(u32, HashMap<String, String>)>;
 
-pub(crate) fn dump_audio_sources() -> NapiResult<Vec<HashMap<String, String>>> {
+pub(crate) fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, String> {
+    let _gate = PW_ACCESS
+        .lock()
+        .map_err(|_| String::from("PipeWire access lock poisoned"))?;
     pipewire::init();
-    let pw = pw_init().map_err(|e| napi::Error::from_reason(format!("PipeWire init: {e}")))?;
+    let pw = pw_init().map_err(|e| format!("PipeWire init: {e}"))?;
     let registry = pw
         .core
         .get_registry()
-        .map_err(|e| napi::Error::from_reason(format!("Registry: {e}")))?;
+        .map_err(|e| format!("Registry: {e}"))?;
     let nodes: Rc<RefCell<NodePropList>> = Rc::new(RefCell::new(Vec::new()));
     let bindings: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
         Rc::new(RefCell::new(Vec::new()));

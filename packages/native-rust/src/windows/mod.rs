@@ -10,7 +10,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use napi::{Either, Result as NapiResult};
+use crate::{AudioApp, AudioTarget};
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, S_FALSE, S_OK, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
@@ -42,8 +42,6 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Error, GUID, HRESULT, IUnknown, Interface, PCSTR, Ref, implement};
-
-use crate::AudioApp;
 
 const KSDATAFORMAT_SUBTYPE_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 const PROCESS_LOOPBACK_MIN_BUILD: u32 = 20348;
@@ -288,15 +286,15 @@ pub struct WasapiManager {
 
 static MANAGER: WasapiManager = WasapiManager::new();
 
-fn validate_target_pid(pid: i32) -> NapiResult<u32> {
+fn validate_target_pid(pid: i32) -> Result<u32, String> {
     if pid == -1 || pid == 0 {
         Ok(SYSTEM_AUDIO_PID_DEFAULT)
     } else if pid > 0 {
         Ok(u32::try_from(pid).unwrap_or(0))
     } else {
-        Err(napi::Error::from_reason(format!(
+        Err(format!(
             "Invalid target process ID: {pid}. Must be -1 (system audio), 0, or a positive PID"
-        )))
+        ))
     }
 }
 
@@ -372,24 +370,23 @@ impl WasapiManager {
         }
     }
 
-    pub fn start_audio_capture(&self, target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-        let target_pid = match target_app_id {
-            Either::A(label) => {
-                let p = label.parse::<i32>().map_err(|_| {
-                    napi::Error::from_reason(format!("Invalid PID string: '{label}'"))
-                })?;
+    pub fn start_audio_capture(&self, target: &AudioTarget) -> Result<bool, String> {
+        let target_pid = match target {
+            AudioTarget::Label(label) => {
+                let p = label
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid PID string: '{label}'"))?;
                 validate_target_pid(p)?
             }
-            Either::B(pid) => validate_target_pid(*pid)?,
+            AudioTarget::Id(pid) => validate_target_pid(*pid)?,
         };
 
         let stop_event = OwnedHandle::new(
             // SAFETY: standard event-object creation; the returned handle is
             // wrapped in OwnedHandle, which closes it exactly once.
             unsafe { CreateEventA(None, false, false, PCSTR::null()) }
-                .map_err(|e| napi_err("CreateEventA", e))?,
-        )
-        .map_err(napi::Error::from_reason)?;
+                .map_err(|e| format!("CreateEventA: {e}"))?,
+        )?;
 
         let (startup_tx, startup_rx) = channel::<Result<CaptureMode, String>>();
         let (run_tx, run_rx) = channel::<()>();
@@ -400,7 +397,7 @@ impl WasapiManager {
             .spawn(move || {
                 let _ = run_capture(target_pid, stop_send_handle, startup_tx, run_rx);
             })
-            .map_err(|e| napi_err("Failed to spawn WASAPI thread", e))?;
+            .map_err(|e| format!("Failed to spawn WASAPI thread: {e}"))?;
 
         let stop_raw = stop_event.into_raw();
 
@@ -460,7 +457,7 @@ fn cleanup_failed_startup(
     stop_raw: HANDLE,
     join: std::thread::JoinHandle<()>,
     msg: String,
-) -> napi::Error {
+) -> String {
     drop(run_tx);
     // SAFETY: `stop_raw` is a valid CreateEventA handle; signalling it lets a
     // capture thread blocked on the event exit before we join it.
@@ -469,11 +466,7 @@ fn cleanup_failed_startup(
     // SAFETY: the capture thread has joined, so `stop_raw` is no longer
     // referenced and can be closed exactly once here.
     let _ = unsafe { CloseHandle(stop_raw) };
-    napi::Error::from_reason(msg)
-}
-
-fn napi_err(context: &str, e: impl std::fmt::Display) -> napi::Error {
-    napi::Error::from_reason(format!("{context}: {e}"))
+    msg
 }
 
 #[allow(
@@ -755,13 +748,13 @@ fn snapshot_process_names() -> HashMap<u32, String> {
     map
 }
 
-pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
+pub fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
     // SAFETY: standard per-thread COM initialization; balanced below on success.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let com_ok = hr == S_OK || hr == S_FALSE;
     let com_changed_mode = hr == HRESULT(RPC_E_CHANGED_MODE);
     if !com_ok && !com_changed_mode {
-        return Err(napi_err("CoInitializeEx failed", format!("{hr:?}")));
+        return Err(format!("CoInitializeEx failed: {hr:?}"));
     }
     let result = enumerate_audio_apps();
     if com_ok {
@@ -773,28 +766,28 @@ pub fn list_audio_applications() -> NapiResult<Vec<AudioApp>> {
 
 #[allow(
     clippy::cast_possible_wrap,
-    reason = "Windows PIDs are far below i32::MAX; AudioApp fields are i32 for the napi boundary"
+    reason = "Windows PIDs are far below i32::MAX; AudioApp fields are i32 for the historical JS boundary"
 )]
-fn enumerate_audio_apps() -> NapiResult<Vec<AudioApp>> {
+fn enumerate_audio_apps() -> Result<Vec<AudioApp>, String> {
     let names = snapshot_process_names();
     // SAFETY: COM was initialized on this thread by the caller. Every interface
     // obtained here is valid, used only on this thread, and released on drop.
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                .map_err(|e| napi_err("CoCreateInstance(MMDeviceEnumerator)", e))?;
+                .map_err(|e| format!("CoCreateInstance(MMDeviceEnumerator): {e}"))?;
         let device = enumerator
             .GetDefaultAudioEndpoint(eRender, eConsole)
-            .map_err(|e| napi_err("GetDefaultAudioEndpoint", e))?;
+            .map_err(|e| format!("GetDefaultAudioEndpoint: {e}"))?;
         let manager: IAudioSessionManager2 = device
             .Activate(CLSCTX_ALL, None)
-            .map_err(|e| napi_err("Activate(IAudioSessionManager2)", e))?;
+            .map_err(|e| format!("Activate(IAudioSessionManager2): {e}"))?;
         let sessions = manager
             .GetSessionEnumerator()
-            .map_err(|e| napi_err("GetSessionEnumerator", e))?;
+            .map_err(|e| format!("GetSessionEnumerator: {e}"))?;
         let count = sessions
             .GetCount()
-            .map_err(|e| napi_err("GetSessionEnumerator::GetCount", e))?;
+            .map_err(|e| format!("GetSessionEnumerator::GetCount: {e}"))?;
 
         let mut apps = Vec::new();
         let mut seen: HashSet<u32> = HashSet::new();
@@ -1437,8 +1430,8 @@ fn run_capture(
     run_result
 }
 
-pub fn start_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    MANAGER.start_audio_capture(target_app_id)
+pub fn start_audio_capture(target: &AudioTarget) -> Result<bool, String> {
+    MANAGER.start_audio_capture(target)
 }
 
 pub fn stop_audio_capture() -> bool {
@@ -1449,19 +1442,15 @@ pub fn is_audio_capture_active() -> bool {
     MANAGER.is_audio_capture_active()
 }
 
-pub fn switch_audio_capture(target_app_id: &Either<String, i32>) -> NapiResult<bool> {
-    start_audio_capture(target_app_id)
-}
-
-pub fn resolve_audio_app_for_x11_window(_: u32) -> Option<AudioApp> {
-    None
+pub fn switch_audio_capture(target: &AudioTarget) -> Result<bool, String> {
+    start_audio_capture(target)
 }
 
 #[allow(
     clippy::unnecessary_wraps,
     reason = "keeps the platform-module signature uniform with the fallible linux implementation"
 )]
-pub fn dump_audio_sources() -> NapiResult<Vec<std::collections::HashMap<String, String>>> {
+pub fn dump_audio_sources() -> Result<Vec<std::collections::HashMap<String, String>>, String> {
     Ok(Vec::new())
 }
 
@@ -1469,17 +1458,15 @@ pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     None
 }
 
-pub fn get_capture_context() -> NapiResult<crate::CaptureContext> {
-    Err(napi::Error::from_reason(
-        "Capture context introspection is only available on Linux",
-    ))
+pub fn get_capture_context() -> Result<crate::CaptureContext, String> {
+    Err("Capture context introspection is only available on Linux".into())
 }
 
 #[allow(
     clippy::unnecessary_wraps,
     reason = "keeps the platform-module signature uniform with the fallible linux implementation"
 )]
-pub fn start_audio_metering() -> NapiResult<bool> {
+pub fn start_audio_metering() -> Result<bool, String> {
     Ok(false)
 }
 
@@ -1487,28 +1474,9 @@ pub fn stop_audio_metering() -> bool {
     true
 }
 
-pub fn set_audio_wave_callback(_callback: std::sync::Arc<crate::WaveThreadsafeFunction>) {}
+pub fn set_wave_callback(_callback: Box<dyn Fn(Vec<crate::AudioAppWave>) + Send + Sync>) {}
 
-pub fn clear_audio_wave_callback() {}
-
-pub fn set_dmabuf_callback(_callback: std::sync::Arc<crate::DmaBufFrameCallback>) {}
-
-pub fn clear_dmabuf_callback() {}
-
-pub fn start_video_capture(
-    _node_id: u32,
-    _width: u32,
-    _height: u32,
-    _fps: u32,
-) -> NapiResult<bool> {
-    Err(napi::Error::from_reason(
-        "PipeWire video capture is only available on Linux",
-    ))
-}
-
-pub fn stop_video_capture() -> bool {
-    true
-}
+pub fn clear_wave_callback() {}
 
 #[cfg(test)]
 mod tests {

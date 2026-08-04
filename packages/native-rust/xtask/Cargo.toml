@@ -3,3 +3,7 @@ name = "xtask"
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+# Standalone workspace root: the repo root workspace excludes this dev tool,
+# and the empty table pins it as its own root so cargo never tries to join.
+[workspace]

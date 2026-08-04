@@ -2,8 +2,6 @@ use super::{CAPTURE_NODE_NAME, pw_init};
 use crate::AudioAppWave;
 use arc_swap::ArcSwapOption;
 use crossbeam_queue::ArrayQueue;
-use napi::Result as NapiResult;
-use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use pipewire::properties::properties;
 use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pipewire::spa::param::format::MediaType;
@@ -79,28 +77,28 @@ struct MeterSession {
 
 static METER_STATE: Mutex<Option<MeterSession>> = Mutex::new(None);
 
-/// Registered by the Electron main process; the meter worker pushes the
-/// waveform snapshot through this instead of the main process polling
-/// `get_audio_wave`, which held the meter locks on the JS thread every 33 ms.
-static AUDIO_WAVE_CALLBACK: ArcSwapOption<crate::WaveThreadsafeFunction> =
+/// Registered by the desktop backend; the meter worker pushes the waveform
+/// snapshot through this instead of the caller polling, which held the meter
+/// locks on the main thread every 33 ms.
+static AUDIO_WAVE_CALLBACK: ArcSwapOption<Box<dyn Fn(Vec<AudioAppWave>) + Send + Sync>> =
     ArcSwapOption::const_empty();
 
-pub(crate) fn set_audio_wave_callback(callback: Arc<crate::WaveThreadsafeFunction>) {
-    AUDIO_WAVE_CALLBACK.store(Some(callback));
+pub(crate) fn set_wave_callback(callback: Box<dyn Fn(Vec<AudioAppWave>) + Send + Sync>) {
+    AUDIO_WAVE_CALLBACK.store(Some(Arc::new(callback)));
 }
 
-pub(crate) fn clear_audio_wave_callback() {
+pub(crate) fn clear_wave_callback() {
     AUDIO_WAVE_CALLBACK.store(None);
 }
 
 /// Non-destructive snapshot of every meter's published wave; dropped (not
-/// queued) if the main process is busy, since the next 33 ms tick supersedes it.
+/// queued) if the caller is busy, since the next 33 ms tick supersedes it.
 fn invoke_wave_callback(waves: Vec<AudioAppWave>) {
     let guard = AUDIO_WAVE_CALLBACK.load();
     let Some(callback) = guard.as_ref() else {
         return;
     };
-    let _ = callback.call(Ok(waves), ThreadsafeFunctionCallMode::NonBlocking);
+    callback(waves);
 }
 
 fn wave_snapshot(meters: &HashMap<u32, MeterStream>) -> Vec<AudioAppWave> {
@@ -422,10 +420,10 @@ fn run_meter_session(stop: Arc<AtomicBool>, ready_tx: mpsc::Sender<Result<(), St
     meters.borrow_mut().clear();
 }
 
-pub(crate) fn start_audio_metering() -> NapiResult<bool> {
+pub(crate) fn start_audio_metering() -> Result<bool, String> {
     let mut guard = METER_STATE
         .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        .map_err(|e| format!("Audio metering state lock poisoned: {e}"))?;
     if guard.is_some() {
         return Ok(true);
     }
@@ -438,9 +436,7 @@ pub(crate) fn start_audio_metering() -> NapiResult<bool> {
         thread::Builder::new()
             .name("pw-audio-metering".into())
             .spawn(move || run_meter_session(stop, ready_tx))
-            .map_err(|e| {
-                napi::Error::from_reason(format!("Failed to spawn metering worker: {e}"))
-            })?
+            .map_err(|e| format!("Failed to spawn metering worker: {e}"))?
     };
 
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
@@ -448,14 +444,12 @@ pub(crate) fn start_audio_metering() -> NapiResult<bool> {
         Ok(Err(reason)) => {
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
-            return Err(napi::Error::from_reason(reason));
+            return Err(reason);
         }
         Err(_) => {
             stop.store(true, Ordering::SeqCst);
             let _ = join.join();
-            return Err(napi::Error::from_reason(
-                "Timed out starting audio metering",
-            ));
+            return Err("Timed out starting audio metering".into());
         }
     }
 

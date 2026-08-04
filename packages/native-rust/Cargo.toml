@@ -13,20 +13,14 @@ expect_used = "deny"
 undocumented_unsafe_blocks = "deny"
 allow_attributes_without_reason = "deny"
 
-[lib]
-crate-type = ["cdylib"]
-
 [dependencies]
-napi = { version = "3", default-features = false, features = ["napi4"] }
-napi-derive = "3"
 arc-swap = "1.9.2"
 crossbeam-queue = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.10.0"
-x11 = "2.21"
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
-futures-util = { version = "0.3", default-features = false, features = ["async-await"] }
+futures-util = { version = "0.3", default-features = false, features = ["async-await", "async-await-macro", "alloc"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -46,19 +40,3 @@ windows = { version = "0.62.2", features = [
 ] }
 # Direct dependency required: the `#[implement]` proc-macro emits `windows_core::` paths.
 windows-core = "0.62.2"
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-debug = false
-strip = true
-
-[profile.release.build-override]
-opt-level = 0
-
-[profile.release.package."*"]
-opt-level = "z"
-
-[build-dependencies]
-napi-build = "2"
