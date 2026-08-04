@@ -5,6 +5,11 @@ mod graph;
 mod kwin;
 mod metering;
 mod mpris;
+#[allow(
+    dead_code,
+    reason = "Phase A lands standalone; consumed by the Phase D capture wiring"
+)]
+mod portal;
 mod procinfo;
 mod screencast;
 mod video;
