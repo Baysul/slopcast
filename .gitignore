@@ -61,3 +61,6 @@ slopcast.config.json
 
 # npm lockfile — this workspace uses pnpm (pnpm-lock.yaml)
 package-lock.json
+
+# Tauri generated schemas (from capabilities/ at build time)
+apps/desktop/src-tauri/gen/
