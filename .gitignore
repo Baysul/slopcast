@@ -46,7 +46,9 @@ opencode.json
 # Project documentation
 AGENTS.md
 DESIGN.md
+MIGRATION.md
 PRODUCT.md
+SCREEN-CAPTURE-INHOUSE.md
 
 # Test artifacts
 test-output/
