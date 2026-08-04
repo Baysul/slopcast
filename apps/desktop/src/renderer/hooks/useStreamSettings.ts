@@ -1,6 +1,7 @@
 import type { ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
 import { useEffect, useRef, useState } from 'react';
+import { desktopApi } from '../api/desktop';
 import { notify } from '../lib/toast';
 import type { CodecInfo } from '../utils/codecs';
 import { detectSupportedCodecs, probeCodecHardware } from '../utils/codecs';
@@ -74,9 +75,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   // Initial config and settings load
   useEffect(() => {
     (async () => {
-      if (!window.electronAPI) return;
-
-      const config = await window.electronAPI.getAppConfig();
+      const config = await desktopApi.getAppConfig();
       if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
       if (config.livekitUrl) setLivekitUrl(config.livekitUrl);
 
@@ -84,7 +83,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       setAvailableCodecs(codecs);
 
       // Persisted settings take precedence over config-file defaults.
-      const saved = await window.electronAPI.getStreamSettings();
+      const saved = await desktopApi.getStreamSettings();
       lastSavedSettingsRef.current = saved;
       setStreamFps(saved.fps);
       setBitrateLimit(saved.bitrateLimit);
@@ -113,8 +112,8 @@ export function useStreamSettings(): UseStreamSettingsReturn {
     if (last && streamSettingsEqual(last, current)) return;
 
     const timer = setTimeout(() => {
-      void window.electronAPI
-        ?.saveStreamSettings(current)
+      void desktopApi
+        .saveStreamSettings(current)
         .then((ok) => {
           if (!ok) {
             notify('error', 'Settings save failed', 'The settings file could not be written to disk.');

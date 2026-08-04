@@ -1,5 +1,6 @@
-import type { AudioApp } from '@slopcast/shared-types';
+import type { AudioApp, AudioAppWave } from '@slopcast/shared-types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { desktopApi } from '../api/desktop';
 import { notify } from '../lib/toast';
 import type { CaptureContext } from '../types';
 import { groupAudioApps } from '../utils/audio-grouping';
@@ -96,7 +97,7 @@ export interface UseAudioCaptureReturn {
   loadAudioApps: () => Promise<void>;
   startAudioCapture: (targetId: number) => Promise<boolean>;
   switchAudioCapture: (targetId: number) => Promise<boolean>;
-  attemptAutoResolve: (opts?: { sourceId?: string; nameHint?: string }) => Promise<AudioApp | null>;
+  attemptAutoResolve: (nameHint?: string) => Promise<AudioApp | null>;
   handleSelectApp: (appId: number | null, explicit?: boolean) => void;
 }
 
@@ -115,8 +116,7 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
   // Keep the list identity stable across polls so memoized consumers
   // (AudioAppPicker, audioAppGroups) don't re-render on unchanged data.
   const loadAudioApps = useCallback(async () => {
-    if (!window.electronAPI) return;
-    const apps = await window.electronAPI.getAudioApps();
+    const apps = await desktopApi.getAudioApps();
     setAudioApps((prev) => {
       const same =
         prev.length === apps.length && prev.every((app, i) => app.id === apps[i]?.id && app.name === apps[i]?.name);
@@ -141,34 +141,37 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
 
   // Audio waveform metering
   useEffect(() => {
-    const api = window.electronAPI;
-    if (!api?.startAudioMetering) return;
-
     let cancelled = false;
-    let cleanupListener: (() => void) | null = null;
+    let unlisten: (() => void) | null = null;
 
-    const handleWave = (waves: Array<{ id: number; columns: number[] }>) => {
+    const handleWave = (waves: AudioAppWave[]) => {
       if (cancelled) return;
       audioWaveStore.updateWave(waves);
     };
 
-    void api.startAudioMetering().then((started) => {
+    void desktopApi.startAudioMetering().then((started) => {
       if (!started || cancelled) return;
-      cleanupListener = api.onAudioWave?.(handleWave) ?? null;
+      void desktopApi.onAudioWave(handleWave).then((un) => {
+        if (cancelled) {
+          un();
+          return;
+        }
+        unlisten = un;
+      });
     });
 
     return () => {
       cancelled = true;
-      if (cleanupListener) cleanupListener();
-      void api.stopAudioMetering().catch((err) => console.warn('[useAudioCapture] stopAudioMetering failed:', err));
+      unlisten?.();
+      void desktopApi.stopAudioMetering();
     };
   }, []);
 
   // Selects the app whose PipeWire streams get linked into the capture node.
-  // The PCM then flows native-rust -> main -> native-livekit automatically;
+  // The PCM then flows native-rust -> backend -> native-livekit automatically;
   // the renderer never creates or publishes a JS audio track.
   const startAudioCapture = useCallback(async (targetId: number): Promise<boolean> => {
-    const started = await window.electronAPI?.startAudioCapture(targetId);
+    const started = await desktopApi.startAudioCapture(targetId);
     if (!started) {
       throw new Error('Native audio capture failed to start');
     }
@@ -177,9 +180,9 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
   }, []);
 
   const switchAudioCapture = useCallback(async (targetId: number): Promise<boolean> => {
-    let switched = await window.electronAPI?.switchAudioCapture(targetId);
+    let switched = await desktopApi.switchAudioCapture(targetId);
     if (!switched) {
-      switched = await window.electronAPI?.startAudioCapture(targetId);
+      switched = await desktopApi.startAudioCapture(targetId);
     }
     if (!switched) {
       throw new Error('Native audio target switch failed');
@@ -189,17 +192,15 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
   }, []);
 
   const attemptAutoResolve = useCallback(
-    async (opts?: { sourceId?: string; nameHint?: string }): Promise<AudioApp | null> => {
-      if (!window.electronAPI) return null;
+    async (nameHint?: string): Promise<AudioApp | null> => {
+      let app = await desktopApi.resolveAudioSource(nameHint);
 
-      let app = await window.electronAPI.resolveAudioSource(opts ?? {});
-
-      if (!app && opts?.nameHint && audioApps.length > 0) {
-        app = findBestAudioMatch(audioApps, opts.nameHint);
+      if (!app && nameHint && audioApps.length > 0) {
+        app = findBestAudioMatch(audioApps, nameHint);
       }
 
-      if (!app && window.electronAPI?.getCaptureContext) {
-        const ctx = await window.electronAPI.getCaptureContext();
+      if (!app) {
+        const ctx = await desktopApi.getCaptureContext();
         setCaptureContext(ctx);
         if (ctx?.sourceType === 'monitor') {
           app = { id: -1, name: 'System Audio', processId: 0 };

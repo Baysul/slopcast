@@ -1,0 +1,45 @@
+[package]
+name = "slopcast"
+version = "0.1.0"
+edition = "2024"
+description = "Slopcast desktop presenter (Tauri backend)"
+license = "MIT"
+
+[lints.rust]
+unused = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+undocumented_unsafe_blocks = "deny"
+allow_attributes_without_reason = "deny"
+
+[lib]
+name = "slopcast_lib"
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-log = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+# E2E-only (MIGRATION §12): embedded WebDriver server + browser.tauri.execute.
+tauri-plugin-wdio = { version = "1", optional = true }
+tauri-plugin-wdio-webdriver = { version = "1", optional = true }
+native-livekit = { path = "../../../packages/native-livekit" }
+native-rust = { path = "../../../packages/native-rust" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Embedded WebDriver plugins for the WebdriverIO e2e presenter phase (§12).
+# Production builds exclude them: the WebDriver server is an unauthenticated
+# localhost HTTP surface.
+e2e = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]

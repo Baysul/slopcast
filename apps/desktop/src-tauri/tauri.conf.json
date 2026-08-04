@@ -1,0 +1,34 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Slopcast",
+  "version": "0.1.0",
+  "identifier": "slopcast",
+  "build": {
+    "beforeDevCommand": "pnpm --filter @slopcast/shared-types build && pnpm --filter desktop dev:renderer",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm --filter @slopcast/shared-types build && pnpm --filter desktop build:renderer",
+    "frontendDist": "../dist/renderer"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Slopcast Desktop Presenter",
+        "width": 1100,
+        "height": 900,
+        "backgroundColor": "#090d16",
+        "center": true,
+        "maximized": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:5173 wss: https:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "deb", "nsis"],
+    "category": "Utility",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"]
+  }
+}

@@ -1,9 +1,14 @@
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+
 export async function copyText(text: string): Promise<boolean> {
   if (!text) return false;
   try {
-    if (window.electronAPI?.clipboardWriteText) {
-      return await window.electronAPI.clipboardWriteText(text);
-    }
+    await writeText(text);
+    return true;
+  } catch (err) {
+    console.error('clipboard writeText failed:', err);
+  }
+  try {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (err) {

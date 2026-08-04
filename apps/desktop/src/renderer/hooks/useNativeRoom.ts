@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { desktopApi } from '../api/desktop';
 import { notify, primeAudioContext } from '../lib/toast';
-import '../types/electron-api.d.ts';
 
 const POLL_MS = 1000;
 
@@ -20,8 +20,8 @@ export interface UseNativeRoomReturn {
 }
 
 // The renderer's only room path: room creation mints a presenter token from
-// the server, then the connection itself lives in native-livekit (main
-// process). Spectator count and connection state are polled over IPC since
+// the server, then the connection itself lives in native-livekit (Tauri
+// backend). Spectator count and connection state are polled over commands since
 // native-livekit does not push events to the renderer.
 export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNativeRoomOptions): UseNativeRoomReturn {
   const [roomCode, setRoomCode] = useState<string>('');
@@ -36,7 +36,7 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
   const sawConnectedRef = useRef(false);
 
   const disconnectRoom = useCallback(() => {
-    void window.electronAPI?.disconnectNativeRoom();
+    void desktopApi.disconnectNativeRoom();
     roomActiveRef.current = false;
     sawConnectedRef.current = false;
     setRoomCode('');
@@ -70,7 +70,7 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
       };
       const resolvedLivekitUrl = room.livekitUrl || livekitUrl;
 
-      const connected = await window.electronAPI?.connectNativeRoom(resolvedLivekitUrl, room.token);
+      const connected = await desktopApi.connectNativeRoom(resolvedLivekitUrl, room.token);
       if (!connected) {
         throw new Error('Native LiveKit connection failed');
       }
@@ -94,11 +94,11 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
     if (!roomCode) return;
 
     const poll = async (): Promise<void> => {
-      const count = await window.electronAPI?.getSpectatorCount();
+      const count = await desktopApi.getSpectatorCount();
       if (typeof count === 'number') {
         setSpectatorCount(count);
       }
-      const connected = await window.electronAPI?.isNativeRoomConnected();
+      const connected = await desktopApi.isNativeRoomConnected();
       if (connected === true) {
         sawConnectedRef.current = true;
       }

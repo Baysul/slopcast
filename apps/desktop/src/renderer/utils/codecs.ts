@@ -31,10 +31,15 @@ export const sortByEncodingEfficiency = (codecs: CodecInfo[]): CodecInfo[] => {
   return [...codecs].sort((a, b) => (priority.get(a.codec) ?? 99) - (priority.get(b.codec) ?? 99));
 };
 
-// Every codec Chromium's WebRTC stack can send on this device. Hardware
-// acceleration is probed separately (async) via WebCodecs.
+// Every codec the WebRTC stack can send on this device. Hardware acceleration
+// is probed separately (async) via WebCodecs. WebKitGTK may lack
+// `RTCRtpSender.getCapabilities` entirely (MIGRATION R2), so the sender API is
+// guarded and the fallback list degrades to software H.264.
 export function detectSupportedCodecs(): CodecInfo[] {
-  const caps = RTCRtpSender.getCapabilities('video');
+  const caps =
+    typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
+      ? RTCRtpSender.getCapabilities('video')
+      : null;
   if (!caps) {
     return [{ codec: 'h264', label: 'H.264', hardware: false, recommended: false }];
   }

@@ -1,7 +1,8 @@
 import { codecLabel } from '@slopcast/shared-types';
 import { useCallback, useRef, useState } from 'react';
+import { desktopApi } from '../api/desktop';
 import { idleTelemetry, type StreamTelemetry } from '../components/telemetry/StreamTelemetryBar';
-import type { NativeTelemetry } from '../types/electron-api';
+import type { NativeTelemetry } from '../types';
 
 const STATS_POLL_MS = 1000;
 const STATS_HISTORY_MAX = 48;
@@ -267,9 +268,9 @@ export function useStreamTelemetry(): UseStreamTelemetryReturn {
 
       const inputs = getInputs();
       const elapsedMs = broadcastStartRef.current ? performance.now() - broadcastStartRef.current : 0;
-      const spectatorCount = (await window.electronAPI?.getSpectatorCount()) ?? 0;
+      const spectatorCount = (await desktopApi.getSpectatorCount()) ?? 0;
 
-      const t = await window.electronAPI?.getNativeTelemetry();
+      const t = await desktopApi.getNativeTelemetry();
       if (!t || (t.videoBytesSent == null && t.audioBytesSent == null)) {
         setTelemetry((p) => telemetryWithoutSender(p, inputs, spectatorCount, elapsedMs));
         return;

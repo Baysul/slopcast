@@ -4,7 +4,9 @@ import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Toaster } from '@/components/ui/sonner';
+import { desktopApi } from './api/desktop';
 import { AudioAppPicker } from './components/audio/AudioAppPicker';
+import { WaylandNotice } from './components/gate/WaylandNotice';
 import { PresenterHeader } from './components/layout/PresenterHeader';
 import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
 import { ScreensharePreview } from './components/preview/ScreensharePreview';
@@ -16,50 +18,43 @@ import { useNativeRoom } from './hooks/useNativeRoom';
 import { useStreamSettings } from './hooks/useStreamSettings';
 import { useStreamTelemetry } from './hooks/useStreamTelemetry';
 import { notify, primeAudioContext } from './lib/toast';
-import type { CaptureContext, DesktopSource } from './types';
+import type { CaptureStage, DesktopCaptureConfig, PlatformInfo, PreviewFrame } from './types';
 import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
-import './types/electron-api.d.ts';
 import './index.css';
+
+// E2E-only (MIGRATION §12): the WDIO frontend plugin snapshots the raw Tauri
+// core (`window.__wdio_original_core__`) that `browser.tauri.execute` needs
+// and forwards console logs. Bundled in every build but only executed when
+// the e2e build sets VITE_E2E=1, so production runs never touch it.
+if (import.meta.env.VITE_E2E === '1') {
+  await import('@wdio/tauri-plugin');
+}
 
 // Debug aid: print every live PipeWire audio stream node's full property
 // dictionary (the same view pw-dump shows) when a capture starts, so a missed
 // auto-resolve can be matched against the real nodes. Fire-and-forget: never
 // blocks share start on PipeWire enumeration.
 async function logLiveAudioSources(): Promise<void> {
-  if (!window.electronAPI?.dumpAudioSources) return;
-  try {
-    const sources = await window.electronAPI.dumpAudioSources();
-    console.log(`[Presenter] live audio sources: ${sources.length}`);
-    for (const source of sources) {
-      console.log('[Presenter] audio source props:', JSON.stringify(source, null, 2));
-    }
-  } catch (err) {
-    console.warn('[Presenter] live audio source dump failed:', err);
+  const sources = await desktopApi.dumpAudioSources();
+  console.log(`[Presenter] live audio sources: ${sources.length}`);
+  for (const source of sources) {
+    console.log('[Presenter] audio source props:', JSON.stringify(source, null, 2));
   }
 }
 
 // Debug aid: print a fresh capture-context introspection carrying the
 // xdg-desktop-portal screencast metadata (portal.screencast.*) for the picked
 // window, KWin window PID/caption, and the best-matched audio app. Fire-and-forget.
-async function logSelectedApplication(label: string | null, sourceId: string | null): Promise<void> {
-  if (!window.electronAPI?.inspectCaptureContext) return;
-  try {
-    const context = await window.electronAPI.inspectCaptureContext();
-    console.log(
-      `[Presenter] selected application (trackLabel="${label}", sourceId=${sourceId ?? 'null'}):`,
-      JSON.stringify(context, null, 2),
-    );
-  } catch (err) {
-    console.warn('[Presenter] selected application dump failed:', err);
-  }
+async function logSelectedApplication(label: string | null): Promise<void> {
+  const context = await desktopApi.inspectCaptureContext();
+  console.log(`[Presenter] selected application (trackLabel="${label}"):`, JSON.stringify(context, null, 2));
 }
 
 export const PresenterApp: React.FC = () => {
-  const [isWayland, setIsWayland] = useState<boolean>(false);
-  const [desktopSources, setDesktopSources] = useState<DesktopSource[]>([]);
-  const [selectedSourceId, setSelectedSourceId] = useState<string>('');
-  const [isSharing, setIsSharing] = useState<boolean>(false);
+  const [platformInfo, setPlatformInfo] = useState<PlatformInfo | null>(null);
+  const [captureStage, setCaptureStage] = useState<CaptureStage>('idle');
+  const [previewFrame, setPreviewFrame] = useState<PreviewFrame | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [copied, setCopied] = useState<'link' | 'code' | null>(null);
 
@@ -113,7 +108,7 @@ export const PresenterApp: React.FC = () => {
     startAudioCapture,
     attemptAutoResolve,
     handleSelectApp,
-  } = useAudioCapture(isSharing);
+  } = useAudioCapture(captureStage === 'live');
 
   const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } = useStreamTelemetry();
 
@@ -133,34 +128,49 @@ export const PresenterApp: React.FC = () => {
     });
   }, [videoCodec, resolutionRef, streamFpsRef, bitrateLimitRef]);
 
-  const loadDesktopSources = useCallback(async () => {
-    if (window.electronAPI) {
-      const sources = await window.electronAPI.getDesktopSources();
-      setDesktopSources(sources);
-    }
-  }, []);
+  const buildCaptureConfig = useCallback((): DesktopCaptureConfig => {
+    const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
+    return {
+      fps: streamFpsRef.current,
+      width: dims.width,
+      height: dims.height,
+      videoCodec,
+      maxBitrate: bitrateLimitRef.current,
+    };
+  }, [resolutionRef, streamFpsRef, bitrateLimitRef, videoCodec]);
 
   useEffect(() => {
     (async () => {
-      if (window.electronAPI) {
-        const info = await window.electronAPI.getPlatformInfo();
-        setIsWayland(info.isWayland);
-        if (!info.isWayland) {
-          loadDesktopSources();
-        }
-      }
+      const info = await desktopApi.getPlatformInfo();
+      setPlatformInfo(info);
     })();
 
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void desktopApi
+      .onPreviewFrame((frame) => {
+        if (!disposed) setPreviewFrame(frame);
+      })
+      .then((un) => {
+        if (disposed) {
+          un();
+          return;
+        }
+        unlisten = un;
+      });
+
     return () => {
+      disposed = true;
+      unlisten?.();
       disconnectRoom();
     };
-  }, [loadDesktopSources, disconnectRoom]);
+  }, [disconnectRoom]);
 
   // Live encoder settings (fps, bitrate, codec, resolution): restart the
   // native video track with the new config. Debounced so rapid changes
   // coalesce into one track restart.
   useEffect(() => {
-    if (!isSharing) {
+    if (captureStage !== 'live') {
       lastVideoConfigKeyRef.current = null;
       return;
     }
@@ -178,8 +188,8 @@ export const PresenterApp: React.FC = () => {
     const prevCodec = activeVideoCodecRef.current;
     const timeout = setTimeout(() => {
       lastVideoConfigKeyRef.current = key;
-      void window.electronAPI
-        ?.updateNativeVideo({
+      void desktopApi
+        .updateNativeVideo({
           fps: streamFps,
           width: dims.width,
           height: dims.height,
@@ -203,7 +213,7 @@ export const PresenterApp: React.FC = () => {
         });
     }, 300);
     return () => clearTimeout(timeout);
-  }, [streamFps, bitrateLimit, videoCodec, resolution, isSharing, resetStatsPrev]);
+  }, [streamFps, bitrateLimit, videoCodec, resolution, captureStage, resetStatsPrev]);
 
   const handleCreateRoom = useCallback(async () => {
     setAudioAppExplicitlySet(false);
@@ -216,13 +226,12 @@ export const PresenterApp: React.FC = () => {
 
   const handleStopShare = useCallback(async () => {
     lastVideoConfigKeyRef.current = null;
-    if (window.electronAPI) {
-      await window.electronAPI.stopNativeCapture();
-      await window.electronAPI.stopAudioCapture();
-    }
+    await desktopApi.stopNativeCapture();
+    await desktopApi.stopAudioCapture();
     stopTelemetryPolling();
     audioAppIdRef.current = null;
-    setIsSharing(false);
+    setCaptureStage('idle');
+    setPreviewFrame(null);
     if (!audioAppExplicitlySet) {
       setSelectedAudioAppId(null);
     }
@@ -241,15 +250,10 @@ export const PresenterApp: React.FC = () => {
 
   const resolveSystemAudioFallback = useCallback(async (): Promise<boolean> => {
     setAutoDetectFailed(true);
-    let ctx: CaptureContext | null = null;
-    if (isWayland && window.electronAPI?.getCaptureContext) {
-      ctx = await window.electronAPI.getCaptureContext();
-      setCaptureContext(ctx);
-    }
+    const ctx = await desktopApi.getCaptureContext();
+    setCaptureContext(ctx);
 
-    const isMonitor = ctx?.sourceType === 'monitor' || (!isWayland && selectedSourceId?.startsWith('screen:'));
-
-    if (!isMonitor) {
+    if (ctx?.sourceType !== 'monitor') {
       notify('info', 'No audio detected', 'Sharing video only. Select an audio app and restart to include audio.');
       return false;
     }
@@ -261,24 +265,14 @@ export const PresenterApp: React.FC = () => {
     }
     console.log('[Presenter] No specific app resolved — using system audio (desktop audio fallback)');
     return true;
-  }, [
-    isWayland,
-    selectedSourceId,
-    audioAppExplicitlySet,
-    setAutoDetectFailed,
-    setCaptureContext,
-    setSelectedAudioAppId,
-    setAutoDetectedApp,
-  ]);
+  }, [audioAppExplicitlySet, setAutoDetectFailed, setCaptureContext, setSelectedAudioAppId, setAutoDetectedApp]);
 
   const resolveAudioTarget = useCallback(async (): Promise<number | null> => {
     let targetAudioId: number | null = selectedAudioAppId;
 
     if (targetAudioId === null && !audioAppExplicitlySet) {
       await loadAudioApps();
-
-      const opts = isWayland ? {} : { sourceId: selectedSourceId };
-      targetAudioId = (await attemptAutoResolve(opts))?.id ?? null;
+      targetAudioId = (await attemptAutoResolve())?.id ?? null;
     }
 
     if (targetAudioId !== null) {
@@ -292,8 +286,6 @@ export const PresenterApp: React.FC = () => {
     selectedAudioAppId,
     audioAppExplicitlySet,
     loadAudioApps,
-    isWayland,
-    selectedSourceId,
     attemptAutoResolve,
     resolveSystemAudioFallback,
     setAutoDetectFailed,
@@ -313,10 +305,8 @@ export const PresenterApp: React.FC = () => {
   );
 
   const cleanupFailedShare = useCallback(async (): Promise<void> => {
-    if (window.electronAPI) {
-      await window.electronAPI.stopNativeCapture();
-      await window.electronAPI.stopAudioCapture();
-    }
+    await desktopApi.stopNativeCapture();
+    await desktopApi.stopAudioCapture();
     if (!audioAppExplicitlySet) {
       setSelectedAudioAppId(null);
       setAutoDetectedApp(null);
@@ -333,59 +323,78 @@ export const PresenterApp: React.FC = () => {
     };
   }, [resolutionRef, streamFpsRef, audioAppIdRef]);
 
+  // Shared tail of both go-live paths: resolve and start audio, mark the
+  // applied encoder config, flip the stage to live and start telemetry.
+  const activateLive = useCallback(async (): Promise<void> => {
+    const targetAudioId = await resolveAudioTarget();
+    await captureAudioForTarget(targetAudioId);
+    activeVideoCodecRef.current = videoCodec;
+    lastVideoConfigKeyRef.current = videoConfigKey();
+    setCaptureStage('live');
+    setTelemetry({ ...idleTelemetry(), live: true });
+    startTelemetryPolling(getTelemetryInputs);
+    void logLiveAudioSources();
+    void logSelectedApplication(null);
+  }, [
+    resolveAudioTarget,
+    captureAudioForTarget,
+    videoCodec,
+    videoConfigKey,
+    setTelemetry,
+    startTelemetryPolling,
+    getTelemetryInputs,
+  ]);
+
+  // Combined start: publishes the track immediately. Used when the pre-roll
+  // backend isn't available, matching the pre-migration behavior.
+  const startCombinedShare = useCallback(async (): Promise<void> => {
+    const res = await desktopApi.startNativeCapture(buildCaptureConfig());
+    if (!res.ok) {
+      throw new Error(res.error ?? 'Native capture failed to start');
+    }
+    await activateLive();
+  }, [buildCaptureConfig, activateLive]);
+
   const handleStartShare = useCallback(async () => {
     primeAudioContext();
     try {
-      const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
-      const fps = streamFpsRef.current;
-      const res = await window.electronAPI?.startNativeCapture(0, {
-        fps,
-        width: dims.width,
-        height: dims.height,
-        videoCodec,
-        maxBitrate: bitrateLimitRef.current,
-      });
-      if (!res?.ok) {
-        throw new Error(res?.error ?? 'Native capture failed to start');
+      const previewStarted = await desktopApi.startCapturePreview();
+      if (previewStarted) {
+        setPreviewFrame(null);
+        setCaptureStage('previewing');
+        return;
       }
-      lastVideoConfigKeyRef.current = videoConfigKey();
-
-      const targetAudioId = await resolveAudioTarget();
-      await captureAudioForTarget(targetAudioId);
-
-      if (!res.videoEnabled) {
-        notify(
-          'info',
-          'Video requires Wayland',
-          'Screen video capture is only available on Wayland — sharing audio only.',
-        );
-      }
-
-      activeVideoCodecRef.current = videoCodec;
-      setIsSharing(true);
-      setTelemetry({ ...idleTelemetry(), live: true });
-      startTelemetryPolling(getTelemetryInputs);
-      void logLiveAudioSources();
-      void logSelectedApplication(null, null);
+      // Pre-roll unavailable (preview backend not merged yet, MIGRATION §9.2):
+      // degrade to the combined start.
+      await startCombinedShare();
     } catch (err: unknown) {
       console.error('Failed to capture screen:', err);
       const message = err instanceof Error ? err.message : 'Unknown capture error';
       notify('error', 'Screenshare failed to start', message);
+      setCaptureStage('idle');
       await cleanupFailedShare();
     }
-  }, [
-    resolveAudioTarget,
-    captureAudioForTarget,
-    bitrateLimitRef,
-    streamFpsRef,
-    resolutionRef,
-    videoCodec,
-    videoConfigKey,
-    getTelemetryInputs,
-    setTelemetry,
-    startTelemetryPolling,
-    cleanupFailedShare,
-  ]);
+  }, [startCombinedShare, cleanupFailedShare]);
+
+  const handleGoLive = useCallback(async () => {
+    primeAudioContext();
+    try {
+      const config = buildCaptureConfig();
+      const published = await desktopApi.goLive(config);
+      if (!published) {
+        // Backend without the preview backend: fall back to the combined start.
+        const res = await desktopApi.startNativeCapture(config);
+        if (!res.ok) {
+          throw new Error(res.error ?? 'Native capture failed to start');
+        }
+      }
+      await activateLive();
+    } catch (err: unknown) {
+      console.error('Failed to go live:', err);
+      const message = err instanceof Error ? err.message : 'Unknown capture error';
+      notify('error', 'Go live failed', message);
+    }
+  }, [buildCaptureConfig, activateLive]);
 
   const flashCopied = useCallback((kind: 'link' | 'code') => {
     setCopied(kind);
@@ -413,19 +422,15 @@ export const PresenterApp: React.FC = () => {
     }
   }, [roomCode, flashCopied]);
 
-  const handleSelectSource = useCallback(
-    (source: DesktopSource) => {
-      setSelectedSourceId(source.id);
-      void attemptAutoResolve({ sourceId: source.id, nameHint: source.name });
-    },
-    [attemptAutoResolve],
-  );
+  if (!platformInfo) return null;
+  if (!platformInfo.isWayland) return <WaylandNotice />;
 
-  const canStartShare = !!roomCode && !isSharing && (isWayland || !!selectedSourceId);
+  const canStartShare = !!roomCode && captureStage === 'idle';
+  const canGoLive = captureStage === 'previewing' && previewFrame !== null;
   const startDisabledReason = (): string | null => {
-    if (isSharing || canStartShare) return null;
+    if (captureStage !== 'idle' || canStartShare) return null;
     if (!roomCode) return 'Create a live room to start sharing.';
-    return 'Select a window above to start sharing.';
+    return null;
   };
   const disabledReason = startDisabledReason();
 
@@ -448,10 +453,10 @@ export const PresenterApp: React.FC = () => {
 
       <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
         <ScreensharePreview
-          isSharing={isSharing}
+          captureStage={captureStage}
           roomCode={roomCode}
-          canStartShare={canStartShare}
           copied={copied}
+          previewFrame={previewFrame}
           telemetry={telemetry}
           onCopyLink={handleCopyLink}
         />
@@ -467,19 +472,17 @@ export const PresenterApp: React.FC = () => {
           />
 
           <SourcePicker
-            isWayland={isWayland}
-            desktopSources={desktopSources}
-            selectedSourceId={selectedSourceId}
-            onSelectSource={handleSelectSource}
             captureContext={captureContext}
             autoDetectFailed={autoDetectFailed}
-            isSharing={isSharing}
+            captureStage={captureStage}
             showStopConfirm={showStopConfirm}
             setShowStopConfirm={setShowStopConfirm}
             spectatorCount={spectatorCount}
             canStartShare={canStartShare}
+            canGoLive={canGoLive}
             disabledReason={disabledReason}
             onStartShare={handleStartShare}
+            onGoLive={handleGoLive}
             onStopShare={handleStopShare}
           />
         </div>

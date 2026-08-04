@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { desktopApi } from '../api/desktop';
 
 export function useOnboarding() {
   const [completed, setCompleted] = useState(false);
@@ -6,7 +7,7 @@ export function useOnboarding() {
 
   useEffect(() => {
     let cancelled = false;
-    window.electronAPI?.getOnboardingCompleted().then((v) => {
+    desktopApi.getOnboardingCompleted().then((v) => {
       if (!cancelled) {
         setCompleted(v);
         setInitialised(true);
@@ -18,7 +19,7 @@ export function useOnboarding() {
   }, []);
 
   const dismiss = useCallback(async () => {
-    const ok = await window.electronAPI?.setOnboardingCompleted();
+    const ok = await desktopApi.setOnboardingCompleted();
     if (ok) setCompleted(true);
   }, []);
 
