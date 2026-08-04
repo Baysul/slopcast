@@ -13,29 +13,12 @@ expect_used = "deny"
 undocumented_unsafe_blocks = "deny"
 allow_attributes_without_reason = "deny"
 
-[lib]
-crate-type = ["cdylib"]
-
 [dependencies]
 arc-swap = "1.9.2"
+base64 = "0.22"
 bytemuck = "1.25.2"
-livekit = { version = "0.8", features = ["rustls-tls-native-roots"] }
-napi = { version = "3", default-features = false, features = ["napi4"] }
-napi-derive = "3"
+glib = "0.21"
+jpeg-encoder = "0.7"
+livekit = { version = "0.8", features = ["glib-main-loop", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-debug = false
-strip = true
-
-[profile.release.build-override]
-opt-level = 0
-
-[profile.release.package."*"]
-opt-level = "z"
-
-[build-dependencies]
-napi-build = "2"

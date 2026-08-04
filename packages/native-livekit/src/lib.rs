@@ -1,24 +1,8 @@
-#![allow(
-    clippy::needless_pass_by_value,
-    reason = "napi-rs #[napi] function signatures must take ownership of String params for JS type conversion"
-)]
-#![allow(
-    clippy::used_underscore_binding,
-    reason = "clippy warns on room_events even though it must be bound for the receiver"
-)]
-#![allow(
-    clippy::missing_errors_doc,
-    reason = "NAPI exported functions return NapiResult without explicit rustdoc error sections"
-)]
-
-use napi::Result as NapiResult;
-use napi_derive::napi;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
-mod test_stubs;
+mod desktop_capture;
 
 use arc_swap::ArcSwapOption;
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
@@ -36,8 +20,8 @@ use std::time::Duration;
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
 
-#[napi(object)]
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CaptureConfig {
     pub width: u32,
     pub height: u32,
@@ -46,8 +30,8 @@ pub struct CaptureConfig {
     pub max_bitrate: Option<f64>,
 }
 
-#[napi(object)]
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativeTelemetry {
     pub video_codec: Option<String>,
     pub video_bytes_sent: Option<f64>,
@@ -64,6 +48,25 @@ pub struct NativeTelemetry {
     pub timestamp_ms: Option<f64>,
 }
 
+/// Per-stage counters for the desktop capture pipeline, reset on every
+/// `startDesktopCapture`. `framesDequeued` counts frames received from the
+/// capturer; `framesPushed` counts those converted to I420 and delivered to
+/// the video track; `framesDropped` counts frames skipped while no track was
+/// active; `previewFramesSent` counts base64 JPEG preview frames emitted via
+/// the preview callback (640×360 @ ~15 fps, MIGRATION §9.1); `captureErrors`
+/// counts capturer-reported failures.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCaptureStats {
+    pub frames_dequeued: i64,
+    pub frames_pushed: i64,
+    pub frames_dropped: i64,
+    pub capture_errors: i64,
+    pub preview_frames_sent: i64,
+    pub last_width: i64,
+    pub last_height: i64,
+}
+
 enum WorkerCmd {
     StartVideo {
         config: CaptureConfig,
@@ -78,7 +81,7 @@ enum WorkerCmd {
 struct NativeLiveKit {
     pcm_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
-    _stop: tokio::sync::oneshot::Sender<()>,
+    stop: tokio::sync::oneshot::Sender<()>,
     _join: std::thread::JoinHandle<()>,
 }
 
@@ -92,30 +95,59 @@ static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
 static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
 static SPECTATOR_COUNT: AtomicU32 = AtomicU32::new(0);
 static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
-static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
+/// The published video track's source; the desktop capturer feeds it frames.
+/// `None` while no track is active — capture frames are dropped then.
+pub(crate) static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
 
-fn with_guard<F, R>(f: F) -> NapiResult<R>
+// The bundled libwebrtc statically links hidden-weak `pw_*` dlopen shims
+// (`modules::portal::*`, from `pipewire_stubs.cc`) that capture pipewire-rs's
+// direct `pw_init` reference in the same binary at link time. The shims
+// tail-jump through static pointers that stay NULL until `InitializePipewire`
+// dlopens `libpipewire` and arms them — any earlier `pw_init` call SIGSEGVs.
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    #[link_name = "_ZN14modules_portal18InitializePipewireEPv"]
+    fn webrtc_initialize_pipewire(module: *mut std::ffi::c_void);
+}
+
+/// Arms libwebrtc's bundled `PipeWire` dlopen shims so `pipewire-rs` calls
+/// reach the real libpipewire. Must run before any native-rust `PipeWire`
+/// usage (see the Tauri setup wiring).
+#[cfg(target_os = "linux")]
+pub fn arm_pipewire_shims() {
+    // SAFETY: `InitializePipewire` only dlopens libpipewire and stores
+    // dlsym results into static pointers; the module argument is forwarded
+    // to the stub machinery and never dereferenced.
+    unsafe { webrtc_initialize_pipewire(std::ptr::null_mut()) };
+}
+
+/// No-op on platforms without the libwebrtc PipeWire shims.
+#[cfg(not(target_os = "linux"))]
+pub fn arm_pipewire_shims() {}
+
+fn with_guard<F, R>(f: F) -> Result<R, String>
 where
-    F: FnOnce(&NativeLiveKit) -> NapiResult<R>,
+    F: FnOnce(&NativeLiveKit) -> Result<R, String>,
 {
-    let guard = LIVEKIT
-        .lock()
-        .map_err(|e| napi::Error::from_reason(format!("Lock poisoned: {e}")))?;
+    let guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let Some(state) = guard.as_ref() else {
-        return Err(napi::Error::from_reason("Room not connected"));
+        return Err("Room not connected".into());
     };
     f(state)
 }
 
-#[napi]
-pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
-    let mut guard = LIVEKIT
-        .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+/// Connects to a `LiveKit` room and publishes a screenshare audio track. The
+/// worker thread runs its own tokio runtime; video tracks are published
+/// through `start_video_track` once the room is live.
+///
+/// # Errors
+///
+/// Returns an error if a room is already connected or the worker thread cannot
+/// be spawned.
+pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
+    let mut guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     if guard.is_some() {
-        return Err(napi::Error::from_reason(
-            "Native LiveKit room is already connected",
-        ));
+        return Err("Native LiveKit room is already connected".into());
     }
 
     ROOM_CONNECTED.store(false, Ordering::Relaxed);
@@ -144,28 +176,32 @@ pub fn connect_livekit_room(url: String, token: String) -> NapiResult<()> {
                 }
             });
         })
-        .map_err(|e| napi::Error::from_reason(format!("Failed to spawn: {e}")))?;
+        .map_err(|e| format!("Failed to spawn: {e}"))?;
 
     *guard = Some(NativeLiveKit {
         pcm_tx,
         cmd_tx,
-        _stop: stop_tx,
+        stop: stop_tx,
         _join: handle,
     });
     Ok(())
 }
 
-#[napi]
-pub fn disconnect_livekit_room() -> NapiResult<()> {
-    let mut guard = LIVEKIT
-        .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+/// Disconnects from the live room, stopping the video track and desktop
+/// capture, and tearing down the worker thread.
+///
+/// # Errors
+///
+/// Returns an error if the room state lock is poisoned.
+pub fn disconnect_livekit_room() -> Result<(), String> {
+    let mut guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     if let Some(state) = guard.take() {
         let _ = state.cmd_tx.send(WorkerCmd::StopVideo);
         let _ = state.cmd_tx.send(WorkerCmd::Shutdown);
-        let _ = state._stop.send(());
+        let _ = state.stop.send(());
     }
     *guard = None;
+    desktop_capture::stop();
     ROOM_CONNECTED.store(false, Ordering::SeqCst);
     SPECTATOR_COUNT.store(0, Ordering::Relaxed);
     VIDEO_ACTIVE.store(false, Ordering::SeqCst);
@@ -173,39 +209,8 @@ pub fn disconnect_livekit_room() -> NapiResult<()> {
     Ok(())
 }
 
-#[napi]
 pub fn is_livekit_room_connected() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
-}
-
-/// Decodes raw i16 LE PCM bytes into samples, independent of the N-API
-/// `Buffer` type so the conversion is unit-testable. On little-endian hosts
-/// the fast path casts the slice directly; odd byte counts (and big-endian
-/// hosts) fall back to per-pair decoding, dropping a trailing half sample.
-fn decode_pcm_bytes(bytes: &[u8]) -> Vec<i16> {
-    if cfg!(target_endian = "little")
-        && let Ok(slice) = bytemuck::try_cast_slice::<u8, i16>(bytes)
-    {
-        return slice.to_vec();
-    }
-    bytes
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
-        .collect()
-}
-
-/// Recombines the high and low 32-bit timestamp integers (as passed through
-/// N-API) into a 64-bit microsecond integer. Bit-faithful: negative halves
-/// are re-interpreted as their unsigned bit patterns.
-#[cfg(any(target_os = "linux", test))]
-#[allow(
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_lossless,
-    reason = "Recombining high and low 32-bit timestamp integers into a 64-bit microsecond integer"
-)]
-fn recombine_dmabuf_timestamp(timestamp_lo: i32, timestamp_hi: i32) -> i64 {
-    ((u64::from(timestamp_lo as u32)) | (u64::from(timestamp_hi as u32) << 32)) as i64
 }
 
 /// Resolves a codec string to a `VideoCodec`, defaulting to VP9 for anything
@@ -228,38 +233,48 @@ fn drain_pcm_chunks(buffer: &mut VecDeque<i16>, samples_per_chunk: usize, out: &
     }
 }
 
-#[napi]
-pub fn feed_pcm(pcm: napi::bindgen_prelude::Buffer) -> NapiResult<()> {
+/// Feeds one PCM chunk (48 kHz stereo `i16` samples) into the room's audio
+/// track. When the channel is full, WebRTC encoding is stalled and the newest
+/// chunk is dropped rather than queued.
+///
+/// # Errors
+///
+/// Returns an error if no room is connected or the worker's PCM channel is
+/// closed.
+pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
     with_guard(|state| {
-        // PCM arrives packed as i16 LE bytes from the capture native module.
-        let samples = decode_pcm_bytes(pcm.as_ref());
         // Channel full: WebRTC encoding is stalled, drop the newest chunk.
-        match state.pcm_tx.try_send(samples) {
+        match state.pcm_tx.try_send(pcm) {
             Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err(napi::Error::from_reason("PCM channel closed"))
+                Err("PCM channel closed".into())
             }
         }
     })
 }
 
-#[napi]
-pub fn start_video_track(config: CaptureConfig) -> NapiResult<()> {
+/// Publishes (or re-publishes) the screenshare video track with the given
+/// encoder settings, restarting the track without restarting the capture.
+///
+/// # Errors
+///
+/// Returns an error if no room is connected or the worker channel is closed.
+pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
     with_guard(|state| {
         state
             .cmd_tx
-            .send(WorkerCmd::StartVideo {
-                config: config.clone(),
-            })
-            .map_err(|_| napi::Error::from_reason("Worker channel closed"))
+            .send(WorkerCmd::StartVideo { config })
+            .map_err(|_| "Worker channel closed".into())
     })
 }
 
-#[napi]
-pub fn stop_video_track() -> NapiResult<()> {
-    let guard = LIVEKIT
-        .lock()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+/// Unpublishes the screenshare video track.
+///
+/// # Errors
+///
+/// Returns an error if the room state lock is poisoned.
+pub fn stop_video_track() -> Result<(), String> {
+    let guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let Some(state) = guard.as_ref() else {
         return Ok(());
     };
@@ -267,52 +282,55 @@ pub fn stop_video_track() -> NapiResult<()> {
     Ok(())
 }
 
-#[napi]
 pub fn is_video_track_active() -> bool {
     VIDEO_ACTIVE.load(Ordering::Relaxed)
 }
 
-#[napi]
-#[allow(
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_lossless,
-    reason = "Recombining high and low 32-bit timestamp integers into a 64-bit microsecond integer"
-)]
-pub fn capture_dmabuf_frame(
-    dmabuf_fd: i32,
-    width: u32,
-    height: u32,
-    pixel_format: i32,
-    timestamp_lo: i32,
-    timestamp_hi: i32,
-) -> NapiResult<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let Some(source) = VIDEO_SOURCE.load_full() else {
-            return Err(napi::Error::from_reason("Video track not active"));
-        };
-        let timestamp_us = recombine_dmabuf_timestamp(timestamp_lo, timestamp_hi);
-        source.capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us);
-        Ok(())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (
-            dmabuf_fd,
-            width,
-            height,
-            pixel_format,
-            timestamp_lo,
-            timestamp_hi,
-        );
-        Err(napi::Error::from_reason(
-            "DMA-BUF frame capture is only supported on Linux",
-        ))
-    }
+/// Starts the desktop capturer on its own thread. Returns once the capturer is
+/// running; on Wayland the native portal picker then appears and frames flow
+/// after the user selects a source.
+///
+/// # Errors
+///
+/// Returns an error if a capture session is already active, the thread cannot
+/// be spawned, or the capturer fails to initialize within five seconds.
+pub fn start_desktop_capture() -> Result<bool, String> {
+    desktop_capture::start()
 }
 
-#[napi]
+/// Stops the active desktop capture session (closing its portal stream).
+#[must_use]
+pub fn stop_desktop_capture() -> bool {
+    desktop_capture::stop()
+}
+
+/// Returns `true` while the capturer is running (the portal picker may still
+/// be awaiting a selection).
+#[must_use]
+pub fn is_desktop_capture_active() -> bool {
+    desktop_capture::is_active()
+}
+
+/// Returns the current desktop capture stage counters.
+#[must_use]
+pub fn get_desktop_capture_stats() -> DesktopCaptureStats {
+    desktop_capture::stats()
+}
+
+/// Registers the preview-frame callback: the capture thread invokes it with
+/// base64 JPEG frames `(width, height, data, pts_us)` at ~15 fps while a
+/// capture session is active (MIGRATION §9.1). The engine stays
+/// Tauri-unaware — the Tauri backend wires this callback to its
+/// `preview-frame` event. Replaces any previously registered callback.
+pub fn set_preview_callback(callback: Box<dyn Fn(u32, u32, String, i64) + Send + Sync>) {
+    desktop_capture::set_preview_callback(callback);
+}
+
+/// Clears the registered preview-frame callback.
+pub fn clear_preview_callback() {
+    desktop_capture::clear_preview_callback();
+}
+
 pub fn get_spectator_count() -> u32 {
     SPECTATOR_COUNT.load(Ordering::Relaxed)
 }
@@ -321,7 +339,6 @@ pub fn get_spectator_count() -> u32 {
 /// worker thread (stats queries must run on the tokio runtime) and returns the
 /// result over a bounded blocking channel. Falls back to an empty snapshot if
 /// the worker cannot answer within 500 ms.
-#[napi]
 pub fn get_native_telemetry() -> NativeTelemetry {
     let Ok(guard) = LIVEKIT.lock() else {
         return NativeTelemetry::default();
@@ -358,7 +375,7 @@ async fn collect_telemetry(room: &Room) -> NativeTelemetry {
 }
 
 // Byte counters and epoch-millisecond timestamps stay well below 2^53, so the
-// f64 conversion loses no precision in practice (NAPI objects cannot carry u64).
+// f64 conversion loses no precision in practice (JSON cannot carry u64).
 #[allow(
     clippy::cast_precision_loss,
     reason = "Byte counters and epoch-millisecond timestamps stay well below 2^53; f64 is exact in this range"
@@ -695,59 +712,10 @@ mod tests {
     }
 
     #[test]
-    fn decode_pcm_decodes_little_endian_i16() {
-        let bytes = 42i16.to_le_bytes();
-        assert_eq!(decode_pcm_bytes(&bytes), vec![42]);
-    }
-
-    #[test]
-    fn decode_pcm_handles_multiple_samples() {
-        let samples: Vec<i16> = vec![-32768, 0, 32767];
-        let mut bytes = Vec::new();
-        for s in &samples {
-            bytes.extend_from_slice(&s.to_le_bytes());
-        }
-        assert_eq!(decode_pcm_bytes(&bytes), samples);
-    }
-
-    #[test]
-    fn decode_pcm_drops_trailing_odd_byte() {
-        // 5 bytes = 2 full samples + 1 orphan byte that must be discarded.
-        let bytes = [1u8, 0, 2, 0, 0xAB];
-        let decoded = decode_pcm_bytes(&bytes);
-        assert_eq!(decoded, vec![1, 2]);
-    }
-
-    #[test]
-    fn decode_pcm_empty_input_is_empty() {
-        assert!(decode_pcm_bytes(&[]).is_empty());
-    }
-
-    #[test]
     #[allow(
         clippy::cast_possible_wrap,
         reason = "test fixture: 0xABCD_EF01 deliberately reinterpreted as a negative i32"
     )]
-    fn recombine_timestamp_roundtrips_positive_values() {
-        assert_eq!(recombine_dmabuf_timestamp(0, 0), 0);
-        assert_eq!(recombine_dmabuf_timestamp(0x1234_5678, 0), 0x1234_5678);
-        assert_eq!(
-            recombine_dmabuf_timestamp(0xABCD_EF01u32 as i32, 0x0000_0001),
-            0x0000_0001_ABCD_EF01
-        );
-    }
-
-    #[test]
-    fn recombine_timestamp_handles_negative_halves_bit_faithfully() {
-        // Both halves negative: lo = 0xFFFF_FFFF, hi = 0xFFFF_FFFF → -1.
-        assert_eq!(recombine_dmabuf_timestamp(-1, -1), -1);
-        // Negative high half with zero low half → 0x8000_0000_0000_0000.
-        assert_eq!(recombine_dmabuf_timestamp(0, i32::MIN), i64::MIN);
-        // Positive hi, negative lo: lo's top bit must extend into the result.
-        assert_eq!(recombine_dmabuf_timestamp(-1, 1), 0x0000_0001_FFFF_FFFF);
-    }
-
-    #[test]
     fn parse_video_codec_maps_known_strings() {
         assert_eq!(parse_video_codec(Some("vp8")), VideoCodec::VP8);
         assert_eq!(parse_video_codec(Some("vp9")), VideoCodec::VP9);
@@ -804,6 +772,6 @@ mod tests {
         let Err(err) = with_guard(|_| Ok(())) else {
             panic!("expected an error without a connected room");
         };
-        assert!(err.to_string().contains("Room not connected"));
+        assert!(err.contains("Room not connected"));
     }
 }
