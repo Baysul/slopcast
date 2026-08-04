@@ -57,6 +57,11 @@ export interface StreamSettings {
   apiEndpoint: string;
 }
 
+// TS↔Rust sync rule: `DEFAULT_STREAM_SETTINGS` and `sanitizeStreamSettings`
+// are mirrored field-for-field by `default_stream_settings` and
+// `sanitize_stream_settings` in apps/desktop/src-tauri/src/settings.rs
+// (same defaults, clamps and whitelists). Update both files together; the
+// Rust `defaults_match_ts_table` conformance test enforces these values.
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   fps: 60,
   bitrateLimit: 20_000_000,
