@@ -5,39 +5,52 @@
  * Validates the complete room-based screen sharing ecosystem:
  *   1. Parse slopcast.config.json for ports and endpoints
  *   2. Kill conflicting processes, spawn server + web dev servers
- *   3. Launch Electron presenter: create room, share screen
+ *   3. Launch the Tauri presenter via WebdriverIO (embedded WebDriver):
+ *      Wayland assertion, create room, preview + Go Live (MIGRATION §12)
  *   4. Launch Chromium spectator: join room, verify video stream
- *   5. Diagnostic validation: console logs, GPU report, stream health
+ *   5. Diagnostic validation: console logs, GPU probe report, stream health
  *   6. Graceful cleanup with retry-on-failure logic
  *
  * Prerequisites:
  *   Playwright + Chromium: pnpm add -D -w playwright && npx playwright install chromium
- *   Desktop app built:      pnpm build:desktop
+ *   Tauri e2e binary:      VITE_E2E=1 pnpm --filter desktop tauri build --features e2e
  *
  * Usage:
  *   pnpm tsx apps/server/src/e2e-test.ts
  */
 
 import { type ChildProcess, execSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 
 import { type AppConfig, loadConfig } from '@slopcast/shared-types/config';
 
-import type { Browser, ElectronApplication, Page } from 'playwright';
+import type { Browser, Page } from 'playwright';
 
-interface GpuFeatureStatus {
-  name: string;
-  status: string;
+/// GPU probe output (D5): replaces Electron's `app.getGPUInfo('complete')`.
+interface GpuInfo {
+  eglVendor: string | null;
+  glRenderer: string | null;
+  glVersion: string | null;
+  softwareRasterizer: boolean;
 }
 
-interface GpuInfo {
-  gpuDevice: Array<Record<string, unknown>>;
-  featureStatus: GpuFeatureStatus[];
-  problems: string[];
-  auxAttributes?: Record<string, unknown>;
+/// Structured result of the WebdriverIO presenter phase (§12.2), written by
+/// the spec to `presenter-phase.json` and read back by the harness.
+interface PresenterPhase {
+  ok: boolean;
+  roomCode: string;
+  shareUrl: string;
+  isWayland: boolean;
+  gpuReport: GpuInfo | null;
+  previewFramesSent: number;
+  videoFramesSent: number;
+  videoBytesSent: number;
+  captureFramesPushed: number;
+  telemetryFlowing: boolean;
+  errors: string[];
 }
 
 interface LogEntry {
@@ -57,6 +70,17 @@ interface TestResult {
   spectatorVideoPlaying: boolean;
   spectatorVideoWidth: number;
   spectatorVideoHeight: number;
+  /** Continuous-frame check: two distinct requestVideoFrameCallback frames. */
+  spectatorFramesFlowing: boolean;
+  /** Pixel check: the decoded frame is not uniformly black. */
+  spectatorFrameHasContent: boolean;
+  /** Presenter-side native telemetry: published video frames, bytes, capture-pipeline pushes. */
+  presenterVideoFlowing: boolean;
+  presenterVideoFramesSent: number;
+  presenterVideoBytesSent: number;
+  captureFramesPushed: number;
+  /** §9.1 preview emitter counter — proves base64 JPEG preview frames flowed. */
+  previewFramesSent: number;
   decoderStallDetected: boolean;
   durationMs: number;
   retries: number;
@@ -69,11 +93,13 @@ const DESKTOP_CONSOLE_LOG = path.join(OUTPUT_DIR, 'desktop-console.log');
 const WEB_CONSOLE_LOG = path.join(OUTPUT_DIR, 'web-console.log');
 const GPU_REPORT_PATH = path.join(OUTPUT_DIR, 'desktop-gpu-report.json');
 const RESULT_PATH = path.join(OUTPUT_DIR, 'e2e-result.json');
+/// Written by the harness to end the WDIO spec's hold step (§12.2); the
+/// tauri-service then tears the app down at session end.
+const PRESENTER_RELEASE_FLAG = path.join(OUTPUT_DIR, '.presenter-release');
+const PRESENTER_PHASE_JSON = path.join(OUTPUT_DIR, 'presenter-phase.json');
 
 const HEALTH_POLL_MS = 500;
 const STARTUP_TIMEOUT_MS = 30_000;
-// Room creation hits the just-spawned tsx dev server — cold compiles can take 25s+.
-const ROOM_CREATE_TIMEOUT_MS = 30_000;
 const SPECTATOR_CONNECT_TIMEOUT_MS = 20_000;
 const STREAM_TIMEOUT_MS = 20_000;
 
@@ -308,43 +334,16 @@ function validateGpuReport(report: GpuInfo | null): string[] {
   const issues: string[] = [];
 
   if (!report) {
-    issues.push('GPU report is null — GPU info could not be retrieved');
+    issues.push('GPU report is null — probe_gpu_info returned nothing');
     return issues;
   }
 
-  const featureStatus = report.featureStatus ?? [];
-  const problems: string[] = report.problems ?? [];
-
-  // getGPUInfo statuses are lowercase tokens like "enabled", "disabled_software".
-  const hasSoftwareRenderer =
-    featureStatus.some((f) => {
-      if (f.name !== 'gpu_compositing') return false;
-      const s = f.status.toLowerCase();
-      return s.includes('software') || s.includes('disabled');
-    }) || problems.some((p) => p.toLowerCase().includes('software'));
-
-  if (hasSoftwareRenderer) {
-    issues.push('GPU acceleration appears disabled or software-rendered');
+  if (!report.eglVendor) {
+    issues.push('GPU probe reported no EGL vendor');
   }
 
-  const criticalDisabled = featureStatus.filter(
-    (f) =>
-      (f.name === 'webgl' || f.name === 'webgl2' || f.name === 'video_encode') &&
-      !f.status.toLowerCase().includes('enabled') &&
-      !f.status.toLowerCase().includes('accelerated') &&
-      !f.status.toLowerCase().includes('hardware'),
-  );
-
-  if (criticalDisabled.length > 0) {
-    for (const f of criticalDisabled) {
-      issues.push(`GPU feature "${f.name}" is not enabled: ${f.status}`);
-    }
-  }
-
-  if (problems.length > 0) {
-    for (const p of problems) {
-      issues.push(`GPU problem: ${p.slice(0, 200)}`);
-    }
+  if (report.softwareRasterizer) {
+    issues.push('GPU is software-rendered (llvmpipe/softpipe/SwiftShader)');
   }
 
   return issues;
@@ -404,201 +403,156 @@ async function ensureServers(config: AppConfig, logEntries: LogEntry[]): Promise
 }
 
 interface PresenterPhaseResult {
-  electronApp: ElectronApplication;
-  gpuInfo: GpuInfo | null;
-  isWayland: boolean;
+  phase: PresenterPhase;
+  wdioProc: ChildProcess;
 }
 
-function attachDesktopLogging(electronApp: ElectronApplication, logEntries: LogEntry[]): void {
-  electronApp.process().stdout?.on('data', (data: Buffer) => {
-    for (const line of data.toString().split('\n').filter(Boolean)) {
-      logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
-    }
-  });
-  electronApp.process().stderr?.on('data', (data: Buffer) => {
-    for (const line of data.toString().split('\n').filter(Boolean)) {
-      logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
-    }
+const PRESENTER_TIMEOUT_MS = 240_000;
+const PRESENTER_TEARDOWN_MS = 30_000;
+
+function writePresenterRelease(): void {
+  writeFileSync(PRESENTER_RELEASE_FLAG, String(Date.now()));
+}
+
+async function waitForProcessExit(proc: ChildProcess, timeoutMs: number): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => resolve(), timeoutMs);
+    proc.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
 }
 
-async function waitForStreaming(page: Page): Promise<void> {
-  const deadline = Date.now() + STREAM_TIMEOUT_MS;
-  let isLive = false;
-  log('ELECTRON', `Waiting for streaming to start (timeout ${STREAM_TIMEOUT_MS}ms)...`);
+/// Polls `presenter-phase.json` until the spec settles (ok or with errors) or
+/// the wdio process exits early; returns `null` on timeout.
+async function waitForPresenterPhase(wdioProc: ChildProcess, timeoutMs: number): Promise<PresenterPhase | null> {
+  const deadline = Date.now() + timeoutMs;
+  let phase: PresenterPhase | null = null;
   while (Date.now() < deadline) {
-    const stopButton = page.getByRole('button', { name: 'Stop Screenshare' });
-    if ((await stopButton.count()) > 0) {
-      isLive = true;
-      break;
+    if (existsSync(PRESENTER_PHASE_JSON)) {
+      try {
+        phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
+        if (phase.ok || phase.errors.length > 0) break;
+      } catch {
+        // Partial write mid-step — keep polling.
+      }
     }
+    if (wdioProc.exitCode !== null || wdioProc.signalCode !== null) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
-  log('ELECTRON', `Streaming live: ${isLive}`);
+  return phase;
 }
 
-async function selectX11Source(page: Page): Promise<void> {
-  const sourceBtns = page.locator('button:has(img)');
-  const sourceCount = await sourceBtns.count();
-  if (sourceCount > 0) {
-    await sourceBtns.first().click();
-    log('ELECTRON', `Selected screen source (${sourceCount} available)`);
-    await new Promise((r) => setTimeout(r, 500));
-  } else {
-    log('ELECTRON', 'No screen source thumbnails found');
-  }
-}
-
-async function startScreenshare(page: Page, isWaylandPlatform: boolean): Promise<void> {
-  const startBtn = page.locator('button', { hasText: 'Start Screenshare' });
-  try {
-    await startBtn.waitFor({ state: 'visible', timeout: 5000 });
-    const isDisabled = await startBtn.isDisabled();
-    if (!isDisabled) {
-      await startBtn.click();
-      log('ELECTRON', 'Clicked "Start Screenshare"');
-
-      if (isWaylandPlatform) {
-        // setDisplayMediaRequestHandler auto-picks the first window source —
-        // no native portal dialog appears, the share starts headlessly.
-        log('ELECTRON', 'Wayland: display media handler auto-selects a window source');
-      }
-    } else {
-      log('ELECTRON', '"Start Screenshare" button is disabled — may need source selection');
-    }
-  } catch {
-    log('ELECTRON', '"Start Screenshare" button not found or not available');
-  }
-}
-
-async function collectGpuInfo(electronApp: ElectronApplication, result: TestResult): Promise<GpuInfo | null> {
-  log('ELECTRON', 'Retrieving GPU diagnostic data...');
-  try {
-    const gpuInfo = await electronApp.evaluate(async ({ app }) => {
-      try {
-        return (await app.getGPUInfo('complete')) as GpuInfo | null;
-      } catch (err) {
-        log('ELECTRON', `GPU info retrieval failed: ${err}`);
-        return null;
-      }
-    });
-
-    if (gpuInfo) {
-      writeFileSync(GPU_REPORT_PATH, JSON.stringify(gpuInfo, null, 2));
-      log('ELECTRON', `GPU report written to ${GPU_REPORT_PATH}`);
-      result.gpuReport = gpuInfo;
-    }
-    return gpuInfo;
-  } catch (err) {
-    log('ELECTRON', `Failed to retrieve GPU info: ${err}`);
-    return null;
-  }
-}
-
+/// Runs the presenter phase as a WebdriverIO subprocess against the Tauri
+/// binary (embedded WebDriver, MIGRATION §12). The spec drives the UI,
+/// samples telemetry and probes the GPU; the harness only orchestrates:
+/// spawn, poll `presenter-phase.json`, then hand the room over to the
+/// spectator phase. The spec's final test holds the session open until the
+/// harness writes the release flag.
 async function runPresenterPhase(
   config: AppConfig,
   logEntries: LogEntry[],
   result: TestResult,
 ): Promise<PresenterPhaseResult> {
-  log('TEST', '=== Step 2: Presenter Automation (Electron) ===');
+  log('TEST', '=== Step 2: Presenter Automation (WebdriverIO + Tauri) ===');
 
-  // Dynamic import to avoid type issues at top level before playwright is installed.
-  const { _electron: electron } = await import('playwright');
-
-  const desktopDir = path.join(REPO_ROOT, 'apps', 'desktop');
-  const electronBin = path.join(desktopDir, 'node_modules', 'electron', 'dist', 'electron');
-
-  if (!existsSync(electronBin)) {
-    throw new Error(`Electron binary not found at ${electronBin}. Run "pnpm install" and "pnpm build:desktop" first.`);
+  // Cargo workspace target dir lives at the repo root, not in src-tauri.
+  const appBinary = path.join(REPO_ROOT, 'target', 'release', 'slopcast');
+  if (!existsSync(appBinary)) {
+    throw new Error(
+      `Tauri e2e binary not found at ${appBinary}. ` +
+        'Build it with: VITE_E2E=1 pnpm --filter desktop tauri build --features e2e ' +
+        '(add --no-bundle when AppImage bundling is unavailable in the environment)',
+    );
   }
+  log('ELECTRON', `Launching Tauri app from ${appBinary}`);
 
-  log('ELECTRON', `Launching Electron from ${electronBin}`);
-  log('ELECTRON', `App directory: ${desktopDir}`);
+  // Fresh handshake files: a stale release flag from a previous attempt would
+  // end the spec's hold test immediately.
+  rmSync(PRESENTER_RELEASE_FLAG, { force: true });
+  rmSync(PRESENTER_PHASE_JSON, { force: true });
 
-  // Isolate the app's userData (stream-settings.json, onboarding state) so
-  // persisted settings from a real session — e.g. a remote apiEndpoint —
-  // cannot leak into the test and point the presenter at a different server
-  // than the one the spectator joins.
-  const isolatedConfigDir = path.join(REPO_ROOT, 'test-output', 'e2e-userdata');
-
-  const electronApp = await electron.launch({
-    executablePath: electronBin,
-    args: [desktopDir],
+  // Isolate the app's config dir (stream-settings.json, onboarding state) so
+  // persisted settings from a real session cannot leak into the test; the
+  // embedded WebDriver env vars are added by the tauri-service itself.
+  const wdioProc = spawn('pnpm', ['--filter', 'desktop', 'exec', 'wdio', 'run', './wdio.conf.ts'], {
+    cwd: REPO_ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       NODE_ENV: 'test',
-      XDG_CONFIG_HOME: isolatedConfigDir,
+      XDG_CONFIG_HOME: path.join(REPO_ROOT, 'test-output', 'e2e-userdata'),
+      // WebKitGTK compositing stability knob — streaming is unaffected.
+      WEBKIT_DISABLE_DMABUF_RENDERER: '1',
+      E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
+      E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
+      E2E_WEBSITE_URL: config.websiteUrl,
+      FORCE_COLOR: '0',
     },
-    timeout: 30_000,
   });
 
-  // Capture main process console via pipe.
-  attachDesktopLogging(electronApp, logEntries);
-
-  // Wait for first window and capture renderer console.
-  const page: Page = await electronApp.firstWindow();
-
-  page.on('console', (msg) => {
-    logEntries.push({
-      source: 'desktop-renderer',
-      message: `[${msg.type()}] ${msg.text()}`,
-      timestamp: Date.now(),
+  // The wdio output carries the tauri-service's forwarded backend logs and
+  // the spec's own diagnostics — the renderer console is not forwarded by
+  // WebKitGTK (R3), so failure detection leans on these + DOM assertions.
+  const attachOutput = (stream: NodeJS.ReadableStream | null): void => {
+    stream?.on('data', (data: Buffer) => {
+      for (const line of data.toString().split('\n').filter(Boolean)) {
+        logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
+      }
     });
+  };
+  attachOutput(wdioProc.stdout);
+  attachOutput(wdioProc.stderr);
+  wdioProc.on('error', (err) => {
+    log('PROCESS', `wdio spawn error: ${err.message}`);
   });
 
-  page.on('pageerror', (err) => {
-    logEntries.push({
-      source: 'desktop-renderer',
-      message: `UNCAUGHT: ${err.message}`,
-      timestamp: Date.now(),
-    });
-  });
+  // Poll for the phase JSON; break on a settled result (ok or with errors) or
+  // on an early wdio exit (binary/driver startup failure).
+  const phase = await waitForPresenterPhase(wdioProc, PRESENTER_TIMEOUT_MS);
 
-  await page.waitForLoadState('domcontentloaded');
-  log('ELECTRON', 'Desktop window loaded');
-
-  // Click "Create Live Room" button.
-  const createRoomBtn = page.locator('button', { hasText: 'Create Live Room' });
-  await createRoomBtn.waitFor({ state: 'visible', timeout: ROOM_CREATE_TIMEOUT_MS });
-  log('ELECTRON', '"Create Live Room" button visible');
-
-  await createRoomBtn.click();
-  log('ELECTRON', 'Clicked "Create Live Room"');
-
-  // Wait for room code to appear (replaces the Create button).
-  // The code span is the font-mono element inside the room button.
-  const roomCodeSpan = page.locator('span.font-mono').first();
-  await roomCodeSpan.waitFor({ state: 'visible', timeout: ROOM_CREATE_TIMEOUT_MS });
-  const roomCode = ((await roomCodeSpan.textContent()) ?? '').trim();
-  result.roomCode = roomCode;
-  result.shareUrl = `${config.websiteUrl}/room/${roomCode}`;
-  log('ELECTRON', `Room created: code=${roomCode} url=${result.shareUrl}`);
-
-  if (!roomCode) {
-    throw new Error('Failed to extract room code from Electron UI');
+  if (!phase?.ok) {
+    // End the spec's hold (or let a not-yet-started session exit) so the app
+    // tears down before the retry.
+    writePresenterRelease();
+    const reason = phase
+      ? phase.errors.join('; ') || 'no errors recorded'
+      : 'no presenter-phase.json within timeout (wdio did not settle)';
+    throw new Error(`Presenter phase failed: ${reason}`);
   }
 
-  // Platform detection: query the main process over IPC — there is no
-  // platform text in the renderer DOM to scrape.
-  const platformInfo = await page.evaluate(() => {
-    const api = (window as any).electronAPI;
-    return api?.getPlatformInfo ? api.getPlatformInfo() : null;
-  });
-  const isWaylandPlatform = platformInfo?.isWayland !== false;
-  const isX11 = !isWaylandPlatform;
-
-  log('ELECTRON', `Platform detected: ${isWaylandPlatform ? 'Wayland' : 'X11'}`);
-
-  if (isX11) {
-    await selectX11Source(page);
+  // The spec asserts the Wayland gate itself; the harness fails fast on the
+  // phase result so a non-Wayland session never reaches the spectator.
+  if (!phase.isWayland) {
+    writePresenterRelease();
+    throw new Error('Presenter phase: Wayland required — Slopcast is Wayland-only (D2)');
   }
 
-  await startScreenshare(page, isWaylandPlatform);
-  await waitForStreaming(page);
+  result.roomCode = phase.roomCode;
+  result.shareUrl = phase.shareUrl;
+  result.gpuReport = phase.gpuReport;
+  result.presenterVideoFlowing = phase.telemetryFlowing;
+  result.presenterVideoFramesSent = phase.videoFramesSent;
+  result.presenterVideoBytesSent = phase.videoBytesSent;
+  result.captureFramesPushed = phase.captureFramesPushed;
+  result.previewFramesSent = phase.previewFramesSent;
 
-  const gpuInfo = await collectGpuInfo(electronApp, result);
+  if (phase.gpuReport) {
+    writeFileSync(GPU_REPORT_PATH, JSON.stringify(phase.gpuReport, null, 2));
+    log('ELECTRON', `GPU report written to ${GPU_REPORT_PATH}`);
+  }
 
-  return { electronApp, gpuInfo, isWayland: isWaylandPlatform };
+  log('ELECTRON', `Room created: code=${phase.roomCode} url=${phase.shareUrl}`);
+  log(
+    'ELECTRON',
+    `Presenter telemetry: framesSent=${phase.videoFramesSent} bytesSent=${phase.videoBytesSent} ` +
+      `captureFramesPushed=${phase.captureFramesPushed} previewFramesSent=${phase.previewFramesSent} ` +
+      `flowing=${phase.telemetryFlowing}`,
+  );
+
+  return { phase, wdioProc };
 }
 
 async function waitForSpectatorConnection(page: Page, result: TestResult): Promise<void> {
@@ -671,9 +625,72 @@ async function waitForSpectatorVideo(page: Page, result: TestResult): Promise<vo
       log('SPECTATOR', 'Video element present but no video track data');
       result.errors.push('Video element found but no video frames received');
     }
+
+    await checkSpectatorFrameFlow(page, result);
   } catch (err) {
     log('SPECTATOR', `Video element never appeared: ${err}`);
     result.errors.push('Spectator video element never appeared');
+  }
+}
+
+/**
+ * Malfunction check on the decoded stream: two `requestVideoFrameCallback`
+ * frames ~1 s apart must arrive (continuous flow, not a single frame stall),
+ * and the second frame's pixels must not be uniformly black (a dead capture
+ * publishes black keepalive frames that satisfy the videoWidth check).
+ */
+async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<void> {
+  try {
+    const frameCheck = await page.evaluate(async () => {
+      const video = [...document.querySelectorAll('video')].find((v) => v.videoWidth > 0);
+      if (!video) {
+        throw new Error('no video element with frames');
+      }
+      const nextFrame = () =>
+        new Promise<void>((resolve) => {
+          video.requestVideoFrameCallback(() => resolve());
+        });
+      // Two consecutive decoded frames: the first could be a lone keepalive,
+      // so a second callback proves the stream keeps flowing.
+      await nextFrame();
+      await nextFrame();
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) {
+        throw new Error('canvas 2d context unavailable');
+      }
+      ctx.drawImage(video, 0, 0, 64, 64);
+      const data = ctx.getImageData(0, 0, 64, 64).data;
+      let nonBlack = 0;
+      let varied = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const luma = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        if (luma > 16) nonBlack += 1;
+        if (data[i] !== data[0] || data[i + 1] !== data[1] || data[i + 2] !== data[2]) varied += 1;
+      }
+      const pixels = data.length / 4;
+      return {
+        nonBlack: nonBlack / pixels,
+        varied: varied / pixels,
+        currentTime: video.currentTime,
+      };
+    });
+
+    const hasContent = frameCheck.nonBlack > 0.3 || frameCheck.varied > 0.02;
+    result.spectatorFramesFlowing = true;
+    result.spectatorFrameHasContent = hasContent;
+    log(
+      'SPECTATOR',
+      `Frame flow: two consecutive frames decoded, nonBlack=${frameCheck.nonBlack.toFixed(3)} ` +
+        `varied=${frameCheck.varied.toFixed(3)} currentTime=${frameCheck.currentTime.toFixed(2)} ` +
+        `content=${hasContent}`,
+    );
+  } catch (err) {
+    log('SPECTATOR', `Frame flow check failed: ${err}`);
+    result.errors.push(`Spectator frame flow check failed: ${String(err)}`);
   }
 }
 
@@ -693,7 +710,7 @@ async function checkDecoderStall(page: Page, result: TestResult): Promise<void> 
   }
 }
 
-async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, isWayland: boolean): Promise<Browser> {
+async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult): Promise<Browser> {
   log('TEST', '=== Step 3: Spectator Automation (Chromium) ===');
 
   const { chromium } = await import('playwright');
@@ -735,12 +752,7 @@ async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, isW
   await spectatorPage.goto(result.shareUrl, { waitUntil: 'domcontentloaded', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
 
   await waitForSpectatorConnection(spectatorPage, result);
-  if (isWayland) {
-    await waitForSpectatorVideo(spectatorPage, result);
-  } else {
-    log('SPECTATOR', 'X11 platform: video element assertion skipped (audio-only share)');
-    result.spectatorVideoReceived = true;
-  }
+  await waitForSpectatorVideo(spectatorPage, result);
 
   // Additional stability wait to let stream settle.
   await new Promise((r) => setTimeout(r, 3000));
@@ -750,12 +762,7 @@ async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, isW
   return browser;
 }
 
-function validateDiagnostics(
-  result: TestResult,
-  gpuInfo: GpuInfo | null,
-  logEntries: LogEntry[],
-  isWayland: boolean,
-): void {
+function validateDiagnostics(result: TestResult, logEntries: LogEntry[]): void {
   log('TEST', '=== Step 4: Diagnostic Validation ===');
 
   // Validate desktop logs.
@@ -774,8 +781,8 @@ function validateDiagnostics(
     result.errors.push(`${spectatorErrors.length} suspicious spectator console log entry(s)`);
   }
 
-  // Validate GPU report.
-  const gpuIssues = validateGpuReport(gpuInfo);
+  // Validate GPU report (probe_gpu_info, D5).
+  const gpuIssues = validateGpuReport(result.gpuReport);
   for (const issue of gpuIssues) {
     result.errors.push(`GPU: ${issue}`);
   }
@@ -783,8 +790,20 @@ function validateDiagnostics(
   // Validate spectator stream receipt.
   if (!result.spectatorVideoReceived) {
     result.errors.push('Spectator did not receive video stream within timeout');
-  } else if (!isWayland) {
-    log('SPECTATOR', 'X11 audio-only share: video receipt marked satisfied by platform skip');
+  }
+
+  // Validate that video frames keep flowing (not a single black keepalive).
+  if (!result.spectatorFramesFlowing) {
+    result.errors.push('Spectator video stalled after the first frame (no continuous frame flow)');
+  }
+  if (!result.spectatorFrameHasContent) {
+    result.errors.push('Spectator video frames are uniformly black (capture malfunction)');
+  }
+  if (!result.presenterVideoFlowing) {
+    result.errors.push('Presenter published no advancing video frames (videoFramesSent did not grow)');
+  }
+  if (result.previewFramesSent <= 0) {
+    result.errors.push('Presenter emitted no preview frames (previewFramesSent stayed at 0)');
   }
 }
 
@@ -801,7 +820,7 @@ function writeOutputArtifacts(logEntries: LogEntry[]): void {
 
 async function shutdownResources(
   browser: Browser | null,
-  electronApp: ElectronApplication | null,
+  wdioProc: ChildProcess | null,
   procs: ServerProcs,
   config: AppConfig,
 ): Promise<void> {
@@ -809,8 +828,16 @@ async function shutdownResources(
   if (browser) {
     await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
   }
-  if (electronApp) {
-    await electronApp.close().catch(() => log('CLEANUP', 'Electron app already closed'));
+  // Release the presenter spec's hold first so the wdio session (and with it
+  // the Tauri app) tears down gracefully instead of being SIGKILLed.
+  if (wdioProc) {
+    writePresenterRelease();
+    await waitForProcessExit(wdioProc, PRESENTER_TEARDOWN_MS);
+    if (wdioProc.exitCode === null && wdioProc.signalCode === null) {
+      log('CLEANUP', 'wdio did not exit after release — killing');
+      wdioProc.kill('SIGTERM');
+      await waitForProcessExit(wdioProc, 5000);
+    }
   }
   for (const proc of [procs.serverProc, procs.webProc, procs.livekitProc]) {
     try {
@@ -838,6 +865,13 @@ async function runTest(): Promise<TestResult> {
     spectatorVideoPlaying: false,
     spectatorVideoWidth: 0,
     spectatorVideoHeight: 0,
+    spectatorFramesFlowing: false,
+    spectatorFrameHasContent: false,
+    presenterVideoFlowing: false,
+    presenterVideoFramesSent: 0,
+    presenterVideoBytesSent: 0,
+    captureFramesPushed: 0,
+    previewFramesSent: 0,
     decoderStallDetected: false,
     durationMs: 0,
     retries: 0,
@@ -855,34 +889,28 @@ async function runTest(): Promise<TestResult> {
   mkdirSync(OUTPUT_DIR, { recursive: true });
 
   // Resources tracked for guaranteed cleanup — a failure at any step must not
-  // leak server processes or browser instances into the next retry.
-  let electronApp: ElectronApplication | null = null;
+  // leak server processes, browser instances or the presenter app into the
+  // next retry.
   let browser: Browser | null = null;
-  let gpuInfo: GpuInfo | null = null;
+  let wdioProc: ChildProcess | null = null;
   let procs: ServerProcs = { serverProc: null, webProc: null, livekitProc: null };
 
   try {
     procs = await ensureServers(config, logEntries);
 
     const presenter = await runPresenterPhase(config, logEntries, result);
-    electronApp = presenter.electronApp;
-    gpuInfo = presenter.gpuInfo;
+    wdioProc = presenter.wdioProc;
 
-    // Native video publishing only exists on Wayland; on X11 the presenter
-    // degrades to audio-only sharing, so the video assertions are skipped.
-    if (!presenter.isWayland) {
-      log('SPECTATOR', 'X11 platform: skipping spectator video assertions (native video requires Wayland)');
-    }
-    browser = await runSpectatorPhase(logEntries, result, presenter.isWayland);
+    browser = await runSpectatorPhase(logEntries, result);
 
-    validateDiagnostics(result, gpuInfo, logEntries, presenter.isWayland);
+    validateDiagnostics(result, logEntries);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log('TEST', `FATAL: ${message}`);
     result.errors.push(message);
   } finally {
+    await shutdownResources(browser, wdioProc, procs, config);
     writeOutputArtifacts(logEntries);
-    await shutdownResources(browser, electronApp, procs, config);
   }
 
   result.passed = result.errors.length === 0;
@@ -960,7 +988,8 @@ function printSummary(result: TestResult): void {
   log('SUMMARY', `Video Playing:   ${result.spectatorVideoPlaying}`);
   log('SUMMARY', `Video Size:      ${result.spectatorVideoWidth}x${result.spectatorVideoHeight}`);
   log('SUMMARY', `Decoder Stall:   ${result.decoderStallDetected}`);
-  log('SUMMARY', `GPU:             ${result.gpuReport ? 'Retrieved' : 'Missing'}`);
+  log('SUMMARY', `GPU:             ${result.gpuReport ? 'Probed' : 'Missing'}`);
+  log('SUMMARY', `Preview Frames:  ${result.previewFramesSent}`);
   log('SUMMARY', `Console Errors:  ${result.consoleErrors.length}`);
   log('SUMMARY', `Errors:          ${result.errors.length}`);
 
