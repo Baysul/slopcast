@@ -429,10 +429,13 @@ fn convert_and_push(
         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
         return;
     };
-    match scale_target.filter(|target| width > target.width || height > target.height) {
+    match scale_target.filter(|target| width != target.width || height != target.height) {
         // libwebrtc's encoder has no explicit target size (VideoEncoding
         // carries only bitrate/fps), so without this a 4K source would be
-        // encoded at 4K with the bitrate the user configured for 1080p.
+        // encoded at 4K with the bitrate the user configured for 1080p —
+        // and a smaller source would stream at its own resolution instead
+        // of the configured one. Scale every frame to the configured
+        // dimensions, up or down (OBS-style canvas scaling).
         // I420Buffer::scale is libwebrtc's libyuv-backed scaler.
         Some(target) => {
             let scaled = frame_buffer.buffer.scale(
@@ -862,13 +865,13 @@ mod probe {
         assert!(plane_v.iter().all(|&v| v == 240));
     }
 
-    /// The encode-target scale must never be applied when the source is
-    /// smaller than the target (upscaling would waste encoder bitrate on
-    /// interpolated pixels).
+    /// The encode target is applied whenever the source dimensions differ
+    /// from it — downscaling for larger sources, upscaling for smaller ones
+    /// (OBS-style canvas scaling) — and skipped only on an exact match.
     #[test]
-    fn scale_target_is_only_applied_to_larger_sources() {
+    fn scale_target_is_applied_whenever_source_differs_from_target() {
         let needs_scale = |src_w: u32, src_h: u32, t: ScaleTarget| {
-            (src_w > t.width || src_h > t.height).then_some(t)
+            (src_w != t.width || src_h != t.height).then_some(t)
         };
         let target = ScaleTarget {
             width: 1920,
@@ -880,16 +883,20 @@ mod probe {
             "4K must scale down"
         );
         assert!(
+            needs_scale(1920, 1040, target).is_some(),
+            "height-shorter source must scale to the exact target"
+        );
+        assert!(
+            needs_scale(1280, 720, target).is_some(),
+            "720p must scale up to the configured 1080p"
+        );
+        assert!(
+            needs_scale(960, 520, target).is_some(),
+            "small windows must scale up to the configured resolution"
+        );
+        assert!(
             needs_scale(1920, 1080, target).is_none(),
             "exact match must not scale"
-        );
-        assert!(
-            needs_scale(1920, 1040, target).is_none(),
-            "smaller-than-target sources must pass through untouched"
-        );
-        assert!(
-            needs_scale(1280, 720, target).is_none(),
-            "720p must never be upscaled to 1080p"
         );
     }
 

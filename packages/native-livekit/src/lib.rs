@@ -102,8 +102,9 @@ pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
 /// `startDesktopCapture`. `framesDequeued` counts frames received from the
 /// capturer; `framesPushed` counts those converted to I420 and delivered to
 /// the video track; `framesDropped` counts frames skipped while no track was
-/// active; `previewFramesSent` counts JPEG preview frames emitted via
-/// the preview callback (up to 640×360 at up to 30 fps); `captureErrors`
+/// active; `previewFramesSent` counts JPEG preview frames emitted via the
+/// preview callback (scaled to fit the renderer's preview card — OBS-style
+/// "scale to the window" — at the stream's framerate); `captureErrors`
 /// counts capturer-reported failures.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -395,6 +396,20 @@ pub fn clear_preview_callback() {
     desktop_capture::clear_preview_callback();
 }
 
+/// Reports the renderer's preview viewport size in device pixels; the
+/// preview emitter scales every frame to fit inside it (OBS-style "scale to
+/// the window"), so the IPC channel only carries what the card can show.
+/// Replaces any previously reported size.
+pub fn set_preview_viewport(width: u32, height: u32) {
+    desktop_capture::set_preview_viewport(width, height);
+}
+
+/// Clears the reported preview viewport; previews fall back to the source
+/// resolution until the renderer reports again.
+pub fn clear_preview_viewport() {
+    desktop_capture::clear_preview_viewport();
+}
+
 pub fn get_spectator_count() -> u32 {
     SPECTATOR_COUNT.load(Ordering::Relaxed)
 }
@@ -633,6 +648,11 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
                 source: TrackSource::Screenshare,
                 video_codec: codec,
                 video_encoding: encoding,
+                // livekit-rs 0.8 defaults to simulcast; its screenshare LOW/MID
+                // presets cap the lower layers at 3 FPS and a few hundred kbps
+                // (half resolution), which is what spectators then receive.
+                // One layer at the user's configured fps/bitrate instead.
+                simulcast: false,
                 ..Default::default()
             },
         )
