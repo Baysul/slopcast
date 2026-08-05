@@ -15,3 +15,10 @@ opt-level = 0
 
 [profile.release.package."*"]
 opt-level = "z"
+
+# tao 0.35.x ignores `decorations: false` on KDE Wayland (tao#899): KWin
+# applies server-side decorations because GTK never requests client-side
+# ones for undecorated windows. Fixed in tao 0.36.0 (#1218); tauri 2.11 pins
+# tao 0.35, so pin the fix commit until a tauri release bumps to tao 0.36.
+[patch.crates-io]
+tao = { git = "https://github.com/tauri-apps/tao", rev = "07f3742b1833b64be27b1ef991e38d557d4276c9" }
