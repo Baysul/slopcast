@@ -16,6 +16,7 @@
         "title": "Slopcast Desktop Presenter",
         "width": 1100,
         "height": 900,
+        "decorations": false,
         "backgroundColor": "#090d16",
         "center": true,
         "maximized": true

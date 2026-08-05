@@ -1,4 +1,4 @@
-import { Check, Copy, ScreenShare } from 'lucide-react';
+import { Check, Copy } from 'lucide-react';
 import React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -16,16 +16,11 @@ export interface PresenterHeaderProps {
 
 export const PresenterHeader: React.FC<PresenterHeaderProps> = React.memo(
   ({ roomCode, spectatorCount, isCreatingRoom, copied, onCreateRoom, onCopyCode, onCopyLink }) => {
+    // Room-controls toolbar below the custom titlebar (which owns the
+    // branding); a static row in the app shell, so no sticky/backdrop needed.
     return (
-      <header className="sticky top-0 z-10 border-b border-border bg-background/80 backdrop-blur-md">
-        <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
-            <span className="p-2 bg-safelight/10 rounded-xl text-safelight shrink-0">
-              <ScreenShare className="w-5 h-5" aria-hidden="true" />
-            </span>
-            <h1 className="text-xl font-bold text-foreground shrink-0 leading-tight tracking-tight">Slopcast</h1>
-          </div>
-
+      <header className="shrink-0 border-b border-border bg-background">
+        <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-end gap-4">
           <div className="shrink-0">
             {!roomCode ? (
               <Button onClick={onCreateRoom} disabled={isCreatingRoom}>
