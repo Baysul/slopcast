@@ -41,6 +41,12 @@
 /// raw IPC channel.
 type PreviewFrameCallback = Box<dyn Fn(Vec<u8>, i64) + Send + Sync>;
 
+/// Capture-ended callback type: invoked once when the portal session closes
+/// while the capture is running — the compositor ended the stream (e.g. the
+/// presenter closed the captured window). The Tauri backend forwards this to
+/// the renderer as the `capture-ended` event, which tears the share down.
+type CaptureEndedCallback = Box<dyn Fn() + Send + Sync>;
+
 use arc_swap::ArcSwapOption;
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
@@ -87,6 +93,7 @@ pub(crate) fn reset_stats() {
     STATS_PREVIEW_SENT.store(0, Ordering::Relaxed);
     STATS_LAST_WIDTH.store(0, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(0, Ordering::Relaxed);
+    CAPTURE_ENDED_EMITTED.store(false, Ordering::Relaxed);
 }
 
 /// Preview cadence before a video track is published (no stream fps to
@@ -115,6 +122,18 @@ pub(crate) fn set_preview_callback(callback: PreviewFrameCallback) {
 /// Clears the registered preview callback.
 pub(crate) fn clear_preview_callback() {
     PREVIEW_CALLBACK.store(None);
+}
+
+/// Invoked once per capture when the portal session closes unexpectedly
+/// (the compositor ended the stream — e.g. the captured window was closed).
+static CAPTURE_ENDED_CALLBACK: ArcSwapOption<CaptureEndedCallback> = ArcSwapOption::const_empty();
+/// Guards the ended callback so a session fires it exactly once.
+static CAPTURE_ENDED_EMITTED: AtomicBool = AtomicBool::new(false);
+
+/// Registers the capture-ended callback, replacing any previously
+/// registered one.
+pub(crate) fn set_capture_ended_callback(callback: CaptureEndedCallback) {
+    CAPTURE_ENDED_CALLBACK.store(Some(Arc::new(callback)));
 }
 
 /// The published video track's encoder target: `(width, height, fps)` of the
@@ -687,6 +706,24 @@ fn run_capture(
     let mut next_preview_at = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
+        // The compositor closes the portal session when the captured source
+        // disappears (e.g. the presenter closed the captured window/app).
+        // That ends the share: fire the callback once and let the renderer
+        // tear the track and capture down. Our own `stop()` never sets the
+        // flag while the loop runs — the session is only closed in `Drop`,
+        // after the loop exits.
+        #[cfg(target_os = "linux")]
+        if !CAPTURE_ENDED_EMITTED.load(Ordering::Relaxed)
+            && portal
+                .as_ref()
+                .is_some_and(ScreenCastPortal::session_closed)
+        {
+            CAPTURE_ENDED_EMITTED.store(true, Ordering::Relaxed);
+            log::info!("[desktop-capture] portal session closed — captured source is gone");
+            if let Some(callback) = CAPTURE_ENDED_CALLBACK.load_full() {
+                callback();
+            }
+        }
         emit_preview_frame(
             &preview_source,
             &mut preview_bufs,

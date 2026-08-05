@@ -264,6 +264,21 @@ export const PresenterApp: React.FC = () => {
     setAutoDetectFailed,
   ]);
 
+  // Auto-end: the backend closes the portal ScreenCast session when the
+  // compositor stops the stream — e.g. the presenter closed the app/window
+  // being captured — and emits `capture-ended`. Tear the share down exactly
+  // like the Stop button, and tell the user why.
+  useEffect(() => {
+    if (captureStage === 'idle') return;
+    const unlistenPromise = desktopApi.onCaptureEnded(() => {
+      notify('info', 'Stream ended', 'The captured window was closed, so sharing stopped.');
+      void handleStopShare();
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [captureStage, handleStopShare]);
+
   const resolveSystemAudioFallback = useCallback(async (): Promise<boolean> => {
     setAutoDetectFailed(true);
     const ctx = await desktopApi.getCaptureContext();

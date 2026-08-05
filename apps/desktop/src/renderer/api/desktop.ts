@@ -131,4 +131,8 @@ export const desktopApi = {
   clearPreviewViewport: (): Promise<boolean> => invokeOk('clear_preview_viewport', undefined),
   onAudioWave: (callback: (waves: AudioAppWave[]) => void): Promise<UnlistenFn> =>
     subscribe<AudioAppWave[]>('audio-wave-update', callback),
+  // Fired when the portal closes the ScreenCast session — the presenter
+  // closed the captured window/app, so the backend ended the share. The
+  // renderer tears the UI down (same path as the Stop button).
+  onCaptureEnded: (callback: () => void): Promise<UnlistenFn> => subscribe<null>('capture-ended', () => callback()),
 };

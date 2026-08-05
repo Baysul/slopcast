@@ -90,6 +90,16 @@ pub struct ScreenCastPortal {
     session_closed: Arc<AtomicBool>,
 }
 
+impl ScreenCastPortal {
+    /// Returns `true` once the portal emitted `Session::Closed`: the
+    /// compositor ended the stream (e.g. the captured window was closed),
+    /// or the session was closed locally.
+    #[must_use]
+    pub fn session_closed(&self) -> bool {
+        self.session_closed.load(Ordering::Relaxed)
+    }
+}
+
 /// Fresh, process-unique portal token. The portal echoes the token back as
 /// the last element of the request/session object path, so uniqueness within
 /// the process is all that matters (libwebrtc uses a random u32).

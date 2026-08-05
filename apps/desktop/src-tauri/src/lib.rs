@@ -60,6 +60,7 @@ pub fn run() {
             app.manage(config::AppConfigState::load()?);
             audio::register_audio_callbacks(app.handle());
             capture::register_preview_channel_callback();
+            capture::register_capture_ended_callback(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

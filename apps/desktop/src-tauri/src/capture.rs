@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use native_livekit::{CaptureConfig, DesktopCaptureStats};
 use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::{AppHandle, Emitter};
 
 use crate::platform::is_wayland;
 
@@ -59,6 +60,27 @@ pub fn register_preview_channel_callback() {
         payload.extend_from_slice(&pts_us.to_le_bytes());
         payload.extend_from_slice(&bytes);
         let _ = channel.send(InvokeResponseBody::Raw(payload));
+    }));
+}
+
+/// The app handle the capture-ended callback emits the `capture-ended`
+/// event through; registered once at startup, like the preview callback.
+static CAPTURE_ENDED_EMITTER: Mutex<Option<AppHandle>> = Mutex::new(None);
+
+/// Registers the capture-ended callback: the portal closes the `ScreenCast`
+/// session when the compositor ends the stream (e.g. the presenter closed
+/// the captured window), and the renderer tears the share down on the
+/// `capture-ended` event. The callback runs on the capture thread; the emit
+/// is non-blocking, so the join in `stop_desktop_capture` never waits on it.
+pub fn register_capture_ended_callback(app: &AppHandle) {
+    if let Ok(mut guard) = CAPTURE_ENDED_EMITTER.lock() {
+        *guard = Some(app.clone());
+    }
+    native_livekit::set_capture_ended_callback(Box::new(|| {
+        let Some(emitter) = CAPTURE_ENDED_EMITTER.lock().ok().and_then(|g| g.clone()) else {
+            return;
+        };
+        let _ = emitter.emit("capture-ended", ());
     }));
 }
 

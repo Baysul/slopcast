@@ -396,6 +396,15 @@ pub fn clear_preview_callback() {
     desktop_capture::clear_preview_callback();
 }
 
+/// Registers the capture-ended callback: invoked once per capture session
+/// when the portal closes it unexpectedly — the compositor ended the
+/// stream (e.g. the presenter closed the captured window/app). The Tauri
+/// backend forwards this to the renderer as the `capture-ended` event.
+/// Replaces any previously registered callback.
+pub fn set_capture_ended_callback(callback: Box<dyn Fn() + Send + Sync>) {
+    desktop_capture::set_capture_ended_callback(callback);
+}
+
 /// Reports the renderer's preview viewport size in device pixels; the
 /// preview emitter scales every frame to fit inside it (OBS-style "scale to
 /// the window"), so the IPC channel only carries what the card can show.
