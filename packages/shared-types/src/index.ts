@@ -12,6 +12,18 @@ export interface AppConfig {
 /// web join form: `abc-123-xyz`.
 export const ROOM_CODE_RE = /^[a-z]{3}-[0-9]{3}-[a-z]{3}$/;
 
+/** Upgrades a LiveKit signaling URL for spectators on HTTPS pages: browsers
+ * block `ws://` WebSocket connections from HTTPS origins as mixed content,
+ * so the server-advertised `ws://` URL must become `wss://`. Plain HTTP
+ * pages (and localhost dev) stay on `ws://`. Non-`ws://` URLs pass through.
+ */
+export function normalizeLivekitUrl(url: string, pageIsHttps: boolean): string {
+  if (pageIsHttps && url.startsWith('ws://')) {
+    return `wss://${url.slice('ws://'.length)}`;
+  }
+  return url;
+}
+
 export interface AudioApp {
   id: number;
   name: string;

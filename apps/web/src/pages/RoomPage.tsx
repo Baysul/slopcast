@@ -1,3 +1,4 @@
+import { normalizeLivekitUrl } from '@slopcast/shared-types';
 import { ConnectionState, type RemoteTrack, Room, RoomEvent } from 'livekit-client';
 import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
@@ -12,6 +13,10 @@ type StatusVariant = 'live' | 'disconnected' | 'info';
 
 const DECODER_STALL_THRESHOLD_MS = 8000;
 const DECODER_STALL_CHECK_MS = 2000;
+// Belt-and-braces guard around room.connect: livekit-client times out its
+// own signal handshake, but the status badge must never sit on "Connecting..."
+// indefinitely if a future bump regresses that.
+const CONNECT_TIMEOUT_MS = 20000;
 
 const logH264Sdp = (room: Room): void => {
   try {
@@ -177,6 +182,9 @@ export const RoomPage: React.FC = () => {
   const stallCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stallStartRef = useRef<number>(0);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set when a connection attempt fails; guards the badge state from being
+  // overwritten by the tear-down events (Disconnected) that follow.
+  const connectFailedRef = useRef(false);
 
   const resetIdleTimer = useCallback(() => {
     setShowFullscreenControls(true);
@@ -251,6 +259,7 @@ export const RoomPage: React.FC = () => {
     setParticipantCount(0);
     setDecoderStalled(false);
     setStalledCodec(null);
+    connectFailedRef.current = false;
 
     if (stallCheckRef.current) {
       clearInterval(stallCheckRef.current);
@@ -326,6 +335,7 @@ export const RoomPage: React.FC = () => {
           setStatusText('Reconnecting...');
           break;
         case ConnectionState.Disconnected:
+          if (connectFailedRef.current) return;
           setConnectionStatus('disconnected');
           setStatusText('Connection lost');
           break;
@@ -336,6 +346,7 @@ export const RoomPage: React.FC = () => {
 
     room.on(RoomEvent.Disconnected, () => {
       if (isStale()) return;
+      if (connectFailedRef.current) return;
       setConnectionStatus('closed');
       setStatusText('Room closed');
     });
@@ -385,21 +396,49 @@ export const RoomPage: React.FC = () => {
     };
 
     getToken()
-      .then(({ token, livekitUrl }) => {
+      .then(async ({ token, livekitUrl }) => {
         if (isStale()) return;
-        const livekitUrlForClient = livekitUrl || injectedLivekitUrl || `ws://${window.location.hostname}:7880`;
-        return room.connect(livekitUrlForClient, token).then(() => {
-          if (isStale()) {
-            room.disconnect();
-            return;
+        const livekitUrlForClient = normalizeLivekitUrl(
+          livekitUrl || injectedLivekitUrl || `ws://${window.location.hostname}:7880`,
+          window.location.protocol === 'https:',
+        );
+        try {
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const connectPromise = room.connect(livekitUrlForClient, token);
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => {
+              reject(
+                new Error(
+                  `timed out connecting to ${livekitUrlForClient} after ${CONNECT_TIMEOUT_MS / 1000}s — is the LiveKit server running?`,
+                ),
+              );
+            }, CONNECT_TIMEOUT_MS);
+          });
+          try {
+            await Promise.race([connectPromise, timeoutPromise]);
+          } finally {
+            if (timeout) clearTimeout(timeout);
           }
-          setParticipantCount(room.remoteParticipants.size);
-          attachExistingTracks(room, managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
-        });
+        } catch (err) {
+          // A timed-out connect may still complete later; tear the room down
+          // so the error state stays truthful.
+          void room.disconnect().catch(() => undefined);
+          throw err;
+        }
+        if (isStale()) {
+          room.disconnect();
+          return;
+        }
+        setParticipantCount(room.remoteParticipants.size);
+        attachExistingTracks(room, managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
       })
       .catch((err) => {
         if (isStale()) return;
+        connectFailedRef.current = true;
         setConnectionStatus('error');
+        // The header badge renders statusText — it must not keep claiming
+        // "Connecting..." while the connection actually failed.
+        setStatusText('Connection failed');
         setErrorMsg(`Connection failed: ${err instanceof Error ? err.message : String(err)}`);
       });
   }, [roomId]);

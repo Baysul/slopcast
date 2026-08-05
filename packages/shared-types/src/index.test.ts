@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { codecLabel, DEFAULT_STREAM_SETTINGS, fmtBitrate, fmtLoss, sanitizeStreamSettings } from './index.js';
+import {
+  codecLabel,
+  DEFAULT_STREAM_SETTINGS,
+  fmtBitrate,
+  fmtLoss,
+  normalizeLivekitUrl,
+  sanitizeStreamSettings,
+} from './index.js';
 
 // sanitizeStreamSettings: corrupted or hand-edited files must never
 // crash the app; every field falls back to a default individually.
@@ -92,4 +99,28 @@ test('codecLabel maps known mime types and falls back to stripped mime', () => {
   assert.equal(codecLabel('VIDEO/WEIRD'), 'WEIRD');
   assert.equal(codecLabel(null), null);
   assert.equal(codecLabel(undefined), null);
+});
+
+// normalizeLivekitUrl: ws:// URLs are mixed content on HTTPS pages and must
+// upgrade to wss://; plain HTTP/localhost dev keeps ws://.
+
+test('normalizeLivekitUrl upgrades ws:// to wss:// on HTTPS pages', () => {
+  assert.equal(normalizeLivekitUrl('ws://livekit.example.com:7880', true), 'wss://livekit.example.com:7880');
+});
+
+test('normalizeLivekitUrl leaves wss:// untouched on HTTPS pages', () => {
+  assert.equal(normalizeLivekitUrl('wss://livekit.example.com:7880', true), 'wss://livekit.example.com:7880');
+});
+
+test('normalizeLivekitUrl leaves ws:// untouched on plain HTTP pages', () => {
+  assert.equal(normalizeLivekitUrl('ws://localhost:7880', false), 'ws://localhost:7880');
+});
+
+test('normalizeLivekitUrl leaves wss:// untouched on plain HTTP pages', () => {
+  assert.equal(normalizeLivekitUrl('wss://localhost:7880', false), 'wss://localhost:7880');
+});
+
+test('normalizeLivekitUrl passes non-ws URLs through', () => {
+  assert.equal(normalizeLivekitUrl('http://livekit.example.com:7880', true), 'http://livekit.example.com:7880');
+  assert.equal(normalizeLivekitUrl('', true), '');
 });
