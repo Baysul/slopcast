@@ -5,6 +5,7 @@ import type React from 'react';
 import { memo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { CodecInfo } from '@/utils/codecs';
 
 export interface StreamSettingsPanelProps {
@@ -75,18 +76,18 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 >
                   Video Codec
                 </label>
-                <select
-                  id="select-video-codec"
-                  value={videoCodec}
-                  onChange={(e) => setVideoCodec(e.target.value as VideoCodec)}
-                  className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
-                >
-                  {availableCodecs.map((info) => (
-                    <option key={info.codec} value={info.codec} className="bg-popover text-popover-foreground">
-                      {codecLabel(info.codec)} {codecOptionSuffix(info)}
-                    </option>
-                  ))}
-                </select>
+                <Select value={videoCodec} onValueChange={(v) => setVideoCodec(v as VideoCodec)}>
+                  <SelectTrigger id="select-video-codec">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableCodecs.map((info) => (
+                      <SelectItem key={info.codec} value={info.codec}>
+                        {codecLabel(info.codec)} {codecOptionSuffix(info)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="space-y-1.5">
@@ -96,28 +97,18 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 >
                   Resolution
                 </label>
-                <select
-                  id="select-resolution"
-                  value={resolution}
-                  onChange={(e) => setResolution(e.target.value as ResolutionPreset)}
-                  className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
-                >
-                  <option value="480p" className="bg-popover text-popover-foreground">
-                    480p (SD)
-                  </option>
-                  <option value="720p" className="bg-popover text-popover-foreground">
-                    720p (HD)
-                  </option>
-                  <option value="1080p" className="bg-popover text-popover-foreground">
-                    1080p (Full HD)
-                  </option>
-                  <option value="1440p" className="bg-popover text-popover-foreground">
-                    1440p (QHD)
-                  </option>
-                  <option value="2160p" className="bg-popover text-popover-foreground">
-                    4K (Ultra HD)
-                  </option>
-                </select>
+                <Select value={resolution} onValueChange={(v) => setResolution(v as ResolutionPreset)}>
+                  <SelectTrigger id="select-resolution">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="480p">480p (SD)</SelectItem>
+                    <SelectItem value="720p">720p (HD)</SelectItem>
+                    <SelectItem value="1080p">1080p (Full HD)</SelectItem>
+                    <SelectItem value="1440p">1440p (QHD)</SelectItem>
+                    <SelectItem value="2160p">4K (Ultra HD)</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
@@ -129,25 +120,17 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 >
                   Frame Rate
                 </label>
-                <select
-                  id="select-fps"
-                  value={streamFps}
-                  onChange={(e) => setStreamFps(Number(e.target.value))}
-                  className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
-                >
-                  <option value={15} className="bg-popover text-popover-foreground">
-                    15 fps
-                  </option>
-                  <option value={24} className="bg-popover text-popover-foreground">
-                    24 fps
-                  </option>
-                  <option value={30} className="bg-popover text-popover-foreground">
-                    30 fps
-                  </option>
-                  <option value={60} className="bg-popover text-popover-foreground">
-                    60 fps
-                  </option>
-                </select>
+                <Select value={String(streamFps)} onValueChange={(v) => setStreamFps(Number(v))}>
+                  <SelectTrigger id="select-fps">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="15">15 fps</SelectItem>
+                    <SelectItem value="24">24 fps</SelectItem>
+                    <SelectItem value="30">30 fps</SelectItem>
+                    <SelectItem value="60">60 fps</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="space-y-1.5">
@@ -157,40 +140,22 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 >
                   Bitrate Limit
                 </label>
-                <select
-                  id="select-bitrate"
-                  value={bitrateLimit}
-                  onChange={(e) => setBitrateLimit(Number(e.target.value))}
-                  className="w-full bg-secondary border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-safelight cursor-pointer"
-                >
-                  <option value={1_000_000} className="bg-popover text-popover-foreground">
-                    1 Mbps
-                  </option>
-                  <option value={2_000_000} className="bg-popover text-popover-foreground">
-                    2 Mbps
-                  </option>
-                  <option value={4_000_000} className="bg-popover text-popover-foreground">
-                    4 Mbps
-                  </option>
-                  <option value={6_000_000} className="bg-popover text-popover-foreground">
-                    6 Mbps
-                  </option>
-                  <option value={10_000_000} className="bg-popover text-popover-foreground">
-                    10 Mbps
-                  </option>
-                  <option value={20_000_000} className="bg-popover text-popover-foreground">
-                    20 Mbps
-                  </option>
-                  <option value={30_000_000} className="bg-popover text-popover-foreground">
-                    30 Mbps
-                  </option>
-                  <option value={50_000_000} className="bg-popover text-popover-foreground">
-                    50 Mbps
-                  </option>
-                  <option value={80_000_000} className="bg-popover text-popover-foreground">
-                    80 Mbps
-                  </option>
-                </select>
+                <Select value={String(bitrateLimit)} onValueChange={(v) => setBitrateLimit(Number(v))}>
+                  <SelectTrigger id="select-bitrate">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1000000">1 Mbps</SelectItem>
+                    <SelectItem value="2000000">2 Mbps</SelectItem>
+                    <SelectItem value="4000000">4 Mbps</SelectItem>
+                    <SelectItem value="6000000">6 Mbps</SelectItem>
+                    <SelectItem value="10000000">10 Mbps</SelectItem>
+                    <SelectItem value="20000000">20 Mbps</SelectItem>
+                    <SelectItem value="30000000">30 Mbps</SelectItem>
+                    <SelectItem value="50000000">50 Mbps</SelectItem>
+                    <SelectItem value="80000000">80 Mbps</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
