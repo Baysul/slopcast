@@ -1,5 +1,6 @@
 import type { VideoCodec } from '@slopcast/shared-types';
 import { VIDEO_CODEC_PRIORITY } from '@slopcast/shared-types';
+import type { NativeCodecInfo } from '../types';
 
 export interface CodecInfo {
   codec: VideoCodec;
@@ -8,83 +9,44 @@ export interface CodecInfo {
   recommended: boolean;
 }
 
-const KNOWN_VIDEO_CODECS: Record<string, { codec: VideoCodec; label: string }> = {
-  'VIDEO/AV1': { codec: 'av1', label: 'AV1' },
-  'VIDEO/H264': { codec: 'h264', label: 'H.264' },
-  'VIDEO/VP9': { codec: 'vp9', label: 'VP9' },
-  'VIDEO/VP8': { codec: 'vp8', label: 'VP8' },
-};
-
-// Multiple profile/level variants per family: isConfigSupported validates the
-// codec string's level against the requested resolution, so probing a single
-// low-level string (e.g. avc1.42E01E at 1080p) falsely reports "unsupported"
-// even when the hardware encoder handles the family at higher levels.
-const WEBCODECS_PROBE_CODECS: Record<VideoCodec, string[]> = {
-  vp8: ['vp8'],
-  h264: ['avc1.640028', 'avc1.4D4028', 'avc1.42E028'],
-  vp9: ['vp09.00.40.08', 'vp09.00.41.08'],
-  av1: ['av01.0.08M.08', 'av01.0.09M.08'],
-};
-
-export const sortByEncodingEfficiency = (codecs: CodecInfo[]): CodecInfo[] => {
+// Preference order from `VIDEO_CODEC_PRIORITY` (shared-types): h264 first —
+// it is the only hardware-capable codec in the native stack, so the picker
+// shows it on top.
+export const sortByCodecPreference = (codecs: CodecInfo[]): CodecInfo[] => {
   const priority = new Map<VideoCodec, number>(VIDEO_CODEC_PRIORITY.map((c, i) => [c, i]));
   return [...codecs].sort((a, b) => (priority.get(a.codec) ?? 99) - (priority.get(b.codec) ?? 99));
 };
 
-// Every codec the WebRTC stack can send on this device. Hardware acceleration
-// is probed separately (async) via WebCodecs. WebKitGTK may lack
-// `RTCRtpSender.getCapabilities` entirely (MIGRATION R2), so the sender API is
-// guarded and the fallback list degrades to software H.264.
-export function detectSupportedCodecs(): CodecInfo[] {
-  const caps =
-    typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
-      ? RTCRtpSender.getCapabilities('video')
-      : null;
-  if (!caps) {
-    return [{ codec: 'h264', label: 'H.264', hardware: false, recommended: false }];
-  }
-
-  const mimeTypes = new Set(caps.codecs.map((c) => c.mimeType.toUpperCase()));
-  const available: CodecInfo[] = [];
-  for (const [mime, info] of Object.entries(KNOWN_VIDEO_CODECS)) {
-    if (mimeTypes.has(mime) && !available.some((c) => c.codec === info.codec)) {
-      available.push({ ...info, hardware: false, recommended: false });
-    }
-  }
-  return sortByEncodingEfficiency(available);
-}
-
-export const supportsHardwareEncoding = async (codec: VideoCodec): Promise<boolean> => {
-  for (const probe of WEBCODECS_PROBE_CODECS[codec]) {
-    try {
-      const { supported } = await VideoEncoder.isConfigSupported({
-        codec: probe,
-        width: 1920,
-        height: 1080,
-        bitrate: 6_000_000,
-        framerate: 30,
-        hardwareAcceleration: 'prefer-hardware',
-      });
-      if (supported) return true;
-    } catch (err) {
-      console.warn(`[Codecs] hardware probe failed for ${codec} (${probe}):`, err);
-    }
-  }
-  return false;
+// The native stack (bundled libwebrtc in native-livekit) is the ONLY encoder
+// this app uses — the webview's `RTCRtpSender.getCapabilities` reflects the
+// WebKitGTK/GStreamer stack, which never touches the stream, so it must never
+// drive the codec picker. `hardware` comes from the native build: only H264
+// has a hardware encoder factory (VA-API/NVENC on Linux, Media Foundation on
+// Windows, VideoToolbox on macOS); VP8/VP9/AV1 are always software there.
+export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
+  const codecs = infos
+    .filter((i): i is NativeCodecInfo & { codec: VideoCodec } => ['vp8', 'h264', 'vp9', 'av1'].includes(i.codec))
+    .map((i) => ({ codec: i.codec, label: i.label, hardware: i.hardware, recommended: false }));
+  return sortByCodecPreference(codecs);
 };
 
-// Tags each codec with hardware-acceleration availability, then hoists the
-// most efficient hardware encoder to the top as the recommended choice.
-export const probeCodecHardware = async (codecs: CodecInfo[]): Promise<CodecInfo[]> => {
-  const probed = await Promise.all(
-    codecs.map(async (info) => ({ ...info, hardware: await supportsHardwareEncoding(info.codec) })),
-  );
-  const recommended = probed.find((c) => c.hardware);
-  if (!recommended) return probed;
-  return [{ ...recommended, recommended: true }, ...probed.filter((c) => c.codec !== recommended.codec)];
+// Hoists the recommended choice: the first hardware-capable codec, or H.264
+// when no hardware encoder exists (H.264 is the only software codec the
+// picker should ever fall back to — libvpx VP9 and libaom AV1 cannot sustain
+// real-time 1080p60 in software).
+export const recommendCodec = (codecs: CodecInfo[]): CodecInfo[] => {
+  if (codecs.length === 0) return [];
+  const recommended = codecs.find((c) => c.hardware) ?? codecs.find((c) => c.codec === 'h264');
+  if (!recommended) return codecs;
+  return [{ ...recommended, recommended: true }, ...codecs.filter((c) => c.codec !== recommended.codec)];
 };
 
 export const codecOptionSuffix = (info: CodecInfo): string => {
-  if (info.recommended) return 'Hardware - Recommended';
-  return info.hardware ? 'Hardware' : 'Software';
+  if (info.recommended) return info.hardware ? 'Hardware - Recommended' : 'Recommended';
+  if (info.hardware) return 'Hardware';
+  // libaom (AV1) is single-threaded and libvpx VP9 is too heavy to sustain
+  // real-time 1080p60 in software; calling that out prevents pickers from
+  // choosing a codec the encoder cannot keep up with.
+  if (info.codec === 'av1' || info.codec === 'vp9') return 'Software (slow)';
+  return 'Software';
 };

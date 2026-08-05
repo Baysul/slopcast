@@ -63,7 +63,10 @@ const applyAudioDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPre
 const foldNativeTelemetry = (t: NativeTelemetry, prev: StatsPrev): StatsSnapshot => {
   const snap: StatsSnapshot = {
     videoMime: t.videoCodec,
-    videoEnc: null,
+    // The outbound-rtp `encoderImplementation` stat: "VAAPI H264 Encoder"
+    // (hardware) vs "OpenH264"/"libvpx" (software) — surfaces whether the
+    // hardware encoder is actually in use.
+    videoEnc: t.encoderImplementation,
     audioMime: t.audioCodec,
     videoBps: null,
     audioBps: null,

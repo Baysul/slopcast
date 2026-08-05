@@ -54,8 +54,10 @@ export interface DesktopCaptureConfig {
   maxBitrate?: number;
 }
 
-/// One `preview-frame` event payload: a base64 JPEG frame (640×360 @ ~15 fps)
-/// rendered by `PreviewCanvas` while capture is active (MIGRATION §9.1).
+/// One `preview-frame` event payload: base64-encoded tightly packed I420
+/// planes (Y, then U, then V; stride == width) at up to 640×360, rendered by
+/// the renderer's preview canvas while capture is active. No image codec is
+/// involved — the planes are drawn directly.
 export interface PreviewFrame {
   data: string;
   width: number;
@@ -63,10 +65,23 @@ export interface PreviewFrame {
   ptsUs: number;
 }
 
+/// A codec the native encoder stack (bundled libwebrtc) can encode with, as
+/// reported by `get_native_supported_codecs`. The renderer must never read
+/// the webview's `RTCRtpSender.getCapabilities` — that stack is not used for
+/// encoding.
+export interface NativeCodecInfo {
+  codec: string;
+  label: string;
+  hardware: boolean;
+}
+
 /// Cumulative libwebrtc counters reported by `get_native_telemetry`; deltas
 /// are computed renderer-side exactly like the old `getStats()` path.
 export interface NativeTelemetry {
   videoCodec: string | null;
+  /** Actual encoder used, e.g. "VAAPI H264 Encoder" (hardware) vs "OpenH264"
+   * (software) — from the outbound-rtp `encoderImplementation` stat. */
+  encoderImplementation: string | null;
   videoBytesSent: number | null;
   videoPacketsSent: number | null;
   videoPacketsLost: number | null;
@@ -87,8 +102,8 @@ export interface DesktopCaptureStats {
   framesPushed: number;
   framesDropped: number;
   captureErrors: number;
-  /// Base64 JPEG preview frames emitted via the `preview-frame` event
-  /// (640×360 @ ~15 fps, MIGRATION §9.1).
+  /// Raw I420 preview frames emitted via the `preview-frame` event (no
+  /// image codec involved).
   previewFramesSent: number;
   lastWidth: number;
   lastHeight: number;

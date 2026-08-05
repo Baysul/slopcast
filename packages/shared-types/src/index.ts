@@ -35,7 +35,7 @@ export const WAVE_EPSILON = 0.002;
 
 export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1';
 
-export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['av1', 'vp9', 'h264', 'vp8'];
+export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['h264', 'vp8', 'vp9', 'av1'];
 
 export type ResolutionPreset = '480p' | '720p' | '1080p' | '1440p' | '2160p';
 
@@ -62,10 +62,15 @@ export interface StreamSettings {
 // `sanitize_stream_settings` in apps/desktop/src-tauri/src/settings.rs
 // (same defaults, clamps and whitelists). Update both files together; the
 // Rust `defaults_match_ts_table` conformance test enforces these values.
+//
+// `videoCodec` defaults to h264 because the bundled libwebrtc hardware-
+// encodes only H264 (VA-API/NVENC on Linux, Media Foundation on Windows,
+// VideoToolbox on macOS); the other codecs are software-only and are never
+// picked unless the user explicitly chooses them.
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   fps: 60,
   bitrateLimit: 20_000_000,
-  videoCodec: 'vp8',
+  videoCodec: 'h264',
   resolution: '1080p',
   apiEndpoint: 'http://localhost:3001',
 };

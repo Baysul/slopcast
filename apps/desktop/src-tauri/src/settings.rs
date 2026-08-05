@@ -35,13 +35,14 @@ pub struct StreamSettings {
 /// Defensive copy on every call (mirrors the TS spread of the shared default).
 ///
 /// TS↔Rust sync rule: values must match `DEFAULT_STREAM_SETTINGS` in
-/// `packages/shared-types/src/index.ts`.
+/// `packages/shared-types/src/index.ts` (h264 because the bundled libwebrtc
+/// hardware-encodes only H264 on every platform).
 #[must_use]
 pub fn default_stream_settings() -> StreamSettings {
     StreamSettings {
         fps: 60.0,
         bitrate_limit: 20_000_000.0,
-        video_codec: "vp8".into(),
+        video_codec: "h264".into(),
         resolution: "1080p".into(),
         api_endpoint: "http://localhost:3001".into(),
     }
@@ -199,13 +200,13 @@ mod tests {
 
     // TS↔Rust sync rule: these values must match DEFAULT_STREAM_SETTINGS in
     // packages/shared-types/src/index.ts (fps 60, bitrateLimit 20_000_000,
-    // videoCodec 'vp8', resolution '1080p', apiEndpoint 'http://localhost:3001').
+    // videoCodec 'h264', resolution '1080p', apiEndpoint 'http://localhost:3001').
     #[test]
     fn defaults_match_ts_table() {
         let defaults = default_stream_settings();
         assert_eq!(defaults.fps, 60.0);
         assert_eq!(defaults.bitrate_limit, 20_000_000.0);
-        assert_eq!(defaults.video_codec, "vp8");
+        assert_eq!(defaults.video_codec, "h264");
         assert_eq!(defaults.resolution, "1080p");
         assert_eq!(defaults.api_endpoint, "http://localhost:3001");
     }
@@ -256,9 +257,9 @@ mod tests {
         for valid in VALID_CODECS {
             assert_eq!(sanitize_codec(valid), valid);
         }
-        assert_eq!(sanitize_codec("theora"), "vp8");
-        assert_eq!(sanitize_codec(""), "vp8");
-        assert_eq!(sanitize_codec("VP8"), "vp8");
+        assert_eq!(sanitize_codec("theora"), "h264");
+        assert_eq!(sanitize_codec(""), "h264");
+        assert_eq!(sanitize_codec("VP8"), "h264");
     }
 
     #[test]

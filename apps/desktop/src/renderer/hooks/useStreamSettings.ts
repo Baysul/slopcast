@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { desktopApi } from '../api/desktop';
 import { notify } from '../lib/toast';
 import type { CodecInfo } from '../utils/codecs';
-import { detectSupportedCodecs, probeCodecHardware } from '../utils/codecs';
+import { fromNativeCodecInfo, recommendCodec } from '../utils/codecs';
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 800;
 
@@ -44,12 +44,8 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
   const [streamFps, setStreamFps] = useState(DEFAULT_STREAM_SETTINGS.fps);
   const [bitrateLimit, setBitrateLimit] = useState(DEFAULT_STREAM_SETTINGS.bitrateLimit);
-  const [availableCodecs, setAvailableCodecs] = useState<CodecInfo[]>(() => detectSupportedCodecs());
-  const [videoCodec, setVideoCodec] = useState<VideoCodec>(() => {
-    const top = availableCodecs[0]?.codec ?? 'h264';
-    const saved = DEFAULT_STREAM_SETTINGS.videoCodec;
-    return availableCodecs.some((c) => c.codec === saved) ? saved : top;
-  });
+  const [availableCodecs, setAvailableCodecs] = useState<CodecInfo[]>([]);
+  const [videoCodec, setVideoCodec] = useState<VideoCodec>(DEFAULT_STREAM_SETTINGS.videoCodec);
   const [resolution, setResolution] = useState<ResolutionPreset>(DEFAULT_STREAM_SETTINGS.resolution);
 
   const streamFpsRef = useRef(streamFps);
@@ -79,7 +75,9 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
       if (config.livekitUrl) setLivekitUrl(config.livekitUrl);
 
-      const codecs = await probeCodecHardware(detectSupportedCodecs());
+      // The native encoder stack is the only one that matters; the webview's
+      // WebRTC stack is never used for encoding.
+      const codecs = recommendCodec(fromNativeCodecInfo(await desktopApi.getNativeSupportedCodecs()));
       setAvailableCodecs(codecs);
 
       // Persisted settings take precedence over config-file defaults.

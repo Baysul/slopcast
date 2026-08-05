@@ -1,38 +1,37 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-
+import type { NativeCodecInfo } from '../src/renderer/types/index.ts';
 import {
   type CodecInfo,
   codecOptionSuffix,
-  detectSupportedCodecs,
-  probeCodecHardware,
-  sortByEncodingEfficiency,
-  supportsHardwareEncoding,
+  fromNativeCodecInfo,
+  recommendCodec,
+  sortByCodecPreference,
 } from '../src/renderer/utils/codecs.ts';
 
 function info(codec: CodecInfo['codec'], hardware = false, recommended = false): CodecInfo {
   return { codec, label: codec.toUpperCase(), hardware, recommended };
 }
 
-test('sortByEncodingEfficiency orders av1 > vp9 > h264 > vp8', () => {
-  const sorted = sortByEncodingEfficiency([info('h264'), info('av1'), info('vp8'), info('vp9')]);
+test('sortByCodecPreference orders h264 > vp8 > vp9 > av1', () => {
+  const sorted = sortByCodecPreference([info('av1'), info('h264'), info('vp9'), info('vp8')]);
   assert.deepEqual(
     sorted.map((c) => c.codec),
-    ['av1', 'vp9', 'h264', 'vp8'],
+    ['h264', 'vp8', 'vp9', 'av1'],
   );
 });
 
-test('sortByEncodingEfficiency keeps unknown codecs last', () => {
-  const sorted = sortByEncodingEfficiency([info('vp8'), info('h264')]);
+test('sortByCodecPreference keeps unknown codecs last', () => {
+  const sorted = sortByCodecPreference([info('vp8'), info('h264')]);
   assert.deepEqual(
     sorted.map((c) => c.codec),
     ['h264', 'vp8'],
   );
 });
 
-test('sortByEncodingEfficiency does not mutate its input', () => {
+test('sortByCodecPreference does not mutate its input', () => {
   const input = [info('vp8'), info('av1')];
-  sortByEncodingEfficiency(input);
+  sortByCodecPreference(input);
   assert.deepEqual(
     input.map((c) => c.codec),
     ['vp8', 'av1'],
@@ -42,102 +41,62 @@ test('sortByEncodingEfficiency does not mutate its input', () => {
 test('codecOptionSuffix labels hardware and recommended states', () => {
   assert.equal(codecOptionSuffix(info('vp9', true, true)), 'Hardware - Recommended');
   assert.equal(codecOptionSuffix(info('vp9', true, false)), 'Hardware');
-  assert.equal(codecOptionSuffix(info('vp9', false, false)), 'Software');
+  assert.equal(codecOptionSuffix(info('vp9', false, false)), 'Software (slow)');
+  assert.equal(codecOptionSuffix(info('vp8', false, false)), 'Software');
 });
 
-test('detectSupportedCodecs falls back to h264 when capabilities are unavailable', () => {
-  Object.assign(globalThis, { RTCRtpSender: { getCapabilities: () => null } });
-  const codecs = detectSupportedCodecs();
-  assert.deepEqual(codecs, [{ codec: 'h264', label: 'H.264', hardware: false, recommended: false }]);
-});
-
-test('detectSupportedCodecs maps mime types once per codec family', () => {
-  Object.assign(globalThis, {
-    RTCRtpSender: {
-      getCapabilities: () => ({
-        codecs: [
-          { mimeType: 'video/VP9' },
-          { mimeType: 'video/VP8' },
-          // Duplicate family entries must collapse to one entry.
-          { mimeType: 'video/VP8' },
-          { mimeType: 'video/AV1' },
-          { mimeType: 'audio/opus' },
-        ],
-      }),
-    },
-  });
-  const codecs = detectSupportedCodecs();
+test('fromNativeCodecInfo maps the native stack list and sorts by preference', () => {
+  const native: NativeCodecInfo[] = [
+    { codec: 'h264', label: 'H.264', hardware: true },
+    { codec: 'vp8', label: 'VP8', hardware: false },
+    { codec: 'vp9', label: 'VP9', hardware: false },
+    { codec: 'av1', label: 'AV1', hardware: false },
+  ];
+  const codecs = fromNativeCodecInfo(native);
   assert.deepEqual(
     codecs.map((c) => c.codec),
-    ['av1', 'vp9', 'vp8'],
+    ['h264', 'vp8', 'vp9', 'av1'],
   );
+  assert.ok(codecs.every((c) => !c.recommended));
+  assert.equal(codecs.find((c) => c.codec === 'h264')?.hardware, true);
+  assert.equal(codecs.find((c) => c.codec === 'vp8')?.hardware, false);
 });
 
-test('supportsHardwareEncoding succeeds on the first supported probe', async () => {
-  let probes = 0;
-  Object.assign(globalThis, {
-    VideoEncoder: {
-      isConfigSupported: async () => {
-        probes += 1;
-        return { supported: probes === 1 };
-      },
-    },
-  });
-  assert.equal(await supportsHardwareEncoding('vp8'), true);
-  assert.equal(probes, 1);
+test('fromNativeCodecInfo drops unknown codecs and returns an empty list', () => {
+  const native: NativeCodecInfo[] = [
+    { codec: 'h265', label: 'H.265', hardware: true },
+    { codec: 'theora', label: 'Theora', hardware: false },
+  ];
+  assert.deepEqual(fromNativeCodecInfo(native), []);
+  assert.deepEqual(fromNativeCodecInfo([]), []);
 });
 
-test('supportsHardwareEncoding probes every variant before giving up', async () => {
-  let probes = 0;
-  Object.assign(globalThis, {
-    VideoEncoder: {
-      isConfigSupported: async () => {
-        probes += 1;
-        return { supported: false };
-      },
-    },
-  });
-  // h264 has 3 probe variants.
-  assert.equal(await supportsHardwareEncoding('h264'), false);
-  assert.equal(probes, 3);
+test('recommendCodec hoists the hardware codec first', () => {
+  const input = sortByCodecPreference([
+    { ...info('h264', true) },
+    { ...info('vp8', false) },
+    { ...info('vp9', false) },
+    { ...info('av1', false) },
+  ]);
+  const recommended = recommendCodec(input);
+  assert.equal(recommended[0]?.codec, 'h264');
+  assert.equal(recommended[0]?.recommended, true);
+  assert.ok(recommended.slice(1).every((c) => !c.recommended));
 });
 
-test('supportsHardwareEncoding swallows probe errors and continues', async () => {
-  Object.assign(globalThis, {
-    VideoEncoder: {
-      isConfigSupported: async () => {
-        throw new Error('encoder gone');
-      },
-    },
-  });
-  assert.equal(await supportsHardwareEncoding('av1'), false);
+test('recommendCodec falls back to h264 when nothing is hardware', () => {
+  const input = sortByCodecPreference([info('vp8'), info('vp9'), info('h264'), info('av1')]);
+  const recommended = recommendCodec(input);
+  assert.equal(recommended[0]?.codec, 'h264');
+  assert.equal(recommended[0]?.recommended, true);
 });
 
-test('probeCodecHardware hoists the recommended hardware codec first', async () => {
-  Object.assign(globalThis, {
-    VideoEncoder: { isConfigSupported: async () => ({ supported: true }) },
-  });
-  const input = sortByEncodingEfficiency([info('vp9'), info('h264'), info('av1')]);
-  const probed = await probeCodecHardware(input);
-  // Priority order is av1 > vp9 > h264; with every codec hardware, av1 is
-  // recommended and hoisted to the front.
-  assert.deepEqual(
-    probed.map((c) => c.codec),
-    ['av1', 'vp9', 'h264'],
-  );
-  assert.equal(probed[0]?.recommended, true);
-  assert.ok(probed.slice(1).every((c) => !c.recommended));
+test('recommendCodec leaves a single non-h264 list untouched', () => {
+  const input = [info('vp8')];
+  const recommended = recommendCodec(input);
+  assert.deepEqual(recommended, [{ ...info('vp8'), recommended: false }]);
 });
 
-test('probeCodecHardware leaves order unchanged when nothing is hardware', async () => {
-  Object.assign(globalThis, {
-    VideoEncoder: { isConfigSupported: async () => ({ supported: false }) },
-  });
-  const input = [info('h264'), info('vp8')];
-  const probed = await probeCodecHardware(input);
-  assert.deepEqual(
-    probed.map((c) => c.codec),
-    ['h264', 'vp8'],
-  );
-  assert.ok(probed.every((c) => !c.hardware && !c.recommended));
+test('recommendCodec returns an empty list unchanged', () => {
+  assert.deepEqual(recommendCodec([]), []);
 });

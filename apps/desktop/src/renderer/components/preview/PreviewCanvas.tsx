@@ -1,44 +1,24 @@
 import { useEffect, useRef } from 'react';
 import type { PreviewFrame } from '../../types';
+import { drawI420Frame, parseI420Frame } from '../../utils/yuv';
 
-// Live preview canvas: decodes each base64 JPEG `preview-frame` payload into
-// an ImageBitmap and draws it at full canvas resolution. The canvas CSS sizes
-// the bitmap to the card; 640×360 @ 15 fps is trivial even on WebKitGTK's
-// software canvas path (MIGRATION §9.2).
+// Live preview canvas: decodes each raw I420 `preview-frame` payload and
+// draws it via WebGL2 (Y/U/V planes uploaded as R8 textures, YUV→RGB in the
+// fragment shader, GPU-scaled to the card). No image codec is involved — the
+// preview shows the actual capture planes at the stream's framerate.
 export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const draw = async (): Promise<void> => {
-      try {
-        const bytes = Uint8Array.from(atob(frame.data), (c) => c.charCodeAt(0));
-        const blob = new Blob([bytes], { type: 'image/jpeg' });
-        const bitmap = await createImageBitmap(blob);
-        if (cancelled) {
-          bitmap.close();
-          return;
-        }
-        const canvas = canvasRef.current;
-        const ctx = canvas?.getContext('2d');
-        if (!canvas || !ctx) {
-          bitmap.close();
-          return;
-        }
-        canvas.width = frame.width;
-        canvas.height = frame.height;
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close();
-      } catch (err) {
-        console.warn('[PreviewCanvas] failed to draw preview frame:', err);
-      }
-    };
-
-    void draw();
-    return () => {
-      cancelled = true;
-    };
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    try {
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+      drawI420Frame(canvas, parseI420Frame(frame.data, frame.width, frame.height));
+    } catch (err) {
+      console.warn('[PreviewCanvas] failed to draw preview frame:', err);
+    }
   }, [frame]);
 
   return (

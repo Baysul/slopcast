@@ -50,8 +50,8 @@ test('non-numeric and non-finite numbers fall back', () => {
 });
 
 test('unknown codec and resolution strings fall back', () => {
-  assert.equal(sanitizeStreamSettings({ videoCodec: 'theora' }).videoCodec, 'vp8');
-  assert.equal(sanitizeStreamSettings({ videoCodec: 'H264' }).videoCodec, 'vp8');
+  assert.equal(sanitizeStreamSettings({ videoCodec: 'theora' }).videoCodec, 'h264');
+  assert.equal(sanitizeStreamSettings({ videoCodec: 'H264' }).videoCodec, 'h264');
   assert.equal(sanitizeStreamSettings({ resolution: '4k' }).resolution, '1080p');
   assert.equal(sanitizeStreamSettings({ resolution: '720P' }).resolution, '1080p');
 });

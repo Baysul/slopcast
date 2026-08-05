@@ -92,9 +92,9 @@ impl From<&native_rust::CaptureContext> for CaptureContextDto {
     }
 }
 
-/// One `preview-frame` event payload: a base64 JPEG frame (640×360 @ ~15 fps)
-/// rendered by the renderer's preview canvas while capture is active
-/// (MIGRATION §9.1).
+/// One `preview-frame` event payload: a base64 raw I420 frame (640×360 at
+/// the stream framerate) rendered by the renderer's preview canvas while
+/// capture is active (MIGRATION §9.1).
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewFrameDto {

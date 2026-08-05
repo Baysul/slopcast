@@ -17,6 +17,7 @@ import type {
   DesktopCaptureConfig,
   DesktopCaptureStats,
   GpuInfo,
+  NativeCodecInfo,
   NativeTelemetry,
   PlatformInfo,
   PreviewFrame,
@@ -85,11 +86,17 @@ export const desktopApi = {
     invokeOr('save_stream_settings', { settings }, false),
   getOnboardingCompleted: (): Promise<boolean> => invokeOr('get_onboarding_completed', undefined, false),
   setOnboardingCompleted: (): Promise<boolean> => invokeOr('set_onboarding_completed', undefined, false),
-  connectNativeRoom: (url: string, token: string): Promise<boolean> => invokeOk('connect_native_room', { url, token }),
+  connectNativeRoom: (url: string, token: string): Promise<boolean> =>
+    invokeOk('connect_native_room', { args: { url, token } }),
   disconnectNativeRoom: (): Promise<boolean> => invokeOk('disconnect_native_room', undefined),
   isNativeRoomConnected: (): Promise<boolean> => invokeOr('is_native_room_connected', undefined, false),
   startNativeCapture: (config: DesktopCaptureConfig): Promise<CaptureStartResult> =>
     invokeOr('start_native_capture', { config }, { ok: false, nodeId: null, videoEnabled: false }),
+  // Headless test-pattern capture (e2e): synthetic BGRA frames feed the exact
+  // same publish path as the portal capture.
+  startSyntheticCapture: (config: DesktopCaptureConfig): Promise<CaptureStartResult> =>
+    invokeOr('start_synthetic_capture', { config }, { ok: false, nodeId: null, videoEnabled: false }),
+  getNativeSupportedCodecs: (): Promise<NativeCodecInfo[]> => invokeOr('get_native_supported_codecs', undefined, []),
   updateNativeVideo: (config: DesktopCaptureConfig): Promise<boolean> =>
     invokeOr('update_native_video', { config }, false),
   stopNativeCapture: (): Promise<boolean> => invokeOr('stop_native_capture', undefined, false),
