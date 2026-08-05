@@ -18,6 +18,12 @@ mod e2e;
 
 use tauri::Manager;
 
+// Build-script hook: `build.rs` rewrites this stamp whenever any renderer
+// asset changes, so this `include_bytes!` dependency recompiles the crate and
+// forces `generate_context!` to re-embed the frontend (otherwise new hashed
+// bundles leave a stale embed behind -> blank window).
+const _FRONTEND_STAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/slopcast-frontend-stamp"));
+
 /// Builds and runs the Tauri application: plugins, managed state, the audio
 /// callback wiring, the command surface and the lifecycle cleanup that
 /// mirrors Electron's `before-quit` handler.
@@ -27,7 +33,14 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_log::Builder::new().build());
+        // Info level: the plugin's default (Trace) forwards every
+        // `log::debug!` from libwebrtc's ICE/connection threads to the
+        // console, flooding it with per-connection STUN spam while streaming.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .build(),
+        );
 
     #[cfg(feature = "e2e")]
     let builder = e2e::with_plugins(builder);
@@ -35,10 +48,12 @@ pub fn run() {
     let app = builder
         .setup(|app| {
             // Arm libwebrtc's bundled PipeWire dlopen shims before any
-            // native-rust PipeWire call: the hidden-weak `pw_*` shims capture
-            // pipewire-rs's references at link time and jump through NULL
-            // until `InitializePipewire` dlopens libpipewire (SIGSEGV observed
-            // at startup when unarmed).
+            // native-rust PipeWire call. Our code no longer pulls them (the
+            // in-house engine replaced `DesktopCapturer`), but the peer
+            // connection factory keeps libwebrtc's PipeWire video capture
+            // module linked, which drags the hidden-weak `pw_*` shims in;
+            // they jump through NULL until `InitializePipewire` arms them
+            // (SIGSEGV at startup when unarmed).
             native_livekit::arm_pipewire_shims();
             native_rust::ensure_pipewire_init();
             app.manage(context::CaptureContextCache::default());
@@ -70,7 +85,9 @@ pub fn run() {
             room::is_native_room_connected,
             room::get_spectator_count,
             room::get_native_telemetry,
+            room::get_native_supported_codecs,
             capture::start_native_capture,
+            capture::start_synthetic_capture,
             capture::update_native_video,
             capture::stop_native_capture,
             capture::stop_video_capture,
