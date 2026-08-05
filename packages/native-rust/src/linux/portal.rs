@@ -22,7 +22,7 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{ObjectPath, OwnedFd as ZvOwnedFd, OwnedObjectPath, OwnedValue, Value};
@@ -56,25 +56,32 @@ type Options = HashMap<&'static str, Value<'static>>;
 
 /// What `Start` returned: a negotiated stream, or the user cancelling the
 /// picker (portal response code 1 — surfaced as cancellation, not an error).
-pub(crate) enum StartOutcome {
+pub enum StartOutcome {
+    /// The portal negotiated a capture stream.
     Stream(PortalStream),
+    /// The user dismissed the picker without selecting a source.
     Cancelled,
 }
 
 /// The single portal stream `Start` negotiated (mirrors libwebrtc: only the
 /// first `streams` tuple is consumed; node id is the targeting key, the
 /// `pipewire-serial` alternative is a documented follow-up).
-pub(crate) struct PortalStream {
+pub struct PortalStream {
+    /// The `PipeWire` node id of the screencast stream.
     pub node_id: u32,
+    /// `source_type` prop (monitor/window/region) when the portal reported it.
     pub source_type: Option<u32>,
+    /// Source size `(width, height)` when the portal reported it.
     pub size: Option<(i32, i32)>,
+    /// Source position `(x, y)` when the portal reported it.
     pub position: Option<(i32, i32)>,
+    /// Persist/restore token when the portal emitted one (v4+; unused for now).
     pub restore_token: Option<String>,
 }
 
 /// An open `ScreenCast` portal session. All phases must run on one thread
 /// (the capture thread in the final wiring); `Drop` closes the session.
-pub(crate) struct ScreenCastPortal {
+pub struct ScreenCastPortal {
     connection: Connection,
     portal: Proxy<'static>,
     session_handle: Option<String>,
@@ -158,7 +165,12 @@ impl ScreenCastPortal {
     /// Opens a portal connection, creates the `ScreenCast` session, and
     /// subscribes to `Session::Closed`. On error the session (if created) is
     /// closed by `Drop`.
-    pub(crate) fn connect(connection: Connection) -> Result<Self, String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable reason when the session bus or the portal
+    /// daemon rejects the handshake.
+    pub fn connect(connection: Connection) -> Result<Self, String> {
         let portal = Proxy::new_owned(
             connection.clone(),
             PORTAL_BUS_NAME,
@@ -254,7 +266,11 @@ impl ScreenCastPortal {
     /// content (monitor|window), `multiple` = false, `cursor_mode` = embedded
     /// only when advertised in `AvailableCursorModes`, `persist_mode` = 0 only
     /// when the portal `version` is ≥ 4.
-    pub(crate) fn select_sources(&self) -> Result<(), String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable reason when the portal rejects the phase.
+    pub fn select_sources(&self) -> Result<(), String> {
         let session = self.session_path()?;
         let request_token = next_token("slopcast");
         let request_path = portal_handle_path(&self.connection, &request_token)?;
@@ -295,8 +311,19 @@ impl ScreenCastPortal {
     }
 
     /// `Start` with an empty `parent_window` (Wayland has no x11 id); blocks
-    /// until the user answers the picker (or `PICKER_TIMEOUT` elapses).
-    pub(crate) fn start(&self) -> Result<StartOutcome, String> {
+    /// until the user answers the picker (or `PICKER_TIMEOUT` elapses, or —
+    /// when `stop` is provided — the caller's stop flag flips). The portal-wait
+    /// thread owns the real bus wait; this thread polls the result channel in
+    /// short slices so the stop flag interrupts the picker wait without killing
+    /// the parked thread (it wakes on its own when the portal answers or the
+    /// process dies).
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable reason when the picker is aborted via `stop`,
+    /// the portal rejects the phase, or `PICKER_TIMEOUT` elapses while the user
+    /// ignores the picker.
+    pub fn start(&self, stop: Option<&AtomicBool>) -> Result<StartOutcome, String> {
         let session = self.session_path()?;
         let request_token = next_token("slopcast");
         let request_path = portal_handle_path(&self.connection, &request_token)?;
@@ -308,20 +335,40 @@ impl ScreenCastPortal {
             .call("Start", &(session.as_ref(), "", &options))
             .map_err(|e| format!("Start call: {e}"))?;
 
-        let (code, results) = rx
-            .recv_timeout(PICKER_TIMEOUT)
-            .map_err(|e| format!("Start: {e}"))??;
-        match code {
-            0 => parse_streams(&results).map(StartOutcome::Stream),
-            1 => Ok(StartOutcome::Cancelled),
-            code => Err(portal_code_error("Start", code)),
+        let deadline = Instant::now() + PICKER_TIMEOUT;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(body) => {
+                    let (code, results) = body.map_err(|e| format!("Start: {e}"))?;
+                    return match code {
+                        0 => parse_streams(&results).map(StartOutcome::Stream),
+                        1 => Ok(StartOutcome::Cancelled),
+                        code => Err(portal_code_error("Start", code)),
+                    };
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if stop.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                        return Err("Start: aborted by stop".into());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("Start: picker timed out".into());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Start: response channel disconnected".into());
+                }
+            }
         }
     }
 
     /// Returns the isolated `PipeWire` remote fd for this session, where only
     /// the screencast node is visible. The reply carries an `h`; zbus resolves
     /// the fd index against the message's fd list.
-    pub(crate) fn open_pipewire_remote(&self) -> Result<OwnedFd, String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable reason when the portal rejects the phase.
+    pub fn open_pipewire_remote(&self) -> Result<OwnedFd, String> {
         let session = self.session_path()?;
         let options: Options = HashMap::new();
         let (fd,): (ZvOwnedFd,) = self
@@ -414,7 +461,7 @@ mod tests {
         portal
             .select_sources()
             .unwrap_or_else(|e| panic!("select sources: {e}"));
-        match portal.start().unwrap_or_else(|e| panic!("start: {e}")) {
+        match portal.start(None).unwrap_or_else(|e| panic!("start: {e}")) {
             StartOutcome::Stream(stream) => {
                 eprintln!(
                     "[portal-probe] node_id={} source_type={:?} size={:?} position={:?} restore_token={:?}",

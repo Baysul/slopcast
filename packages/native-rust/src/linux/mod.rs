@@ -1,24 +1,12 @@
 mod apps;
 mod capture;
-#[allow(
-    dead_code,
-    reason = "Phase C lands standalone; consumed by the Phase B/D capture wiring"
-)]
 mod egl;
 mod graph;
 mod kwin;
 mod metering;
 mod mpris;
-#[allow(
-    dead_code,
-    reason = "Phase A lands standalone; consumed by the Phase D capture wiring"
-)]
 mod portal;
 mod procinfo;
-#[allow(
-    dead_code,
-    reason = "Phase B lands standalone; consumed by the Phase D capture wiring"
-)]
 mod pw_video;
 mod screencast;
 
@@ -30,6 +18,11 @@ pub(crate) use metering::{
     clear_wave_callback, set_wave_callback, start_audio_metering, stop_audio_metering,
 };
 pub(crate) use screencast::{get_capture_context, resolve_audio_app_for_captured_window};
+
+// The in-house capture engine (Phases A–C) is consumed by native-livekit's
+// desktop capture pipeline; the crate root re-exports these.
+pub use portal::{PortalStream, ScreenCastPortal, StartOutcome};
+pub use pw_video::{PwVideoCapture, VideoFrameCallback};
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -47,11 +40,12 @@ struct PwCtx {
 
 /// Runs the global `PipeWire` library init exactly once on the main thread,
 /// before the event loop serves IPC. libwebrtc's statically-linked `pw_*`
-/// dlopen shims capture pipewire-rs's references in the same binary; the Tauri
-/// backend arms them (`native_livekit::arm_pipewire_shims`) before calling this
-/// so `pw_init` reaches the real libpipewire. Completing the once here keeps
-/// later worker-thread calls (the renderer polls `getAudioApps` every 3s) on
-/// the fast path.
+/// dlopen shims (pulled by its `PipeWire` video capture module, not by our
+/// code) capture pipewire-rs's references in the same binary; the Tauri
+/// backend arms them (`native_livekit::arm_pipewire_shims`) before calling
+/// this so `pw_init` reaches the real libpipewire. Completing the once here
+/// keeps later worker-thread calls (the renderer polls `getAudioApps` every
+/// 3s) on the fast path.
 pub(crate) fn ensure_pipewire_init() {
     pipewire::init();
 }

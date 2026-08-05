@@ -374,7 +374,7 @@ fn open_gbm_device() -> Result<Option<GbmDevice>, String> {
     let Some(node) = nodes.first() else {
         return Ok(None);
     };
-    let path = format!("/dev/dri/{node}");
+    let path = format!("/dev/dri/{node}\0");
     let path =
         CStr::from_bytes_with_nul(path.as_bytes()).map_err(|_| "invalid render node path")?;
     // SAFETY: `O_RDWR` open of a render node; the mode argument is omitted
@@ -939,6 +939,14 @@ impl Drop for EglDmaBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::raw::c_float;
+
+    type CreateBoFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32) -> *mut c_void;
+    type DestroyBoFn = unsafe extern "C" fn(*mut c_void);
+    type GetFdFn = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type GetStrideFn = unsafe extern "C" fn(*mut c_void) -> u32;
+    type ClearColorFn = unsafe extern "C" fn(c_float, c_float, c_float, c_float);
+    type ClearFn = unsafe extern "C" fn(u32);
 
     #[test]
     fn mod_invalid_matches_drm_fourcc_header() {
@@ -1100,5 +1108,207 @@ mod tests {
             fourcc_to_egl_int(DRM_FORMAT_ABGR8888).cast_unsigned(),
             DRM_FORMAT_ABGR8888
         );
+    }
+
+    /// Manual probe (gate 3b of SCREEN-CAPTURE-INHOUSE.md §10): imports a
+    /// self-made linear ARGB8888 DMA-BUF filled with a known red pixel and
+    /// runs it through the exact EGL import + `glReadPixels` path used by
+    /// the capture engine, asserting the readback byte order. A swap here
+    /// would silently tint every captured frame (blue/red cast). Run with:
+    ///
+    /// ```sh
+    /// cargo test -p native-rust --release -- --ignored dmabuf_readback_probe --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual probe: requires a live EGL/Wayland session"]
+    fn dmabuf_readback_probe() {
+        const W: u32 = 64;
+        const H: u32 = 64;
+        const GBM_FORMAT_ARGB8888: u32 = 0x3432_5241;
+        const GBM_BO_USE_LINEAR: u32 = 1 << 4;
+
+        // SAFETY: `dlopen` is thread-safe; the handle is never closed.
+        let gbm =
+            unsafe { libc::dlopen(c"libgbm.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+        assert!(!gbm.is_null(), "dlopen libgbm.so.1");
+        // SAFETY: the resolved symbols are the documented libgbm entry points.
+        let (create_bo, destroy_bo, get_fd, get_stride) = unsafe {
+            (
+                dlsym_fn::<CreateBoFn>(gbm, c"gbm_bo_create")
+                    .unwrap_or_else(|| panic!("gbm_bo_create")),
+                dlsym_fn::<DestroyBoFn>(gbm, c"gbm_bo_destroy")
+                    .unwrap_or_else(|| panic!("gbm_bo_destroy")),
+                dlsym_fn::<GetFdFn>(gbm, c"gbm_bo_get_fd")
+                    .unwrap_or_else(|| panic!("gbm_bo_get_fd")),
+                dlsym_fn::<GetStrideFn>(gbm, c"gbm_bo_get_stride")
+                    .unwrap_or_else(|| panic!("gbm_bo_get_stride")),
+            )
+        };
+        // SAFETY: `dlopen` is thread-safe; the handle is never closed.
+        let gl_lib =
+            unsafe { libc::dlopen(c"libGL.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+        assert!(!gl_lib.is_null(), "dlopen libGL.so.1");
+        // SAFETY: glXGetProcAddressARB is the standard GL extension resolver.
+        let glx = unsafe { dlsym_fn::<ResolverFn>(gl_lib, c"glXGetProcAddressARB") }
+            .unwrap_or_else(|| panic!("glXGetProcAddressARB"));
+        // SAFETY: the resolved symbols are core GL entry points.
+        let (gl_clear_color, gl_clear) = unsafe {
+            (
+                resolve_required::<ClearColorFn>(glx, c"glClearColor")
+                    .unwrap_or_else(|e| panic!("glClearColor: {e}")),
+                resolve_required::<ClearFn>(glx, c"glClear")
+                    .unwrap_or_else(|e| panic!("glClear: {e}")),
+            )
+        };
+
+        let egl = EglDmaBuf::new().unwrap_or_else(|e| panic!("EglDmaBuf::new: {e}"));
+        let Some(gbm_device) = open_gbm_device().unwrap_or_else(|e| panic!("open_gbm_device: {e}"))
+        else {
+            panic!("no GBM render node");
+        };
+        // SAFETY: `gbm_device.device` is a live gbm_device; a linear buffer
+        // is the simplest import target.
+        let bo = unsafe {
+            create_bo(
+                gbm_device.device,
+                W,
+                H,
+                GBM_FORMAT_ARGB8888,
+                GBM_BO_USE_LINEAR,
+            )
+        };
+        assert!(!bo.is_null(), "gbm_bo_create failed");
+        // SAFETY: `gbm_bo_get_fd` returns a live fd owned by the caller.
+        let fd = unsafe { get_fd(bo) };
+        assert!(fd >= 0, "gbm_bo_get_fd failed");
+        // SAFETY: `bo` is a live gbm buffer created above.
+        let stride = unsafe { get_stride(bo) };
+        assert_eq!(stride, W * 4, "linear stride must equal width * 4");
+
+        // Fill the buffer through the GPU itself: import it, attach it to an
+        // FBO and clear to red — the same driver path KWin uses to write
+        // screencast buffers, so CPU staging quirks cannot distort the test.
+        // SAFETY: the probe's EglDmaBuf owns the display/context; the bo is a
+        // live linear ARGB8888 buffer of W x H.
+        let (texture, fbo) =
+            unsafe { fill_red_via_gl(&egl, fd, stride, W, H, gl_clear_color, gl_clear) };
+
+        // Now run the production readback path on the same buffer.
+        let mut out = vec![0u8; (W * H * 4) as usize];
+        let planes = [DmabufPlane {
+            fd,
+            offset: 0,
+            stride: i32::try_from(stride).unwrap_or(0),
+        }];
+        egl.read_dmabuf(
+            W,
+            H,
+            VideoFormat::BGRA,
+            &planes,
+            DRM_FORMAT_MOD_INVALID,
+            &mut out,
+        )
+        .unwrap_or_else(|e| panic!("read_dmabuf: {e}"));
+
+        for (label, i) in [
+            ("p0", 0usize),
+            ("p1", 4),
+            ("mid", ((H / 2) * stride + (W / 2) * 4) as usize),
+            ("last", (W * H * 4 - 4) as usize),
+        ] {
+            eprintln!(
+                "[probe] {label}: {:02X} {:02X} {:02X} {:02X}",
+                out[i],
+                out[i + 1],
+                out[i + 2],
+                out[i + 3]
+            );
+        }
+
+        // SAFETY: the GL names and the bo are ours to release.
+        unsafe {
+            (egl.gl.delete_framebuffers)(1, &raw const fbo);
+            (egl.gl.delete_textures)(1, &raw const texture);
+            destroy_bo(bo);
+        }
+
+        let actual = [out[0], out[1], out[2], out[3]];
+        let expected = [0x00u8, 0x00, 0xFF, 0xFF];
+        eprintln!(
+            "[probe] red dma-buf readback: first pixel = {actual:02X?}, expected {expected:02X?}"
+        );
+        assert_eq!(actual, expected, "EGL readback channel order is swapped");
+    }
+
+    /// Imports `fd` as an EGL image, attaches it to a texture + FBO and
+    /// clears it to opaque red via `glClear` (the same GPU write path
+    /// `KWin`
+    /// uses for screencast buffers). Returns the created GL names.
+    ///
+    /// # Safety
+    ///
+    /// `egl` must own a live display/context on the current thread; `fd`
+    /// must be a live, linear `ARGB8888` dma-buf of `width` x `height`
+    /// with the given `stride`. The image is destroyed before returning.
+    unsafe fn fill_red_via_gl(
+        egl: &EglDmaBuf,
+        fd: c_int,
+        stride: u32,
+        width: u32,
+        height: u32,
+        gl_clear_color: ClearColorFn,
+        gl_clear: ClearFn,
+    ) -> (u32, u32) {
+        // SAFETY: the caller guarantees `egl` owns a live display/context on
+        // this thread and `fd` is a live linear `ARGB8888` dma-buf of
+        // `width` x `height`; the image is destroyed on every exit path.
+        unsafe {
+            const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+
+            (egl.egl.make_current)(egl.display, ptr::null_mut(), ptr::null_mut(), egl.context);
+            let attrs = build_image_attrs(
+                i32::try_from(width).unwrap_or(0),
+                i32::try_from(height).unwrap_or(0),
+                DRM_FORMAT_ARGB8888,
+                &[DmabufPlane {
+                    fd,
+                    offset: 0,
+                    stride: i32::try_from(stride).unwrap_or(0),
+                }],
+                DRM_FORMAT_MOD_INVALID,
+            )
+            .unwrap_or_else(|e| panic!("build_image_attrs: {e}"));
+            let image = (egl.egl.create_image)(
+                egl.display,
+                ptr::null_mut(),
+                EGL_LINUX_DMA_BUF_EXT,
+                ptr::null_mut(),
+                attrs.as_ptr(),
+            );
+            assert!(!image.is_null(), "eglCreateImageKHR failed");
+
+            let (mut texture, mut fbo) = (0u32, 0u32);
+            (egl.gl.gen_textures)(1, &raw mut texture);
+            (egl.gl.bind_texture)(GL_TEXTURE_2D, texture);
+            (egl.egl.image_target_texture2d)(GL_TEXTURE_2D, image);
+            (egl.gl.gen_framebuffers)(1, &raw mut fbo);
+            (egl.gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo);
+            (egl.gl.framebuffer_texture2d)(
+                GL_FRAMEBUFFER,
+                GL_COLOR_ATTACHMENT0,
+                GL_TEXTURE_2D,
+                texture,
+                0,
+            );
+            assert_eq!(
+                (egl.gl.check_framebuffer_status)(GL_FRAMEBUFFER),
+                GL_FRAMEBUFFER_COMPLETE,
+                "framebuffer incomplete"
+            );
+            gl_clear_color(1.0, 0.0, 0.0, 1.0);
+            gl_clear(GL_COLOR_BUFFER_BIT);
+            (egl.egl.destroy_image)(egl.display, image);
+            (texture, fbo)
+        }
     }
 }

@@ -20,7 +20,7 @@ use std::time::Duration;
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureConfig {
     pub width: u32,
@@ -34,6 +34,11 @@ pub struct CaptureConfig {
 #[serde(rename_all = "camelCase")]
 pub struct NativeTelemetry {
     pub video_codec: Option<String>,
+    /// The actual encoder libwebrtc used for the video track ("VAAPI H264
+    /// Encoder", "`OpenH264`", "NVENC…", `Media Foundation` "…", "libvpx", …).
+    /// Filled from the `encoderImplementation` outbound-rtp stat; `None`
+    /// while the value is not yet reported by the stack.
+    pub encoder_implementation: Option<String>,
     pub video_bytes_sent: Option<f64>,
     pub video_packets_sent: Option<f64>,
     pub video_packets_lost: Option<f64>,
@@ -48,12 +53,57 @@ pub struct NativeTelemetry {
     pub timestamp_ms: Option<f64>,
 }
 
+/// A codec the bundled libwebrtc can actually encode with, as exposed to the
+/// renderer's codec picker. The picker must NEVER read the webview's
+/// `RTCRtpSender.getCapabilities` — that stack is not used for encoding.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeCodecInfo {
+    pub codec: String,
+    pub label: String,
+    /// True when the bundled libwebrtc ships a hardware encoder factory for
+    /// this codec on this platform (VA-API/NVENC on Linux, `Media Foundation`
+    /// on Windows, `VideoToolbox` on macOS); VP8/VP9/AV1 are software-only.
+    pub hardware: bool,
+}
+
+/// Encoder support baked into the bundled libwebrtc build
+/// (`webrtc-sys` prebuilts: `rtc_use_h264`/`rtc_use_h265` +
+/// `rtc_libvpx_build_vp9` + `enable_libaom` on every platform). The native
+/// stack hardware-encodes only H264 (H265 on some platforms), so H264 is the
+/// only codec that can ever use a hardware encoder.
+pub const NATIVE_VIDEO_CODECS: [(&str, &str); 4] = [
+    ("h264", "H.264"),
+    ("vp8", "VP8"),
+    ("vp9", "VP9"),
+    ("av1", "AV1"),
+];
+
+/// The single codec with a hardware encoder factory in the bundled libwebrtc
+/// build (VA-API + NVENC on Linux, `Media Foundation` on Windows,
+/// `VideoToolbox` on macOS).
+pub const NATIVE_HW_CODEC: &str = "h264";
+
+/// Returns the codecs the native stack can encode with (build-time constant,
+/// verified against the bundled libwebrtc in `get_native_supported_codecs`).
+#[must_use]
+pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
+    NATIVE_VIDEO_CODECS
+        .iter()
+        .map(|(codec, label)| NativeCodecInfo {
+            codec: (*codec).to_string(),
+            label: (*label).to_string(),
+            hardware: *codec == NATIVE_HW_CODEC,
+        })
+        .collect()
+}
+
 /// Per-stage counters for the desktop capture pipeline, reset on every
 /// `startDesktopCapture`. `framesDequeued` counts frames received from the
 /// capturer; `framesPushed` counts those converted to I420 and delivered to
 /// the video track; `framesDropped` counts frames skipped while no track was
-/// active; `previewFramesSent` counts base64 JPEG preview frames emitted via
-/// the preview callback (640×360 @ ~15 fps, MIGRATION §9.1); `captureErrors`
+/// active; `previewFramesSent` counts raw I420 preview frames emitted via
+/// the preview callback (640×360 at the stream framerate); `captureErrors`
 /// counts capturer-reported failures.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,10 +150,13 @@ static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
 
 // The bundled libwebrtc statically links hidden-weak `pw_*` dlopen shims
-// (`modules::portal::*`, from `pipewire_stubs.cc`) that capture pipewire-rs's
-// direct `pw_init` reference in the same binary at link time. The shims
-// tail-jump through static pointers that stay NULL until `InitializePipewire`
-// dlopens `libpipewire` and arms them — any earlier `pw_init` call SIGSEGVs.
+// (`pipewire_stubs.o`, `modules::portal::*`). They are NOT pulled by our
+// code anymore (the in-house engine replaced `DesktopCapturer`), but the
+// peer connection factory keeps libwebrtc's `PipeWire` *video capture module*
+// (`video_capture_pipewire.o`) in the link, and its `pw_*` references still
+// drag the shims in. The shims tail-jump through static pointers that stay
+// NULL until `InitializePipewire` dlopens `libpipewire` and arms them — any
+// earlier `pw_init` call SIGSEGVs, so the app must arm them at startup.
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     #[link_name = "_ZN14modules_portal18InitializePipewireEPv"]
@@ -172,7 +225,7 @@ pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
 
             rt.block_on(async {
                 if let Err(e) = run_worker(url, token, pcm_rx, cmd_rx, stop_rx).await {
-                    eprintln!("[livekit] worker error: {e}");
+                    log::error!("[livekit] worker error: {e}");
                 }
             });
         })
@@ -304,6 +357,18 @@ pub fn stop_desktop_capture() -> bool {
     desktop_capture::stop()
 }
 
+/// Starts the synthetic test-pattern capture used by the headless e2e and
+/// probes: generated BGRA frames feed the exact same conversion and publish
+/// path as the portal engine, with no picker and no Wayland requirement.
+///
+/// # Errors
+///
+/// Returns an error if a capture session is already active or the generator
+/// thread cannot be spawned.
+pub fn start_synthetic_capture(config: &CaptureConfig) -> Result<bool, String> {
+    desktop_capture::start_synthetic_capture(config)
+}
+
 /// Returns `true` while the capturer is running (the portal picker may still
 /// be awaiting a selection).
 #[must_use]
@@ -318,8 +383,8 @@ pub fn get_desktop_capture_stats() -> DesktopCaptureStats {
 }
 
 /// Registers the preview-frame callback: the capture thread invokes it with
-/// base64 JPEG frames `(width, height, data, pts_us)` at ~15 fps while a
-/// capture session is active (MIGRATION §9.1). The engine stays
+/// base64 raw I420 planes `(width, height, data, pts_us)` at the stream
+/// framerate while a capture session is active. The engine stays
 /// Tauri-unaware — the Tauri backend wires this callback to its
 /// `preview-frame` event. Replaces any previously registered callback.
 pub fn set_preview_callback(callback: Box<dyn Fn(u32, u32, String, i64) + Send + Sync>) {
@@ -396,6 +461,10 @@ fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
                     "video" => {
                         video_ssrc = Some(outbound.stream.ssrc);
                         telemetry.video_codec = mime.cloned();
+                        if !outbound.outbound.encoder_implementation.is_empty() {
+                            telemetry.encoder_implementation =
+                                Some(outbound.outbound.encoder_implementation.clone());
+                        }
                         telemetry.video_bytes_sent = Some(outbound.sent.bytes_sent as f64);
                         telemetry.video_packets_sent = Some(outbound.sent.packets_sent as f64);
                         telemetry.video_frames_sent =
@@ -456,7 +525,7 @@ async fn run_worker(
         )
         .await?;
 
-    eprintln!("[livekit] audio track published");
+    log::info!("[livekit] audio track published");
     ROOM_CONNECTED.store(true, Ordering::SeqCst);
 
     let samples_per_10ms = (SAMPLE_RATE / 100 * CHANNELS) as usize;
@@ -516,7 +585,7 @@ async fn run_worker(
                         samples_per_channel: SAMPLE_RATE / 100,
                     };
                     if let Err(e) = audio.capture_frame(&frame).await {
-                        eprintln!("[livekit] audio capture_frame error: {e}");
+                        log::error!("[livekit] audio capture_frame error: {e}");
                     }
                 }
             }
@@ -570,18 +639,27 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
         )
         .await
     {
-        Ok(_) => eprintln!("[livekit] video track published"),
+        Ok(_) => log::info!("[livekit] video track published (codec={config:?})"),
         Err(e) => {
-            eprintln!("[livekit] video track publish failed: {e}");
+            log::error!(
+                "[livekit] video track publish failed (codec={:?}, width={}, height={}, fps={}, bitrate={:?}): {e}",
+                config.video_codec,
+                config.width,
+                config.height,
+                config.fps,
+                config.max_bitrate,
+            );
             return;
         }
     }
 
+    desktop_capture::set_scale_target(config.width, config.height, config.fps);
     VIDEO_SOURCE.store(Some(Arc::new(source)));
     VIDEO_ACTIVE.store(true, Ordering::SeqCst);
 }
 
 async fn handle_stop_video(room: &Room) {
+    desktop_capture::clear_scale_target();
     VIDEO_SOURCE.store(None);
     VIDEO_ACTIVE.store(false, Ordering::SeqCst);
 
@@ -618,7 +696,14 @@ mod tests {
         })
     }
 
-    fn outbound_stats(kind: &str, ssrc: u32, codec_id: &str, bytes: u64, frames: u32) -> RtcStats {
+    fn outbound_stats(
+        kind: &str,
+        ssrc: u32,
+        codec_id: &str,
+        bytes: u64,
+        frames: u32,
+        encoder_impl: &str,
+    ) -> RtcStats {
         RtcStats::OutboundRtp(OutboundRtpStats {
             rtc: d::RtcStats {
                 id: format!("out-{kind}"),
@@ -638,6 +723,7 @@ mod tests {
                 frames_sent: frames,
                 frame_width: 1920,
                 frame_height: 1080,
+                encoder_implementation: encoder_impl.into(),
                 ..Default::default()
             },
         })
@@ -669,12 +755,13 @@ mod tests {
         let stats = [
             codec_stats("codec-v", "video/VP8"),
             codec_stats("codec-a", "audio/OPUS"),
-            outbound_stats("video", 11, "codec-v", 2_000_000, 1200),
-            outbound_stats("audio", 22, "codec-a", 400_000, 0),
+            outbound_stats("video", 11, "codec-v", 2_000_000, 1200, "libvpx"),
+            outbound_stats("audio", 22, "codec-a", 400_000, 0, ""),
         ];
         let mut t = NativeTelemetry::default();
         fold_stats(&mut t, &stats);
         assert_eq!(t.video_codec.as_deref(), Some("video/VP8"));
+        assert_eq!(t.encoder_implementation.as_deref(), Some("libvpx"));
         assert_eq!(t.video_bytes_sent, Some(2_000_000.0));
         assert_eq!(t.video_packets_sent, Some(100.0));
         assert_eq!(t.video_frames_sent, Some(1200.0));
@@ -687,10 +774,56 @@ mod tests {
     }
 
     #[test]
+    fn fold_stats_reports_the_actual_hardware_encoder_implementation() {
+        // "VAAPI H264 Encoder" proves the VA-API hardware path was taken
+        // instead of OpenH264; empty strings stay None (stack never reported).
+        let stats = [outbound_stats(
+            "video",
+            11,
+            "codec-v",
+            2_000_000,
+            1200,
+            "VAAPI H264 Encoder",
+        )];
+        let mut t = NativeTelemetry::default();
+        fold_stats(&mut t, &stats);
+        assert_eq!(
+            t.encoder_implementation.as_deref(),
+            Some("VAAPI H264 Encoder")
+        );
+
+        let stats = [outbound_stats("video", 11, "codec-v", 0, 0, "")];
+        let mut t = NativeTelemetry::default();
+        fold_stats(&mut t, &stats);
+        assert_eq!(t.encoder_implementation, None);
+    }
+
+    #[test]
+    fn native_codec_list_marks_only_h264_as_hardware() {
+        let codecs = get_native_supported_codecs();
+        assert_eq!(codecs.len(), 4);
+        let h264 = codecs
+            .iter()
+            .find(|c| c.codec == "h264")
+            .unwrap_or_else(|| {
+                panic!("h264 must be in the native codec list");
+            });
+        assert!(h264.hardware);
+        for codec in codecs.iter().filter(|c| c.codec != "h264") {
+            assert!(!codec.hardware, "{} must be software", codec.codec);
+        }
+        // The picker contract: every codec has a non-empty display label.
+        for codec in &codecs {
+            assert!(!codec.label.is_empty());
+            assert!(!codec.codec.is_empty());
+        }
+    }
+
+    #[test]
     fn fold_stats_attributes_packets_lost_by_ssrc_and_reports_rtt() {
         let stats = [
-            outbound_stats("video", 11, "codec-v", 0, 0),
-            outbound_stats("audio", 22, "codec-a", 0, 0),
+            outbound_stats("video", 11, "codec-v", 0, 0, ""),
+            outbound_stats("audio", 22, "codec-a", 0, 0, ""),
             remote_inbound_stats(11, -3, 0.05),
             remote_inbound_stats(22, 7, 0.0),
         ];

@@ -31,7 +31,7 @@ use std::time::Duration;
 /// BGRA before the callback fires (port of `ConvertRGBxToBGRx`). `pts_us` is
 /// a monotonic microsecond timestamp. The callback runs on the capture
 /// thread, synchronously inside the `PipeWire` process callback.
-pub(crate) type VideoFrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
+pub type VideoFrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 
 /// Modifiers are only offered when both ends are at least this version.
 const DMA_BUF_MODIFIER_MIN_VERSION: PipeWireVersion = PipeWireVersion {
@@ -667,7 +667,7 @@ static VIDEO_CAPTURE_STATE: Mutex<Option<PwVideoCapture>> = Mutex::new(None);
 /// The whole engine — `PipeWire` main loop, EGL readback, frame callback —
 /// runs on a dedicated `"desktop-capture"` thread. Only one capture may be
 /// active at a time; the singleton slot is released by [`PwVideoCapture::stop`].
-pub(crate) struct PwVideoCapture {
+pub struct PwVideoCapture {
     stop: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -703,7 +703,7 @@ impl PwVideoCapture {
     /// Returns a human-readable reason when init/connect/negotiation fails,
     /// the stream does not reach a running state within 5 s, or a capture is
     /// already active.
-    pub(crate) fn start(
+    pub fn start(
         portal_fd: Option<OwnedFd>,
         node_id: u32,
         width: u32,
@@ -779,7 +779,7 @@ impl PwVideoCapture {
 
     /// Stops the capture thread and joins it; also releases the singleton
     /// slot so a new capture can start.
-    pub(crate) fn stop(&mut self) {
+    pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.join.take() {
             let _ = handle.join();
@@ -1061,7 +1061,7 @@ mod probe {
         portal
             .select_sources()
             .unwrap_or_else(|e| panic!("select sources: {e}"));
-        let stream = match portal.start().unwrap_or_else(|e| panic!("start: {e}")) {
+        let stream = match portal.start(None).unwrap_or_else(|e| panic!("start: {e}")) {
             StartOutcome::Stream(stream) => stream,
             StartOutcome::Cancelled => {
                 eprintln!("[pw-video-probe] cancelled by user");

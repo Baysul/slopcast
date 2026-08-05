@@ -16,9 +16,11 @@ allow_attributes_without_reason = "deny"
 [dependencies]
 arc-swap = "1.9.2"
 base64 = "0.22"
-bytemuck = "1.25.2"
-glib = "0.21"
-jpeg-encoder = "0.7"
-livekit = { version = "0.8", features = ["glib-main-loop", "rustls-tls-native-roots"] }
+livekit = { version = "0.8", features = ["rustls-tls-native-roots"] }
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+native-rust = { path = "../native-rust" }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }

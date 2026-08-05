@@ -12,6 +12,18 @@ use crate::linux as platform;
 #[cfg(target_os = "windows")]
 use crate::windows as platform;
 
+/// In-house desktop video capture engine (SCREEN-CAPTURE-INHOUSE.md Phases
+/// A–C): the `ScreenCast` portal client (`ScreenCastPortal`, zbus) and the
+/// `pw_stream` capture engine (`PwVideoCapture`, DMA-BUF + EGL readback).
+/// Wired together by the desktop capture pipeline in `native-livekit`;
+/// Linux-only.
+#[cfg(target_os = "linux")]
+pub mod video_capture {
+    pub use crate::linux::{
+        PortalStream, PwVideoCapture, ScreenCastPortal, StartOutcome, VideoFrameCallback,
+    };
+}
+
 #[derive(Debug, Clone)]
 pub struct AudioApp {
     pub id: i32,
@@ -226,7 +238,9 @@ pub fn init_engine() -> String {
 /// Runs the global `PipeWire` library init exactly once on the main thread,
 /// before the event loop serves IPC. On Linux this is only safe after
 /// libwebrtc's `pw_*` dlopen shims are armed (`native_livekit::arm_pipewire_shims`)
-/// — see the Linux module. No-op on other platforms.
+/// — its `PipeWire` video capture module keeps them in the link even though
+/// our code no longer references `DesktopCapturer`; see the Linux module.
+/// No-op on other platforms.
 #[cfg(target_os = "linux")]
 pub fn ensure_pipewire_init() {
     platform::ensure_pipewire_init();
