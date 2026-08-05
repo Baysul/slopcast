@@ -58,6 +58,8 @@ interface PresenterPhase {
   encoderImplementation: string | null;
   captureFramesPushed: number;
   telemetryFlowing: boolean;
+  /** Measured published-frame rate over the telemetry sampling window. */
+  telemetryFps: number;
   errors: string[];
 }
 
@@ -86,6 +88,8 @@ interface TestResult {
   presenterVideoFlowing: boolean;
   presenterVideoFramesSent: number;
   presenterVideoBytesSent: number;
+  /** Measured published-frame rate over the telemetry sampling window. */
+  presenterTelemetryFps: number;
   captureFramesPushed: number;
   /** §9.1 preview emitter counter — proves JPEG preview frames flowed. */
   previewFramesSent: number;
@@ -610,6 +614,7 @@ async function runPresenterPhase(
   result.presenterVideoFlowing = phase.telemetryFlowing;
   result.presenterVideoFramesSent = phase.videoFramesSent;
   result.presenterVideoBytesSent = phase.videoBytesSent;
+  result.presenterTelemetryFps = phase.telemetryFps;
   result.captureFramesPushed = phase.captureFramesPushed;
   result.previewFramesSent = phase.previewFramesSent;
   result.videoCodecReported = phase.videoCodecReported;
@@ -654,7 +659,7 @@ async function waitForSpectatorConnection(page: Page, result: TestResult): Promi
   }
 }
 
-async function waitForSpectatorVideo(page: Page, result: TestResult): Promise<void> {
+async function waitForSpectatorVideo(page: Page, result: TestResult, captureMode: string): Promise<void> {
   try {
     await page.waitForSelector('video', { state: 'attached', timeout: STREAM_TIMEOUT_MS });
 
@@ -697,6 +702,15 @@ async function waitForSpectatorVideo(page: Page, result: TestResult): Promise<vo
       result.spectatorVideoPlaying = videoState.playing;
       result.spectatorVideoWidth = videoState.width;
       result.spectatorVideoHeight = videoState.height;
+      // The synthetic source and the stream settings are both 720p, and the
+      // publish is single-layer — the spectator must receive the full
+      // resolution. A halved stream (960x520-class simulcast layer or a
+      // source-resolution passthrough) fails here.
+      if (captureMode === 'synthetic' && (videoState.width !== 1280 || videoState.height !== 720)) {
+        result.errors.push(
+          `Spectator received ${videoState.width}x${videoState.height}, expected the published 1280x720 (single layer)`,
+        );
+      }
     } else {
       log('SPECTATOR', 'Video element present but no video track data');
       result.errors.push('Video element found but no video frames received');
@@ -787,7 +801,7 @@ async function checkDecoderStall(page: Page, result: TestResult): Promise<void> 
   }
 }
 
-async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult): Promise<Browser> {
+async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, captureMode: string): Promise<Browser> {
   log('TEST', '=== Step 3: Spectator Automation (Chromium) ===');
 
   const { chromium } = await import('playwright');
@@ -829,7 +843,7 @@ async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult): Pr
   await spectatorPage.goto(result.shareUrl, { waitUntil: 'domcontentloaded', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
 
   await waitForSpectatorConnection(spectatorPage, result);
-  await waitForSpectatorVideo(spectatorPage, result);
+  await waitForSpectatorVideo(spectatorPage, result, captureMode);
 
   // Additional stability wait to let stream settle.
   await new Promise((r) => setTimeout(r, 3000));
@@ -947,6 +961,7 @@ async function runTest(): Promise<TestResult> {
     presenterVideoFlowing: false,
     presenterVideoFramesSent: 0,
     presenterVideoBytesSent: 0,
+    presenterTelemetryFps: 0,
     captureFramesPushed: 0,
     previewFramesSent: 0,
     videoCodecReported: null,
@@ -1040,7 +1055,7 @@ async function runTest(): Promise<TestResult> {
       const presenter = await runPresenterPhase(config, logEntries, result, codec, captureMode);
       wdioProc = presenter.wdioProc;
 
-      browser = await runSpectatorPhase(logEntries, result);
+      browser = await runSpectatorPhase(logEntries, result, captureMode);
 
       validateDiagnostics(result, logEntries);
 
@@ -1155,6 +1170,7 @@ function printSummary(result: TestResult): void {
   log('SUMMARY', `Video Received:  ${result.spectatorVideoReceived}`);
   log('SUMMARY', `Video Playing:   ${result.spectatorVideoPlaying}`);
   log('SUMMARY', `Video Size:      ${result.spectatorVideoWidth}x${result.spectatorVideoHeight}`);
+  log('SUMMARY', `Presenter FPS:   ${result.presenterTelemetryFps}`);
   log('SUMMARY', `Decoder Stall:   ${result.decoderStallDetected}`);
   log('SUMMARY', `GPU:             ${result.gpuReport ? 'Probed' : 'Missing'}`);
   log('SUMMARY', `Preview Frames:  ${result.previewFramesSent}`);

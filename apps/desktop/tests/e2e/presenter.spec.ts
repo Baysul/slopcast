@@ -90,6 +90,8 @@ interface PhaseResult {
   encoderImplementation: string | null;
   captureFramesPushed: number;
   telemetryFlowing: boolean;
+  /** Measured published-frame rate over the telemetry sampling window. */
+  telemetryFps: number;
   errors: string[];
 }
 
@@ -123,6 +125,7 @@ const phase: PhaseResult = {
   encoderImplementation: null,
   captureFramesPushed: 0,
   telemetryFlowing: false,
+  telemetryFps: 0,
   errors: [],
 };
 
@@ -204,7 +207,9 @@ async function samplePreviewCanvas(): Promise<{
   if (!ctx) return empty;
   ctx.drawImage(canvas, 0, 0);
   const { data, width, height } = ctx.getImageData(0, 0, copy.width, copy.height);
-  if (width < 640 || height < 360) return empty;
+  // The preview is scaled to fit the preview card, so its size follows the
+  // window — only reject a canvas too small to sample meaningfully.
+  if (width < 160 || height < 90) return empty;
 
   const pixel = (x: number, y: number): [number, number, number] => {
     const i = (y * width + x) * 4;
@@ -219,19 +224,23 @@ async function samplePreviewCanvas(): Promise<{
   }
 
   // Bar centers at y = 3/4 height, below the moving-box band (rows [h/8, h/4)).
+  // Bar x-positions are derived from the preview width (8 equal bars), so the
+  // sampler works at any preview resolution — the preview now matches the
+  // capture source's full resolution.
   const y = Math.floor(height * 0.75);
-  const bar = (x: number, want: [boolean, boolean, boolean]): boolean => {
+  const barWidth = width / 8;
+  const bar = (index: number, want: [boolean, boolean, boolean]): boolean => {
+    const x = Math.floor(barWidth * (index + 0.5));
     const [r, g, b] = pixel(x, y);
     const ok = (v: number, active: boolean): boolean => (active ? v > 200 : v < 60);
     return ok(r, want[0]) && ok(g, want[1]) && ok(b, want[2]);
   };
-  // Synthetic bars at 640-wide preview: red at x=440, blue at x=520, green
-  // at x=280, cyan at x=200.
+  // Synthetic bars: red (5), blue (6), green (3), cyan (2).
   const barsCorrect =
-    bar(440, [true, false, false]) && // red
-    bar(520, [false, false, true]) && // blue
-    bar(280, [false, true, false]) && // green
-    bar(200, [false, true, true]); // cyan
+    bar(5, [true, false, false]) && // red
+    bar(6, [false, false, true]) && // blue
+    bar(3, [false, true, false]) && // green
+    bar(2, [false, true, true]); // cyan
 
   // Flip check: count white pixels (all channels > 200) in the top-quarter
   // band vs the bottom-quarter band. The white box lives in rows [h/8, h/4)
@@ -351,19 +360,25 @@ describe('Slopcast presenter phase (Tauri)', () => {
     phase.encoderImplementation = t1.telemetry.encoderImplementation ?? null;
     phase.captureFramesPushed = t1.stats.framesPushed;
     phase.previewFramesSent = t1.stats.previewFramesSent;
-    phase.telemetryFlowing =
-      (t1.telemetry.videoFramesSent ?? 0) > (t0.telemetry.videoFramesSent ?? 0) &&
-      (t1.telemetry.videoBytesSent ?? 0) > 0 &&
-      t1.stats.framesPushed > 0;
+    // The published stream must sustain the configured framerate: a collapsed
+    // encoder or a crippled simulcast layer shows up as a low frame delta.
+    const framesDelta = (t1.telemetry.videoFramesSent ?? 0) - (t0.telemetry.videoFramesSent ?? 0);
+    phase.telemetryFps = Math.round(framesDelta / (TELEMETRY_SAMPLE_GAP_MS / 1000));
+    phase.telemetryFlowing = framesDelta > 0 && (t1.telemetry.videoBytesSent ?? 0) > 0 && t1.stats.framesPushed > 0;
     writePhase();
 
     console.log(
       `[e2e] telemetry: framesSent ${t0.telemetry.videoFramesSent ?? 'null'} -> ` +
-        `${t1.telemetry.videoFramesSent ?? 'null'}, bytesSent=${phase.videoBytesSent}, ` +
+        `${t1.telemetry.videoFramesSent ?? 'null'} (${phase.telemetryFps} fps), ` +
+        `bytesSent=${phase.videoBytesSent}, ` +
         `captureFramesPushed=${phase.captureFramesPushed}, previewFramesSent=${phase.previewFramesSent}`,
     );
 
     assert(phase.telemetryFlowing, 'Presenter video telemetry did not advance (frames/bytes stalled)');
+    assert(
+      phase.telemetryFps >= 15,
+      `Presenter stream ran at ${phase.telemetryFps} fps — encoder collapsed or crippled layer (need >= 15)`,
+    );
     assert(phase.previewFramesSent > 0, 'No preview frames were emitted (previewFramesSent stayed at 0)');
     assertCodecTelemetry(phase);
   });
