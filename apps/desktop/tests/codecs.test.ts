@@ -5,6 +5,7 @@ import {
   type CodecInfo,
   codecOptionSuffix,
   fromNativeCodecInfo,
+  groupCodecsByHardware,
   recommendCodec,
   sortByCodecPreference,
 } from '../src/renderer/utils/codecs.ts';
@@ -59,6 +60,7 @@ test('fromNativeCodecInfo maps the native stack list and sorts by preference', (
   );
   assert.ok(codecs.every((c) => !c.recommended));
   assert.equal(codecs.find((c) => c.codec === 'h264')?.hardware, true);
+  assert.equal(codecs.find((c) => c.codec === 'h264')?.label, 'H.264');
   assert.equal(codecs.find((c) => c.codec === 'vp8')?.hardware, false);
 });
 
@@ -105,4 +107,31 @@ test('recommendCodec handles a single non-default codec without crashing', () =>
 
 test('recommendCodec returns an empty list unchanged', () => {
   assert.deepEqual(recommendCodec([]), []);
+});
+
+test('groupCodecsByHardware puts hardware first, preserving order within each group', () => {
+  const codecs = recommendCodec(
+    fromNativeCodecInfo([
+      { codec: 'h264', label: 'H.264', hardware: true },
+      { codec: 'vp8', label: 'VP8', hardware: false },
+      { codec: 'vp9', label: 'VP9', hardware: false },
+      { codec: 'av1', label: 'AV1', hardware: false },
+    ]),
+  );
+  const { hardware, software } = groupCodecsByHardware(codecs);
+  assert.deepEqual(
+    hardware.map((c) => c.codec),
+    ['h264'],
+  );
+  // The recommended codec (vp8) stays first within its group.
+  assert.deepEqual(
+    software.map((c) => c.codec),
+    ['vp8', 'vp9', 'av1'],
+  );
+  assert.equal(software[0]?.recommended, true);
+});
+
+test('groupCodecsByHardware handles an all-software and an empty list', () => {
+  assert.deepEqual(groupCodecsByHardware([info('vp8')]), { hardware: [], software: [info('vp8')] });
+  assert.deepEqual(groupCodecsByHardware([]), { hardware: [], software: [] });
 });

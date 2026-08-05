@@ -47,3 +47,11 @@ export const codecOptionSuffix = (info: CodecInfo): string => {
   if (info.codec === 'av1' || info.codec === 'vp9') return 'Software (slow)';
   return 'Software';
 };
+
+// Partitions codecs for the grouped picker (hardware group on top), preserving
+// the preference order within each partition so the recommendation stays first
+// in its group.
+export const groupCodecsByHardware = (codecs: CodecInfo[]): { hardware: CodecInfo[]; software: CodecInfo[] } => ({
+  hardware: codecs.filter((c) => c.hardware),
+  software: codecs.filter((c) => !c.hardware),
+});

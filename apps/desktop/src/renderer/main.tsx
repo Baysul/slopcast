@@ -222,7 +222,7 @@ export const PresenterApp: React.FC = () => {
             notify(
               'info',
               'Video codec updated',
-              `Switched video codec to ${codecLabel(videoCodec) ?? videoCodec.toUpperCase()}`,
+              `Switched video codec to ${codecLabel(`VIDEO/${videoCodec.toUpperCase()}`) ?? videoCodec.toUpperCase()}`,
             );
           }
         });

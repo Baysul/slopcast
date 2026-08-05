@@ -1,12 +1,20 @@
 import type { ResolutionPreset, VideoCodec } from '@slopcast/shared-types';
-import { codecLabel } from '@slopcast/shared-types';
 import { ChevronDown } from 'lucide-react';
 import type React from 'react';
 import { memo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import type { CodecInfo } from '@/utils/codecs';
+import { groupCodecsByHardware } from '@/utils/codecs';
 
 export interface StreamSettingsPanelProps {
   streamSettingsOpen: boolean;
@@ -44,6 +52,7 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
   }) => {
     const openClass = streamSettingsOpen ? 'rotate-0' : '-rotate-90';
     const containerClass = streamSettingsOpen ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden';
+    const { hardware: hardwareCodecs, software: softwareCodecs } = groupCodecsByHardware(availableCodecs);
 
     return (
       <Card className="border-border/60 bg-card/60 backdrop-blur-sm shadow-xl">
@@ -81,11 +90,26 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableCodecs.map((info) => (
-                      <SelectItem key={info.codec} value={info.codec}>
-                        {codecLabel(info.codec)} {codecOptionSuffix(info)}
-                      </SelectItem>
-                    ))}
+                    {hardwareCodecs.length > 0 && (
+                      <SelectGroup>
+                        <SelectLabel>Hardware</SelectLabel>
+                        {hardwareCodecs.map((info) => (
+                          <SelectItem key={info.codec} value={info.codec}>
+                            {info.label} {codecOptionSuffix(info)}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    )}
+                    {softwareCodecs.length > 0 && (
+                      <SelectGroup>
+                        {hardwareCodecs.length > 0 && <SelectLabel>Software</SelectLabel>}
+                        {softwareCodecs.map((info) => (
+                          <SelectItem key={info.codec} value={info.codec}>
+                            {info.label} {codecOptionSuffix(info)}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    )}
                   </SelectContent>
                 </Select>
               </div>
