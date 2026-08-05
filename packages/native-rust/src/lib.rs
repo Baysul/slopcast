@@ -44,9 +44,12 @@ pub struct AudioAppWave {
 }
 
 /// Target for an exclusive audio capture session. `Id` carries the numeric
-/// target — a `PipeWire` node ID on Linux, a process ID on Windows; negative
-/// IDs select system audio on both platforms. `Label` carries a per-platform
-/// textual target (a node ID string on Linux, a PID string on Windows).
+/// target: a `PipeWire` node ID on Linux, a process ID on Windows. On Linux,
+/// `-1` selects system audio, values below `-1` select a process-id target
+/// (`-pid` — for apps with no active audio stream yet, e.g. a paused player;
+/// their audio is linked the moment it starts playing), and non-negative
+/// values are stream node ids. `Label` carries a per-platform textual target
+/// (a node ID string on Linux, a PID string on Windows).
 pub enum AudioTarget {
     Id(i32),
     Label(String),
@@ -272,8 +275,8 @@ pub fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, String> {
 /// Starts exclusive audio capture for the given application.
 ///
 /// `target` is an `AudioTarget` — a `PipeWire` node ID (Linux) or process ID
-/// (Windows) with negative values selecting system audio, or a per-platform
-/// textual target.
+/// (Windows), with `-1` selecting system audio and Linux values below `-1`
+/// selecting a process-id target (`-pid`), or a per-platform textual target.
 ///
 /// # Errors
 ///

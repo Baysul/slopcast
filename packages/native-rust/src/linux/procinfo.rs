@@ -53,7 +53,7 @@ fn scan_proc() -> Vec<ProcEntry> {
         .collect()
 }
 
-fn is_system_or_session_daemon(pid: u32) -> bool {
+pub(super) fn is_system_or_session_daemon(pid: u32) -> bool {
     if pid <= 1 {
         return true;
     }
@@ -133,6 +133,19 @@ pub(super) fn are_processes_related(pid_a: u32, pid_b: u32) -> bool {
     let ancestors_a = get_ancestor_pids(pid_a);
     let ancestors_b = get_ancestor_pids(pid_b);
     ancestors_a.iter().any(|a| ancestors_b.contains(a))
+}
+
+/// True when `descendant` is `ancestor` itself or a descendant of it (walking
+/// the `/proc` parent chain). Unlike `are_processes_related` this never
+/// matches siblings that merely share a launcher ancestor — two games under
+/// the same Steam instance must not be conflated — so capture-by-PID links
+/// only the targeted process and its own children (e.g. a browser's audio
+/// utility process).
+pub(super) fn is_same_or_descendant(descendant: u32, ancestor: u32) -> bool {
+    if descendant <= 1 || ancestor <= 1 {
+        return false;
+    }
+    get_ancestor_pids(descendant).contains(&ancestor)
 }
 
 pub(super) fn is_generic_launcher(name: &str) -> bool {
@@ -263,8 +276,8 @@ pub(super) fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcEntry, are_processes_related, is_generic_launcher, is_valid_pid, resolve_pid_by_binary,
-        resolve_pid_by_name,
+        ProcEntry, are_processes_related, is_generic_launcher, is_same_or_descendant, is_valid_pid,
+        resolve_pid_by_binary, resolve_pid_by_name,
     };
 
     #[test]
@@ -408,6 +421,28 @@ mod tests {
             .unwrap_or_else(|e| panic!("parent pid fits u32: {e}"));
         assert!(are_processes_related(our_pid, parent));
         assert!(are_processes_related(parent, our_pid));
+    }
+
+    #[test]
+    fn same_or_descendant_matches_self_and_parent() {
+        let our_pid = std::process::id();
+        // SAFETY: getppid() always returns a valid parent pid for this process.
+        let parent = unsafe { libc::getppid() }
+            .try_into()
+            .unwrap_or_else(|e| panic!("parent pid fits u32: {e}"));
+        assert!(is_same_or_descendant(our_pid, our_pid));
+        assert!(is_same_or_descendant(our_pid, parent));
+        assert!(!is_same_or_descendant(parent, our_pid));
+    }
+
+    #[test]
+    fn same_or_descendant_never_matches_unrelated_or_system_pids() {
+        let our_pid = std::process::id();
+        assert!(!is_same_or_descendant(our_pid, our_pid + 5000));
+        assert!(!is_same_or_descendant(0, our_pid));
+        assert!(!is_same_or_descendant(our_pid, 0));
+        assert!(!is_same_or_descendant(our_pid, 1));
+        assert!(!is_same_or_descendant(1, 1));
     }
 
     #[test]

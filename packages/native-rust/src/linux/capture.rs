@@ -18,16 +18,48 @@ use std::time::Duration;
 
 type ReadySenderCell = Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>;
 
-fn parse_target_id(target: &AudioTarget) -> Result<Option<u32>, String> {
+/// A parsed capture target: a `PipeWire` stream node id, a process id (for
+/// apps with no active stream yet — their audio is linked the moment they
+/// start playing), or system audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedTarget {
+    Node(u32),
+    Pid(u32),
+    SystemAudio,
+}
+
+impl ParsedTarget {
+    fn into_spec(self) -> TargetSpec {
+        match self {
+            Self::Node(node_id) => TargetSpec {
+                node_id: Some(node_id),
+                ..TargetSpec::default()
+            },
+            Self::Pid(pid) => TargetSpec {
+                pid: Some(pid),
+                ..TargetSpec::default()
+            },
+            Self::SystemAudio => TargetSpec {
+                system_audio: true,
+                ..TargetSpec::default()
+            },
+        }
+    }
+}
+
+/// `-1` selects system audio; any value below `-1` is a process id target
+/// (`-pid`); non-negative ids are `PipeWire` node ids.
+fn parse_target(target: &AudioTarget) -> Result<ParsedTarget, String> {
     match target {
-        AudioTarget::Id(n) if *n < 0 => Ok(None),
-        AudioTarget::Id(n) => Ok(Some((*n).cast_unsigned())),
+        AudioTarget::Id(n) if *n == -1 => Ok(ParsedTarget::SystemAudio),
+        AudioTarget::Id(n) if *n < -1 => Ok(ParsedTarget::Pid(n.unsigned_abs())),
+        AudioTarget::Id(n) => Ok(ParsedTarget::Node((*n).cast_unsigned())),
         AudioTarget::Label(s) => {
             let n = s
                 .trim()
                 .parse::<u32>()
                 .map_err(|_| "A PipeWire node ID or -1 (system audio) is required".to_string())?;
-            Ok(Some(n))
+            Ok(ParsedTarget::Node(n))
         }
     }
 }
@@ -529,18 +561,13 @@ fn stop_session(state: &mut CaptureState) {
 }
 
 pub(crate) fn start_audio_capture(target_app_id: &AudioTarget) -> Result<bool, String> {
-    let node_id = parse_target_id(target_app_id)?;
+    let target = parse_target(target_app_id)?.into_spec();
     let mut state_guard = CAPTURE_STATE
         .lock()
         .map_err(|e| format!("Audio capture state lock poisoned: {e}"))?;
     let state = state_guard.get_or_insert_with(CaptureState::new);
     stop_session(state);
 
-    let target = TargetSpec {
-        node_id,
-        system_audio: node_id.is_none(),
-        ..TargetSpec::default()
-    };
     let session = spawn_capture_session(target)?;
     state.is_active = true;
     state.session = Some(session);
@@ -548,7 +575,7 @@ pub(crate) fn start_audio_capture(target_app_id: &AudioTarget) -> Result<bool, S
 }
 
 pub(crate) fn switch_audio_capture(target_app_id: &AudioTarget) -> Result<bool, String> {
-    let node_id = parse_target_id(target_app_id)?;
+    let target = parse_target(target_app_id)?.into_spec();
     let mut state_guard = CAPTURE_STATE
         .lock()
         .map_err(|e| format!("Audio capture state lock poisoned: {e}"))?;
@@ -559,11 +586,6 @@ pub(crate) fn switch_audio_capture(target_app_id: &AudioTarget) -> Result<bool, 
         return Err("No active audio capture session to switch".into());
     };
 
-    let target = TargetSpec {
-        node_id,
-        system_audio: node_id.is_none(),
-        ..TargetSpec::default()
-    };
     session
         .target_tx
         .send(target)
@@ -650,41 +672,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_negative_number_means_system_audio() {
+    fn minus_one_means_system_audio() {
         assert_eq!(
-            parse_target_id(&AudioTarget::Id(-1)).unwrap_or_else(|e| panic!("system audio: {e}")),
-            None
-        );
-        assert_eq!(
-            parse_target_id(&AudioTarget::Id(-5)).unwrap_or_else(|e| panic!("system audio: {e}")),
-            None
+            parse_target(&AudioTarget::Id(-1)).unwrap_or_else(|e| panic!("system audio: {e}")),
+            ParsedTarget::SystemAudio
         );
     }
 
     #[test]
-    fn parse_positive_number_is_node_id() {
+    fn negative_ids_below_minus_one_are_pid_targets() {
         assert_eq!(
-            parse_target_id(&AudioTarget::Id(0)).unwrap_or_else(|e| panic!("node 0: {e}")),
-            Some(0)
+            parse_target(&AudioTarget::Id(-1234)).unwrap_or_else(|e| panic!("pid: {e}")),
+            ParsedTarget::Pid(1234)
+        );
+        // i32::MIN (a valid negative id) maps to a u32 pid without overflow.
+        assert_eq!(
+            parse_target(&AudioTarget::Id(i32::MIN)).unwrap_or_else(|e| panic!("pid: {e}")),
+            ParsedTarget::Pid(2_147_483_648)
+        );
+    }
+
+    #[test]
+    fn positive_numbers_are_node_ids() {
+        assert_eq!(
+            parse_target(&AudioTarget::Id(0)).unwrap_or_else(|e| panic!("node 0: {e}")),
+            ParsedTarget::Node(0)
         );
         assert_eq!(
-            parse_target_id(&AudioTarget::Id(42)).unwrap_or_else(|e| panic!("node 42: {e}")),
-            Some(42)
+            parse_target(&AudioTarget::Id(42)).unwrap_or_else(|e| panic!("node 42: {e}")),
+            ParsedTarget::Node(42)
         );
+    }
+
+    #[test]
+    fn pid_targets_build_pid_specs_and_system_audio_builds_system_specs() {
+        assert_eq!(
+            parse_target(&AudioTarget::Id(-777))
+                .unwrap_or_else(|e| panic!("pid: {e}"))
+                .into_spec()
+                .pid,
+            Some(777)
+        );
+        let system = parse_target(&AudioTarget::Id(-1))
+            .unwrap_or_else(|e| panic!("system: {e}"))
+            .into_spec();
+        assert!(system.system_audio);
+        assert!(system.node_id.is_none());
+        assert!(system.pid.is_none());
+        let node = parse_target(&AudioTarget::Id(9))
+            .unwrap_or_else(|e| panic!("node: {e}"))
+            .into_spec();
+        assert_eq!(node.node_id, Some(9));
+        assert!(!node.system_audio);
     }
 
     #[test]
     fn parse_numeric_string_is_node_id() {
         assert_eq!(
-            parse_target_id(&AudioTarget::Label("123".into()))
+            parse_target(&AudioTarget::Label("123".into()))
                 .unwrap_or_else(|e| panic!("node 123: {e}")),
-            Some(123)
+            ParsedTarget::Node(123)
         );
         // Whitespace is trimmed before parsing.
         assert_eq!(
-            parse_target_id(&AudioTarget::Label(" 7 ".into()))
+            parse_target(&AudioTarget::Label(" 7 ".into()))
                 .unwrap_or_else(|e| panic!("node 7: {e}")),
-            Some(7)
+            ParsedTarget::Node(7)
         );
     }
 
@@ -692,13 +745,13 @@ mod tests {
     fn parse_string_minus_one_is_not_system_audio() {
         // Only the numeric -1 selects system audio; a "-1" string is an
         // invalid node id, not a mode switch.
-        assert!(parse_target_id(&AudioTarget::Label("-1".into())).is_err());
+        assert!(parse_target(&AudioTarget::Label("-1".into())).is_err());
     }
 
     #[test]
     fn parse_non_numeric_string_is_an_error() {
-        assert!(parse_target_id(&AudioTarget::Label("not-a-node".into())).is_err());
-        assert!(parse_target_id(&AudioTarget::Label(String::new())).is_err());
+        assert!(parse_target(&AudioTarget::Label("not-a-node".into())).is_err());
+        assert!(parse_target(&AudioTarget::Label(String::new())).is_err());
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use super::procinfo::{
-    client_sec_pid, is_valid_pid, iter_proc, resolve_pid_by_binary, resolve_pid_by_name,
+    client_sec_pid, is_system_or_session_daemon, is_valid_pid, iter_proc, resolve_pid_by_binary,
+    resolve_pid_by_name,
 };
 use super::{CAPTURE_NODE_NAME, mpris, pw_init, sync_registry};
 use crate::AudioApp;
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Mutex;
 
@@ -50,6 +51,75 @@ fn stream_window_title(props: &DictRef, app_name: &str) -> Option<String> {
     None
 }
 
+/// True when a `PipeWire` client should never be offered as an audio capture
+/// target: it is us, a session daemon, or a name that can never map to a
+/// user-meaningful audio app (`Steam` itself, `WEBRTC VoiceEngine` utility
+/// clients, …). Pid 0/1 and pids that do not fit the negative-id encoding
+/// (`id = -pid`) are rejected too.
+fn is_skip_client(pid: u32, name: &str, our_pid: u32) -> bool {
+    const SKIP_NAMES: [&str; 7] = [
+        "slopcast",
+        "pipewire",
+        "wireplumber",
+        "libcanberra",
+        "pulseaudio",
+        "steam",
+        "webrtc voiceengine",
+    ];
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return true;
+    }
+    if pid == our_pid {
+        return true;
+    }
+    if name.trim().is_empty() {
+        return true;
+    }
+    let lower = name.to_lowercase();
+    if SKIP_NAMES.iter().any(|k| lower.contains(k)) {
+        return true;
+    }
+    is_system_or_session_daemon(pid)
+}
+
+/// Appends `PipeWire` clients that are connected to the daemon but currently
+/// have no `Stream/Output/Audio` node — e.g. Spotify while paused. They are
+/// selectable as process-id targets (`id = -pid`); the capture session links
+/// their audio the moment it starts playing. Clients whose pid already owns a
+/// stream node are skipped (the stream entries carry the rich metadata).
+fn append_idle_clients(apps: &mut Vec<AudioApp>, clients: HashMap<u32, (u32, String)>) {
+    let our_pid = std::process::id();
+    let stream_pids: HashSet<u32> = apps
+        .iter()
+        .filter_map(|app| (app.process_id > 0).then_some(app.process_id.cast_unsigned()))
+        .collect();
+    // Prefer the friendliest name per pid: the shortest one sorts first
+    // (e.g. "Chromium" before "Chromium input").
+    let mut idle: Vec<(u32, String)> = clients.into_values().collect();
+    idle.sort_by(|(pid_a, name_a), (pid_b, name_b)| {
+        (pid_a, name_a.len()).cmp(&(pid_b, name_b.len()))
+    });
+    let mut seen_pids = HashSet::new();
+    for (pid, name) in idle {
+        if !seen_pids.insert(pid)
+            || is_skip_client(pid, &name, our_pid)
+            || stream_pids.contains(&pid)
+        {
+            continue;
+        }
+        let pid_signed = pid.cast_signed();
+        apps.push(AudioApp {
+            id: -pid_signed,
+            name,
+            process_id: pid_signed,
+            bundle_id: None,
+            window_title: None,
+            client_id: None,
+            media_title: None,
+        });
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "PipeWire registry event handling for client PID collection is inherently long and operates as a single logical unit; splitting would harm readability"
@@ -59,9 +129,12 @@ fn collect_client_pids(
     main_loop: &pipewire::main_loop::MainLoopRc,
     registry: &pipewire::registry::Registry,
     apps: &Rc<RefCell<Vec<AudioApp>>>,
-) -> HashMap<u32, u32> {
+) -> (HashMap<u32, u32>, HashMap<u32, (u32, String)>) {
     let client_pids: Rc<RefCell<HashMap<u32, u32>>> = Rc::new(RefCell::new(HashMap::new()));
+    let client_info: Rc<RefCell<HashMap<u32, (u32, String)>>> =
+        Rc::new(RefCell::new(HashMap::new()));
     let cp = client_pids.clone();
+    let ci = client_info.clone();
     let ap = apps.clone();
     // Node info props (e.g. `media.name`, where browsers put the tab title) are
     // not part of the registry advertisement — they only arrive after binding
@@ -99,6 +172,10 @@ fn collect_client_pids(
                     });
                 if let Some(pid) = pid {
                     cp.borrow_mut().insert(global.id, pid.cast_unsigned());
+                    if !app_name.is_empty() {
+                        ci.borrow_mut()
+                            .insert(global.id, (pid.cast_unsigned(), app_name.to_string()));
+                    }
                 }
             }
 
@@ -188,7 +265,7 @@ fn collect_client_pids(
     sync_registry(core, main_loop);
     // Second round trip: bound node proxies deliver their info events.
     sync_registry(core, main_loop);
-    client_pids.take()
+    (client_pids.take(), client_info.take())
 }
 
 /// Normalize a string for fuzzy matching: lowercase, strip non-alphanumeric.
@@ -264,8 +341,9 @@ pub(crate) fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
         .get_registry()
         .map_err(|e| format!("Registry: {e}"))?;
     let apps = Rc::new(RefCell::new(Vec::<AudioApp>::new()));
-    collect_client_pids(&pw.core, &pw.main_loop, &registry, &apps);
+    let (_, client_info) = collect_client_pids(&pw.core, &pw.main_loop, &registry, &apps);
     let mut apps = apps.take();
+    append_idle_clients(&mut apps, client_info);
     annotate_mpris_titles(&mut apps);
     Ok(apps)
 }
@@ -336,4 +414,103 @@ pub(crate) fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, Strin
     // Second round trip: bound node proxies deliver their info events.
     sync_registry(&pw.core, &pw.main_loop);
     Ok(nodes.take().into_iter().map(|(_, map)| map).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_idle_clients, is_skip_client};
+    use crate::AudioApp;
+    use std::collections::HashMap;
+
+    fn app(process_id: i32) -> AudioApp {
+        AudioApp {
+            id: process_id,
+            name: "stream".into(),
+            process_id,
+            bundle_id: None,
+            window_title: None,
+            client_id: None,
+            media_title: None,
+        }
+    }
+
+    #[test]
+    fn skip_client_rejects_self_daemons_and_unusable_pids() {
+        let our_pid = std::process::id();
+        assert!(is_skip_client(our_pid, "Spotify", our_pid));
+        assert!(is_skip_client(0, "Spotify", our_pid));
+        assert!(is_skip_client(1, "init", our_pid));
+        assert!(is_skip_client(i32::MAX as u32 + 1, "Spotify", our_pid));
+        assert!(is_skip_client(100, "   ", our_pid));
+        // A dead pid resolves to a session daemon in the /proc walk.
+        assert!(is_skip_client(999_999_999, "Spotify", our_pid));
+    }
+
+    #[test]
+    fn skip_client_rejects_noise_clients_but_keeps_real_apps() {
+        // A pid that is definitely not the test process and never appears as
+        // a session daemon in /proc: our own live pid with a different
+        // "our_pid" argument.
+        let live_pid = std::process::id();
+        let other_pid = u32::MAX - 1;
+        for name in [
+            "slopcast",
+            "Slopcast-Window-Audio",
+            "pipewire",
+            "wireplumber",
+            "libcanberra",
+            "pulseaudio",
+            "Steam",
+            "Steam Voice Settings",
+            "WEBRTC VoiceEngine",
+        ] {
+            assert!(
+                is_skip_client(live_pid, name, other_pid),
+                "{name} must be skipped"
+            );
+        }
+        for name in ["Spotify", "Firefox", "Discord", "ZenlessZoneZero.exe"] {
+            assert!(
+                !is_skip_client(live_pid, name, other_pid),
+                "{name} must be offered as a capture target"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_clients_become_negative_pid_targets() {
+        let mut apps = vec![app(42)];
+        let clients = HashMap::from([(1, (43u32, "Spotify".to_string()))]);
+        append_idle_clients(&mut apps, clients);
+        let idle = apps
+            .iter()
+            .find(|a| a.name == "Spotify")
+            .unwrap_or_else(|| {
+                panic!("idle Spotify must be listed");
+            });
+        assert_eq!(idle.id, -43);
+        assert_eq!(idle.process_id, 43);
+    }
+
+    #[test]
+    fn idle_clients_skip_pids_with_active_streams() {
+        let mut apps = vec![app(42)];
+        let clients = HashMap::from([(1, (42u32, "Spotify".to_string()))]);
+        append_idle_clients(&mut apps, clients);
+        assert_eq!(apps.len(), 1, "a stream-owning pid must not be duplicated");
+    }
+
+    #[test]
+    fn idle_clients_prefer_the_shortest_name_per_pid() {
+        let mut apps = Vec::new();
+        let clients = HashMap::from([
+            (1, (50u32, "Chromium input".to_string())),
+            (2, (50u32, "Chromium".to_string())),
+        ]);
+        append_idle_clients(&mut apps, clients);
+        let idle = apps.iter().find(|a| a.process_id == 50).unwrap_or_else(|| {
+            panic!("pid 50 must be listed");
+        });
+        assert_eq!(idle.name, "Chromium");
+    }
 }

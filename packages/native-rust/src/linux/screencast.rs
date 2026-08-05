@@ -1,5 +1,5 @@
 use super::apps::list_audio_applications;
-use super::procinfo::{are_processes_related, is_generic_launcher};
+use super::procinfo::{are_processes_related, is_generic_launcher, iter_proc, resolve_pid_by_name};
 use super::{kwin, pw_init, sync_registry};
 use crate::AudioApp;
 use pipewire::spa::utils::dict::DictRef;
@@ -97,93 +97,172 @@ fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     if suffix.is_empty() || classify_kde_screencast(suffix) != KdeScreencast::Window {
         return None;
     }
-    let apps = list_audio_applications().ok()?;
     // The suffix is the captured window's desktop file name; KWin reports the
     // owning PID and window caption for it over D-Bus.
-    if let Some(win) = kwin::resolve_window(suffix) {
-        // Layer 1: Process hierarchy & related process tree match — check if
-        // the audio process and window owner process are identical, parent/child,
-        // or share a launcher/container ancestor (e.g. Proton/Wine, Steam/bwrap).
-        if let Some(app) = apps.iter().find(|app| {
-            let app_pid = app.process_id.cast_unsigned();
-            are_processes_related(app_pid, win.pid)
-        }) {
-            return Some(app.clone());
-        }
+    let win = kwin::resolve_window(suffix)?;
+    if let Ok(apps) = list_audio_applications()
+        && let Some(app) = match_kde_window_to_apps(&apps, &win, suffix)
+    {
+        return Some(app);
+    }
+    // Layer 5: the window's own process as a PID capture target — resolves
+    // apps with no active audio stream yet (e.g. Spotify while paused). The
+    // capture session links their audio the moment it starts playing.
+    window_pid_fallback(&win, suffix)
+}
 
-        // Layer 1b: Match audio app by checking process binary/cmdline of running
-        // audio apps against the suffix or window caption (normalizing Windows backslashes
-        // and .exe extensions).
-        let clean_suffix = suffix.trim_end_matches(".exe").trim_end_matches(".EXE");
-        for app in &apps {
-            let app_pid = app.process_id;
-            if app_pid <= 0 {
-                continue;
-            }
-            if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{app_pid}/cmdline")) {
-                let norm_cmd = cmdline.replace('\\', "/");
-                let exe = std::path::Path::new(norm_cmd.split('\0').next().unwrap_or(""))
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .trim_end_matches(".exe")
-                    .trim_end_matches(".EXE");
-                if !exe.is_empty()
-                    && (exe.eq_ignore_ascii_case(clean_suffix)
-                        || (!win.caption.is_empty()
-                            && win.caption.to_lowercase().contains(&exe.to_lowercase())))
-                {
-                    return Some(app.clone());
-                }
-            }
-        }
+/// Layers 1–4 of the KDE audio resolution: match the captured window against
+/// the *active* audio streams (process hierarchy, binary, name, caption,
+/// desktop file name).
+#[allow(
+    clippy::too_many_lines,
+    reason = "four ordered match strategies are clearer as one cascade than as separate helpers"
+)]
+fn match_kde_window_to_apps(
+    apps: &[AudioApp],
+    win: &kwin::WindowMatch,
+    suffix: &str,
+) -> Option<AudioApp> {
+    // Layer 1: Process hierarchy & related process tree match — check if
+    // the audio process and window owner process are identical, parent/child,
+    // or share a launcher/container ancestor (e.g. Proton/Wine, Steam/bwrap).
+    if let Some(app) = apps.iter().find(|app| {
+        let app_pid = app.process_id.cast_unsigned();
+        are_processes_related(app_pid, win.pid)
+    }) {
+        return Some(app.clone());
+    }
 
-        // Layer 2: Match by non-generic window process candidates.
-        let comm = std::fs::read_to_string(format!("/proc/{}/comm", win.pid)).ok();
-        let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", win.pid)).ok();
-        let mut candidates: Vec<String> = Vec::new();
-        if let Some(ref comm) = comm {
-            let name = comm.trim();
-            if !name.is_empty() && !is_generic_launcher(name) {
-                candidates.push(name.to_string());
-            }
+    // Layer 1b: Match audio app by checking process binary/cmdline of running
+    // audio apps against the suffix or window caption (normalizing Windows backslashes
+    // and .exe extensions).
+    let clean_suffix = suffix.trim_end_matches(".exe").trim_end_matches(".EXE");
+    for app in apps {
+        let app_pid = app.process_id;
+        if app_pid <= 0 {
+            continue;
         }
-        if let Some(ref cmdline) = cmdline {
+        if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{app_pid}/cmdline")) {
             let norm_cmd = cmdline.replace('\\', "/");
-            let binary = norm_cmd.split('\0').next().unwrap_or("").trim();
-            if !binary.is_empty()
-                && let Some(stem) = std::path::Path::new(binary)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                && !stem.is_empty()
-                && !is_generic_launcher(stem)
-                && !candidates.iter().any(|c| c == stem)
+            let exe = std::path::Path::new(norm_cmd.split('\0').next().unwrap_or(""))
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .trim_end_matches(".exe")
+                .trim_end_matches(".EXE");
+            if !exe.is_empty()
+                && (exe.eq_ignore_ascii_case(clean_suffix)
+                    || (!win.caption.is_empty()
+                        && win.caption.to_lowercase().contains(&exe.to_lowercase())))
             {
-                candidates.push(stem.to_string());
+                return Some(app.clone());
             }
         }
-        for candidate in &candidates {
-            if let Some(app) = crate::find_best_audio_match(&apps, candidate) {
-                return Some(app);
-            }
-        }
+    }
 
-        // Layer 3: Window caption match.
-        if !win.caption.is_empty()
-            && let Some(app) = crate::find_best_audio_match(&apps, &win.caption)
+    // Layer 2: Match by non-generic window process candidates.
+    let comm = std::fs::read_to_string(format!("/proc/{}/comm", win.pid)).ok();
+    let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", win.pid)).ok();
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(ref comm) = comm {
+        let name = comm.trim();
+        if !name.is_empty() && !is_generic_launcher(name) {
+            candidates.push(name.to_string());
+        }
+    }
+    if let Some(ref cmdline) = cmdline {
+        let norm_cmd = cmdline.replace('\\', "/");
+        let binary = norm_cmd.split('\0').next().unwrap_or("").trim();
+        if !binary.is_empty()
+            && let Some(stem) = std::path::Path::new(binary)
+                .file_stem()
+                .and_then(|s| s.to_str())
+            && !stem.is_empty()
+            && !is_generic_launcher(stem)
+            && !candidates.iter().any(|c| c == stem)
         {
+            candidates.push(stem.to_string());
+        }
+    }
+    for candidate in &candidates {
+        if let Some(app) = crate::find_best_audio_match(apps, candidate) {
             return Some(app);
         }
     }
 
+    // Layer 3: Window caption match.
+    if !win.caption.is_empty()
+        && let Some(app) = crate::find_best_audio_match(apps, &win.caption)
+    {
+        return Some(app);
+    }
+
     // Layer 4: Match desktop file name suffix if not generic.
     if !is_generic_launcher(suffix)
-        && let Some(app) = crate::find_best_audio_match(&apps, suffix)
+        && let Some(app) = crate::find_best_audio_match(apps, suffix)
     {
         return Some(app);
     }
 
     None
+}
+
+/// The friendliest display name for a process: its comm unless that is a
+/// generic launcher (steam, wine64-preloader, …), falling back to `fallback`.
+fn process_display_name(pid: u32, fallback: &str) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty() && !is_generic_launcher(c))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// A process-id capture target (`id = -pid`) for an app that is running but
+/// currently silent. Pid 0/1 and pids that do not fit the negative-id
+/// encoding are rejected.
+fn pid_fallback_app(pid: i32, name: String) -> Option<AudioApp> {
+    if pid <= 1 {
+        return None;
+    }
+    Some(AudioApp {
+        id: -pid,
+        name,
+        process_id: pid,
+        bundle_id: None,
+        window_title: None,
+        client_id: None,
+        media_title: None,
+    })
+}
+
+/// Layer 5 for KDE window captures: the window's own process as a PID target.
+fn window_pid_fallback(win: &kwin::WindowMatch, suffix: &str) -> Option<AudioApp> {
+    let pid = i32::try_from(win.pid).ok()?;
+    let name = if win.caption.is_empty() {
+        process_display_name(win.pid, suffix)
+    } else {
+        process_display_name(win.pid, &win.caption)
+    };
+    pid_fallback_app(pid, name)
+}
+
+/// The last dot-segment of a reverse-domain app id (`org.mozilla.firefox` →
+/// `firefox`). Only names with at least two dots qualify — binary names like
+/// `ffxiv_dx11.exe` (a single dot) stay untouched.
+fn shorten_portal_app_id(name: &str) -> Option<&str> {
+    let short = name.split('.').next_back()?;
+    (name.matches('.').count() >= 2 && short.len() >= 3).then_some(short)
+}
+
+/// Resolves the process id for a portal-reported window application id:
+/// exact name/binary match first, then the last dot-segment (`org.gnome.…`).
+fn resolve_pid_for_portal_app(name: &str) -> Option<i32> {
+    let procs = iter_proc();
+    if let Some(pid) = resolve_pid_by_name(&procs, name) {
+        return Some(pid);
+    }
+    let short = shorten_portal_app_id(name)?;
+    resolve_pid_by_name(&procs, short)
 }
 
 /// Snapshot of the `PipeWire` video nodes relevant to an active portal capture.
@@ -378,10 +457,22 @@ fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
     }
 
     // 3. For GNOME / XDG portal screencast streams, match against running audio apps.
-    let apps = list_audio_applications().ok()?;
-    scan.capture_names
-        .iter()
-        .find_map(|name| crate::find_best_audio_match(&apps, name))
+    if let Ok(apps) = list_audio_applications()
+        && let Some(app) = scan
+            .capture_names
+            .iter()
+            .find_map(|name| crate::find_best_audio_match(&apps, name))
+    {
+        return Some(app);
+    }
+
+    // 4. Portal window apps with no active audio stream yet: resolve the
+    // portal app id to a running process and target it by PID.
+    scan.capture_names.iter().find_map(|name| {
+        let pid = resolve_pid_for_portal_app(name)?;
+        let display = process_display_name(pid.cast_unsigned(), name);
+        pid_fallback_app(pid, display)
+    })
 }
 
 pub(crate) fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
@@ -430,10 +521,67 @@ pub(crate) fn get_capture_context() -> Result<crate::CaptureContext, String> {
 mod tests {
     use super::{
         KdeScreencast, VideoScan, classify_kde_screencast, extract_portal_window_name_from_map,
-        resolve_from_video_scan,
+        pid_fallback_app, process_display_name, resolve_from_video_scan, shorten_portal_app_id,
+        window_pid_fallback,
     };
     use crate::AudioApp;
     use std::collections::HashMap;
+
+    #[test]
+    fn pid_fallback_app_encodes_pid_as_negative_id() {
+        let app = pid_fallback_app(1234, "Spotify".into()).unwrap_or_else(|| panic!("pid app"));
+        assert_eq!(app.id, -1234);
+        assert_eq!(app.process_id, 1234);
+        assert_eq!(app.name, "Spotify");
+    }
+
+    #[test]
+    fn pid_fallback_app_rejects_system_pids() {
+        assert!(pid_fallback_app(0, "x".into()).is_none());
+        assert!(pid_fallback_app(1, "x".into()).is_none());
+    }
+
+    #[test]
+    fn window_pid_fallback_prefers_process_comm_over_caption() {
+        // Our own live process: comm is the test binary (not a generic
+        // launcher), so it must win over the caption.
+        let pid = std::process::id();
+        let win = super::super::kwin::WindowMatch {
+            pid,
+            caption: "Some Window Caption".into(),
+        };
+        let app = window_pid_fallback(&win, "suffix").unwrap_or_else(|| panic!("pid app"));
+        let comm =
+            std::fs::read_to_string("/proc/self/comm").unwrap_or_else(|e| panic!("comm: {e}"));
+        assert_eq!(app.name, comm.trim());
+        assert_eq!(app.id, -(i32::try_from(pid).unwrap_or(i32::MAX)));
+        assert_eq!(app.process_id, i32::try_from(pid).unwrap_or(i32::MAX));
+    }
+
+    #[test]
+    fn process_display_name_falls_back_for_unknown_processes() {
+        assert_eq!(process_display_name(999_999_999, "fallback"), "fallback");
+        assert!(!process_display_name(std::process::id(), "fallback").is_empty());
+    }
+
+    #[test]
+    fn shorten_portal_app_id_only_shortens_reverse_domain_names() {
+        assert_eq!(
+            shorten_portal_app_id("org.mozilla.firefox"),
+            Some("firefox")
+        );
+        assert_eq!(
+            shorten_portal_app_id("org.gnome.Nautilus"),
+            Some("Nautilus")
+        );
+        assert_eq!(shorten_portal_app_id("com.spotify.Client"), Some("Client"));
+        // Single-dot names are binaries (or plain names) — never shortened.
+        assert_eq!(shorten_portal_app_id("ffxiv_dx11.exe"), None);
+        assert_eq!(shorten_portal_app_id("spotify"), None);
+        assert_eq!(shorten_portal_app_id("org"), None);
+        // Too-short segments are not usable search keys.
+        assert_eq!(shorten_portal_app_id("org.foo.x"), None);
+    }
 
     #[test]
     fn matches_pipewire_portal_screencast_node_properties() {

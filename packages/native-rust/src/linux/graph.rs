@@ -1,7 +1,8 @@
 use super::capture::SessionShared;
 use super::capture::port_channel_from_name;
 use super::procinfo::{
-    ProcEntry, client_sec_pid, is_valid_pid, iter_proc, resolve_pid_by_binary, resolve_pid_by_name,
+    ProcEntry, client_sec_pid, is_same_or_descendant, is_valid_pid, iter_proc,
+    resolve_pid_by_binary, resolve_pid_by_name,
 };
 use super::{CAPTURE_NODE_NAME, LINK_FACTORY};
 use pipewire::properties::{PropertiesBox, properties};
@@ -54,7 +55,13 @@ impl TargetSpec {
     fn matches(&self, node_id: u32, info: &AppNodeInfo) -> bool {
         Some(node_id) == self.node_id
             || self.client_id.is_some_and(|c| info.client_id == Some(c))
-            || self.pid.is_some_and(|p| info.pid == Some(p))
+            // Exact PID match, or the audio stream's process is a descendant
+            // of the target process (e.g. a browser window's audio utility
+            // process). Descendant-only on purpose: siblings that merely
+            // share a launcher (two Steam games) must never be linked.
+            || self.pid.is_some_and(|p| {
+                info.pid.is_some_and(|i| i == p || is_same_or_descendant(i, p))
+            })
             || self.app_name.as_deref().is_some_and(|a| {
                 info.app_name
                     .as_deref()
@@ -639,6 +646,40 @@ mod tests {
         };
         assert!(target.matches(1, &app_node_info(None, None, None, Some("spotify"))));
         assert!(!target.matches(1, &app_node_info(None, None, None, Some("VLC"))));
+    }
+
+    #[test]
+    fn pid_target_matches_descendant_audio_processes() {
+        let our_pid = std::process::id();
+        // SAFETY: getppid() always returns a valid parent pid for this process.
+        let parent = unsafe { libc::getppid() }
+            .try_into()
+            .unwrap_or_else(|e| panic!("parent pid fits u32: {e}"));
+        // A window pid target captures audio from its own process…
+        let target = TargetSpec {
+            pid: Some(parent),
+            ..TargetSpec::default()
+        };
+        assert!(target.matches(1, &app_node_info(Some(parent), None, None, None)));
+        // …and from descendant processes (browser audio utilities are
+        // children of the window process)…
+        assert!(target.matches(1, &app_node_info(Some(our_pid), None, None, None)));
+        // …but never from unrelated processes.
+        assert!(!target.matches(1, &app_node_info(Some(our_pid + 5000), None, None, None)));
+    }
+
+    #[test]
+    fn pid_target_never_matches_through_a_shared_launcher_ancestor() {
+        // Two Steam games share the steam launcher as an ancestor; a pid
+        // target for one game must not capture the other's audio.
+        let target = TargetSpec {
+            pid: Some(std::process::id()),
+            ..TargetSpec::default()
+        };
+        // A process two thousand pids away cannot share our ancestor chain
+        // (our chain ends at the session shell, which is excluded).
+        let unrelated = std::process::id() + 2000;
+        assert!(!target.matches(1, &app_node_info(Some(unrelated), None, None, None)));
     }
 
     #[test]
