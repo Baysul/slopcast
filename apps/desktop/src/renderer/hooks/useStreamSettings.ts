@@ -85,7 +85,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       lastSavedSettingsRef.current = saved;
       setStreamFps(saved.fps);
       setBitrateLimit(saved.bitrateLimit);
-      const bestCodec = codecs[0]?.codec ?? 'h264';
+      const bestCodec = codecs[0]?.codec ?? 'vp8';
       const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
       const hydratedCodec = savedOk ? saved.videoCodec : bestCodec;
       setVideoCodec(hydratedCodec);

@@ -75,14 +75,16 @@ export interface StreamSettings {
 // (same defaults, clamps and whitelists). Update both files together; the
 // Rust `defaults_match_ts_table` conformance test enforces these values.
 //
-// `videoCodec` defaults to h264 because the bundled libwebrtc hardware-
-// encodes only H264 (VA-API/NVENC on Linux, Media Foundation on Windows,
-// VideoToolbox on macOS); the other codecs are software-only and are never
-// picked unless the user explicitly chooses them.
+// `videoCodec` defaults to vp8: the bundled libwebrtc's VA-API H264 path
+// has proven unreliable on Linux (the encoder collapses to ~1-3 fps shortly
+// after publish, which reads as a ~1 kbps, super-pixelated stream), while
+// VP8 holds the requested framerate in every platform test. H264 remains
+// selectable for hardware-encode setups where it works (NVENC/Media
+// Foundation/VideoToolbox).
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   fps: 60,
   bitrateLimit: 20_000_000,
-  videoCodec: 'h264',
+  videoCodec: 'vp8',
   resolution: '1080p',
   apiEndpoint: 'http://localhost:3001',
 };

@@ -71,7 +71,7 @@ test('fromNativeCodecInfo drops unknown codecs and returns an empty list', () =>
   assert.deepEqual(fromNativeCodecInfo([]), []);
 });
 
-test('recommendCodec hoists the hardware codec first', () => {
+test('recommendCodec hoists the shipped default codec (vp8) first', () => {
   const input = sortByCodecPreference([
     { ...info('h264', true) },
     { ...info('vp8', false) },
@@ -79,22 +79,28 @@ test('recommendCodec hoists the hardware codec first', () => {
     { ...info('av1', false) },
   ]);
   const recommended = recommendCodec(input);
-  assert.equal(recommended[0]?.codec, 'h264');
+  assert.equal(recommended[0]?.codec, 'vp8');
   assert.equal(recommended[0]?.recommended, true);
   assert.ok(recommended.slice(1).every((c) => !c.recommended));
 });
 
-test('recommendCodec falls back to h264 when nothing is hardware', () => {
-  const input = sortByCodecPreference([info('vp8'), info('vp9'), info('h264'), info('av1')]);
+test('recommendCodec falls back to the first available codec when vp8 is absent', () => {
+  const input = sortByCodecPreference([info('vp9'), info('h264'), info('av1')]);
   const recommended = recommendCodec(input);
   assert.equal(recommended[0]?.codec, 'h264');
   assert.equal(recommended[0]?.recommended, true);
 });
 
-test('recommendCodec leaves a single non-h264 list untouched', () => {
+test('recommendCodec marks a single vp8 list as recommended (it is the shipped default)', () => {
   const input = [info('vp8')];
   const recommended = recommendCodec(input);
-  assert.deepEqual(recommended, [{ ...info('vp8'), recommended: false }]);
+  assert.deepEqual(recommended, [{ ...info('vp8'), recommended: true }]);
+});
+
+test('recommendCodec handles a single non-default codec without crashing', () => {
+  const input = [info('h264', true)];
+  const recommended = recommendCodec(input);
+  assert.deepEqual(recommended, [{ ...info('h264', true), recommended: true }]);
 });
 
 test('recommendCodec returns an empty list unchanged', () => {

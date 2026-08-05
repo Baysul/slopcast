@@ -1,5 +1,5 @@
 import type { VideoCodec } from '@slopcast/shared-types';
-import { VIDEO_CODEC_PRIORITY } from '@slopcast/shared-types';
+import { DEFAULT_STREAM_SETTINGS, VIDEO_CODEC_PRIORITY } from '@slopcast/shared-types';
 import type { NativeCodecInfo } from '../types';
 
 export interface CodecInfo {
@@ -30,14 +30,11 @@ export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
   return sortByCodecPreference(codecs);
 };
 
-// Hoists the recommended choice: the first hardware-capable codec, or H.264
-// when no hardware encoder exists (H.264 is the only software codec the
-// picker should ever fall back to — libvpx VP9 and libaom AV1 cannot sustain
-// real-time 1080p60 in software).
+// Hoists the recommended choice: the shipped default codec (vp8 — see
+// DEFAULT_STREAM_SETTINGS; VA-API H264 collapses to ~1-3 fps on Linux).
 export const recommendCodec = (codecs: CodecInfo[]): CodecInfo[] => {
   if (codecs.length === 0) return [];
-  const recommended = codecs.find((c) => c.hardware) ?? codecs.find((c) => c.codec === 'h264');
-  if (!recommended) return codecs;
+  const recommended = codecs.find((c) => c.codec === DEFAULT_STREAM_SETTINGS.videoCodec) ?? codecs[0];
   return [{ ...recommended, recommended: true }, ...codecs.filter((c) => c.codec !== recommended.codec)];
 };
 
