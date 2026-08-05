@@ -41,13 +41,21 @@ interface GpuInfo {
 /// the spec to `presenter-phase.json` and read back by the harness.
 interface PresenterPhase {
   ok: boolean;
+  /** Set only once the presenter is live (spec sets it after Go Live); the
+   * harness refuses to start the spectator until it flips, so an early
+   * Wayland-only write can never hand off an unstarted session. */
+  handoffReady: boolean;
   roomCode: string;
   shareUrl: string;
   isWayland: boolean;
+  captureMode: string;
+  codec: string;
   gpuReport: GpuInfo | null;
   previewFramesSent: number;
   videoFramesSent: number;
   videoBytesSent: number;
+  videoCodecReported: string | null;
+  encoderImplementation: string | null;
   captureFramesPushed: number;
   telemetryFlowing: boolean;
   errors: string[];
@@ -79,9 +87,23 @@ interface TestResult {
   presenterVideoFramesSent: number;
   presenterVideoBytesSent: number;
   captureFramesPushed: number;
-  /** §9.1 preview emitter counter — proves base64 JPEG preview frames flowed. */
+  /** §9.1 preview emitter counter — proves base64 I420 preview frames flowed. */
   previewFramesSent: number;
+  videoCodecReported: string | null;
+  encoderImplementation: string | null;
   decoderStallDetected: boolean;
+  /** Codecs the presenter phase ran with, in order. */
+  codecsTested: string[];
+  /** Per-codec pass outcome (the codec list fix + HW-encoding gates live here). */
+  codecResults: Record<
+    string,
+    {
+      passed: boolean;
+      errors: string[];
+      encoderImplementation: string | null;
+      videoCodecReported: string | null;
+    }
+  >;
   durationMs: number;
   retries: number;
   errors: string[];
@@ -136,6 +158,23 @@ function killPort(port: number): void {
     }
   } catch {
     log('CLEANUP', `Port ${port} was free`);
+  }
+}
+
+/// Kills stray app instances left by previous runs. The app registers
+/// `tauri-plugin-single-instance`, so a leaked process both holds the
+/// WebDriver port (4445) and swallows every later launch — the new run would
+/// silently attach to the stale instance's webview (whose UI is stuck in the
+/// previous session's state) and every element check would fail.
+function killStraySlopcast(): void {
+  try {
+    if (process.platform === 'linux') {
+      execSync(`pkill -f 'target/release/slopcast' 2>/dev/null || true`, { stdio: 'pipe' });
+    } else if (process.platform === 'win32') {
+      execSync('taskkill /IM slopcast.exe /F >nul 2>&1 || exit /b 0', { stdio: 'pipe' });
+    }
+  } catch {
+    log('CLEANUP', 'No stray app processes to kill');
   }
 }
 
@@ -241,17 +280,23 @@ function findOnPath(bin: string): boolean {
 // fail at the streaming stage, so check early and start a local dev server
 // when possible (the app defaults ws://localhost:7880 + devkey/secret match
 // `livekit-server --dev` exactly).
+//
+// A listener already bound to a localhost port is NOT trusted: containerized
+// SFUs (e.g. the compose stack under rootless Docker) often relay signaling
+// but fail ICE/DTLS on the media plane (user-space UDP NAT drops the checks),
+// which surfaces as a client that "connects" and then hangs forever. The
+// harness therefore always runs its own native server for localhost endpoints.
 async function ensureLiveKit(url: string, logEntries: LogEntry[]): Promise<ChildProcess | null> {
   const endpoint = parseWsEndpoint(url);
   if (!endpoint) {
     log('LIVEKIT', `Could not parse LiveKit URL "${url}" — assuming external SFU`);
     return null;
   }
-  if (await tcpCheck(endpoint.host, endpoint.port)) {
-    log('LIVEKIT', `LiveKit reachable at ${endpoint.host}:${endpoint.port}`);
-    return null;
-  }
-  if (endpoint.host !== 'localhost' && endpoint.host !== '127.0.0.1') {
+  if (endpoint.host !== 'localhost' && endpoint.host !== '127.0.0.1' && endpoint.host !== '::1') {
+    if (await tcpCheck(endpoint.host, endpoint.port)) {
+      log('LIVEKIT', `LiveKit reachable at ${endpoint.host}:${endpoint.port}`);
+      return null;
+    }
     throw new Error(
       `LiveKit SFU unreachable at ${url}. Check network/credentials (slopcast.config.json or LIVEKIT_URL).`,
     );
@@ -262,8 +307,19 @@ async function ensureLiveKit(url: string, logEntries: LogEntry[]): Promise<Child
         'Start one manually (livekit-server --dev) or point LIVEKIT_URL at a reachable instance.',
     );
   }
-  log('LIVEKIT', `Nothing on ${endpoint.host}:${endpoint.port} — starting local livekit-server --dev...`);
-  const proc = spawnLogging('livekit-server', ['--dev'], 'livekit', logEntries);
+  // Free the signal + media ports (7880/7881/7882) — a stale containerized
+  // instance would otherwise keep them and sabotage the native server.
+  for (const port of [endpoint.port, 7881, 7882]) {
+    killPort(port);
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  log('LIVEKIT', `Starting native livekit-server --dev on :${endpoint.port}...`);
+  const proc = spawnLogging(
+    'livekit-server',
+    ['--dev', '--bind', '0.0.0.0', '--port', String(endpoint.port)],
+    'livekit',
+    logEntries,
+  );
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await tcpCheck(endpoint.host, endpoint.port)) {
@@ -434,7 +490,8 @@ async function waitForPresenterPhase(wdioProc: ChildProcess, timeoutMs: number):
     if (existsSync(PRESENTER_PHASE_JSON)) {
       try {
         phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
-        if (phase.ok || phase.errors.length > 0) break;
+        // Hand off only once the presenter is live (handoffReady) or failed.
+        if (phase.handoffReady || phase.errors.length > 0) break;
       } catch {
         // Partial write mid-step — keep polling.
       }
@@ -455,8 +512,10 @@ async function runPresenterPhase(
   config: AppConfig,
   logEntries: LogEntry[],
   result: TestResult,
+  codec: string,
+  captureMode: string,
 ): Promise<PresenterPhaseResult> {
-  log('TEST', '=== Step 2: Presenter Automation (WebdriverIO + Tauri) ===');
+  log('TEST', `=== Step 2: Presenter Automation (WebdriverIO + Tauri, codec=${codec}) ===`);
 
   // Cargo workspace target dir lives at the repo root, not in src-tauri.
   const appBinary = path.join(REPO_ROOT, 'target', 'release', 'slopcast');
@@ -470,9 +529,11 @@ async function runPresenterPhase(
   log('ELECTRON', `Launching Tauri app from ${appBinary}`);
 
   // Fresh handshake files: a stale release flag from a previous attempt would
-  // end the spec's hold test immediately.
+  // end the spec's hold test immediately. Also kill stray app instances from
+  // previous runs (single-instance plugin would hijack this launch).
   rmSync(PRESENTER_RELEASE_FLAG, { force: true });
   rmSync(PRESENTER_PHASE_JSON, { force: true });
+  killStraySlopcast();
 
   // Isolate the app's config dir (stream-settings.json, onboarding state) so
   // persisted settings from a real session cannot leak into the test; the
@@ -489,6 +550,9 @@ async function runPresenterPhase(
       E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
       E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
       E2E_WEBSITE_URL: config.websiteUrl,
+      E2E_CODEC: codec,
+      E2E_CAPTURE: captureMode,
+      SLOPCAST_E2E_CAPTURE: captureMode === 'portal' ? '' : 'synthetic',
       FORCE_COLOR: '0',
     },
   });
@@ -523,9 +587,19 @@ async function runPresenterPhase(
     throw new Error(`Presenter phase failed: ${reason}`);
   }
 
-  // The spec asserts the Wayland gate itself; the harness fails fast on the
+  // A settled-but-partial phase (no room code, never went live) is a stuck
+  // session, not a success — fail fast instead of handing off an empty room.
+  if (!phase.handoffReady || phase.roomCode.length === 0) {
+    writePresenterRelease();
+    throw new Error(
+      `Presenter phase never went live (handoffReady=${phase.handoffReady}, roomCode="${phase.roomCode}")`,
+    );
+  }
+
+  // The spec asserts the Wayland gate itself (portal mode only — synthetic
+  // mode runs headless without a picker); the harness fails fast on the
   // phase result so a non-Wayland session never reaches the spectator.
-  if (!phase.isWayland) {
+  if (!phase.isWayland && captureMode === 'portal') {
     writePresenterRelease();
     throw new Error('Presenter phase: Wayland required — Slopcast is Wayland-only (D2)');
   }
@@ -538,6 +612,8 @@ async function runPresenterPhase(
   result.presenterVideoBytesSent = phase.videoBytesSent;
   result.captureFramesPushed = phase.captureFramesPushed;
   result.previewFramesSent = phase.previewFramesSent;
+  result.videoCodecReported = phase.videoCodecReported;
+  result.encoderImplementation = phase.encoderImplementation;
 
   if (phase.gpuReport) {
     writeFileSync(GPU_REPORT_PATH, JSON.stringify(phase.gpuReport, null, 2));
@@ -641,19 +717,20 @@ async function waitForSpectatorVideo(page: Page, result: TestResult): Promise<vo
  */
 async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<void> {
   try {
+    // CAUTION: the callback is stringified and re-executed in the browser, and
+    // tsx/esbuild wraps any *named* inner arrow (`const nextFrame = () => ...`)
+    // with a `__name(...)` helper that does not exist in the page context
+    // ("ReferenceError: __name is not defined"). Only anonymous inline arrow
+    // arguments survive — so the two frame-waits are inlined below.
     const frameCheck = await page.evaluate(async () => {
       const video = [...document.querySelectorAll('video')].find((v) => v.videoWidth > 0);
       if (!video) {
         throw new Error('no video element with frames');
       }
-      const nextFrame = () =>
-        new Promise<void>((resolve) => {
-          video.requestVideoFrameCallback(() => resolve());
-        });
       // Two consecutive decoded frames: the first could be a lone keepalive,
       // so a second callback proves the stream keeps flowing.
-      await nextFrame();
-      await nextFrame();
+      await new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve()));
+      await new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve()));
 
       const canvas = document.createElement('canvas');
       canvas.width = 64;
@@ -872,7 +949,11 @@ async function runTest(): Promise<TestResult> {
     presenterVideoBytesSent: 0,
     captureFramesPushed: 0,
     previewFramesSent: 0,
+    videoCodecReported: null,
+    encoderImplementation: null,
     decoderStallDetected: false,
+    codecsTested: [],
+    codecResults: {},
     durationMs: 0,
     retries: 0,
     errors: [],
@@ -888,6 +969,42 @@ async function runTest(): Promise<TestResult> {
 
   mkdirSync(OUTPUT_DIR, { recursive: true });
 
+  // Synthetic capture mode (default): no portal picker, no human, no Wayland
+  // requirement — the app feeds a test pattern through the real publish path.
+  // Portal mode keeps the manual picker flow for humans.
+  const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
+  const codecs = (process.env.E2E_CODECS ?? 'h264,vp8,vp9,av1')
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean);
+  result.codecsTested = codecs;
+  log('TEST', `Capture mode: ${captureMode}; codecs under test: ${codecs.join(', ')}`);
+
+  // In synthetic mode the app's persisted stream settings drive the codec,
+  // resolution and fps of the published track; write them into the isolated
+  // app config dir (XDG_CONFIG_HOME is redirected to test-output/e2e-userdata)
+  // before every pass so the renderer hydrates from them at startup.
+  const streamSettingsPath = path.join(OUTPUT_DIR, 'e2e-userdata', 'slopcast', 'stream-settings.json');
+  const writeStreamSettingsForPass = (codec: string): void => {
+    if (captureMode === 'portal') return;
+    mkdirSync(path.dirname(streamSettingsPath), { recursive: true });
+    writeFileSync(
+      streamSettingsPath,
+      JSON.stringify(
+        {
+          fps: 30,
+          bitrateLimit: 8_000_000,
+          videoCodec: codec,
+          resolution: '720p',
+          apiEndpoint: 'http://localhost:3001',
+        },
+        null,
+        2,
+      ),
+    );
+    log('CONFIG', `Wrote stream settings for codec ${codec}: 720p@30, 8 Mbps`);
+  };
+
   // Resources tracked for guaranteed cleanup — a failure at any step must not
   // leak server processes, browser instances or the presenter app into the
   // next retry.
@@ -895,15 +1012,66 @@ async function runTest(): Promise<TestResult> {
   let wdioProc: ChildProcess | null = null;
   let procs: ServerProcs = { serverProc: null, webProc: null, livekitProc: null };
 
+  const releasePresenterSession = async (): Promise<void> => {
+    if (wdioProc) {
+      writePresenterRelease();
+      await waitForProcessExit(wdioProc, PRESENTER_TEARDOWN_MS);
+      if (wdioProc.exitCode === null && wdioProc.signalCode === null) {
+        log('CLEANUP', 'wdio did not exit after release — killing');
+        wdioProc.kill('SIGTERM');
+        await waitForProcessExit(wdioProc, 5000);
+      }
+      wdioProc = null;
+    }
+    if (browser) {
+      await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
+      browser = null;
+    }
+  };
+
+  /// One full presenter → spectator pass for a single codec. Errors are
+  /// recorded into `result` under the codec key; the pass always returns so
+  /// the remaining codecs still run.
+  const runCodecPass = async (codec: string): Promise<void> => {
+    const errorsBefore = result.errors.length;
+    writeStreamSettingsForPass(codec);
+    log('TEST', `=== Pass: codec=${codec} (${captureMode} capture) ===`);
+    try {
+      const presenter = await runPresenterPhase(config, logEntries, result, codec, captureMode);
+      wdioProc = presenter.wdioProc;
+
+      browser = await runSpectatorPhase(logEntries, result);
+
+      validateDiagnostics(result, logEntries);
+
+      const passErrors = result.errors.slice(errorsBefore);
+      result.codecResults[codec] = {
+        passed: passErrors.length === 0,
+        errors: passErrors,
+        encoderImplementation: result.encoderImplementation ?? null,
+        videoCodecReported: result.videoCodecReported ?? null,
+      };
+      log('TEST', `Pass codec=${codec}: ${passErrors.length === 0 ? 'PASSED' : 'FAILED'}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log('TEST', `Pass codec=${codec}: FATAL ${message}`);
+      result.errors.push(`[${codec}] ${message}`);
+      result.codecResults[codec] = {
+        passed: false,
+        errors: [message],
+        encoderImplementation: null,
+        videoCodecReported: null,
+      };
+    }
+    await releasePresenterSession();
+  };
+
   try {
     procs = await ensureServers(config, logEntries);
 
-    const presenter = await runPresenterPhase(config, logEntries, result);
-    wdioProc = presenter.wdioProc;
-
-    browser = await runSpectatorPhase(logEntries, result);
-
-    validateDiagnostics(result, logEntries);
+    for (const codec of codecs) {
+      await runCodecPass(codec);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log('TEST', `FATAL: ${message}`);

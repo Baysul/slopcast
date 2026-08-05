@@ -5,13 +5,16 @@
 // WebDriver server (tauri-plugin-wdio-webdriver) + `browser.tauri.execute`
 // (tauri-plugin-wdio) power the flow:
 //
-//   1. Wayland assertion (fail fast)
+//   1. Platform assertion (fail-fast Wayland gate only in portal mode)
 //   2. Create Live Room → extract the room code from `span.font-mono`
-//   3. Start Screenshare → portal picker (answered by the runner) → preview
-//      canvas appears → Go Live → LIVE (Stop Screenshare visible)
+//   3. Start Screenshare → preview canvas appears → Go Live → LIVE
+//      (Stop Screenshare visible). The capture route is chosen by the
+//      backend: `SLOPCAST_E2E_CAPTURE=synthetic` (default, headless — no
+//      portal picker) or `portal` (a human answers the picker).
 //   4. Presenter telemetry: get_native_telemetry + get_video_capture_stats
-//      sampled twice ~2 s apart; videoFramesSent must advance and
-//      previewFramesSent > 0 (proves the §9.1 preview emitter ran)
+//      sampled twice ~2 s apart; videoFramesSent must advance, the outbound
+//      codec must match E2E_CODEC, and previewFramesSent > 0 (proves the
+//      raw-I420 preview emitter ran)
 //   5. GPU diagnostics via probe_gpu_info (D5) — softwareRasterizer must be
 //      false and eglVendor present
 //   6. Hold: keep the app alive until the harness releases it after the
@@ -59,6 +62,8 @@ interface GpuInfo {
 interface NativeTelemetry {
   videoFramesSent?: number;
   videoBytesSent?: number;
+  videoCodec?: string | null;
+  encoderImplementation?: string | null;
 }
 
 interface CaptureStats {
@@ -68,13 +73,21 @@ interface CaptureStats {
 
 interface PhaseResult {
   ok: boolean;
+  /** True only once the presenter is actually live: sets the handoff signal
+   * the harness waits on before starting the spectator, so an early Wayland
+   * assertion (test 1) alone can never hand off an unstarted session. */
+  handoffReady: boolean;
   roomCode: string;
   shareUrl: string;
   isWayland: boolean;
+  captureMode: string;
+  codec: string;
   gpuReport: GpuInfo | null;
   previewFramesSent: number;
   videoFramesSent: number;
   videoBytesSent: number;
+  videoCodecReported: string | null;
+  encoderImplementation: string | null;
   captureFramesPushed: number;
   telemetryFlowing: boolean;
   errors: string[];
@@ -83,24 +96,31 @@ interface PhaseResult {
 const phaseJsonPath = process.env.E2E_PHASE_JSON;
 const releaseFlagPath = process.env.E2E_RELEASE_FLAG;
 const websiteUrl = process.env.E2E_WEBSITE_URL;
+const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
+const codec = process.env.E2E_CODEC ?? 'h264';
 if (!phaseJsonPath || !releaseFlagPath || !websiteUrl) {
   throw new Error('E2E_PHASE_JSON, E2E_RELEASE_FLAG and E2E_WEBSITE_URL must be set');
 }
 
 const ROOM_CREATE_TIMEOUT_MS = 30_000;
-const PICKER_TIMEOUT_MS = 60_000;
+const PREVIEW_TIMEOUT_MS = captureMode === 'portal' ? 60_000 : 20_000;
 const TELEMETRY_SAMPLE_GAP_MS = 2000;
 const HOLD_TIMEOUT_MS = 180_000;
 
 const phase: PhaseResult = {
   ok: false,
+  handoffReady: false,
   roomCode: '',
   shareUrl: '',
   isWayland: false,
+  captureMode,
+  codec,
   gpuReport: null,
   previewFramesSent: 0,
   videoFramesSent: 0,
   videoBytesSent: 0,
+  videoCodecReported: null,
+  encoderImplementation: null,
   captureFramesPushed: 0,
   telemetryFlowing: false,
   errors: [],
@@ -125,15 +145,89 @@ function assert(condition: boolean, message: string): void {
 }
 
 function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return browser.tauri.execute((tauri: TauriApi) => tauri.core.invoke(command, args) as Promise<T>);
+  // The WDIO tauri plugin stringifies the script and re-evaluates it inside the
+  // webview, so closure variables are lost ("Can't find variable: command").
+  // command/args must be forwarded as execute() arguments, not captured.
+  return browser.tauri.execute(
+    (tauri: TauriApi, cmd: string, invokeArgs: Record<string, unknown> | undefined) =>
+      tauri.core.invoke(cmd, invokeArgs) as Promise<T>,
+    command,
+    args,
+  );
 }
 
+/// The outbound codec must match the requested one — this pins the whole
+/// codec path (picker → config → publish → SFU) per E2E_CODEC pass — and H264
+/// must use a hardware encoder (VA-API/NVENC on Linux, Media Foundation on
+/// Windows) when one is available; the other codecs are software by design.
+function assertCodecTelemetry(phase: PhaseResult): void {
+  const expectedMime = `video/${codec.toUpperCase()}`;
+  assert(
+    (phase.videoCodecReported ?? '').toUpperCase() === expectedMime.toUpperCase(),
+    `Outbound codec mismatch: requested ${expectedMime}, reported ${phase.videoCodecReported ?? 'null'}`,
+  );
+  if (codec !== 'h264') return;
+  const impl = phase.encoderImplementation ?? '';
+  console.log(`[e2e] h264 encoder implementation: ${impl || '(not yet reported)'}`);
+  assert(
+    /VAAPI|NVENC|Media\s*Foundation|VideoToolbox/i.test(impl),
+    `H264 was not hardware-encoded (encoderImplementation=${impl || 'empty'})`,
+  );
+}
+
+/// Samples the preview canvas in-page: the canvas uses a WebGL2 context, so
+/// its pixels are copied into a fresh 2d canvas (drawImage works across
+/// context types) before reading. Self-contained — the WDIO tauri plugin
+/// stringifies this function and re-evaluates it inside the webview.
+async function samplePreviewCanvas(): Promise<boolean> {
+  const canvas = document.querySelector('canvas[aria-label="Live screenshare preview"]');
+  if (!canvas) return false;
+  // Wait briefly for the first frame to be drawn by the WebGL path.
+  await new Promise((r) => setTimeout(r, 500));
+  const copy = document.createElement('canvas');
+  copy.width = canvas.width;
+  copy.height = canvas.height;
+  const ctx = copy.getContext('2d');
+  if (!ctx) return false;
+  ctx.drawImage(canvas, 0, 0);
+  const { data } = ctx.getImageData(0, 0, copy.width, copy.height);
+  let nonBlack = 0;
+  let total = 0;
+  for (let i = 0; i < data.length; i += 16) {
+    total += 1;
+    if (Math.max(data[i], data[i + 1], data[i + 2]) > 16) nonBlack += 1;
+  }
+  return total > 0 && nonBlack / total > 0.1;
+}
+
+const snapshotPresenterTelemetry = async (): Promise<{
+  telemetry: NativeTelemetry;
+  stats: CaptureStats;
+}> => {
+  const telemetry = await tauriInvoke<NativeTelemetry>('get_native_telemetry');
+  const stats = await tauriInvoke<CaptureStats>('get_video_capture_stats');
+  return { telemetry, stats };
+};
+
 describe('Slopcast presenter phase (Tauri)', () => {
-  it('runs on a Wayland session', async () => {
+  // A test that dies with an uncaught error (not an assert) must still land
+  // in phase.errors immediately — otherwise the harness can hand off a
+  // partial phase (e.g. a room without a live stream) as if it were OK.
+  afterEach(function () {
+    if (this.currentTest?.state === 'failed' && this.currentTest.err) {
+      recordError(this.currentTest.err.message);
+    }
+  });
+
+  it('runs on a supported session', async () => {
     const info = await tauriInvoke<PlatformInfo>('get_platform_info');
     phase.isWayland = info.isWayland;
     writePhase();
-    assert(info.isWayland, 'Wayland required — Slopcast is Wayland-only (D2)');
+    if (captureMode === 'portal') {
+      assert(info.isWayland, 'Wayland required — Slopcast is Wayland-only (D2)');
+    } else {
+      console.log(`[e2e] synthetic capture mode — Wayland not required (session=${info.platform})`);
+    }
   });
 
   it('creates a live room and extracts the room code', async () => {
@@ -153,16 +247,25 @@ describe('Slopcast presenter phase (Tauri)', () => {
   });
 
   it('starts the pre-roll capture, shows the preview and goes live', async () => {
-    // Answer the xdg-desktop-portal picker when it appears — the runner must
-    // select a source for frames (and thus the preview canvas) to flow.
+    // Synthetic mode: the backend feeds test-pattern frames (no portal
+    // picker). Portal mode: the runner must answer the picker for frames to
+    // flow.
     const startBtn = browser.$('button=Start Screenshare');
     await startBtn.waitForDisplayed({ timeout: ROOM_CREATE_TIMEOUT_MS });
     await startBtn.click();
-    console.log('[e2e] portal picker should now be visible — select a source');
+    if (captureMode === 'portal') {
+      console.log('[e2e] portal picker should now be visible — select a source');
+    }
 
     const previewCanvas = browser.$('canvas[aria-label="Live screenshare preview"]');
-    await previewCanvas.waitForExist({ timeout: PICKER_TIMEOUT_MS });
-    console.log('[e2e] preview canvas visible');
+    await previewCanvas.waitForExist({ timeout: PREVIEW_TIMEOUT_MS });
+    console.log(`[e2e] preview canvas visible (mode=${captureMode})`);
+
+    // The preview must actually draw: sample the canvas pixels in-page and
+    // require non-uniform content (a dead capture renders nothing or all
+    // black).
+    const canvasHasContent = await browser.tauri.execute(samplePreviewCanvas);
+    assert(canvasHasContent, 'Preview canvas has no visible frame content');
 
     const goLiveBtn = browser.$('button=Go Live');
     await goLiveBtn.waitForDisplayed({ timeout: 10_000 });
@@ -180,18 +283,14 @@ describe('Slopcast presenter phase (Tauri)', () => {
       return;
     }
 
-    const snapshot = async (): Promise<{ telemetry: NativeTelemetry; stats: CaptureStats }> => {
-      const telemetry = await tauriInvoke<NativeTelemetry>('get_native_telemetry');
-      const stats = await tauriInvoke<CaptureStats>('get_video_capture_stats');
-      return { telemetry, stats };
-    };
-
-    const t0 = await snapshot();
+    const t0 = await snapshotPresenterTelemetry();
     await new Promise((r) => setTimeout(r, TELEMETRY_SAMPLE_GAP_MS));
-    const t1 = await snapshot();
+    const t1 = await snapshotPresenterTelemetry();
 
     phase.videoFramesSent = t1.telemetry.videoFramesSent ?? 0;
     phase.videoBytesSent = t1.telemetry.videoBytesSent ?? 0;
+    phase.videoCodecReported = t1.telemetry.videoCodec ?? null;
+    phase.encoderImplementation = t1.telemetry.encoderImplementation ?? null;
     phase.captureFramesPushed = t1.stats.framesPushed;
     phase.previewFramesSent = t1.stats.previewFramesSent;
     phase.telemetryFlowing =
@@ -208,11 +307,15 @@ describe('Slopcast presenter phase (Tauri)', () => {
 
     assert(phase.telemetryFlowing, 'Presenter video telemetry did not advance (frames/bytes stalled)');
     assert(phase.previewFramesSent > 0, 'No preview frames were emitted (previewFramesSent stayed at 0)');
+    assertCodecTelemetry(phase);
   });
 
   it('probes GPU info via probe_gpu_info', async () => {
     const gpu = await tauriInvoke<GpuInfo>('probe_gpu_info');
     phase.gpuReport = gpu;
+    // Last validation write before the hold: hand off to the spectator with
+    // the complete phase (room + telemetry + GPU), not an early partial.
+    phase.handoffReady = true;
     writePhase();
 
     assert(gpu != null, 'GPU probe returned no data');

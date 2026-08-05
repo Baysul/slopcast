@@ -33,6 +33,11 @@ const allowedOrigins = new Set([
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://[::1]:5173',
+  // Tauri v2 production/webkit registrations: the packaged desktop renderer
+  // is served from the `tauri://localhost` custom protocol, so its API fetch
+  // carries that origin (Electron-era `file://` never hit CORS checks).
+  'tauri://localhost',
+  'http://tauri.localhost',
 ]);
 app.use((req, res, next) => {
   const origin = req.headers.origin;
