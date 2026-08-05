@@ -15,6 +15,11 @@ mod mpris;
 )]
 mod portal;
 mod procinfo;
+#[allow(
+    dead_code,
+    reason = "Phase B lands standalone; consumed by the Phase D capture wiring"
+)]
+mod pw_video;
 mod screencast;
 
 pub(crate) use apps::{dump_audio_sources, list_audio_applications};
