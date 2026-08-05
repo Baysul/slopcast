@@ -1,5 +1,10 @@
 mod apps;
 mod capture;
+#[allow(
+    dead_code,
+    reason = "Phase C lands standalone; consumed by the Phase B/D capture wiring"
+)]
+mod egl;
 mod graph;
 mod kwin;
 mod metering;
