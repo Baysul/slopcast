@@ -16,6 +16,7 @@
     "format": "biome format --write && pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:fmt": "pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:check": "pnpm --filter @slopcast/native-rust rust:check",
+    "probe:capture": "bash probe/probe-capture.sh",
     "dev": "pnpm --parallel --recursive dev",
     "dev:desktop": "pnpm --filter desktop dev",
     "dev:web": "pnpm --filter web dev",
