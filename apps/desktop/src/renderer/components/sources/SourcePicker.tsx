@@ -1,9 +1,14 @@
+import { Check, Copy } from 'lucide-react';
 import React from 'react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import type { CaptureContext, CaptureStage } from '../../types';
 
 export interface SourcePickerProps {
+  roomCode: string;
+  isCreatingRoom: boolean;
+  copied: 'link' | 'code' | null;
   captureContext: CaptureContext | null;
   autoDetectFailed: boolean;
   captureStage: CaptureStage;
@@ -13,13 +18,80 @@ export interface SourcePickerProps {
   canStartShare: boolean;
   canGoLive: boolean;
   disabledReason: string | null;
+  onCreateRoom: () => void;
+  onCopyCode: () => void;
+  onCopyLink: () => void;
   onStartShare: () => void;
   onGoLive: () => void;
   onStopShare: () => void;
 }
 
+interface RoomControlsProps {
+  roomCode: string;
+  isCreatingRoom: boolean;
+  copied: 'link' | 'code' | null;
+  spectatorCount: number;
+  onCreateRoom: () => void;
+  onCopyCode: () => void;
+  onCopyLink: () => void;
+}
+
+// Room lifecycle controls that used to live in the presenter header: create
+// the room when none exists, otherwise show the share code and copy actions.
+const RoomControls: React.FC<RoomControlsProps> = React.memo(
+  ({ roomCode, isCreatingRoom, copied, spectatorCount, onCreateRoom, onCopyCode, onCopyLink }) => {
+    if (!roomCode) {
+      return (
+        <Button variant="default" onClick={onCreateRoom} disabled={isCreatingRoom} className="w-full font-bold">
+          {isCreatingRoom ? 'Creating Room...' : 'Create Live Room'}
+        </Button>
+      );
+    }
+
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          {spectatorCount > 0 && (
+            <Badge variant="info" className="tabular-nums">
+              {spectatorCount} spectator{spectatorCount === 1 ? '' : 's'}
+            </Badge>
+          )}
+          <span className="font-mono text-sm font-semibold tabular-nums tracking-wide text-foreground/90">
+            {roomCode}
+          </span>
+          <Button variant="secondary" size="sm" onClick={onCopyCode} className="gap-2">
+            <span className="text-foreground bg-accent/50 px-2 py-0.5 rounded-md text-xs flex items-center gap-1">
+              {copied === 'code' ? (
+                <>
+                  <Check className="w-3 h-3 text-safelight" aria-hidden="true" />
+                  Copied
+                </>
+              ) : (
+                'Copy'
+              )}
+            </span>
+          </Button>
+          <Button size="sm" onClick={onCopyLink} className="gap-1.5">
+            {copied === 'link' ? (
+              <Check className="w-4 h-4" aria-hidden="true" />
+            ) : (
+              <Copy className="w-4 h-4" aria-hidden="true" />
+            )}
+            {copied === 'link' ? 'Link Copied!' : 'Copy Link'}
+          </Button>
+        </div>
+      </div>
+    );
+  },
+);
+
+RoomControls.displayName = 'RoomControls';
+
 export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
   ({
+    roomCode,
+    isCreatingRoom,
+    copied,
     captureContext,
     autoDetectFailed,
     captureStage,
@@ -29,6 +101,9 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
     canStartShare,
     canGoLive,
     disabledReason,
+    onCreateRoom,
+    onCopyCode,
+    onCopyLink,
     onStartShare,
     onGoLive,
     onStopShare,
@@ -41,6 +116,16 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          <RoomControls
+            roomCode={roomCode}
+            isCreatingRoom={isCreatingRoom}
+            copied={copied}
+            spectatorCount={spectatorCount}
+            onCreateRoom={onCreateRoom}
+            onCopyCode={onCopyCode}
+            onCopyLink={onCopyLink}
+          />
+
           {captureContext?.de === 'kde' && !autoDetectFailed && (
             <div className="space-y-2">
               <p className="text-sm text-muted-foreground bg-secondary border border-border rounded-lg p-3 leading-relaxed">

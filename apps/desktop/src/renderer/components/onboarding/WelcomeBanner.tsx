@@ -78,8 +78,8 @@ export const WelcomeBanner: React.FC = React.memo(() => {
               <div>
                 <p className="text-sm font-semibold text-foreground">Create a room</p>
                 <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                  Click <span className="text-foreground font-medium">Create Live Room</span> in the header to get a
-                  shareable link.
+                  Click <span className="text-foreground font-medium">Create Live Room</span> in the Screenshare Source
+                  panel to get a shareable link.
                 </p>
               </div>
             </div>

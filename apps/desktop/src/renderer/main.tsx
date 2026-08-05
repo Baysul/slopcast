@@ -8,7 +8,6 @@ import { Toaster } from '@/components/ui/sonner';
 import { desktopApi } from './api/desktop';
 import { AudioAppPicker } from './components/audio/AudioAppPicker';
 import { WaylandNotice } from './components/gate/WaylandNotice';
-import { PresenterHeader } from './components/layout/PresenterHeader';
 import { TitleBar } from './components/layout/TitleBar';
 import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
 import { ScreensharePreview } from './components/preview/ScreensharePreview';
@@ -473,78 +472,71 @@ export const PresenterApp: React.FC = () => {
     );
   } else if (platformInfo) {
     content = (
-      <>
-        <PresenterHeader
-          roomCode={roomCode}
-          shareUrl={shareUrl}
-          spectatorCount={spectatorCount}
-          isCreatingRoom={isCreatingRoom}
-          copied={copied}
-          onCreateRoom={handleCreateRoom}
-          onCopyCode={handleCopyCode}
-          onCopyLink={handleCopyLink}
-        />
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-5xl mx-auto w-full px-6 pt-6">
+          <WelcomeBanner />
+        </div>
 
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-5xl mx-auto w-full px-6 pt-6">
-            <WelcomeBanner />
+        <main className="max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
+          <ScreensharePreview
+            captureStage={captureStage}
+            roomCode={roomCode}
+            copied={copied}
+            previewFrame={previewFrame}
+            telemetry={telemetry}
+            onCopyLink={handleCopyLink}
+          />
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <AudioAppPicker
+              audioApps={audioApps}
+              audioAppGroups={audioAppGroups}
+              selectedAudioAppId={selectedAudioAppId}
+              autoDetectedApp={autoDetectedApp}
+              onSelectApp={handleSelectApp}
+              onRefresh={loadAudioApps}
+            />
+
+            <SourcePicker
+              roomCode={roomCode}
+              isCreatingRoom={isCreatingRoom}
+              copied={copied}
+              onCreateRoom={handleCreateRoom}
+              onCopyCode={handleCopyCode}
+              onCopyLink={handleCopyLink}
+              captureContext={captureContext}
+              autoDetectFailed={autoDetectFailed}
+              captureStage={captureStage}
+              showStopConfirm={showStopConfirm}
+              setShowStopConfirm={setShowStopConfirm}
+              spectatorCount={spectatorCount}
+              canStartShare={canStartShare}
+              canGoLive={canGoLive}
+              disabledReason={disabledReason}
+              onStartShare={handleStartShare}
+              onGoLive={handleGoLive}
+              onStopShare={handleStopShare}
+            />
           </div>
 
-          <main className="max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
-            <ScreensharePreview
-              captureStage={captureStage}
-              roomCode={roomCode}
-              copied={copied}
-              previewFrame={previewFrame}
-              telemetry={telemetry}
-              onCopyLink={handleCopyLink}
-            />
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <AudioAppPicker
-                audioApps={audioApps}
-                audioAppGroups={audioAppGroups}
-                selectedAudioAppId={selectedAudioAppId}
-                autoDetectedApp={autoDetectedApp}
-                onSelectApp={handleSelectApp}
-                onRefresh={loadAudioApps}
-              />
-
-              <SourcePicker
-                captureContext={captureContext}
-                autoDetectFailed={autoDetectFailed}
-                captureStage={captureStage}
-                showStopConfirm={showStopConfirm}
-                setShowStopConfirm={setShowStopConfirm}
-                spectatorCount={spectatorCount}
-                canStartShare={canStartShare}
-                canGoLive={canGoLive}
-                disabledReason={disabledReason}
-                onStartShare={handleStartShare}
-                onGoLive={handleGoLive}
-                onStopShare={handleStopShare}
-              />
-            </div>
-
-            <StreamSettingsPanel
-              streamSettingsOpen={streamSettingsOpen}
-              setStreamSettingsOpen={setStreamSettingsOpen}
-              videoCodec={videoCodec}
-              setVideoCodec={setVideoCodec}
-              availableCodecs={availableCodecs}
-              codecOptionSuffix={codecOptionSuffix}
-              resolution={resolution}
-              setResolution={setResolution}
-              streamFps={streamFps}
-              setStreamFps={setStreamFps}
-              bitrateLimit={bitrateLimit}
-              setBitrateLimit={setBitrateLimit}
-              apiEndpoint={apiEndpoint}
-              setApiEndpoint={setApiEndpoint}
-            />
-          </main>
-        </div>
-      </>
+          <StreamSettingsPanel
+            streamSettingsOpen={streamSettingsOpen}
+            setStreamSettingsOpen={setStreamSettingsOpen}
+            videoCodec={videoCodec}
+            setVideoCodec={setVideoCodec}
+            availableCodecs={availableCodecs}
+            codecOptionSuffix={codecOptionSuffix}
+            resolution={resolution}
+            setResolution={setResolution}
+            streamFps={streamFps}
+            setStreamFps={setStreamFps}
+            bitrateLimit={bitrateLimit}
+            setBitrateLimit={setBitrateLimit}
+            apiEndpoint={apiEndpoint}
+            setApiEndpoint={setApiEndpoint}
+          />
+        </main>
+      </div>
     );
   }
 
