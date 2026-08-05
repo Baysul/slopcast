@@ -96,6 +96,8 @@ pub fn run() {
             capture::start_capture_preview,
             capture::go_live,
             capture::register_preview_channel,
+            capture::set_preview_viewport,
+            capture::clear_preview_viewport,
             capture::bench_register_channel,
             capture::bench_push_frames,
         ])

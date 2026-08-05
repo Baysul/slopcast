@@ -78,6 +78,25 @@ pub async fn register_preview_channel(channel: Channel<InvokeResponseBody>) -> R
     Ok(())
 }
 
+/// Reports the renderer's preview card size (device pixels) so the preview
+/// emitter scales frames to fit it — OBS-style "scale to the window" —
+/// instead of shipping full-resolution JPEGs through the channel.
+#[must_use]
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_preview_viewport(width: u32, height: u32) -> bool {
+    native_livekit::set_preview_viewport(width, height);
+    true
+}
+
+/// Clears the reported preview viewport; previews fall back to the source
+/// resolution until the renderer reports again.
+#[must_use]
+#[tauri::command(rename_all = "camelCase")]
+pub fn clear_preview_viewport() -> bool {
+    native_livekit::clear_preview_viewport();
+    true
+}
+
 /// Result of `start_native_capture`, matching the Electron handler's
 /// `{ ok, nodeId, videoEnabled }` shape (X11/Windows degrades to audio-only).
 #[derive(Debug, Default, Clone, serde::Serialize)]

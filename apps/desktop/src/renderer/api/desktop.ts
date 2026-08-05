@@ -123,6 +123,12 @@ export const desktopApi = {
   // it at up to 60 fps — no base64, no JSON per frame.
   registerPreviewChannel: (channel: Channel<ArrayBuffer>): Promise<boolean> =>
     invokeOk('register_preview_channel', { channel }),
+  // The renderer reports its preview card size (device pixels) so the backend
+  // scales preview frames to fit the card (OBS-style) instead of shipping
+  // full-resolution JPEGs through the channel.
+  setPreviewViewport: (width: number, height: number): Promise<boolean> =>
+    invokeOk('set_preview_viewport', { width, height }),
+  clearPreviewViewport: (): Promise<boolean> => invokeOk('clear_preview_viewport', undefined),
   onAudioWave: (callback: (waves: AudioAppWave[]) => void): Promise<UnlistenFn> =>
     subscribe<AudioAppWave[]>('audio-wave-update', callback),
 };

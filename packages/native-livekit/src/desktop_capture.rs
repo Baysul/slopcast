@@ -20,12 +20,15 @@
 //! `DesktopCapturer`) is the documented follow-up — the preview pipeline
 //! needs no further changes when it lands.
 //!
-//! Preview transport: the downscaled I420 planes are converted to RGBA with
+//! Preview transport: the captured I420 planes are converted to RGBA with
 //! libyuv (`I420ToABGR` — the only fourcc with `gl.RGBA` memory order) and
-//! encoded to JPEG with libjpeg-turbo (`turbojpeg`). A ~100 KB JPEG replaces
-//! what was a 1.2 MB base64 string, and the Tauri backend forwards the bytes
-//! over a raw IPC channel (no JSON, no base64) with an 8-byte `pts_us` header
-//! so the renderer can measure end-to-end latency.
+//! encoded to JPEG with libjpeg-turbo (`turbojpeg`). Previews are scaled to
+//! fit the renderer's preview card — OBS-style "scale to the window"
+//! (`GetScaleAndCenterPos` fit math, libyuv downscale, aspect preserved) —
+//! and emitted at the stream's framerate, so the IPC channel only carries
+//! what the card can show. The Tauri backend forwards the bytes over a raw
+//! IPC channel (no JSON, no base64) with an 8-byte `pts_us` header so the
+//! renderer can measure end-to-end latency.
 //!
 //! Threading: the capture thread owns the portal session and the preview poll
 //! loop; the `pw_stream` engine runs its own main loop on a separate thread,
@@ -86,19 +89,14 @@ pub(crate) fn reset_stats() {
     STATS_LAST_HEIGHT.store(0, Ordering::Relaxed);
 }
 
-/// Preview frame size the captured stream is downscaled to before the JPEG
-/// encode. A 640×360 JPEG at q=90 is ~100 KB — a ~10× reduction over raw
-/// RGBA, which is what keeps the renderer IPC channel well under load.
-const PREVIEW_WIDTH: u32 = 640;
-const PREVIEW_HEIGHT: u32 = 360;
-/// JPEG quality for the preview encode (libjpeg-turbo, 4:2:0 subsampling).
-const PREVIEW_JPEG_QUALITY: i32 = 90;
 /// Preview cadence before a video track is published (no stream fps to
 /// target yet).
 const PREVIEW_FALLBACK_FPS: u32 = 30;
-/// Upper bound for the live preview cadence — a 4K/120 source would
-/// otherwise flood the renderer channel.
+/// Upper bound for the live preview cadence — a source faster than this
+/// (e.g. a 120 Hz monitor) would otherwise flood the renderer channel.
 const PREVIEW_MAX_FPS: u32 = 60;
+/// JPEG quality for the preview encode (libjpeg-turbo, 4:2:0 subsampling).
+const PREVIEW_JPEG_QUALITY: i32 = 90;
 
 /// Preview callback: invoked with JPEG bytes while a capture session is
 /// active. The engine stays Tauri-unaware — the Tauri backend wires this to
@@ -144,18 +142,76 @@ pub(crate) fn clear_scale_target() {
     SCALE_TARGET.store(None);
 }
 
+/// The renderer's preview viewport size `(width, height)` in device pixels
+/// (the card the preview canvas is drawn into). The preview emitter scales
+/// every frame to fit inside it — OBS-style "scale to the window" — instead
+/// of shipping full-resolution JPEGs through the IPC channel.
+static PREVIEW_VIEWPORT: ArcSwapOption<(u32, u32)> = ArcSwapOption::const_empty();
+
+/// Reports the preview viewport size; the renderer calls this on mount and
+/// whenever the preview card is resized.
+pub(crate) fn set_preview_viewport(width: u32, height: u32) {
+    if width == 0 || height == 0 {
+        clear_preview_viewport();
+        return;
+    }
+    PREVIEW_VIEWPORT.store(Some(Arc::new((width, height))));
+}
+
+/// Clears the reported viewport (renderer unmounted) — previews fall back to
+/// the source resolution.
+pub(crate) fn clear_preview_viewport() {
+    PREVIEW_VIEWPORT.store(None);
+}
+
+/// OBS's `GetScaleAndCenterPos` (obs-studio `frontend/utility/display-helpers.hpp`):
+/// the size the source occupies inside the viewport when scaled to fit,
+/// preserving its aspect ratio. Returns `None` when the source already fits
+/// inside the viewport — previews are never upscaled past the source, the
+/// renderer's CSS does that.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "OBS truncates the fitted size with int(); all inputs are non-negative u32s, so the f64 products are non-negative and bounded by the viewport dimensions"
+)]
+fn fit_preview_size(
+    base_w: u32,
+    base_h: u32,
+    viewport_w: u32,
+    viewport_h: u32,
+) -> Option<(u32, u32)> {
+    if base_w == 0 || base_h == 0 || viewport_w == 0 || viewport_h == 0 {
+        return None;
+    }
+    let viewport_aspect = f64::from(viewport_w) / f64::from(viewport_h);
+    let base_aspect = f64::from(base_w) / f64::from(base_h);
+    let (fit_w, fit_h) = if viewport_aspect > base_aspect {
+        // The viewport is wider than the source: fit by height.
+        ((f64::from(viewport_h) * base_aspect) as u32, viewport_h)
+    } else {
+        // The viewport is taller (or equal): fit by width.
+        (viewport_w, (f64::from(viewport_w) / base_aspect) as u32)
+    };
+    if fit_w >= base_w && fit_h >= base_h {
+        return None;
+    }
+    Some((fit_w.max(1), fit_h.max(1)))
+}
+
 /// Scratch buffers reused across preview emissions (allocated once per
 /// session).
 struct PreviewBuffers {
-    /// Snapshot of the latest frame's three I420 planes, copied out of the
-    /// shared mutex so the expensive plane processing below never blocks
-    /// the capture thread (which writes the same buffer in `on_frame`).
-    yuv: Vec<u8>,
-    plane_y: Vec<u8>,
-    plane_u: Vec<u8>,
-    plane_v: Vec<u8>,
-    /// Downscaled I420 converted to tightly packed RGBA via libyuv
-    /// `I420ToABGR` (the only fourcc with `gl.RGBA` memory order).
+    /// Snapshot of the latest frame's I420 planes at the source resolution,
+    /// copied out of the shared mutex so the expensive plane processing below
+    /// never blocks the capture thread (which writes the same buffer in
+    /// `on_frame`). Reallocated only when the source resolution changes.
+    src: Option<I420Buffer>,
+    /// The planes actually encoded: the source-resolution snapshot when the
+    /// source fits the viewport, or the viewport-fitted libyuv downscale.
+    /// Tightly packed (stride == width), same layout as `src`.
+    out: Vec<u8>,
+    /// Converted to tightly packed RGBA via libyuv `I420ToABGR` (the only
+    /// fourcc with `gl.RGBA` memory order).
     rgba: Vec<u8>,
     /// Reused JPEG output buffer (resized to the compressor's guaranteed
     /// maximum, then truncated to the actual encoded length).
@@ -165,85 +221,17 @@ struct PreviewBuffers {
     compressor: Option<Result<Compressor, String>>,
 }
 
-/// Box-downscales one 1-byte-plane image: every destination pixel averages
-/// the source rectangle it covers. When the source is smaller than the
-/// destination (upscaling), the covered range can be empty and falls back
-/// to a nearest-neighbour copy. Used for both the BGRA encode target and
-/// the I420 preview planes (before the libyuv RGBA conversion).
-fn box_downscale_plane(src: &[u8], src_w: u32, src_h: u32, dst: &mut [u8], dst_w: u32, dst_h: u32) {
-    let src_w = src_w as usize;
-    let src_h = src_h as usize;
-    let dst_w = dst_w as usize;
-    let dst_h = dst_h as usize;
-    for dst_y in 0..dst_h {
-        let y0 = (dst_y * src_h) / dst_h;
-        let y1 = ((dst_y + 1) * src_h) / dst_h;
-        for dst_x in 0..dst_w {
-            let x0 = (dst_x * src_w) / dst_w;
-            let x1 = ((dst_x + 1) * src_w) / dst_w;
-            let d = dst_y * dst_w + dst_x;
-            if x0 == x1 || y0 == y1 {
-                dst[d] = src[y0.min(src_h - 1) * src_w + x0.min(src_w - 1)];
-                continue;
-            }
-            let mut sum = 0u64;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    sum += u64::from(src[y * src_w + x]);
-                }
-            }
-            let count = ((y1 - y0) * (x1 - x0)) as u64;
-            dst[d] = u8::try_from(sum / count).unwrap_or(255);
-        }
-    }
-}
-
-/// Box-downscales a 4-channel (BGRA/RGBA) image: every destination pixel
-/// averages the source rectangle it covers per channel position. When the
-/// source is smaller than the destination, the covered range can be empty
-/// and falls back to a nearest-neighbour copy.
-fn box_downscale_bgra(src: &[u8], src_w: u32, src_h: u32, dst: &mut [u8], dst_w: u32, dst_h: u32) {
-    let src_w = src_w as usize;
-    let src_h = src_h as usize;
-    let dst_w = dst_w as usize;
-    let dst_h = dst_h as usize;
-    for dst_y in 0..dst_h {
-        let y0 = (dst_y * src_h) / dst_h;
-        let y1 = ((dst_y + 1) * src_h) / dst_h;
-        for dst_x in 0..dst_w {
-            let x0 = (dst_x * src_w) / dst_w;
-            let x1 = ((dst_x + 1) * src_w) / dst_w;
-            let d = (dst_y * dst_w + dst_x) * 4;
-            if x0 == x1 || y0 == y1 {
-                let i = (y0.min(src_h - 1) * src_w + x0.min(src_w - 1)) * 4;
-                dst[d..d + 4].copy_from_slice(&src[i..i + 4]);
-                continue;
-            }
-            let mut sums = [0u64; 4];
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let i = (y * src_w + x) * 4;
-                    for (sum, pixel) in sums.iter_mut().zip(&src[i..i + 4]) {
-                        *sum += u64::from(*pixel);
-                    }
-                }
-            }
-            let count = ((y1 - y0) * (x1 - x0)) as u64;
-            for (sum, out) in sums.into_iter().zip(&mut dst[d..d + 4]) {
-                *out = u8::try_from(sum / count).unwrap_or(255);
-            }
-        }
-    }
-}
-
 /// Copies the latest converted frame out of the shared mutex as fast as
-/// possible (a raw plane memcpy, ~1 ms at 1080p), then downscales the
-/// planes, converts them to RGBA with libyuv and encodes a JPEG with
-/// libjpeg-turbo. Independent of `VIDEO_SOURCE`, so the pre-roll preview
-/// works before any track is published. Returns whether a frame was emitted.
+/// possible (a raw plane memcpy, ~3 ms at 1080p), then — when the reported
+/// preview viewport is smaller than the source — scales it down to fit the
+/// viewport with libyuv (OBS preview behavior: the source is scaled to the
+/// window, aspect preserved). The I420 planes are converted to RGBA with
+/// libyuv and encoded to a JPEG with libjpeg-turbo. Independent of
+/// `VIDEO_SOURCE`, so the pre-roll preview works before any track is
+/// published. Returns whether a frame was emitted.
 #[allow(
     clippy::too_many_lines,
-    reason = "one linear preview emission (snapshot → downscale → convert → encode → callback); splitting it would scatter the buffer bookkeeping"
+    reason = "one linear preview emission (snapshot → scale → convert → encode → callback); splitting it would scatter the buffer bookkeeping"
 )]
 fn emit_preview_frame(
     preview_source: &SharedFrameBuffer,
@@ -257,8 +245,8 @@ fn emit_preview_frame(
     }
     *last_generation = generation;
     // Pre-roll previews run at a fixed cadence; once a track is live the
-    // preview matches the stream fps (capped — a 4K/120 source would
-    // otherwise flood the renderer channel).
+    // preview matches the stream fps (capped — a source faster than 60 fps
+    // would otherwise flood the renderer channel).
     let fps = SCALE_TARGET
         .load_full()
         .map_or(PREVIEW_FALLBACK_FPS, |target| {
@@ -279,62 +267,68 @@ fn emit_preview_frame(
     let y_len = (stride_y * height) as usize;
     let u_len = (stride_u * uv_height) as usize;
     let v_len = (stride_v * uv_height) as usize;
-    bufs.yuv.resize(y_len + u_len + v_len, 0);
-    bufs.yuv[..y_len].copy_from_slice(&plane_y[..y_len]);
-    bufs.yuv[y_len..y_len + u_len].copy_from_slice(&plane_u[..u_len]);
-    bufs.yuv[y_len + u_len..].copy_from_slice(&plane_v[..v_len]);
+    let src = bufs
+        .src
+        .get_or_insert_with(|| I420Buffer::new(width, height));
+    if src.width() != width || src.height() != height {
+        *src = I420Buffer::new(width, height);
+    }
+    let (src_plane_y, src_plane_u, src_plane_v) = src.data_mut();
+    src_plane_y[..y_len].copy_from_slice(&plane_y[..y_len]);
+    src_plane_u[..u_len].copy_from_slice(&plane_u[..u_len]);
+    src_plane_v[..v_len].copy_from_slice(&plane_v[..v_len]);
     let pts_us = guard.timestamp_us;
     drop(guard);
+    // OBS-style fit (`GetScaleAndCenterPos`): scale the source down to the
+    // reported viewport when it does not fit; otherwise ship the source
+    // resolution untouched (the renderer's CSS upscales it).
+    let (out_w, out_h) = if let Some((fit_w, fit_h)) = PREVIEW_VIEWPORT
+        .load_full()
+        .and_then(|vp| fit_preview_size(width, height, vp.0, vp.1))
+    {
+        let scaled = src.scale(
+            i32::try_from(fit_w).unwrap_or(0),
+            i32::try_from(fit_h).unwrap_or(0),
+        );
+        let (py, pu, pv) = scaled.data();
+        let total = py.len() + pu.len() + pv.len();
+        bufs.out.resize(total, 0);
+        bufs.out[..py.len()].copy_from_slice(py);
+        bufs.out[py.len()..py.len() + pu.len()].copy_from_slice(pu);
+        bufs.out[py.len() + pu.len()..].copy_from_slice(pv);
+        (fit_w, fit_h)
+    } else {
+        bufs.out.resize(y_len + u_len + v_len, 0);
+        bufs.out[..y_len].copy_from_slice(&src_plane_y[..y_len]);
+        bufs.out[y_len..y_len + u_len].copy_from_slice(&src_plane_u[..u_len]);
+        bufs.out[y_len + u_len..].copy_from_slice(&src_plane_v[..v_len]);
+        (width, height)
+    };
+    // `out` is tightly packed (stride == width), so the planes split cleanly.
+    let out_chroma_w = out_w.div_ceil(2);
+    let out_chroma_h = out_h.div_ceil(2);
+    let luma_len = (out_w * out_h) as usize;
+    let chroma_len = (out_chroma_w * out_chroma_h) as usize;
+    let (plane_y, rest) = bufs.out.split_at(luma_len);
+    let (plane_u, plane_v) = rest.split_at(chroma_len);
 
-    // The buffer is tightly packed (stride == width), so the planes can be
-    // downscaled independently and re-packed.
-    let dst_w = width.min(PREVIEW_WIDTH);
-    let dst_h = height.min(PREVIEW_HEIGHT);
-    let chroma_w = width.div_ceil(2);
-    let chroma_h = height.div_ceil(2);
-    let dst_chroma_w = dst_w.div_ceil(2);
-    let dst_chroma_h = dst_h.div_ceil(2);
-    let (plane_y, rest) = bufs.yuv.split_at(y_len);
-    let (plane_u, plane_v) = rest.split_at(u_len);
-    bufs.plane_y.resize((dst_w * dst_h) as usize, 0);
-    bufs.plane_u
-        .resize((dst_chroma_w * dst_chroma_h) as usize, 0);
-    bufs.plane_v
-        .resize((dst_chroma_w * dst_chroma_h) as usize, 0);
-    box_downscale_plane(plane_y, width, height, &mut bufs.plane_y, dst_w, dst_h);
-    box_downscale_plane(
-        plane_u,
-        chroma_w,
-        chroma_h,
-        &mut bufs.plane_u,
-        dst_chroma_w,
-        dst_chroma_h,
-    );
-    box_downscale_plane(
-        plane_v,
-        chroma_w,
-        chroma_h,
-        &mut bufs.plane_v,
-        dst_chroma_w,
-        dst_chroma_h,
-    );
-
-    // libyuv converts the downscaled I420 planes to tightly packed RGBA
-    // (memory order R,G,B,A via I420ToABGR — libyuv's "RGBA" fourcc is
-    // [A,B,G,R]) — the exact byte order libjpeg-turbo's PixelFormat::RGBA
-    // expects, so the JPEG encode needs no channel shuffling.
-    bufs.rgba.resize((dst_w * dst_h * 4) as usize, 0);
+    // libyuv converts the (possibly viewport-fitted) I420 planes to tightly
+    // packed RGBA (memory order R,G,B,A via I420ToABGR — libyuv's "RGBA"
+    // fourcc is [A,B,G,R]) — the exact byte order libjpeg-turbo's
+    // PixelFormat::RGBA expects, so the JPEG encode needs no channel
+    // shuffling.
+    bufs.rgba.resize((out_w * out_h * 4) as usize, 0);
     yuv_helper::i420_to_abgr(
-        &bufs.plane_y,
-        dst_w,
-        &bufs.plane_u,
-        dst_chroma_w,
-        &bufs.plane_v,
-        dst_chroma_w,
+        plane_y,
+        out_w,
+        plane_u,
+        out_chroma_w,
+        plane_v,
+        out_chroma_w,
         &mut bufs.rgba,
-        dst_w * 4,
-        i32::try_from(dst_w).unwrap_or(0),
-        i32::try_from(dst_h).unwrap_or(0),
+        out_w * 4,
+        i32::try_from(out_w).unwrap_or(0),
+        i32::try_from(out_h).unwrap_or(0),
     );
 
     if bufs.compressor.is_none() {
@@ -354,8 +348,8 @@ fn emit_preview_frame(
         return false;
     };
     let Ok(max_len) = compressor.buf_len(
-        usize::try_from(dst_w).unwrap_or(0),
-        usize::try_from(dst_h).unwrap_or(0),
+        usize::try_from(out_w).unwrap_or(0),
+        usize::try_from(out_h).unwrap_or(0),
     ) else {
         return false;
     };
@@ -363,9 +357,9 @@ fn emit_preview_frame(
     let Ok(written) = compressor.compress_to_slice(
         turbojpeg::Image {
             pixels: bufs.rgba.as_slice(),
-            width: usize::try_from(dst_w).unwrap_or(0),
-            pitch: usize::try_from(dst_w * 4).unwrap_or(0),
-            height: usize::try_from(dst_h).unwrap_or(0),
+            width: usize::try_from(out_w).unwrap_or(0),
+            pitch: usize::try_from(out_w * 4).unwrap_or(0),
+            height: usize::try_from(out_h).unwrap_or(0),
             format: PixelFormat::RGBA,
         },
         &mut bufs.jpeg,
@@ -392,7 +386,18 @@ type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 /// Converts a linear BGRA frame into the shared I420 buffer, bumps the
 /// preview generation and pushes the frame into the active video source
 /// (if any). Shared by the portal engine and the synthetic generator.
-fn convert_and_push(width: u32, height: u32, bgra: &[u8], preview_source: &SharedFrameBuffer) {
+///
+/// The preview reads the shared buffer at the source resolution; when the
+/// encoder target is smaller, a libyuv-scaled copy of the I420 planes is
+/// pushed to the video source instead, so the encoder never receives a
+/// frame larger than the published track's dimensions.
+fn convert_and_push(
+    width: u32,
+    height: u32,
+    bgra: &[u8],
+    preview_source: &SharedFrameBuffer,
+    scale_target: Option<ScaleTarget>,
+) {
     let Ok(mut frame_buffer) = preview_source.lock() else {
         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
         return;
@@ -424,43 +429,41 @@ fn convert_and_push(width: u32, height: u32, bgra: &[u8], preview_source: &Share
         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
         return;
     };
-    source.capture_frame(&frame_buffer);
+    match scale_target.filter(|target| width > target.width || height > target.height) {
+        // libwebrtc's encoder has no explicit target size (VideoEncoding
+        // carries only bitrate/fps), so without this a 4K source would be
+        // encoded at 4K with the bitrate the user configured for 1080p.
+        // I420Buffer::scale is libwebrtc's libyuv-backed scaler.
+        Some(target) => {
+            let scaled = frame_buffer.buffer.scale(
+                i32::try_from(target.width).unwrap_or(0),
+                i32::try_from(target.height).unwrap_or(0),
+            );
+            let scaled_frame = VideoFrame {
+                rotation: VideoRotation::VideoRotation0,
+                timestamp_us: frame_buffer.timestamp_us,
+                frame_metadata: None,
+                buffer: scaled,
+            };
+            source.capture_frame(&scaled_frame);
+        }
+        None => source.capture_frame(&frame_buffer),
+    }
     STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Builds the frame callback shared by the portal engine and the
-/// synthetic generator: counts the frame, scales it down to the published
-/// track's resolution when larger, then converts and pushes it.
+/// synthetic generator: counts the frame, converts it to I420 and pushes
+/// it — scaled down to the published track's resolution when larger.
 fn make_on_frame(preview_source: SharedFrameBuffer) -> FrameCallback {
-    let mut scale_scratch: Vec<u8> = Vec::new();
     Box::new(move |width, height, bgra, _pts_us| {
         STATS_DEQUEUED.fetch_add(1, Ordering::Relaxed);
         if width == 0 || height == 0 {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        // libwebrtc's encoder has no explicit target size (VideoEncoding
-        // carries only bitrate/fps), so without this a 4K source would be
-        // encoded at 4K with the bitrate the user configured for 1080p.
-        let (w, h, data) = match SCALE_TARGET.load_full() {
-            Some(target) if width > target.width || height > target.height => {
-                let needed = (target.width * target.height * 4) as usize;
-                if scale_scratch.len() != needed {
-                    scale_scratch.resize(needed, 0);
-                }
-                box_downscale_bgra(
-                    bgra,
-                    width,
-                    height,
-                    &mut scale_scratch,
-                    target.width,
-                    target.height,
-                );
-                (target.width, target.height, scale_scratch.as_slice())
-            }
-            _ => (width, height, bgra),
-        };
-        convert_and_push(w, h, data, &preview_source);
+        let scale_target = SCALE_TARGET.load_full().map(|t| *t);
+        convert_and_push(width, height, bgra, &preview_source, scale_target);
     })
 }
 
@@ -671,10 +674,8 @@ fn run_capture(
 
     // Reused scratch buffers for the preview emitter (allocated once).
     let mut preview_bufs = PreviewBuffers {
-        yuv: Vec::new(),
-        plane_y: Vec::new(),
-        plane_u: Vec::new(),
-        plane_v: Vec::new(),
+        src: None,
+        out: Vec::new(),
         rgba: Vec::new(),
         jpeg: Vec::new(),
         compressor: None,
@@ -831,53 +832,93 @@ mod probe {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-    /// Pins the plane downscale path: an exact 2× box average must equal
-    /// the arithmetic mean of its 2×2 source block.
+    /// The encode-target scale path uses libwebrtc's libyuv-backed
+    /// `I420Buffer::scale`: a uniform-color 8×8 frame scaled 2:1 must keep
+    /// its dimensions and its dominant color (a broken scaler would either
+    /// panic, resize wrong or shift the color).
     #[test]
-    fn box_downscale_plane_averages_exact_blocks() {
-        let src: Vec<u8> = (0..64).collect(); // 8x8
-        let mut dst = vec![0u8; 16]; // 4x4
-        box_downscale_plane(&src, 8, 8, &mut dst, 4, 4);
-        assert_eq!(dst[0], 4); // (0+1+8+9)/4 = 4
-        assert_eq!(dst[1], 6); // (2+3+10+11)/4 = 6
-        assert_eq!(dst[4], 20); // (16+17+24+25)/4 = 20
-        assert_eq!(dst[15], 58); // (54+55+62+63)/4 = 58
+    fn i420_scale_preserves_dimensions_and_mean_color() {
+        let mut src = I420Buffer::new(8, 8);
+        {
+            let (plane_y, plane_u, plane_v) = src.data_mut();
+            for byte in &mut *plane_y {
+                *byte = 100;
+            }
+            for byte in &mut *plane_u {
+                *byte = 90;
+            }
+            for byte in &mut *plane_v {
+                *byte = 240;
+            }
+        }
+        let scaled = src.scale(4, 4);
+        assert_eq!((scaled.width(), scaled.height()), (4, 4));
+        let (plane_y, plane_u, plane_v) = scaled.data();
+        assert!(
+            plane_y.iter().all(|&v| v == 100),
+            "luma must survive the scale"
+        );
+        assert!(plane_u.iter().all(|&v| v == 90));
+        assert!(plane_v.iter().all(|&v| v == 240));
     }
 
-    /// Non-divisible ratios (e.g. 1080p → 360) must still produce the
-    /// right output size without panics and with the last rows covered.
+    /// The encode-target scale must never be applied when the source is
+    /// smaller than the target (upscaling would waste encoder bitrate on
+    /// interpolated pixels).
     #[test]
-    fn box_downscale_plane_handles_uneven_ratios() {
-        let src = vec![128u8; 1920 * 1080];
-        let mut dst = vec![0u8; 640 * 360];
-        box_downscale_plane(&src, 1920, 1080, &mut dst, 640, 360);
-        assert!(dst.iter().all(|&v| v == 128));
+    fn scale_target_is_only_applied_to_larger_sources() {
+        let needs_scale = |src_w: u32, src_h: u32, t: ScaleTarget| {
+            (src_w > t.width || src_h > t.height).then_some(t)
+        };
+        let target = ScaleTarget {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+        };
+        assert!(
+            needs_scale(3840, 2160, target).is_some(),
+            "4K must scale down"
+        );
+        assert!(
+            needs_scale(1920, 1080, target).is_none(),
+            "exact match must not scale"
+        );
+        assert!(
+            needs_scale(1920, 1040, target).is_none(),
+            "smaller-than-target sources must pass through untouched"
+        );
+        assert!(
+            needs_scale(1280, 720, target).is_none(),
+            "720p must never be upscaled to 1080p"
+        );
     }
 
-    /// Upscaling (source smaller than target) falls back to a
-    /// nearest-neighbour copy without panicking.
+    /// OBS `GetScaleAndCenterPos` parity: a 1920×1080 source in a wider
+    /// viewport fits by height; in a taller/narrower viewport it fits by
+    /// width. The result keeps the source aspect within the viewport bounds.
     #[test]
-    fn box_downscale_plane_upscale_falls_back_to_nearest() {
-        let src = vec![7u8, 9, 11, 13]; // 2x2
-        let mut dst = vec![0u8; 16]; // 4x4
-        box_downscale_plane(&src, 2, 2, &mut dst, 4, 4);
-        assert_eq!(dst[0], 7);
-        assert_eq!(dst[15], 13);
+    fn fit_preview_size_matches_obs_contain_math() {
+        // Viewport wider than the source (2:1 vs 16:9): fit by height.
+        assert_eq!(fit_preview_size(1920, 1080, 2000, 1000), Some((1777, 1000)));
+        // Viewport narrower than the source (16:10 vs 16:9): fit by width.
+        assert_eq!(fit_preview_size(1920, 1080, 1600, 1000), Some((1600, 900)));
+        // Viewport with a different aspect: fit by width keeps the aspect.
+        assert_eq!(fit_preview_size(1920, 1080, 900, 1000), Some((900, 506)));
     }
 
-    /// The BGRA variant averages each channel position independently.
+    /// The preview is never upscaled past the source — the renderer's CSS
+    /// does that — and degenerate viewports are ignored.
     #[test]
-    fn box_downscale_bgra_averages_per_channel() {
-        // 2x2 pixels: BGRA each.
-        let src = vec![
-            1u8, 2, 3, 4, //
-            5, 6, 7, 8, //
-            9, 10, 11, 12, //
-            13, 14, 15, 16,
-        ];
-        let mut dst = vec![0u8; 4];
-        box_downscale_bgra(&src, 2, 2, &mut dst, 1, 1);
-        assert_eq!(dst, vec![7, 8, 9, 10]); // per-channel mean
+    fn fit_preview_size_never_upscales_and_guards_zeroes() {
+        // Same-aspect viewport smaller than the source: downscale to fit.
+        assert_eq!(fit_preview_size(1920, 1080, 1280, 720), Some((1280, 720)));
+        // Source smaller than the viewport: no downscale needed.
+        assert_eq!(fit_preview_size(1280, 720, 1920, 1080), None);
+        assert_eq!(fit_preview_size(1280, 720, 4000, 3000), None);
+        // Zero viewport or source dimensions are ignored.
+        assert_eq!(fit_preview_size(0, 0, 1280, 720), None);
+        assert_eq!(fit_preview_size(1920, 1080, 0, 720), None);
+        assert_eq!(fit_preview_size(1920, 1080, 1280, 0), None);
     }
 
     /// The synthetic pattern is deterministic, non-uniform and moves with

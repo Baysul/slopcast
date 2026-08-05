@@ -1,6 +1,7 @@
 import { ScreenShare } from 'lucide-react';
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
+import { desktopApi } from '../../api/desktop';
 import type { CaptureStage, PreviewFrame } from '../../types';
 import { type StreamTelemetry, StreamTelemetryBar } from '../telemetry/StreamTelemetryBar';
 import { PreviewCanvas } from './PreviewCanvas';
@@ -14,6 +15,11 @@ export interface ScreensharePreviewProps {
   onCopyLink: () => void;
 }
 
+// Debounce for reporting the preview card size to the backend: window
+// resizes fire ResizeObserver callbacks in bursts, but the native scale
+// target only needs the final size.
+const VIEWPORT_REPORT_DEBOUNCE_MS = 150;
+
 // Capture and encoding run entirely in native code (PipeWire -> native-livekit),
 // so the renderer has no MediaStream to preview. While capture is active the
 // card renders the JPEG preview frames pushed by the backend instead of a
@@ -22,11 +28,44 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
   ({ captureStage, roomCode, copied, previewFrame, telemetry, onCopyLink }) => {
     const live = captureStage === 'live';
     const showPreview = previewFrame !== null && captureStage !== 'idle';
+    const viewportRef = useRef<HTMLDivElement | null>(null);
+
+    // Report the preview card size (device pixels) so the backend scales
+    // preview frames to fit it — OBS-style "scale to the window". The canvas
+    // is drawn into this container; the backend needs its size, not the
+    // capture resolution, to size the JPEGs.
+    useEffect(() => {
+      const container = viewportRef.current;
+      if (!container) return;
+      let disposed = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const report = (): void => {
+        const rect = container.getBoundingClientRect();
+        const width = Math.round(rect.width * window.devicePixelRatio);
+        const height = Math.round(rect.height * window.devicePixelRatio);
+        void desktopApi.setPreviewViewport(width, height);
+      };
+      const observer = new ResizeObserver(() => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = null;
+          if (!disposed) report();
+        }, VIEWPORT_REPORT_DEBOUNCE_MS);
+      });
+      observer.observe(container);
+      report();
+      return () => {
+        disposed = true;
+        if (timer) clearTimeout(timer);
+        observer.disconnect();
+        void desktopApi.clearPreviewViewport();
+      };
+    }, []);
 
     return (
       <Card className="overflow-hidden shadow-2xl transition-all duration-300">
         <CardContent className="p-0">
-          <div className="relative bg-black aspect-video flex items-center justify-center">
+          <div ref={viewportRef} className="relative bg-black aspect-video flex items-center justify-center">
             {showPreview && <PreviewCanvas frame={previewFrame} />}
             {live && <StreamTelemetryBar telemetry={telemetry} />}
 
