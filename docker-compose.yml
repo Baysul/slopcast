@@ -6,7 +6,14 @@ services:
     # muxes all WebRTC media onto UDP 7882 (single port, published below).
     # Without `--bind 0.0.0.0` LiveKit binds to 127.0.0.1 only, unreachable
     # from the other containers.
-    command: --dev --bind 0.0.0.0
+    #
+    # `--node-ip` makes the SFU advertise a host-reachable ICE candidate.
+    # Without it, LiveKit advertises the container's internal bridge IP
+    # (e.g. 10.89.2.5), which clients on the host cannot route to — ICE
+    # fails and the desktop app dies with "wait_pc_connection timed out".
+    # Defaults to a typical LAN address; override for your network:
+    #   LIVEKIT_NODE_IP=192.168.1.50 podman-compose up -d livekit
+    command: --dev --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-10.0.0.128}
     ports:
       - "7880:7880/tcp"  # WebSocket signaling
       - "7881:7881/tcp"  # ICE/TCP fallback
