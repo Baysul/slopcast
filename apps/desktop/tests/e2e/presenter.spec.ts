@@ -14,7 +14,7 @@
 //   4. Presenter telemetry: get_native_telemetry + get_video_capture_stats
 //      sampled twice ~2 s apart; videoFramesSent must advance, the outbound
 //      codec must match E2E_CODEC, and previewFramesSent > 0 (proves the
-//      raw-I420 preview emitter ran)
+//      JPEG preview emitter ran)
 //   5. GPU diagnostics via probe_gpu_info (D5) — softwareRasterizer must be
 //      false and eglVendor present
 //   6. Hold: keep the app alive until the harness releases it after the
@@ -179,25 +179,80 @@ function assertCodecTelemetry(phase: PhaseResult): void {
 /// its pixels are copied into a fresh 2d canvas (drawImage works across
 /// context types) before reading. Self-contained — the WDIO tauri plugin
 /// stringifies this function and re-evaluates it inside the webview.
-async function samplePreviewCanvas(): Promise<boolean> {
+///
+/// The synthetic pattern is eight vertical color bars with a white box in
+/// rows [h/8, h/4), so the sampler can distinguish:
+/// - no content at all (`hasContent`),
+/// - a channel swap or grayscale conversion (`barsCorrect`, bar colors are
+///   sampled below the box band),
+/// - an upside-down render (`upright`, the white box must sit in the top
+///   quarter, never the bottom quarter).
+async function samplePreviewCanvas(): Promise<{
+  hasContent: boolean;
+  barsCorrect: boolean;
+  upright: boolean;
+}> {
+  const empty = { hasContent: false, barsCorrect: false, upright: false };
   const canvas = document.querySelector('canvas[aria-label="Live screenshare preview"]');
-  if (!canvas) return false;
+  if (!canvas) return empty;
   // Wait briefly for the first frame to be drawn by the WebGL path.
   await new Promise((r) => setTimeout(r, 500));
   const copy = document.createElement('canvas');
   copy.width = canvas.width;
   copy.height = canvas.height;
   const ctx = copy.getContext('2d');
-  if (!ctx) return false;
+  if (!ctx) return empty;
   ctx.drawImage(canvas, 0, 0);
-  const { data } = ctx.getImageData(0, 0, copy.width, copy.height);
+  const { data, width, height } = ctx.getImageData(0, 0, copy.width, copy.height);
+  if (width < 640 || height < 360) return empty;
+
+  const pixel = (x: number, y: number): [number, number, number] => {
+    const i = (y * width + x) * 4;
+    return [data[i], data[i + 1], data[i + 2]];
+  };
+
   let nonBlack = 0;
   let total = 0;
   for (let i = 0; i < data.length; i += 16) {
     total += 1;
     if (Math.max(data[i], data[i + 1], data[i + 2]) > 16) nonBlack += 1;
   }
-  return total > 0 && nonBlack / total > 0.1;
+
+  // Bar centers at y = 3/4 height, below the moving-box band (rows [h/8, h/4)).
+  const y = Math.floor(height * 0.75);
+  const bar = (x: number, want: [boolean, boolean, boolean]): boolean => {
+    const [r, g, b] = pixel(x, y);
+    const ok = (v: number, active: boolean): boolean => (active ? v > 200 : v < 60);
+    return ok(r, want[0]) && ok(g, want[1]) && ok(b, want[2]);
+  };
+  // Synthetic bars at 640-wide preview: red at x=440, blue at x=520, green
+  // at x=280, cyan at x=200.
+  const barsCorrect =
+    bar(440, [true, false, false]) && // red
+    bar(520, [false, false, true]) && // blue
+    bar(280, [false, true, false]) && // green
+    bar(200, [false, true, true]); // cyan
+
+  // Flip check: count white pixels (all channels > 200) in the top-quarter
+  // band vs the bottom-quarter band. The white box lives in rows [h/8, h/4)
+  // when upright; an upside-down render moves it to rows [3h/4, 7h/8). Bar 0
+  // is also white, but it contributes equally to both bands, so the box's
+  // constant ~80px decides the comparison regardless of its x position.
+  const whiteIn = (y0: number, y1: number): number => {
+    let count = 0;
+    for (let yy = y0; yy < y1; yy += 2) {
+      for (let xx = 0; xx < width; xx += 2) {
+        const [r, g, b] = pixel(xx, yy);
+        if (r > 200 && g > 200 && b > 200) count += 1;
+      }
+    }
+    return count;
+  };
+  const whiteTop = whiteIn(Math.floor(height / 8) + 5, Math.floor(height / 4));
+  const whiteBottom = whiteIn(Math.floor((3 * height) / 4) + 5, Math.floor((7 * height) / 8));
+  const upright = whiteTop > whiteBottom * 1.05;
+
+  return { hasContent: total > 0 && nonBlack / total > 0.1, barsCorrect, upright };
 }
 
 const snapshotPresenterTelemetry = async (): Promise<{
@@ -262,10 +317,13 @@ describe('Slopcast presenter phase (Tauri)', () => {
     console.log(`[e2e] preview canvas visible (mode=${captureMode})`);
 
     // The preview must actually draw: sample the canvas pixels in-page and
-    // require non-uniform content (a dead capture renders nothing or all
-    // black).
-    const canvasHasContent = await browser.tauri.execute(samplePreviewCanvas);
-    assert(canvasHasContent, 'Preview canvas has no visible frame content');
+    // require visible content, correct bar colors (no channel swap or
+    // grayscale conversion) and an upright image (the white box must be in
+    // the top quarter, not the bottom).
+    const preview = await browser.tauri.execute(samplePreviewCanvas);
+    assert(preview.hasContent, 'Preview canvas has no visible frame content');
+    assert(preview.barsCorrect, 'Preview colors are wrong (channel swap or grayscale conversion)');
+    assert(preview.upright, 'Preview is rendered upside down');
 
     const goLiveBtn = browser.$('button=Go Live');
     await goLiveBtn.waitForDisplayed({ timeout: 10_000 });

@@ -102,8 +102,8 @@ pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
 /// `startDesktopCapture`. `framesDequeued` counts frames received from the
 /// capturer; `framesPushed` counts those converted to I420 and delivered to
 /// the video track; `framesDropped` counts frames skipped while no track was
-/// active; `previewFramesSent` counts raw I420 preview frames emitted via
-/// the preview callback (640×360 at the stream framerate); `captureErrors`
+/// active; `previewFramesSent` counts JPEG preview frames emitted via
+/// the preview callback (up to 640×360 at up to 30 fps); `captureErrors`
 /// counts capturer-reported failures.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -382,16 +382,15 @@ pub fn get_desktop_capture_stats() -> DesktopCaptureStats {
     desktop_capture::stats()
 }
 
-/// Registers the preview-frame callback: the capture thread invokes it with
-/// base64 raw I420 planes `(width, height, data, pts_us)` at the stream
-/// framerate while a capture session is active. The engine stays
-/// Tauri-unaware — the Tauri backend wires this callback to its
-/// `preview-frame` event. Replaces any previously registered callback.
-pub fn set_preview_callback(callback: Box<dyn Fn(u32, u32, String, i64) + Send + Sync>) {
+/// Registers the preview callback: the capture thread invokes it with
+/// JPEG bytes `(data, pts_us)` while a capture session is active. The
+/// engine stays Tauri-unaware — the Tauri backend forwards the bytes to the
+/// renderer's preview channel. Replaces any previously registered callback.
+pub fn set_preview_callback(callback: Box<dyn Fn(Vec<u8>, i64) + Send + Sync>) {
     desktop_capture::set_preview_callback(callback);
 }
 
-/// Clears the registered preview-frame callback.
+/// Clears the registered preview callback.
 pub fn clear_preview_callback() {
     desktop_capture::clear_preview_callback();
 }

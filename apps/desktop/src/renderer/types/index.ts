@@ -54,14 +54,11 @@ export interface DesktopCaptureConfig {
   maxBitrate?: number;
 }
 
-/// One `preview-frame` event payload: base64-encoded tightly packed I420
-/// planes (Y, then U, then V; stride == width) at up to 640×360, rendered by
-/// the renderer's preview canvas while capture is active. No image codec is
-/// involved — the planes are drawn directly.
+/// One preview frame shipped over the preview channel: JPEG bytes encoded
+/// natively by libjpeg-turbo (frame dimensions come from the decoded
+/// bitmap), plus the native emission timestamp used for latency metrics.
 export interface PreviewFrame {
-  data: string;
-  width: number;
-  height: number;
+  data: ArrayBuffer;
   ptsUs: number;
 }
 
@@ -102,8 +99,8 @@ export interface DesktopCaptureStats {
   framesPushed: number;
   framesDropped: number;
   captureErrors: number;
-  /// Raw I420 preview frames emitted via the `preview-frame` event (no
-  /// image codec involved).
+  /// JPEG preview frames emitted via the preview callback (encoded
+  /// natively by libjpeg-turbo).
   previewFramesSent: number;
   lastWidth: number;
   lastHeight: number;

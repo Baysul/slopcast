@@ -87,7 +87,7 @@ interface TestResult {
   presenterVideoFramesSent: number;
   presenterVideoBytesSent: number;
   captureFramesPushed: number;
-  /** §9.1 preview emitter counter — proves base64 I420 preview frames flowed. */
+  /** §9.1 preview emitter counter — proves JPEG preview frames flowed. */
   previewFramesSent: number;
   videoCodecReported: string | null;
   encoderImplementation: string | null;

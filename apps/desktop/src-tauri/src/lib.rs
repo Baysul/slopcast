@@ -59,7 +59,7 @@ pub fn run() {
             app.manage(context::CaptureContextCache::default());
             app.manage(config::AppConfigState::load()?);
             audio::register_audio_callbacks(app.handle());
-            capture::register_preview_callback(app.handle());
+            capture::register_preview_channel_callback();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -95,6 +95,9 @@ pub fn run() {
             capture::get_video_capture_stats,
             capture::start_capture_preview,
             capture::go_live,
+            capture::register_preview_channel,
+            capture::bench_register_channel,
+            capture::bench_push_frames,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| eprintln!("failed to build tauri application: {e}"))

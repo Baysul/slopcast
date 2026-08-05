@@ -16,7 +16,7 @@ export interface ScreensharePreviewProps {
 
 // Capture and encoding run entirely in native code (PipeWire -> native-livekit),
 // so the renderer has no MediaStream to preview. While capture is active the
-// card renders the raw I420 preview frames pushed by the backend instead of a
+// card renders the JPEG preview frames pushed by the backend instead of a
 // video element; telemetry overlays the canvas once the stream is live.
 export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
   ({ captureStage, roomCode, copied, previewFrame, telemetry, onCopyLink }) => {

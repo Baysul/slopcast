@@ -61,3 +61,82 @@ fn abgr_to_i420_does_not_match_bgra_memory_order() {
     assert_ne!(y[0], 82, "ABGR would scramble the red pixel's Y");
     assert_ne!(v[0], 239, "ABGR would scramble the red pixel's V");
 }
+
+/// Pins the preview payload format: `i420_to_abgr` emits memory order
+/// [R,G,B,A] — the only libyuv fourcc a `gl.RGBA` texture upload accepts
+/// verbatim. If a future refactor switches to `i420_to_rgba` (memory
+/// [A,B,G,R], the FOURCC "RGBA" layout) every preview frame gets a
+/// red/blue swap. The preview path converts the downscaled I420 planes with
+/// this exact call.
+///
+/// Assertions use the dominant-channel threshold (not exact equality) because
+/// libyuv's fixed-point BT.601 conversion rounds chroma by a few counts.
+#[cfg(target_os = "linux")]
+#[test]
+fn i420_to_abgr_matches_gl_rgba_memory_order() {
+    use livekit::webrtc::native::yuv_helper;
+
+    // Pure red in I420 (BT.601 limited range, same source as the ARGB probe
+    // above): Y=82, U=90, V=239, 2x2 frame.
+    let y = [82u8; 4];
+    let u = [90u8];
+    let v = [239u8];
+    let mut rgba = [0u8; 16];
+    yuv_helper::i420_to_abgr(&y, 2, &u, 1, &v, 1, &mut rgba, 8, 2, 2);
+
+    for pixel in rgba.chunks_exact(4) {
+        assert!(
+            pixel[0] >= 250,
+            "R channel must carry the red, got {}",
+            pixel[0]
+        );
+        assert!(pixel[1] < 32, "G channel must stay dark, got {}", pixel[1]);
+        assert!(pixel[2] < 32, "B channel must stay dark, got {}", pixel[2]);
+        assert_eq!(pixel[3], 255, "alpha must be opaque");
+    }
+
+    // Pure blue: Y=41, U=240, V=110. The blue channel must land in the third
+    // byte — a swapped output would put it in the first.
+    let y = [41u8; 4];
+    let u = [240u8];
+    let v = [110u8];
+    let mut rgba = [0u8; 16];
+    yuv_helper::i420_to_abgr(&y, 2, &u, 1, &v, 1, &mut rgba, 8, 2, 2);
+
+    for pixel in rgba.chunks_exact(4) {
+        assert!(
+            pixel[2] >= 250,
+            "B channel must carry the blue, got {}",
+            pixel[2]
+        );
+        assert!(pixel[0] < 32, "R channel must stay dark, got {}", pixel[0]);
+        assert!(pixel[1] < 32, "G channel must stay dark, got {}", pixel[1]);
+        assert_eq!(pixel[3], 255, "alpha must be opaque");
+    }
+}
+
+/// libyuv's FOURCC "RGBA" is memory order [A,B,G,R], which a `gl.RGBA`
+/// upload would read as blue-first — the trap that would swap every preview
+/// frame. Pinned so nobody "simplifies" `i420_to_abgr` back to `i420_to_rgba`.
+#[cfg(target_os = "linux")]
+#[test]
+fn i420_to_rgba_does_not_match_gl_rgba_memory_order() {
+    use livekit::webrtc::native::yuv_helper;
+
+    let y = [41u8; 4];
+    let u = [240u8];
+    let v = [110u8];
+    let mut rgba = [0u8; 16];
+    yuv_helper::i420_to_rgba(&y, 2, &u, 1, &v, 1, &mut rgba, 8, 2, 2);
+
+    let pixel = &rgba[0..4];
+    assert_ne!(
+        &pixel[0..3],
+        &[0, 0, 255],
+        "I420ToRGBA's [A,B,G,R] memory order must not be used for gl.RGBA"
+    );
+    assert!(
+        pixel[0] >= 250,
+        "byte 0 carries the alpha in the RGBA fourcc"
+    );
+}

@@ -8,6 +8,7 @@
 
 import type { AudioApp, AudioAppWave, StreamSettings } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
+import type { Channel } from '@tauri-apps/api/core';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
@@ -20,7 +21,6 @@ import type {
   NativeCodecInfo,
   NativeTelemetry,
   PlatformInfo,
-  PreviewFrame,
 } from '../types';
 
 const unavailableCommands = new Set<string>();
@@ -118,8 +118,11 @@ export const desktopApi = {
   startCapturePreview: (): Promise<boolean> => invokeOk('start_capture_preview', undefined),
   goLive: (config: DesktopCaptureConfig): Promise<boolean> => invokeOk('go_live', { config }),
   probeGpuInfo: (): Promise<GpuInfo | null> => invokeOr('probe_gpu_info', undefined, null),
+  // Preview transport: the renderer registers a raw Channel once on mount;
+  // the backend pushes JPEG frames (8-byte pts_us header + JPEG bytes) into
+  // it at up to 60 fps — no base64, no JSON per frame.
+  registerPreviewChannel: (channel: Channel<ArrayBuffer>): Promise<boolean> =>
+    invokeOk('register_preview_channel', { channel }),
   onAudioWave: (callback: (waves: AudioAppWave[]) => void): Promise<UnlistenFn> =>
     subscribe<AudioAppWave[]>('audio-wave-update', callback),
-  onPreviewFrame: (callback: (frame: PreviewFrame) => void): Promise<UnlistenFn> =>
-    subscribe<PreviewFrame>('preview-frame', callback),
 };

@@ -1,11 +1,12 @@
 //! Capture commands — ports of the Electron `video.ts` handlers, driving
 //! `native-livekit`'s desktop capturer and video track.
 
-use tauri::Emitter;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use native_livekit::{CaptureConfig, DesktopCaptureStats};
+use tauri::ipc::{Channel, InvokeResponseBody};
 
-use crate::dto::PreviewFrameDto;
 use crate::platform::is_wayland;
 
 /// When set, the capture commands route to the synthetic test-pattern source
@@ -35,23 +36,46 @@ fn start_capture(config: &CaptureConfig) -> CaptureStartResult {
     result
 }
 
-/// Registers the preview-frame callback (MIGRATION §9.1): the capture thread
-/// invokes it with base64 I420 previews (640×360 at the stream framerate),
-/// and they are forwarded to the renderer as `preview-frame` events. The
-/// capture engine only knows this callback — Tauri stays out of native-livekit.
-pub fn register_preview_callback(app: &tauri::AppHandle) {
-    let app = app.clone();
-    native_livekit::set_preview_callback(Box::new(move |width, height, data, pts_us| {
-        let _ = app.emit(
-            "preview-frame",
-            PreviewFrameDto {
-                data,
-                width,
-                height,
-                pts_us,
-            },
-        );
+/// The renderer's preview channel: the preview callback forwards JPEG bytes
+/// here (prefixed with an 8-byte little-endian `pts_us` header) whenever the
+/// renderer has registered one. Raw payloads travel over Tauri's binary
+/// channel path — no base64, no JSON per frame — and the header lets the
+/// renderer measure end-to-end preview latency.
+static PREVIEW_CHANNEL: Mutex<Option<Channel<InvokeResponseBody>>> = Mutex::new(None);
+
+/// Registers the preview callback (MIGRATION §9.1): the capture thread
+/// invokes it with JPEG bytes `(data, pts_us)` at up to 60 fps, and they are
+/// forwarded to the renderer's preview channel. The capture engine only
+/// knows this callback — Tauri stays out of native-livekit.
+pub fn register_preview_channel_callback() {
+    native_livekit::set_preview_callback(Box::new(move |bytes, pts_us| {
+        let Ok(guard) = PREVIEW_CHANNEL.lock() else {
+            return;
+        };
+        let Some(channel) = guard.as_ref() else {
+            return;
+        };
+        let mut payload = Vec::with_capacity(8 + bytes.len());
+        payload.extend_from_slice(&pts_us.to_le_bytes());
+        payload.extend_from_slice(&bytes);
+        let _ = channel.send(InvokeResponseBody::Raw(payload));
     }));
+}
+
+/// Registers the renderer's preview channel; the renderer calls this once on
+/// mount so preview frames can flow. Replaces any previously registered
+/// channel (e.g. after a webview reload).
+///
+/// # Errors
+///
+/// Returns an error when the channel state lock is poisoned.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn register_preview_channel(channel: Channel<InvokeResponseBody>) -> Result<(), String> {
+    let Ok(mut guard) = PREVIEW_CHANNEL.lock() else {
+        return Err("preview channel lock poisoned".into());
+    };
+    *guard = Some(channel);
+    Ok(())
 }
 
 /// Result of `start_native_capture`, matching the Electron handler's
@@ -149,7 +173,7 @@ pub fn get_video_capture_stats() -> DesktopCaptureStats {
 }
 
 /// Starts a capture-only pre-roll (MIGRATION §9.1): the portal picker
-/// appears, frames flow and `preview-frame` events fire, but no track is
+/// appears, frames flow to the preview channel, but no track is
 /// published yet — `go_live` publishes it. Audio stays renderer-owned: the
 /// audio target is only known to the renderer, which calls
 /// `start_audio_capture` separately after going live. In synthetic e2e mode
@@ -232,4 +256,55 @@ pub async fn go_live(config: CaptureConfig) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("go live task failed: {e}"))?
+}
+
+/// Benchmark-only (Phase 2 of the preview transport comparison): a channel
+/// the `bench_push_frames` command pushes raw payloads into, so the renderer
+/// can measure Tauri's raw channel throughput and latency in isolation —
+/// option 1's ~100 KB JPEG frames vs option 2's 921 KB RGBA frames.
+static BENCH_CHANNEL: Mutex<Option<Channel<InvokeResponseBody>>> = Mutex::new(None);
+
+/// Registers the benchmark channel. Replaces any previously registered one.
+///
+/// # Errors
+///
+/// Returns an error when the channel state lock is poisoned.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn bench_register_channel(channel: Channel<InvokeResponseBody>) -> Result<(), String> {
+    let Ok(mut guard) = BENCH_CHANNEL.lock() else {
+        return Err("bench channel lock poisoned".into());
+    };
+    *guard = Some(channel);
+    Ok(())
+}
+
+/// Benchmark-only: pushes `count` raw payloads of `size` bytes at
+/// `interval_ms` cadence through the registered bench channel. The renderer
+/// records arrival timestamps and computes cadence, jitter and bytes/s.
+///
+/// # Errors
+///
+/// Returns an error when the channel state lock is poisoned or no channel
+/// has been registered yet.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn bench_push_frames(count: u32, size: usize, interval_ms: u64) -> Result<(), String> {
+    let channel = {
+        let Ok(guard) = BENCH_CHANNEL.lock() else {
+            return Err("bench channel lock poisoned".into());
+        };
+        let Some(channel) = guard.as_ref() else {
+            return Err("no bench channel registered".into());
+        };
+        channel.clone()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let payload = vec![0xA5u8; size];
+        for _ in 0..count {
+            let _ = channel.send(InvokeResponseBody::Raw(payload.clone()));
+            if interval_ms > 0 {
+                std::thread::sleep(Duration::from_millis(interval_ms));
+            }
+        }
+    });
+    Ok(())
 }

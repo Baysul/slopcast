@@ -1,5 +1,6 @@
 import type { VideoCodec } from '@slopcast/shared-types';
 import { codecLabel, RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
+import { Channel } from '@tauri-apps/api/core';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -146,22 +147,36 @@ export const PresenterApp: React.FC = () => {
     })();
 
     let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void desktopApi
-      .onPreviewFrame((frame) => {
-        if (!disposed) setPreviewFrame(frame);
-      })
-      .then((un) => {
-        if (disposed) {
-          un();
-          return;
-        }
-        unlisten = un;
-      });
+    if (window.__PREVIEW_BENCH__) {
+      window.__PREVIEW_BENCH_DATA__ = [];
+    }
+    // The preview channel: the backend pushes JPEG frames (8-byte LE
+    // pts_us header + JPEG bytes) through Tauri's raw channel transport.
+    // Tauri's Channel unwraps its message envelope, so the callback receives
+    // the raw ArrayBuffer payload directly.
+    const channel = new Channel<ArrayBuffer>((payload) => {
+      if (disposed) return;
+      // The raw transport delivers ArrayBuffers; anything else (e.g. a
+      // postMessage fallback that shipped a JSON number array) must never
+      // crash the preview pipeline.
+      if (!(payload instanceof ArrayBuffer)) return;
+      if (payload.byteLength < 8) return;
+      let ptsUs = 0;
+      try {
+        ptsUs = Number(new DataView(payload).getBigUint64(0, true));
+      } catch {
+        return;
+      }
+      setPreviewFrame({ ptsUs, data: payload.slice(8) });
+    });
+    void desktopApi.registerPreviewChannel(channel).then((ok) => {
+      if (!ok && !disposed) {
+        console.warn('[Presenter] preview channel registration failed — no live preview');
+      }
+    });
 
     return () => {
       disposed = true;
-      unlisten?.();
       disconnectRoom();
     };
   }, [disconnectRoom]);
