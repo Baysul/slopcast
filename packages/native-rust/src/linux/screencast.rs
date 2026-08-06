@@ -450,9 +450,10 @@ fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
             }
         }
 
-        // Resolve audio only for the active stream. If it returns None (e.g. VSCodium
-        // has no audio process), return None directly — do NOT loop through older
-        // lingering screencast streams (e.g. Steam/FFXIV).
+        // Resolve audio only for the active stream. If it returns None (the
+        // window could not be resolved, or it is not a capturable window),
+        // return None directly — do NOT loop through older lingering
+        // screencast streams (e.g. Steam/FFXIV).
         return resolve_kde_screencast_audio(active_mn);
     }
 
@@ -525,9 +526,9 @@ pub(crate) fn get_capture_context() -> Result<crate::CaptureContext, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KdeScreencast, VideoScan, classify_kde_screencast, extract_portal_window_name_from_map,
-        pid_fallback_app, process_display_name, resolve_from_video_scan, shorten_portal_app_id,
-        window_pid_fallback,
+        KdeScreencast, VideoScan, active_kde_media_name, classify_kde_screencast,
+        extract_portal_window_name_from_map, match_kde_window_to_apps, pid_fallback_app,
+        process_display_name, resolve_from_video_scan, shorten_portal_app_id, window_pid_fallback,
     };
     use crate::AudioApp;
     use std::collections::HashMap;
@@ -809,41 +810,57 @@ mod tests {
     }
 
     #[test]
-    fn resolve_from_video_scan_does_not_fall_through_kde_window_to_unrelated_capture_names() {
-        // KDE scan for a window without matching audio (e.g. VSCodium), where capture_names
-        // accidentally captured Spotify from another video node.
-        let scan = VideoScan {
-            de: Some("kde"),
-            source_type: Some("window"),
-            media_name: Some("kwin-screencast-codium".to_string()),
-            video_node_count: 10,
-            highest_serial: 200,
-            kde_media_names: vec![(200, "kwin-screencast-codium".to_string())],
-            capture_names: vec!["Spotify".to_string()],
-            screencast_node_id: Some(50),
-            portal_props: None,
+    fn kde_window_resolution_never_falls_through_to_unrelated_audio_apps() {
+        // A KDE window capture resolves strictly by the captured window's
+        // identity. An unrelated running audio app — a different process,
+        // e.g. Spotify playing in another window, which may appear in
+        // `capture_names` from another video node — must never be picked,
+        // even when the captured app has no active audio stream: the
+        // resolution ends at the captured window's own PID target (Layer 5),
+        // never at the unrelated app.
+        let win = super::super::kwin::WindowMatch {
+            pid: std::process::id(),
+            caption: "VSCodium — cunny".into(),
         };
-        assert!(resolve_from_video_scan(&scan).is_none());
+        let unrelated =
+            pid_fallback_app(999_999, "Spotify".into()).unwrap_or_else(|| panic!("app"));
+        let resolved = match_kde_window_to_apps(&[unrelated], &win, "codium")
+            .or_else(|| window_pid_fallback(&win, "codium"))
+            .unwrap_or_else(|| panic!("window PID fallback must resolve"));
+        assert_ne!(
+            resolved.name.to_lowercase(),
+            "spotify",
+            "unrelated capture names must never win the KDE resolution"
+        );
+        let self_pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        assert_eq!(
+            resolved.process_id, self_pid,
+            "resolution targets the captured window's own process"
+        );
     }
 
     #[test]
-    fn resolve_from_video_scan_evaluates_only_newest_stream_ignoring_older_lingering_streams() {
-        // Active selection is VSCodium (serial 200), older lingering stream is Steam/FFXIV (serial 100).
-        let scan = VideoScan {
-            de: Some("kde"),
-            source_type: Some("window"),
-            media_name: Some("kwin-screencast-codium".to_string()),
-            video_node_count: 2,
-            highest_serial: 200,
-            kde_media_names: vec![
-                (100, "kwin-screencast-steam_app_default".to_string()),
-                (200, "kwin-screencast-codium".to_string()),
-            ],
-            capture_names: vec![],
-            screencast_node_id: Some(150),
-            portal_props: None,
-        };
-        // Active stream is codium (no audio) — must return None without evaluating the older steam stream.
-        assert!(resolve_from_video_scan(&scan).is_none());
+    fn active_kde_stream_is_the_newest_ignoring_older_lingering_streams() {
+        // KWin can leave lingering screencast streams behind (an older
+        // capture's node is eventually destroyed, but it may still be
+        // listed); the active stream is the most recently created one —
+        // highest `object.serial` — regardless of list order.
+        let names = vec![
+            (100, "kwin-screencast-steam_app_default".to_string()),
+            (200, "kwin-screencast-codium".to_string()),
+        ];
+        assert_eq!(
+            active_kde_media_name(&names),
+            Some("kwin-screencast-codium")
+        );
+        let shuffled = vec![
+            (200, "kwin-screencast-codium".to_string()),
+            (100, "kwin-screencast-steam_app_default".to_string()),
+        ];
+        assert_eq!(
+            active_kde_media_name(&shuffled),
+            Some("kwin-screencast-codium")
+        );
+        assert_eq!(active_kde_media_name(&[]), None);
     }
 }
