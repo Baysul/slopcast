@@ -426,22 +426,28 @@ fn emit_preview_frame(
     true
 }
 
-/// The shared conversion buffer: the capture source (pw or generator
-/// thread) writes it, the preview emitter reads it. The mutex never
-/// contends in practice — both holds are brief — but it gives the
-/// `'static` callback closure and the loop a shared owner for the buffer.
+/// The latest converted frame, shared between the capture source (which
+/// swaps in a fresh, immutable buffer per frame) and the preview emitter
+/// (which snapshots it). The mutex never contends in practice — both
+/// holds are brief — but it gives the `'static` callback closure and the
+/// loop a shared owner for the snapshot.
 type SharedFrameBuffer = Arc<Mutex<VideoFrame<I420Buffer>>>;
 /// The capture-source frame callback: `(width, height, bgra, pts_us)`.
 pub(crate) type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 
-/// Converts a linear BGRA frame into the shared I420 buffer, bumps the
+/// Converts a linear BGRA frame into a fresh I420 buffer, bumps the
 /// preview generation and pushes the frame into the active video source
 /// (if any). Shared by the portal engine and the synthetic generator.
 ///
-/// The preview reads the shared buffer at the source resolution; when the
-/// encoder target is smaller, a libyuv-scaled copy of the I420 planes is
-/// pushed to the video source instead, so the encoder never receives a
-/// frame larger than the published track's dimensions.
+/// Every frame gets its own buffer: the encoder consumes frames
+/// asynchronously on its own queue (the cadence adapter posts them by
+/// value, `VideoStreamEncoder` encodes on the encoder thread), so a
+/// reused buffer would be torn or duplicated mid-read — blocky smearing
+/// during motion, independent of codec. The preview reads the latest
+/// snapshot at the source resolution; when the encoder target is
+/// smaller, a libyuv-scaled copy of the I420 planes is pushed to the
+/// video source instead, so the encoder never receives a frame larger
+/// than the published track's dimensions.
 fn convert_and_push(
     width: u32,
     height: u32,
@@ -449,15 +455,11 @@ fn convert_and_push(
     preview_source: &SharedFrameBuffer,
     scale_target: Option<ScaleTarget>,
 ) {
-    let Ok(mut frame_buffer) = preview_source.lock() else {
-        STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    if frame_buffer.buffer.width() != width || frame_buffer.buffer.height() != height {
-        frame_buffer.buffer = I420Buffer::new(width, height);
-    }
-    let (stride_y, stride_u, stride_v) = frame_buffer.buffer.strides();
-    let (plane_y, plane_u, plane_v) = frame_buffer.buffer.data_mut();
+    // The conversion below is the only per-frame pass: the handed-out
+    // buffer is immutable afterwards, so no copy is needed.
+    let mut out = I420Buffer::new(width, height);
+    let (stride_y, stride_u, stride_v) = out.strides();
+    let (plane_y, plane_u, plane_v) = out.data_mut();
     // The engine delivers tightly packed rows (stride == width * 4).
     yuv_helper::argb_to_i420(
         bgra,
@@ -471,10 +473,19 @@ fn convert_and_push(
         i32::try_from(width).unwrap_or(0),
         i32::try_from(height).unwrap_or(0),
     );
-    frame_buffer.timestamp_us = monotonic_us();
+    let timestamp_us = monotonic_us();
     PREVIEW_GENERATION.fetch_add(1, Ordering::Relaxed);
     STATS_LAST_WIDTH.store(width, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(height, Ordering::Relaxed);
+
+    // Swap the immutable snapshot; the preview emitter reads the same
+    // buffer the encoder got.
+    let Ok(mut frame_buffer) = preview_source.lock() else {
+        STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    frame_buffer.buffer = out;
+    frame_buffer.timestamp_us = timestamp_us;
 
     let Some(source) = VIDEO_SOURCE.load_full() else {
         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -495,7 +506,7 @@ fn convert_and_push(
             );
             let scaled_frame = VideoFrame {
                 rotation: VideoRotation::VideoRotation0,
-                timestamp_us: frame_buffer.timestamp_us,
+                timestamp_us,
                 frame_metadata: None,
                 buffer: scaled,
             };
@@ -629,11 +640,11 @@ fn run_capture(
     ready_tx: &mpsc::Sender<Result<(), String>>,
     source: CaptureSource,
 ) {
-    // The converted frame is shared between the source callback (pw or
-    // generator thread) and the preview emitter (this thread). The mutex
-    // never contends in practice — both holds are brief — but it gives
-    // the 'static callback closure and the loop a shared owner for the
-    // buffer.
+    // The latest converted frame is shared between the source callback
+    // (pw or generator thread) and the preview emitter (this thread).
+    // The mutex never contends in practice — both holds are brief — but
+    // it gives the 'static callback closure and the loop a shared owner
+    // for the snapshot.
     let frame_buffer = VideoFrame {
         rotation: VideoRotation::VideoRotation0,
         timestamp_us: 0,
