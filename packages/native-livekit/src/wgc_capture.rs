@@ -37,7 +37,7 @@
 //! unchanged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,7 @@ use crate::desktop_capture::{
 /// The thread was already initialized in a different COM apartment; the WGC
 /// session may still work, so it is tolerated (same policy as the WASAPI
 /// capture thread in native-rust).
-const RPC_E_CHANGED_MODE: i32 = -2_147_410_682;
+const RPC_E_CHANGED_MODE: i32 = -2_147_417_850;
 
 /// What kind of source a WGC capture session targets. Serialized camelCase
 /// for the renderer's source picker (`"screen"` / `"window"`).

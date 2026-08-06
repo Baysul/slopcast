@@ -522,7 +522,7 @@ fn make_on_frame(preview_source: SharedFrameBuffer) -> FrameCallback {
 }
 
 /// Monotonic microsecond timestamp for video frames, anchored at first use.
-fn monotonic_us() -> i64 {
+pub(crate) fn monotonic_us() -> i64 {
     use std::sync::OnceLock;
     static ANCHOR: OnceLock<Instant> = OnceLock::new();
     let anchor = ANCHOR.get_or_init(Instant::now);
