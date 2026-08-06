@@ -12,7 +12,8 @@
 //! cursor is painted into the frames — and the prebuilt libwebrtc ships the
 //! whole `modules/desktop_capture` module. The engine only has to poll.
 //!
-//! Capture semantics (verified against the livekit m137 fork of
+//! Capture semantics (verified against the webrtc-sdk fork's m144 line —
+//! `webrtc-sdk/webrtc@m144_release`, tags `libwebrtc.m144.7559.xx` —
 //! `wgc_capturer_win.cc` / `wgc_capture_session.cc`):
 //! - `capture_frame()` is a *non-blocking poll*: the WGC session keeps the
 //!   last `Direct3D11CaptureFramePool` frame in an internal queue and
