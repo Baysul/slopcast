@@ -95,7 +95,8 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                         <SelectLabel>Hardware</SelectLabel>
                         {hardwareCodecs.map((info) => (
                           <SelectItem key={info.codec} value={info.codec}>
-                            {info.label} {codecOptionSuffix(info)}
+                            {info.label}
+                            {codecOptionSuffix(info)}
                           </SelectItem>
                         ))}
                       </SelectGroup>
@@ -105,7 +106,8 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                         {hardwareCodecs.length > 0 && <SelectLabel>Software</SelectLabel>}
                         {softwareCodecs.map((info) => (
                           <SelectItem key={info.codec} value={info.codec}>
-                            {info.label} {codecOptionSuffix(info)}
+                            {info.label}
+                            {codecOptionSuffix(info)}
                           </SelectItem>
                         ))}
                       </SelectGroup>

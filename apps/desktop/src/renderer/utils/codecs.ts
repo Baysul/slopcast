@@ -20,9 +20,11 @@ export const sortByCodecPreference = (codecs: CodecInfo[]): CodecInfo[] => {
 // The native stack (bundled libwebrtc in native-livekit) is the ONLY encoder
 // this app uses — the webview's `RTCRtpSender.getCapabilities` reflects the
 // WebKitGTK/GStreamer stack, which never touches the stream, so it must never
-// drive the codec picker. `hardware` comes from the native build: only H264
-// has a hardware encoder factory (VA-API/NVENC on Linux, Media Foundation on
-// Windows, VideoToolbox on macOS); VP8/VP9/AV1 are always software there.
+// drive the codec picker. `hardware` comes from `get_native_supported_codecs`
+// at runtime: the bundled libwebrtc currently ships a hardware encoder factory
+// only for H264 (VA-API on Linux, Media Foundation on Windows, VideoToolbox on
+// macOS), so today VP8/VP9/AV1 report software — but labels always follow the
+// reported flag, never a hardcoded codec → encoder mapping.
 export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
   const codecs = infos
     .filter((i): i is NativeCodecInfo & { codec: VideoCodec } => ['vp8', 'h264', 'vp9', 'av1'].includes(i.codec))
@@ -38,15 +40,10 @@ export const recommendCodec = (codecs: CodecInfo[]): CodecInfo[] => {
   return [{ ...recommended, recommended: true }, ...codecs.filter((c) => c.codec !== recommended.codec)];
 };
 
-export const codecOptionSuffix = (info: CodecInfo): string => {
-  if (info.recommended) return info.hardware ? 'Hardware - Recommended' : 'Recommended';
-  if (info.hardware) return 'Hardware';
-  // libaom (AV1) is single-threaded and libvpx VP9 is too heavy to sustain
-  // real-time 1080p60 in software; calling that out prevents pickers from
-  // choosing a codec the encoder cannot keep up with.
-  if (info.codec === 'av1' || info.codec === 'vp9') return 'Software (slow)';
-  return 'Software';
-};
+// Only the recommended codec gets a suffix — hardware vs. software is already
+// conveyed by the picker's group labels, and the `hardware` flag itself comes
+// from `get_native_supported_codecs` at list-generation time.
+export const codecOptionSuffix = (info: CodecInfo): string => (info.recommended ? ' - Recommended' : '');
 
 // Partitions codecs for the grouped picker (hardware group on top), preserving
 // the preference order within each partition so the recommendation stays first

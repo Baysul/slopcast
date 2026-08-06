@@ -39,11 +39,12 @@ test('sortByCodecPreference does not mutate its input', () => {
   );
 });
 
-test('codecOptionSuffix labels hardware and recommended states', () => {
-  assert.equal(codecOptionSuffix(info('vp9', true, true)), 'Hardware - Recommended');
-  assert.equal(codecOptionSuffix(info('vp9', true, false)), 'Hardware');
-  assert.equal(codecOptionSuffix(info('vp9', false, false)), 'Software (slow)');
-  assert.equal(codecOptionSuffix(info('vp8', false, false)), 'Software');
+test('codecOptionSuffix marks only the recommended codec (groups convey hardware/software)', () => {
+  assert.equal(codecOptionSuffix(info('vp9', true, true)), ' - Recommended');
+  assert.equal(codecOptionSuffix(info('vp9', true, false)), '');
+  assert.equal(codecOptionSuffix(info('vp9', false, true)), ' - Recommended');
+  assert.equal(codecOptionSuffix(info('vp9', false, false)), '');
+  assert.equal(codecOptionSuffix(info('vp8', false, false)), '');
 });
 
 test('fromNativeCodecInfo maps the native stack list and sorts by preference', () => {
