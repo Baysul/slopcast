@@ -4,8 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Bounded lock-free ring queue for up to 64 audio frame chunks.
-const AUDIO_QUEUE_CAPACITY: usize = 64;
+/// Bounded lock-free ring queue for up to 8 audio frame chunks (~0.7 s of
+/// 48 kHz stereo audio at the default 16 KiB slot size). Kept small on
+/// purpose: a stall upstream must not be able to buffer seconds of stale
+/// audio that would then play out behind the live video (drop-oldest at
+/// the consumer keeps the backlog bounded; this caps how much it can
+/// hold in the first place).
+const AUDIO_QUEUE_CAPACITY: usize = 8;
 
 /// PCM format parameters: 48 kHz stereo 16-bit PCM (2 channels * 2 bytes/sample = 4 bytes/frame).
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;

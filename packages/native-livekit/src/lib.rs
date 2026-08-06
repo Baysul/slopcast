@@ -26,6 +26,12 @@ use std::time::Duration;
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
 
+/// Maximum audio backlog in the room worker before the oldest samples are
+/// dropped (drop-oldest): bounds how far audio content can fall behind the
+/// live video after an upstream stall, at the cost of skipping the stale
+/// tail instead of playing it out late.
+const MAX_AUDIO_BACKLOG_MS: usize = 100;
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureConfig {
@@ -632,6 +638,17 @@ async fn run_worker(
                     break;
                 };
                 buffer.extend(pcm_chunk);
+                // Drop-oldest backlog bound: a stalled upstream (ring,
+                // channel or worker) must never push audio content seconds
+                // behind the live video. Skipping the stale tail after a
+                // hiccup keeps audio near-live instead of lagging forever
+                // (the C++ audio source plays its buffer at real-time rate,
+                // so an unbound backlog would never drain faster than it
+                // grows).
+                let max_backlog_samples = MAX_AUDIO_BACKLOG_MS * samples_per_10ms;
+                while buffer.len() > max_backlog_samples {
+                    buffer.pop_front();
+                }
                 let mut chunks = Vec::new();
                 drain_pcm_chunks(&mut buffer, samples_per_10ms, &mut chunks);
                 for chunk in chunks {
