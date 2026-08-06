@@ -429,14 +429,19 @@ fn inspect_video_graph() -> Option<VideoScan> {
     Some(scan.take())
 }
 
+/// The active KDE screencast stream: the most recently created one, by
+/// `object.serial` (`KWin` can leave older, lingering streams listed).
+fn active_kde_media_name(kde_media_names: &[(u64, String)]) -> Option<&str> {
+    kde_media_names
+        .iter()
+        .max_by_key(|(serial, _)| *serial)
+        .map(|(_, name)| name.as_str())
+}
+
 fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
     // 1. For KDE screencast streams (`kwin-screencast-*`), evaluate strictly
     // the single active (most recently created) stream based on object.serial.
-    if !scan.kde_media_names.is_empty() {
-        let mut kde_names: Vec<&(u64, String)> = scan.kde_media_names.iter().collect();
-        kde_names.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-        let active_mn = &kde_names[0].1;
-
+    if let Some(active_mn) = active_kde_media_name(&scan.kde_media_names) {
         // If the active stream is a monitor or region, return None directly.
         if let Some(suffix) = active_mn.strip_prefix("kwin-screencast-") {
             let class = classify_kde_screencast(suffix);
