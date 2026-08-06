@@ -74,12 +74,17 @@ export interface DesktopCaptureConfig {
   maxBitrate?: number;
 }
 
-/// One preview frame shipped over the preview channel: JPEG bytes encoded
-/// natively by libjpeg-turbo (frame dimensions come from the decoded
-/// bitmap), plus the native emission timestamp used for latency metrics.
+/// One preview frame shipped over the preview channel: tightly packed BGRA
+/// rows (native DMA-BUF readback byte order — the renderer uploads them to a
+/// GPU texture as-is, no decode), plus the frame dimensions and the native
+/// emission timestamp used for latency metrics. The 16-byte little-endian
+/// channel header (`u64 pts_us`, `u32 width`, `u32 height`) is already
+/// stripped by the channel callback.
 export interface PreviewFrame {
   data: ArrayBuffer;
   ptsUs: number;
+  width: number;
+  height: number;
 }
 
 /// A codec the native encoder stack (bundled libwebrtc) can encode with, as
@@ -102,7 +107,8 @@ export interface NativeTelemetry {
   videoBytesSent: number | null;
   videoPacketsSent: number | null;
   videoPacketsLost: number | null;
-  videoFramesSent: number | null;
+  /** outbound-rtp `framesEncoded` — m144 never populates `framesSent`. */
+  videoFramesEncoded: number | null;
   videoWidth: number | null;
   videoHeight: number | null;
   audioCodec: string | null;

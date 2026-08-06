@@ -10,6 +10,9 @@ export interface StreamTelemetry {
   width: number | null;
   height: number | null;
   frameRate: number | null;
+  /** Capture-side rate (frames dequeued from the source per second) — the
+   * encode fps in this bar can only be as high as this. */
+  captureFps: number | null;
   targetFrameRate: number | null;
   videoBitrate: number | null;
   audioBitrate: number | null;
@@ -30,6 +33,7 @@ export function idleTelemetry(): StreamTelemetry {
     width: null,
     height: null,
     frameRate: null,
+    captureFps: null,
     targetFrameRate: null,
     videoBitrate: null,
     audioBitrate: null,
@@ -152,6 +156,7 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ t
   if (t.targetFrameRate != null) {
     fpsSub = `/ ${Math.round(t.targetFrameRate)}`;
   }
+  const captureValue = t.captureFps != null ? `${Math.round(t.captureFps)} fps` : '—';
 
   const sparklineSub = t.bitrateHistory.length > 0 ? `bitrate · last ${t.bitrateHistory.length}s` : 'awaiting uplink';
 
@@ -171,8 +176,25 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ t
             sub={t.videoEncoder ? `· ${t.videoEncoder}` : undefined}
           />
           <TelemetryCell label="Resolution" value={t.width && t.height ? `${t.width}×${t.height}` : '—'} />
-          <TelemetryCell label="Frame Rate" value={fpsValue} sub={fpsSub} degrade={fpsDegrade} />
-          <TelemetryCell label="Bitrate" value={fmtBitrate(t.videoBitrate)} />
+          <TelemetryCell
+            label="Frame Rate"
+            value={
+              <span data-testid="telemetry-fps" className="tabular-nums">
+                {fpsValue}
+              </span>
+            }
+            sub={fpsSub}
+            degrade={fpsDegrade}
+          />
+          <TelemetryCell label="Capture" value={<span data-testid="telemetry-capture">{captureValue}</span>} />
+          <TelemetryCell
+            label="Bitrate"
+            value={
+              <span data-testid="telemetry-bitrate" className="tabular-nums">
+                {fmtBitrate(t.videoBitrate)}
+              </span>
+            }
+          />
           <TelemetryCell label="Loss" value={fmtLoss(t.packetLossPct)} degrade={lossDegrade} />
 
           <div className="flex flex-col gap-1 shrink-0 min-w-0">

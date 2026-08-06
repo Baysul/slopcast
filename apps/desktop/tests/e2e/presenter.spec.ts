@@ -12,7 +12,7 @@
 //      backend: `SLOPCAST_E2E_CAPTURE=synthetic` (default, headless — no
 //      portal picker) or `portal` (a human answers the picker).
 //   4. Presenter telemetry: get_native_telemetry + get_video_capture_stats
-//      sampled twice ~2 s apart; videoFramesSent must advance, the outbound
+//      sampled twice ~2 s apart; videoFramesEncoded must advance, the outbound
 //      codec must match E2E_CODEC, and previewFramesSent > 0 (proves the
 //      JPEG preview emitter ran)
 //   5. GPU diagnostics via probe_gpu_info (D5) — softwareRasterizer must be
@@ -64,7 +64,7 @@ interface GpuInfo {
 }
 
 interface NativeTelemetry {
-  videoFramesSent?: number;
+  videoFramesEncoded?: number;
   videoBytesSent?: number;
   videoCodec?: string | null;
   encoderImplementation?: string | null;
@@ -88,7 +88,7 @@ interface PhaseResult {
   codec: string;
   gpuReport: GpuInfo | null;
   previewFramesSent: number;
-  videoFramesSent: number;
+  videoFramesEncoded: number;
   videoBytesSent: number;
   videoCodecReported: string | null;
   encoderImplementation: string | null;
@@ -125,7 +125,7 @@ const phase: PhaseResult = {
   codec,
   gpuReport: null,
   previewFramesSent: 0,
-  videoFramesSent: 0,
+  videoFramesEncoded: 0,
   videoBytesSent: 0,
   videoCodecReported: null,
   encoderImplementation: null,
@@ -279,6 +279,22 @@ const snapshotPresenterTelemetry = async (): Promise<{
   return { telemetry, stats };
 };
 
+/** Reads the rendered telemetry bar's Frame Rate cell — the UI path, not
+ * the invoke path — polling until it leaves the dash/zero state. */
+const readTelemetryBarFps = async (): Promise<string> => {
+  let uiFps = '—';
+  for (let i = 0; i < 12; i++) {
+    const el = browser.$('[data-testid="telemetry-fps"]');
+    if (await el.isExisting()) {
+      uiFps = (await el.getText()).trim();
+      const parsed = Number.parseFloat(uiFps);
+      if (Number.isFinite(parsed) && parsed > 0) break;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return uiFps;
+};
+
 /// Stops the live share through the real UI (Stop Screenshare → confirm Stop)
 /// so the spectator can verify it is informed. The room connection stays up.
 async function stopShareForSpectatorCheck(): Promise<void> {
@@ -375,7 +391,7 @@ describe('Slopcast presenter phase (Tauri)', () => {
     await new Promise((r) => setTimeout(r, TELEMETRY_SAMPLE_GAP_MS));
     const t1 = await snapshotPresenterTelemetry();
 
-    phase.videoFramesSent = t1.telemetry.videoFramesSent ?? 0;
+    phase.videoFramesEncoded = t1.telemetry.videoFramesEncoded ?? 0;
     phase.videoBytesSent = t1.telemetry.videoBytesSent ?? 0;
     phase.videoCodecReported = t1.telemetry.videoCodec ?? null;
     phase.encoderImplementation = t1.telemetry.encoderImplementation ?? null;
@@ -383,14 +399,14 @@ describe('Slopcast presenter phase (Tauri)', () => {
     phase.previewFramesSent = t1.stats.previewFramesSent;
     // The published stream must sustain the configured framerate: a collapsed
     // encoder or a crippled simulcast layer shows up as a low frame delta.
-    const framesDelta = (t1.telemetry.videoFramesSent ?? 0) - (t0.telemetry.videoFramesSent ?? 0);
+    const framesDelta = (t1.telemetry.videoFramesEncoded ?? 0) - (t0.telemetry.videoFramesEncoded ?? 0);
     phase.telemetryFps = Math.round(framesDelta / (TELEMETRY_SAMPLE_GAP_MS / 1000));
     phase.telemetryFlowing = framesDelta > 0 && (t1.telemetry.videoBytesSent ?? 0) > 0 && t1.stats.framesPushed > 0;
     writePhase();
 
     console.log(
-      `[e2e] telemetry: framesSent ${t0.telemetry.videoFramesSent ?? 'null'} -> ` +
-        `${t1.telemetry.videoFramesSent ?? 'null'} (${phase.telemetryFps} fps), ` +
+      `[e2e] telemetry: framesEncoded ${t0.telemetry.videoFramesEncoded ?? 'null'} -> ` +
+        `${t1.telemetry.videoFramesEncoded ?? 'null'} (${phase.telemetryFps} fps), ` +
         `bytesSent=${phase.videoBytesSent}, ` +
         `captureFramesPushed=${phase.captureFramesPushed}, previewFramesSent=${phase.previewFramesSent}`,
     );
@@ -401,6 +417,19 @@ describe('Slopcast presenter phase (Tauri)', () => {
       `Presenter stream ran at ${phase.telemetryFps} fps — encoder collapsed or crippled layer (need >= 15)`,
     );
     assert(phase.previewFramesSent > 0, 'No preview frames were emitted (previewFramesSent stayed at 0)');
+
+    // UI-level check: the telemetry BAR (not just the invoke path) must show
+    // a live frame rate. The bar's polling is independent of this spec's
+    // sampling — poll the rendered cell until it leaves the dash/zero state.
+    const uiFps = await readTelemetryBarFps();
+    console.log(
+      `[e2e] telemetry bar shows: Frame Rate="${uiFps}" Capture="${(await browser.$('[data-testid="telemetry-capture"]').getText()).trim()}"`,
+    );
+    const uiFpsValue = Number.parseFloat(uiFps);
+    assert(
+      Number.isFinite(uiFpsValue) && uiFpsValue > 0,
+      `Telemetry bar never showed a live frame rate (stuck at "${uiFps}") — the renderer is not displaying the encoder's framesEncoded`,
+    );
     assertCodecTelemetry(phase);
   });
 

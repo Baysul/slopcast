@@ -24,6 +24,7 @@ interface StatsSnapshot {
   videoBps: number | null;
   audioBps: number | null;
   fps: number | null;
+  captureFps: number | null;
   packetsSent: number;
   packetsLost: number;
   rttMs: number | null;
@@ -43,10 +44,14 @@ const applyVideoDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPre
   if (!prev.vInit || t.timestampMs <= prev.vTs) return;
   const dt = (t.timestampMs - prev.vTs) / 1000;
   const db = t.videoBytesSent - prev.vBytes;
-  if (db >= 0) snap.videoBps = (db * 8) / dt;
-  if (t.videoFramesSent != null) {
-    const df = t.videoFramesSent - prev.vFrames;
-    if (df >= 0) snap.fps = df / dt;
+  // Strictly-positive deltas only: a zero delta is "no movement this poll",
+  // not a measured 0 bps/fps — showing a confident 0 (e.g. "0 fps") during
+  // any stall is what made the bar read as broken. Null keeps the last
+  // known value on screen.
+  if (db > 0) snap.videoBps = (db * 8) / dt;
+  if (t.videoFramesEncoded != null) {
+    const df = t.videoFramesEncoded - prev.vFrames;
+    if (df > 0) snap.fps = df / dt;
   }
 };
 
@@ -55,8 +60,29 @@ const applyAudioDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPre
   if (!prev.aInit || t.timestampMs <= prev.aTs) return;
   const dt = (t.timestampMs - prev.aTs) / 1000;
   const db = t.audioBytesSent - prev.aBytes;
-  if (db >= 0) snap.audioBps = (db * 8) / dt;
+  if (db > 0) snap.audioBps = (db * 8) / dt;
 };
+
+/** Capture-side rate: frames dequeued from the source since the last poll.
+ * The capture stats carry no timestamp, so the poll cadence is the clock. */
+async function sampleCaptureFps(prev: {
+  dequeued: number;
+  at: number;
+  init: boolean;
+}): Promise<{ fps: number | null; next: { dequeued: number; at: number; init: boolean } }> {
+  const stats = await desktopApi.getVideoCaptureStats();
+  const nowMs = performance.now();
+  let fps: number | null = null;
+  if (prev.init && nowMs > prev.at) {
+    const dt = (nowMs - prev.at) / 1000;
+    const delta = stats.framesDequeued - prev.dequeued;
+    if (delta >= 0 && dt > 0) fps = delta / dt;
+  }
+  return {
+    fps,
+    next: { dequeued: stats.framesDequeued, at: nowMs, init: true },
+  };
+}
 
 // Native-livekit reports cumulative libwebrtc counters; deltas are computed
 // here exactly like the old renderer-side getStats() path did.
@@ -71,6 +97,7 @@ const foldNativeTelemetry = (t: NativeTelemetry, prev: StatsPrev): StatsSnapshot
     videoBps: null,
     audioBps: null,
     fps: null,
+    captureFps: null,
     packetsSent: (t.videoPacketsSent ?? 0) + (t.audioPacketsSent ?? 0),
     packetsLost: (t.videoPacketsLost ?? 0) + (t.audioPacketsLost ?? 0),
     rttMs: t.rttMs,
@@ -82,7 +109,7 @@ const foldNativeTelemetry = (t: NativeTelemetry, prev: StatsPrev): StatsSnapshot
   if (t.videoBytesSent != null) {
     prev.vInit = true;
     prev.vBytes = t.videoBytesSent;
-    prev.vFrames = t.videoFramesSent ?? prev.vFrames;
+    prev.vFrames = t.videoFramesEncoded ?? prev.vFrames;
     prev.vTs = t.timestampMs ?? prev.vTs;
   }
 
@@ -142,6 +169,7 @@ const telemetryWithoutSender = (
   videoBitrate: null,
   audioBitrate: null,
   packetLossPct: null,
+  captureFps: null,
 });
 
 const buildTelemetryUpdate = (
@@ -160,6 +188,7 @@ const buildTelemetryUpdate = (
   targetFrameRate: inputs.targetFrameRate,
   frameRate: smoothed.sFps ?? p.frameRate,
   videoBitrate: smoothed.sBr ?? p.videoBitrate,
+  captureFps: snap.captureFps ?? p.captureFps,
   audioCodec: snap.audioMime ? codecLabel(snap.audioMime) : p.audioCodec,
   audioBitrate: snap.audioBps ?? p.audioBitrate,
   hasAudio: inputs.hasAudio,
@@ -182,6 +211,7 @@ const telemetryLogLine = (i: {
   encHeight: number | null;
   height: number | null;
   sFps: number | null;
+  sCap: number | null;
   targetFrameRate: number | null;
   sBr: number | null;
   lossPct: number;
@@ -189,11 +219,12 @@ const telemetryLogLine = (i: {
   spectatorCount: number;
 }): string => {
   const fpsText = i.sFps != null ? String(Math.round(i.sFps)) : '\u2013';
+  const capText = i.sCap != null ? String(Math.round(i.sCap)) : '\u2013';
   const brText = i.sBr != null ? (i.sBr / 1_000_000).toFixed(1) : '\u2013';
   const rttText = i.rttMs != null ? String(Math.round(i.rttMs)) : '\u2013';
   const widthText = orDash(i.encWidth ?? i.width);
   const heightText = orDash(i.encHeight ?? i.height);
-  return `[Telemetry] ${orDash(i.videoMime)} ${widthText}\u00d7${heightText} ${fpsText}/${orDash(i.targetFrameRate)}fps ${brText}Mbps loss ${i.lossPct.toFixed(2)}% rtt ${rttText}ms \u00b7 ${i.spectatorCount} spectator(s)`;
+  return `[Telemetry] ${orDash(i.videoMime)} ${widthText}\u00d7${heightText} ${fpsText}/${orDash(i.targetFrameRate)}fps cap ${capText}fps ${brText}Mbps loss ${i.lossPct.toFixed(2)}% rtt ${rttText}ms \u00b7 ${i.spectatorCount} spectator(s)`;
 };
 
 const maybeLogTelemetry = (
@@ -212,6 +243,7 @@ const maybeLogTelemetry = (
       encHeight: snap.encHeight,
       height: inputs.height,
       sFps: smoothed.sFps,
+      sCap: snap.captureFps,
       targetFrameRate: inputs.targetFrameRate,
       sBr: smoothed.sBr,
       lossPct: smoothed.lossPct,
@@ -242,10 +274,12 @@ export function useStreamTelemetry(): UseStreamTelemetryReturn {
     aTs: 0,
     aInit: false,
   });
+  const capturePrevRef = useRef({ dequeued: 0, at: 0, init: false });
   const bitrateHistoryRef = useRef<number[]>([]);
 
   const resetStatsPrev = useCallback(() => {
     statsPrevRef.current = { vBytes: 0, vFrames: 0, vTs: 0, vInit: false, aBytes: 0, aTs: 0, aInit: false };
+    capturePrevRef.current = { dequeued: 0, at: 0, init: false };
   }, []);
 
   const stopTelemetryPolling = useCallback(() => {
@@ -281,6 +315,9 @@ export function useStreamTelemetry(): UseStreamTelemetryReturn {
 
       try {
         const snap = foldNativeTelemetry(t, statsPrevRef.current);
+        const capture = await sampleCaptureFps(capturePrevRef.current);
+        snap.captureFps = capture.fps;
+        capturePrevRef.current = capture.next;
         const smoothed = smoothTelemetry(snap, fpsBuf, brBuf, bitrateHistoryRef.current);
         bitrateHistoryRef.current = smoothed.bitrateHistory;
         setTelemetry((p) => buildTelemetryUpdate(p, snap, inputs, smoothed, spectatorCount, elapsedMs));

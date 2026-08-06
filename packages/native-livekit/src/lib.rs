@@ -54,7 +54,10 @@ pub struct NativeTelemetry {
     pub video_bytes_sent: Option<f64>,
     pub video_packets_sent: Option<f64>,
     pub video_packets_lost: Option<f64>,
-    pub video_frames_sent: Option<f64>,
+    /// `framesEncoded` from the outbound-rtp stat — m144 never increments
+    /// `framesSent` (dead member), so this is the advancing counter the
+    /// renderer derives fps from.
+    pub video_frames_encoded: Option<f64>,
     pub video_width: Option<u32>,
     pub video_height: Option<u32>,
     pub audio_codec: Option<String>,
@@ -530,11 +533,16 @@ fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
                         }
                         telemetry.video_bytes_sent = Some(outbound.sent.bytes_sent as f64);
                         telemetry.video_packets_sent = Some(outbound.sent.packets_sent as f64);
-                        telemetry.video_frames_sent =
-                            Some(f64::from(outbound.outbound.frames_sent));
+                        telemetry.video_frames_encoded =
+                            Some(f64::from(outbound.outbound.frames_encoded));
                         telemetry.video_width = Some(outbound.outbound.frame_width);
                         telemetry.video_height = Some(outbound.outbound.frame_height);
-                        telemetry.timestamp_ms = Some(outbound.rtc.timestamp as f64);
+                        // libwebrtc stats timestamps are microseconds since
+                        // the Unix epoch; the DTO contract is milliseconds —
+                        // the renderer computes deltas from this field, and a
+                        // µs delta divided as ms made every rate 1000x too
+                        // small (a healthy 28 Mbps stream read as 28 kbps).
+                        telemetry.timestamp_ms = Some(outbound.rtc.timestamp as f64 / 1000.0);
                     }
                     "audio" => {
                         audio_ssrc = Some(outbound.stream.ssrc);
@@ -799,7 +807,7 @@ mod tests {
                 bytes_sent: bytes,
             },
             outbound: d::OutboundRtpStreamStats {
-                frames_sent: frames,
+                frames_encoded: frames,
                 frame_width: 1920,
                 frame_height: 1080,
                 encoder_implementation: encoder_impl.into(),
@@ -843,10 +851,10 @@ mod tests {
         assert_eq!(t.encoder_implementation.as_deref(), Some("libvpx"));
         assert_eq!(t.video_bytes_sent, Some(2_000_000.0));
         assert_eq!(t.video_packets_sent, Some(100.0));
-        assert_eq!(t.video_frames_sent, Some(1200.0));
+        assert_eq!(t.video_frames_encoded, Some(1200.0));
         assert_eq!(t.video_width, Some(1920));
         assert_eq!(t.video_height, Some(1080));
-        assert_eq!(t.timestamp_ms, Some(1_750_000_000_000.0));
+        assert_eq!(t.timestamp_ms, Some(1_750_000_000.0));
         assert_eq!(t.audio_codec.as_deref(), Some("audio/OPUS"));
         assert_eq!(t.audio_bytes_sent, Some(400_000.0));
         assert_eq!(t.audio_packets_sent, Some(100.0));
