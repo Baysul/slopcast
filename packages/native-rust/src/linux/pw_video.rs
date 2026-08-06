@@ -7,6 +7,7 @@
 
 use crate::linux::egl::{DRM_FORMAT_MOD_INVALID, DmabufPlane, EglDmaBuf};
 use pipewire::properties::properties;
+use pipewire::spa::buffer::meta::{MetaHeader, MetaHeaderFlags};
 use pipewire::spa::buffer::{ChunkFlags, DataType};
 use pipewire::spa::param::ParamType;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
@@ -410,11 +411,24 @@ fn process_buffer(stream: &pipewire::stream::Stream, user_data: &mut CaptureUser
     };
     // The earlier buffers drop here; each `Buffer::drop` re-queues itself.
 
+    // libwebrtc also drops buffers whose header meta carries
+    // `SPA_META_HEADER_FLAG_CORRUPTED` (webrtc-review 349881): the whole
+    // buffer — content and metadata — is unusable, and processing it
+    // would push stale frame content into the stream.
+    if let Some(header) = buffer.find_meta::<MetaHeader>()
+        && header.flags().contains(MetaHeaderFlags::CORRUPTED)
+    {
+        return;
+    }
+
     let datas = buffer.datas_mut();
     let Some(first) = datas.first() else {
         return;
     };
     let chunk = first.chunk();
+    // `size == 0` is the old-compositor compatibility belt (kpipewire
+    // MR 54): pre-fix KWin zeroed the chunk size on cursor-only buffers,
+    // current KWin marks them `SPA_CHUNK_FLAG_CORRUPTED` instead.
     if chunk.size() == 0 || chunk.flags().contains(ChunkFlags::CORRUPTED) {
         return;
     }
