@@ -27,6 +27,28 @@ export interface AppConfig {
 export interface PlatformInfo {
   platform: string;
   isWayland: boolean;
+  /// Whether a real video capture route exists: Wayland (portal) on Linux,
+  /// WGC on Windows. X11/macOS degrade to audio-only.
+  videoCaptureAvailable: boolean;
+}
+
+/// A capturable screen or window in the Windows WGC source picker.
+export type CaptureSourceKind = 'screen' | 'window';
+
+/// One capturable source as reported by `get_capture_sources`.
+export interface CaptureSourceInfo {
+  id: number;
+  title: string;
+  displayId: number;
+  kind: CaptureSourceKind;
+}
+
+/// The picker's selection, passed to `start_native_capture` /
+/// `start_capture_preview` / `go_live` on Windows (ignored on Linux, where
+/// the portal picker decides).
+export interface CaptureSourceSelection {
+  kind: CaptureSourceKind;
+  id: number;
 }
 
 /// Live capture-stage state machine for the pre-roll flow (MIGRATION §9.2):

@@ -7,7 +7,7 @@ import { createRoot } from 'react-dom/client';
 import { Toaster } from '@/components/ui/sonner';
 import { desktopApi } from './api/desktop';
 import { AudioAppPicker } from './components/audio/AudioAppPicker';
-import { WaylandNotice } from './components/gate/WaylandNotice';
+import { PlatformNotice } from './components/gate/PlatformNotice';
 import { TitleBar } from './components/layout/TitleBar';
 import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
 import { ScreensharePreview } from './components/preview/ScreensharePreview';
@@ -19,7 +19,7 @@ import { useNativeRoom } from './hooks/useNativeRoom';
 import { useStreamSettings } from './hooks/useStreamSettings';
 import { useStreamTelemetry } from './hooks/useStreamTelemetry';
 import { notify, primeAudioContext } from './lib/toast';
-import type { CaptureStage, DesktopCaptureConfig, PlatformInfo, PreviewFrame } from './types';
+import type { CaptureSourceSelection, CaptureStage, DesktopCaptureConfig, PlatformInfo, PreviewFrame } from './types';
 import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
 import './index.css';
@@ -58,6 +58,12 @@ export const PresenterApp: React.FC = () => {
   const [previewFrame, setPreviewFrame] = useState<PreviewFrame | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [copied, setCopied] = useState<'link' | 'code' | null>(null);
+  // Windows-only: the in-app WGC source picker embedded in the Screenshare
+  // Source card while open.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // The picker's last selection; the combined-start fallback and go-live
+  // pass it to the backend (Linux ignores it — the portal picker decides).
+  const selectedCaptureSourceRef = useRef<CaptureSourceSelection | null>(null);
 
   const {
     apiEndpoint,
@@ -376,44 +382,77 @@ export const PresenterApp: React.FC = () => {
   ]);
 
   // Combined start: publishes the track immediately. Used when the pre-roll
-  // backend isn't available, matching the pre-migration behavior.
-  const startCombinedShare = useCallback(async (): Promise<void> => {
-    const res = await desktopApi.startNativeCapture(buildCaptureConfig());
-    if (!res.ok) {
-      throw new Error(res.error ?? 'Native capture failed to start');
-    }
-    await activateLive();
-  }, [buildCaptureConfig, activateLive]);
-
-  const handleStartShare = useCallback(async () => {
-    primeAudioContext();
-    try {
-      const previewStarted = await desktopApi.startCapturePreview();
-      if (previewStarted) {
-        setPreviewFrame(null);
-        setCaptureStage('previewing');
-        return;
+  // backend isn't available, matching the pre-migration behavior. On Windows
+  // the picker's source selection rides along (required for real capture).
+  const startCombinedShare = useCallback(
+    async (source?: CaptureSourceSelection): Promise<void> => {
+      const res = await desktopApi.startNativeCapture(buildCaptureConfig(), source);
+      if (!res.ok) {
+        throw new Error(res.error ?? 'Native capture failed to start');
       }
-      // Pre-roll unavailable (preview backend not merged yet, MIGRATION §9.2):
-      // degrade to the combined start.
-      await startCombinedShare();
-    } catch (err: unknown) {
-      console.error('Failed to capture screen:', err);
-      const message = err instanceof Error ? err.message : 'Unknown capture error';
-      notify('error', 'Screenshare failed to start', message);
-      setCaptureStage('idle');
-      await cleanupFailedShare();
+      await activateLive();
+    },
+    [buildCaptureConfig, activateLive],
+  );
+
+  // Starts the pre-roll capture (the portal picker opens on Wayland; the WGC
+  // source runs on Windows) and moves to the previewing stage. Falls back to
+  // the combined start when the pre-roll backend is unavailable.
+  const startPreviewCapture = useCallback(
+    async (source?: CaptureSourceSelection): Promise<void> => {
+      primeAudioContext();
+      try {
+        const previewStarted = await desktopApi.startCapturePreview(source);
+        if (previewStarted) {
+          setPreviewFrame(null);
+          setCaptureStage('previewing');
+          return;
+        }
+        // Pre-roll unavailable (preview backend not merged yet, MIGRATION §9.2):
+        // degrade to the combined start.
+        await startCombinedShare(source);
+      } catch (err: unknown) {
+        console.error('Failed to capture screen:', err);
+        const message = err instanceof Error ? err.message : 'Unknown capture error';
+        notify('error', 'Screenshare failed to start', message);
+        setCaptureStage('idle');
+        await cleanupFailedShare();
+      }
+    },
+    [startCombinedShare, cleanupFailedShare],
+  );
+
+  // Windows has no system picker: the in-app source picker opens first and
+  // its selection drives the pre-roll capture. On Wayland the portal dialog
+  // opens inside `start_capture_preview` as before.
+  const handleStartShare = useCallback(async () => {
+    if (platformInfo?.platform === 'windows') {
+      setPickerOpen(true);
+      return;
     }
-  }, [startCombinedShare, cleanupFailedShare]);
+    await startPreviewCapture();
+  }, [platformInfo, startPreviewCapture]);
+
+  // The picker's confirm: remember the selection (the combined-start
+  // fallback and go-live need it) and start the pre-roll capture.
+  const handleSourceSelected = useCallback(
+    (selection: CaptureSourceSelection): void => {
+      selectedCaptureSourceRef.current = selection;
+      setPickerOpen(false);
+      void startPreviewCapture(selection);
+    },
+    [startPreviewCapture],
+  );
 
   const handleGoLive = useCallback(async () => {
     primeAudioContext();
     try {
       const config = buildCaptureConfig();
-      const published = await desktopApi.goLive(config);
+      const source = selectedCaptureSourceRef.current ?? undefined;
+      const published = await desktopApi.goLive(config, source);
       if (!published) {
         // Backend without the preview backend: fall back to the combined start.
-        const res = await desktopApi.startNativeCapture(config);
+        const res = await desktopApi.startNativeCapture(config, source);
         if (!res.ok) {
           throw new Error(res.error ?? 'Native capture failed to start');
         }
@@ -462,12 +501,12 @@ export const PresenterApp: React.FC = () => {
   const disabledReason = startDisabledReason();
 
   // The shell (titlebar) always renders so the undecorated window stays
-  // draggable and closable on every screen, including the X11 gate.
+  // draggable and closable on every screen, including the platform gate.
   let content: React.ReactNode = null;
-  if (platformInfo && !platformInfo.isWayland) {
+  if (platformInfo && !platformInfo.videoCaptureAvailable) {
     content = (
       <div className="flex-1 overflow-y-auto">
-        <WaylandNotice />
+        <PlatformNotice platform={platformInfo.platform} />
       </div>
     );
   } else if (platformInfo) {
@@ -513,6 +552,9 @@ export const PresenterApp: React.FC = () => {
               canStartShare={canStartShare}
               canGoLive={canGoLive}
               disabledReason={disabledReason}
+              pickerOpen={pickerOpen}
+              setPickerOpen={setPickerOpen}
+              onSourceSelected={handleSourceSelected}
               onStartShare={handleStartShare}
               onGoLive={handleGoLive}
               onStopShare={handleStopShare}

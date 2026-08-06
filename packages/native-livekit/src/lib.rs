@@ -4,6 +4,12 @@ use std::sync::{Arc, Mutex};
 
 mod desktop_capture;
 
+#[cfg(target_os = "windows")]
+mod wgc_capture;
+
+#[cfg(target_os = "windows")]
+pub use wgc_capture::{CaptureSourceInfo, WgcSourceKind};
+
 use arc_swap::ArcSwapOption;
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 use livekit::prelude::*;
@@ -350,6 +356,34 @@ pub fn is_video_track_active() -> bool {
 /// be spawned, or the capturer fails to initialize within five seconds.
 pub fn start_desktop_capture() -> Result<bool, String> {
     desktop_capture::start()
+}
+
+/// Starts the WGC desktop capturer (Windows-only) for the source the
+/// renderer's picker selected. Returns once the capture session is running;
+/// frames flow from the first paced poll, and the existing preview → go-live
+/// flow proceeds unchanged.
+///
+/// # Errors
+///
+/// Returns an error if a capture session is already active, the thread
+/// cannot be spawned, or the capturer fails to initialize within five
+/// seconds.
+#[cfg(target_os = "windows")]
+pub fn start_windows_capture(kind: WgcSourceKind, id: u64) -> Result<bool, String> {
+    desktop_capture::start_windows(kind, id)
+}
+
+/// Enumerates the screens and windows capturable through WGC (Windows-only),
+/// for the renderer's in-app source picker. The chosen `(kind, id)` is fed
+/// back into [`start_windows_capture`].
+///
+/// # Errors
+///
+/// Returns an error when COM cannot be initialized or no capturer can be
+/// created.
+#[cfg(target_os = "windows")]
+pub fn get_windows_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
+    wgc_capture::get_windows_capture_sources()
 }
 
 /// Stops the active desktop capture session (closing its portal stream).

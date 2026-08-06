@@ -10,6 +10,11 @@ use std::path::PathBuf;
 pub struct PlatformInfo {
     pub platform: String,
     pub is_wayland: bool,
+    /// Whether a real video capture route exists on this platform: Wayland
+    /// (portal + `pw_stream`) on Linux, WGC (`libwebrtc` `DesktopCapturer`)
+    /// on Windows. X11 and macOS have no capture route — the share degrades
+    /// to audio-only there.
+    pub video_capture_available: bool,
 }
 
 /// Wayland detection: Linux only, and either the session type is Wayland
@@ -23,6 +28,13 @@ pub fn is_wayland() -> bool {
         || std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
 }
 
+/// Whether a real video capture route exists on this platform (see
+/// `PlatformInfo::video_capture_available`).
+#[must_use]
+pub fn video_capture_available() -> bool {
+    cfg!(target_os = "windows") || is_wayland()
+}
+
 /// Returns the platform identifier and whether the app runs on Wayland.
 #[must_use]
 #[tauri::command]
@@ -30,6 +42,7 @@ pub fn get_platform_info() -> PlatformInfo {
     PlatformInfo {
         platform: std::env::consts::OS.into(),
         is_wayland: is_wayland(),
+        video_capture_available: video_capture_available(),
     }
 }
 

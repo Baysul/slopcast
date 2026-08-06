@@ -8,7 +8,7 @@ use native_livekit::{CaptureConfig, DesktopCaptureStats};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 
-use crate::platform::is_wayland;
+use crate::platform::video_capture_available;
 
 /// When set, the capture commands route to the synthetic test-pattern source
 /// instead of the portal: the headless e2e drives the real UI flow (preview →
@@ -18,9 +18,61 @@ fn e2e_capture_mode() -> bool {
     std::env::var("SLOPCAST_E2E_CAPTURE").as_deref() == Ok("synthetic")
 }
 
+/// A capturable screen or window in the Windows WGC source picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CaptureSourceKind {
+    Screen,
+    Window,
+}
+
+/// One capturable source as reported by `get_capture_sources`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSourceInfo {
+    pub id: u64,
+    pub title: String,
+    pub display_id: i64,
+    pub kind: CaptureSourceKind,
+}
+
+/// The renderer's picker selection, passed into the capture commands on
+/// Windows (ignored on Linux, where the portal picker decides).
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSourceSelection {
+    pub kind: CaptureSourceKind,
+    pub id: u64,
+}
+
+#[cfg(target_os = "windows")]
+fn map_kind(kind: CaptureSourceKind) -> native_livekit::WgcSourceKind {
+    match kind {
+        CaptureSourceKind::Screen => native_livekit::WgcSourceKind::Screen,
+        CaptureSourceKind::Window => native_livekit::WgcSourceKind::Window,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn map_source_info(info: native_livekit::CaptureSourceInfo) -> CaptureSourceInfo {
+    CaptureSourceInfo {
+        id: info.id,
+        title: info.title,
+        display_id: info.display_id,
+        kind: match info.kind {
+            native_livekit::WgcSourceKind::Screen => CaptureSourceKind::Screen,
+            native_livekit::WgcSourceKind::Window => CaptureSourceKind::Window,
+        },
+    }
+}
+
 /// Starts a capture through the active route: the synthetic source in e2e
-/// mode, the portal source otherwise. Returns the `CaptureStartResult`.
-fn start_capture(config: &CaptureConfig) -> CaptureStartResult {
+/// mode, the WGC source on Windows (the picker's selection), the portal
+/// source otherwise. Returns the `CaptureStartResult`.
+fn start_capture(
+    config: &CaptureConfig,
+    source: Option<CaptureSourceSelection>,
+) -> CaptureStartResult {
     let mut result = CaptureStartResult {
         ok: true,
         ..CaptureStartResult::default()
@@ -28,13 +80,36 @@ fn start_capture(config: &CaptureConfig) -> CaptureStartResult {
     let started = if e2e_capture_mode() {
         native_livekit::start_synthetic_capture(config)
     } else {
-        native_livekit::start_desktop_capture()
+        start_real_capture(config, source)
     };
     match started {
         Ok(video_enabled) => result.video_enabled = video_enabled,
         Err(e) => return CaptureStartResult::failed(e),
     }
     result
+}
+
+/// The real (non-e2e) capture route. On Windows the renderer's picker
+/// selection is required — there is no system picker; elsewhere the
+/// platform's default source runs (the portal picker on Wayland, a
+/// video-less no-op elsewhere).
+#[cfg(target_os = "windows")]
+fn start_real_capture(
+    _config: &CaptureConfig,
+    source: Option<CaptureSourceSelection>,
+) -> Result<bool, String> {
+    let Some(selection) = source else {
+        return Err("A capture source is required on Windows".into());
+    };
+    native_livekit::start_windows_capture(map_kind(selection.kind), selection.id)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_real_capture(
+    _config: &CaptureConfig,
+    _source: Option<CaptureSourceSelection>,
+) -> Result<bool, String> {
+    native_livekit::start_desktop_capture()
 }
 
 /// The renderer's preview channel: the preview callback forwards JPEG bytes
@@ -120,7 +195,7 @@ pub fn clear_preview_viewport() -> bool {
 }
 
 /// Result of `start_native_capture`: `{ ok, nodeId, videoEnabled }`
-/// (X11/Windows degrades to audio-only).
+/// (X11/macOS degrade to audio-only).
 #[derive(Debug, Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureStartResult {
@@ -141,12 +216,16 @@ impl CaptureStartResult {
 }
 
 /// Starts the native capture: publishes the video track and starts the
-/// desktop capturer (the portal picker appears on Wayland). On non-Wayland
-/// sessions the share degrades to audio-only (synthetic e2e mode bypasses
-/// the Wayland gate).
+/// desktop capturer. On Wayland the portal picker appears; on Windows the
+/// renderer's picker selection (`source`) is required — there is no system
+/// picker. On platforms with no capture route (X11, macOS) the share
+/// degrades to audio-only (synthetic e2e mode bypasses the platform gate).
 #[tauri::command(rename_all = "camelCase")]
-pub async fn start_native_capture(config: CaptureConfig) -> CaptureStartResult {
-    if !is_wayland() && !e2e_capture_mode() {
+pub async fn start_native_capture(
+    config: CaptureConfig,
+    source: Option<CaptureSourceSelection>,
+) -> CaptureStartResult {
+    if !video_capture_available() && !e2e_capture_mode() {
         return CaptureStartResult {
             ok: true,
             ..CaptureStartResult::default()
@@ -156,22 +235,22 @@ pub async fn start_native_capture(config: CaptureConfig) -> CaptureStartResult {
         if let Err(e) = native_livekit::start_video_track(config.clone()) {
             return CaptureStartResult::failed(e);
         }
-        start_capture(&config)
+        start_capture(&config, source)
     })
     .await
     .unwrap_or_else(|e| CaptureStartResult::failed(format!("start capture task failed: {e}")))
 }
 
 /// Re-publishes the video track with new encoder settings without restarting
-/// the capture. Returns `false` on non-Wayland sessions or when the publish
-/// fails.
+/// the capture. Returns `false` on platforms without a capture route or when
+/// the publish fails.
 ///
 /// # Errors
 ///
 /// Returns an error if the update task fails to run.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn update_native_video(config: CaptureConfig) -> Result<bool, String> {
-    if !is_wayland() && !e2e_capture_mode() {
+    if !video_capture_available() && !e2e_capture_mode() {
         return Ok(false);
     }
     let updated =
@@ -214,22 +293,23 @@ pub fn get_video_capture_stats() -> DesktopCaptureStats {
 }
 
 /// Starts a capture-only pre-roll (MIGRATION §9.1): the portal picker
-/// appears, frames flow to the preview channel, but no track is
-/// published yet — `go_live` publishes it. Audio stays renderer-owned: the
-/// audio target is only known to the renderer, which calls
-/// `start_audio_capture` separately after going live. In synthetic e2e mode
-/// the test-pattern source runs instead of the portal.
+/// appears (Linux), the renderer's picker selection starts the WGC capturer
+/// (Windows), frames flow to the preview channel, but no track is published
+/// yet — `go_live` publishes it. Audio stays renderer-owned: the audio
+/// target is only known to the renderer, which calls `start_audio_capture`
+/// separately after going live. In synthetic e2e mode the test-pattern
+/// source runs instead of the real route.
 ///
 /// # Errors
 ///
-/// Returns an error on non-Wayland sessions (D2 hard gate) or when the
-/// capturer fails to start.
+/// Returns an error on platforms without a capture route, when a Windows
+/// source selection is missing, or when the capturer fails to start.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn start_capture_preview() -> Result<(), String> {
-    if !is_wayland() && !e2e_capture_mode() {
-        return Err("Wayland is required for screen capture".into());
+pub async fn start_capture_preview(source: Option<CaptureSourceSelection>) -> Result<(), String> {
+    if !video_capture_available() && !e2e_capture_mode() {
+        return Err("Screen capture is not supported on this platform".into());
     }
-    tauri::async_runtime::spawn_blocking(|| {
+    tauri::async_runtime::spawn_blocking(move || {
         if e2e_capture_mode() {
             let config = native_livekit::CaptureConfig {
                 width: 1280,
@@ -240,7 +320,17 @@ pub async fn start_capture_preview() -> Result<(), String> {
             };
             native_livekit::start_synthetic_capture(&config)?;
         } else {
-            native_livekit::start_desktop_capture()?;
+            // The real route ignores the encoder config — the WGC engine
+            // captures at the source's native resolution and the encoder
+            // target is applied when `go_live` publishes the track.
+            let config = native_livekit::CaptureConfig {
+                width: 0,
+                height: 0,
+                fps: 30,
+                video_codec: None,
+                max_bitrate: None,
+            };
+            start_real_capture(&config, source)?;
         }
         Ok(())
     })
@@ -272,16 +362,20 @@ pub async fn start_synthetic_capture(config: CaptureConfig) -> CaptureStartResul
 /// Publishes the previewed capture (MIGRATION §9.1): when a pre-roll capture
 /// is already active the track is published against it (frames keep flowing
 /// to both the preview and the track); otherwise the combined start runs
-/// (publish + portal capture), preserving the pre-preview behavior.
+/// (publish + capture start, using the renderer's Windows source selection
+/// when one is supplied).
 ///
 /// # Errors
 ///
-/// Returns an error on non-Wayland sessions or when the track publish or the
-/// capturer start fails.
+/// Returns an error on platforms without a capture route or when the track
+/// publish or the capturer start fails.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn go_live(config: CaptureConfig) -> Result<(), String> {
-    if !is_wayland() && !e2e_capture_mode() {
-        return Err("Wayland is required for screen capture".into());
+pub async fn go_live(
+    config: CaptureConfig,
+    source: Option<CaptureSourceSelection>,
+) -> Result<(), String> {
+    if !video_capture_available() && !e2e_capture_mode() {
+        return Err("Screen capture is not supported on this platform".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
         if native_livekit::is_desktop_capture_active() {
@@ -291,12 +385,34 @@ pub async fn go_live(config: CaptureConfig) -> Result<(), String> {
         if e2e_capture_mode() {
             native_livekit::start_synthetic_capture(&config)?;
         } else {
-            native_livekit::start_desktop_capture()?;
+            start_real_capture(&config, source)?;
         }
         Ok(())
     })
     .await
     .map_err(|e| format!("go live task failed: {e}"))?
+}
+
+/// Enumerates the screens and windows capturable through WGC (Windows-only),
+/// for the renderer's in-app source picker.
+///
+/// # Errors
+///
+/// Returns an error on non-Windows platforms or when the WGC enumeration
+/// fails.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(native_livekit::get_windows_capture_sources)
+            .await
+            .map_err(|e| format!("get capture sources task failed: {e}"))?
+            .map(|sources| sources.into_iter().map(map_source_info).collect())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("get_capture_sources is only supported on Windows".into())
+    }
 }
 
 /// Benchmark-only (Phase 2 of the preview transport comparison): a channel

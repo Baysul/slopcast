@@ -113,6 +113,7 @@ pub fn run() {
             capture::get_video_capture_stats,
             capture::start_capture_preview,
             capture::go_live,
+            capture::get_capture_sources,
             capture::register_preview_channel,
             capture::set_preview_viewport,
             capture::clear_preview_viewport,

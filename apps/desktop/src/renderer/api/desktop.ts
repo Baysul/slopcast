@@ -14,6 +14,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppConfig,
   CaptureContext,
+  CaptureSourceInfo,
+  CaptureSourceSelection,
   CaptureStartResult,
   DesktopCaptureConfig,
   DesktopCaptureStats,
@@ -66,7 +68,11 @@ async function subscribe<T>(event: string, callback: (payload: T) => void): Prom
 export const desktopApi = {
   getAppConfig: (): Promise<AppConfig> => invokeOr('get_app_config', undefined, { apiEndpoint: '', livekitUrl: '' }),
   getPlatformInfo: (): Promise<PlatformInfo> =>
-    invokeOr('get_platform_info', undefined, { platform: 'unknown', isWayland: false }),
+    invokeOr('get_platform_info', undefined, {
+      platform: 'unknown',
+      isWayland: false,
+      videoCaptureAvailable: false,
+    }),
   getAudioApps: (): Promise<AudioApp[]> => invokeOr('get_audio_apps', undefined, []),
   dumpAudioSources: (): Promise<Array<Record<string, string>>> => invokeOr('dump_audio_sources', undefined, []),
   startAudioCapture: (targetId: number): Promise<boolean> => invokeOr('start_audio_capture', { targetId }, false),
@@ -90,8 +96,12 @@ export const desktopApi = {
     invokeOk('connect_native_room', { args: { url, token } }),
   disconnectNativeRoom: (): Promise<boolean> => invokeOk('disconnect_native_room', undefined),
   isNativeRoomConnected: (): Promise<boolean> => invokeOr('is_native_room_connected', undefined, false),
-  startNativeCapture: (config: DesktopCaptureConfig): Promise<CaptureStartResult> =>
-    invokeOr('start_native_capture', { config }, { ok: false, nodeId: null, videoEnabled: false }),
+  startNativeCapture: (config: DesktopCaptureConfig, source?: CaptureSourceSelection): Promise<CaptureStartResult> =>
+    invokeOr('start_native_capture', source ? { config, source } : { config }, {
+      ok: false,
+      nodeId: null,
+      videoEnabled: false,
+    }),
   // Headless test-pattern capture (e2e): synthetic BGRA frames feed the exact
   // same publish path as the portal capture.
   startSyntheticCapture: (config: DesktopCaptureConfig): Promise<CaptureStartResult> =>
@@ -114,9 +124,16 @@ export const desktopApi = {
       lastWidth: 0,
       lastHeight: 0,
     }),
-  // Pre-roll flow (§9): capture-only mode and publish-with-audio.
-  startCapturePreview: (): Promise<boolean> => invokeOk('start_capture_preview', undefined),
-  goLive: (config: DesktopCaptureConfig): Promise<boolean> => invokeOk('go_live', { config }),
+  // Pre-roll flow (§9): capture-only mode and publish-with-audio. On
+  // Windows, `source` is the picker's selection (required for real capture);
+  // on Linux it is ignored — the portal picker decides.
+  startCapturePreview: (source?: CaptureSourceSelection): Promise<boolean> =>
+    invokeOk('start_capture_preview', source ? { source } : undefined),
+  goLive: (config: DesktopCaptureConfig, source?: CaptureSourceSelection): Promise<boolean> =>
+    invokeOk('go_live', source ? { config, source } : { config }),
+  // Windows WGC source enumeration for the in-app picker (empty on other
+  // platforms, where the portal picker or the platform gate applies).
+  getCaptureSources: (): Promise<CaptureSourceInfo[]> => invokeOr('get_capture_sources', undefined, []),
   probeGpuInfo: (): Promise<GpuInfo | null> => invokeOr('probe_gpu_info', undefined, null),
   // Preview transport: the renderer registers a raw Channel once on mount;
   // the backend pushes JPEG frames (8-byte pts_us header + JPEG bytes) into

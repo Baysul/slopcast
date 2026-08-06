@@ -3,7 +3,8 @@ import React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import type { CaptureContext, CaptureStage } from '../../types';
+import type { CaptureContext, CaptureSourceSelection, CaptureStage } from '../../types';
+import { CaptureSourcePicker } from './CaptureSourcePicker';
 
 export interface SourcePickerProps {
   roomCode: string;
@@ -18,6 +19,11 @@ export interface SourcePickerProps {
   canStartShare: boolean;
   canGoLive: boolean;
   disabledReason: string | null;
+  /// Windows-only: the in-app WGC source picker is embedded in this card
+  /// while open (there is no Windows system picker).
+  pickerOpen: boolean;
+  setPickerOpen: (open: boolean) => void;
+  onSourceSelected: (selection: CaptureSourceSelection) => void;
   onCreateRoom: () => void;
   onCopyCode: () => void;
   onCopyLink: () => void;
@@ -101,6 +107,9 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
     canStartShare,
     canGoLive,
     disabledReason,
+    pickerOpen,
+    setPickerOpen,
+    onSourceSelected,
     onCreateRoom,
     onCopyCode,
     onCopyLink,
@@ -143,6 +152,8 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
               </p>
             </div>
           )}
+
+          {pickerOpen && <CaptureSourcePicker onSelect={onSourceSelected} onCancel={() => setPickerOpen(false)} />}
 
           {captureStage === 'idle' && (
             <>

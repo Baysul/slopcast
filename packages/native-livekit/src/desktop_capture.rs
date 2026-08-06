@@ -1,24 +1,30 @@
-//! Desktop video capture engine: in-house portal + `pw_stream` + EGL readback.
+//! Desktop video capture engine: in-house portal + `pw_stream` + EGL readback
+//! on Linux, libwebrtc `DesktopCapturer` (WGC) on Windows, synthetic test
+//! pattern everywhere.
 //!
-//! Replaces libwebrtc's `DesktopCapturer` (SCREEN-CAPTURE-INHOUSE.md Phase D).
-//! The capture thread runs the `ScreenCast` portal handshake (zbus) and then
-//! hands the portal fd + node id to the `pw_stream` engine
+//! Replaces libwebrtc's `DesktopCapturer` on Linux (SCREEN-CAPTURE-INHOUSE.md
+//! Phase D). The capture thread runs the `ScreenCast` portal handshake
+//! (zbus) and then hands the portal fd + node id to the `pw_stream` engine
 //! (`native_rust::video_capture`), whose EGL/DMA-BUF readback delivers linear
 //! BGRA frames to the same conversion callback as before: `argb_to_i420` →
 //! `VideoFrame<I420Buffer>` → the active `NativeVideoSource`. The portal
 //! picker opens inside the portal `Start` phase, so the session is reported
 //! "running" before the user answers it; frames flow once a source is picked.
 //!
+//! On Windows the same pipeline is fed by `wgc_capture` (`WgcCapture`, a
+//! `CaptureSource::Wgc` arm): libwebrtc's `DesktopCapturer` with the WGC
+//! backend, reachable through the livekit crate's bundled bindings
+//! (`livekit::webrtc::desktop_capturer`), polled at the encoder target fps
+//! from the shared capture loop. The renderer's in-app picker supplies the
+//! `(kind, id)` selection — Windows has no system picker.
+//!
 //! A `Synthetic` source (used by the headless e2e, manual probes and the
 //! preview benchmark) feeds generated test-pattern BGRA frames through the
 //! exact same conversion and publish path, so the whole encode → SFU →
 //! spectator chain is testable without a portal picker. It is available on
 //! every platform, so the preview pipeline (convert → downscale → JPEG →
-//! channel) is fully exercised on Windows too; only the portal arm is
-//! Linux-specific (`ScreenCastPortal`/`PwVideoCapture` come from native-rust,
-//! a Linux-only dependency). Windows desktop capture (WGC via libwebrtc's
-//! `DesktopCapturer`) is the documented follow-up — the preview pipeline
-//! needs no further changes when it lands.
+//! channel) is fully exercised on Windows too; macOS remains video-less
+//! (`Ok(false)` from `start()` — no capture route).
 //!
 //! Preview transport: the captured I420 planes are converted to RGBA with
 //! libyuv (`I420ToABGR` — the only fourcc with `gl.RGBA` memory order) and
@@ -136,6 +142,19 @@ pub(crate) fn set_capture_ended_callback(callback: CaptureEndedCallback) {
     CAPTURE_ENDED_CALLBACK.store(Some(Arc::new(callback)));
 }
 
+/// Fires the capture-ended callback exactly once per capture session when
+/// the captured source is gone (WGC `ERROR_PERMANENT` — the captured window
+/// was closed). Mirrors the portal `session_closed` check in the poll loop;
+/// the flag is reset per session in `reset_stats`.
+#[cfg(target_os = "windows")]
+pub(crate) fn fire_capture_ended_once() {
+    if !CAPTURE_ENDED_EMITTED.swap(true, Ordering::Relaxed) {
+        if let Some(callback) = CAPTURE_ENDED_CALLBACK.load_full() {
+            callback();
+        }
+    }
+}
+
 /// The published video track's encoder target: `(width, height, fps)` of the
 /// last `start_video_track` config. The capture engine scales frames down to
 /// these dimensions before pushing them to the encoder (libwebrtc has no
@@ -159,6 +178,19 @@ pub(crate) fn set_scale_target(width: u32, height: u32, fps: u32) {
 /// Clears the encoder scale target; called when the video track stops.
 pub(crate) fn clear_scale_target() {
     SCALE_TARGET.store(None);
+}
+
+/// Poll cadence for engines that pace themselves (the WGC engine): the
+/// encoder target fps when a track is live (capped at the preview ceiling),
+/// else the fallback preview cadence. Re-read per poll via `ArcSwap`, so
+/// going live mid-capture speeds the capture up without a restart.
+#[cfg(target_os = "windows")]
+pub(crate) fn capture_poll_fps() -> u32 {
+    SCALE_TARGET
+        .load_full()
+        .map_or(PREVIEW_FALLBACK_FPS, |target| {
+            target.fps.clamp(1, PREVIEW_MAX_FPS)
+        })
 }
 
 /// The renderer's preview viewport size `(width, height)` in device pixels
@@ -400,7 +432,7 @@ fn emit_preview_frame(
 /// `'static` callback closure and the loop a shared owner for the buffer.
 type SharedFrameBuffer = Arc<Mutex<VideoFrame<I420Buffer>>>;
 /// The capture-source frame callback: `(width, height, bgra, pts_us)`.
-type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
+pub(crate) type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 
 /// Converts a linear BGRA frame into the shared I420 buffer, bumps the
 /// preview generation and pushes the frame into the active video source
@@ -517,12 +549,18 @@ fn start_pw_capture(
 }
 
 /// What feeds the capture pipeline: the portal screencast (real screens,
-/// Linux-only) or a synthetic test pattern (headless e2e / probes /
-/// benchmarks, all platforms).
+/// Linux-only), the WGC capturer (real screens/windows, Windows-only) or a
+/// synthetic test pattern (headless e2e / probes / benchmarks, all
+/// platforms).
 #[derive(Debug, Clone, Copy)]
 enum CaptureSource {
     #[cfg(target_os = "linux")]
     Portal,
+    #[cfg(target_os = "windows")]
+    Wgc {
+        kind: crate::WgcSourceKind,
+        id: u64,
+    },
     Synthetic {
         width: u32,
         height: u32,
@@ -609,6 +647,8 @@ fn run_capture(
     let mut portal: Option<ScreenCastPortal> = None;
     #[cfg(target_os = "linux")]
     let mut capture: Option<PwVideoCapture> = None;
+    #[cfg(target_os = "windows")]
+    let mut wgc: Option<crate::wgc_capture::WgcCapture> = None;
     let mut generator = None;
 
     match source {
@@ -659,6 +699,20 @@ fn run_capture(
                 }
             }
             portal = Some(portal_session);
+        }
+        #[cfg(target_os = "windows")]
+        CaptureSource::Wgc { kind, id } => {
+            match crate::wgc_capture::WgcCapture::start(kind, id, on_frame) {
+                Ok(engine) => {
+                    CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+                    let _ = ready_tx.send(Ok(()));
+                    wgc = Some(engine);
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            }
         }
         CaptureSource::Synthetic { width, height, fps } => {
             CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
@@ -724,6 +778,16 @@ fn run_capture(
                 callback();
             }
         }
+        // WGC: poll the capturer at the encoder target fps (paced inside);
+        // the callback converts and pushes synchronously, so a poll is all
+        // the loop needs to do. `ERROR_PERMANENT` (captured window closed)
+        // stops polling and fires the capture-ended callback once — the
+        // renderer tears the share down through the Stop path, like a
+        // closed portal session.
+        #[cfg(target_os = "windows")]
+        if let Some(engine) = wgc.as_mut() {
+            engine.poll();
+        }
         emit_preview_frame(
             &preview_source,
             &mut preview_bufs,
@@ -739,6 +803,10 @@ fn run_capture(
     if let Some(handle) = generator {
         let _ = handle.join();
     }
+    // Dropping the WGC engine destroys the libwebrtc capturer (stopping its
+    // capture session) before the COM apartment is released.
+    #[cfg(target_os = "windows")]
+    drop(wgc);
     // Dropping the portal closes the session (and its screencast node).
     #[cfg(target_os = "linux")]
     drop(portal);
@@ -747,10 +815,11 @@ fn run_capture(
 
 /// Starts the desktop capturer on its own thread. On Linux, returns once
 /// the portal session is created; the native portal picker then appears and
-/// frames flow after the user selects a source. On other platforms there is
-/// no capture source yet (Windows WGC is the documented follow-up), so this
-/// reports video as unavailable (`Ok(false)`) while the synthetic source
-/// and the whole preview pipeline remain usable.
+/// frames flow after the user selects a source. On Windows the renderer's
+/// picker selection is required — use `start_windows` — and on other
+/// platforms there is no capture source yet, so this reports video as
+/// unavailable (`Ok(false)`) while the synthetic source and the whole
+/// preview pipeline remain usable.
 ///
 /// # Errors
 ///
@@ -766,6 +835,20 @@ pub(crate) fn start() -> Result<bool, String> {
     {
         Ok(false)
     }
+}
+
+/// Starts the WGC desktop capturer for the chosen source (Windows-only; the
+/// renderer's in-app picker supplies the selection). Returns once the
+/// capture session is running; frames flow from the first paced poll.
+///
+/// # Errors
+///
+/// Returns an error if a capture session is already active, the thread
+/// cannot be spawned, or the capturer fails to initialize within five
+/// seconds.
+#[cfg(target_os = "windows")]
+pub(crate) fn start_windows(kind: crate::WgcSourceKind, id: u64) -> Result<bool, String> {
+    start_with(CaptureSource::Wgc { kind, id })
 }
 
 /// Starts the synthetic test-pattern capture (headless e2e, probes and the

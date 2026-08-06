@@ -3160,6 +3160,7 @@ dependencies = [
  "serde",
  "tokio",
  "turbojpeg",
+ "windows 0.62.2",
  "zbus",
 ]
 
