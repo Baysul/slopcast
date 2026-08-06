@@ -25,9 +25,17 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 
+import { RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
 import { type AppConfig, loadConfig } from '@slopcast/shared-types/config';
 
 import type { Browser, Page } from 'playwright';
+
+// Optional overrides to reproduce a specific presenter config in synthetic
+// mode (e.g. E2E_FPS=60 E2E_BITRATE_LIMIT=80000000 E2E_RESOLUTION=1080p);
+// defaults keep the standard 720p@30, 8 Mbps passes.
+const passFps = Number(process.env.E2E_FPS ?? 30);
+const passBitrate = Number(process.env.E2E_BITRATE_LIMIT ?? 8_000_000);
+const passResolution = (process.env.E2E_RESOLUTION ?? '720p') as keyof typeof RESOLUTION_DIMENSIONS;
 
 /// GPU probe output (D5): dlopen'd EGL probe report from `probe_gpu_info`.
 interface GpuInfo {
@@ -52,7 +60,7 @@ interface PresenterPhase {
   codec: string;
   gpuReport: GpuInfo | null;
   previewFramesSent: number;
-  videoFramesSent: number;
+  videoFramesEncoded: number;
   videoBytesSent: number;
   videoCodecReported: string | null;
   encoderImplementation: string | null;
@@ -89,7 +97,7 @@ interface TestResult {
   spectatorNotifiedOfStop: boolean;
   /** Presenter-side native telemetry: published video frames, bytes, capture-pipeline pushes. */
   presenterVideoFlowing: boolean;
-  presenterVideoFramesSent: number;
+  presenterVideoFramesEncoded: number;
   presenterVideoBytesSent: number;
   /** Measured published-frame rate over the telemetry sampling window. */
   presenterTelemetryFps: number;
@@ -624,7 +632,7 @@ async function runPresenterPhase(
   result.shareUrl = phase.shareUrl;
   result.gpuReport = phase.gpuReport;
   result.presenterVideoFlowing = phase.telemetryFlowing;
-  result.presenterVideoFramesSent = phase.videoFramesSent;
+  result.presenterVideoFramesEncoded = phase.videoFramesEncoded;
   result.presenterVideoBytesSent = phase.videoBytesSent;
   result.presenterTelemetryFps = phase.telemetryFps;
   result.captureFramesPushed = phase.captureFramesPushed;
@@ -640,7 +648,7 @@ async function runPresenterPhase(
   log('TAURI', `Room created: code=${phase.roomCode} url=${phase.shareUrl}`);
   log(
     'TAURI',
-    `Presenter telemetry: framesSent=${phase.videoFramesSent} bytesSent=${phase.videoBytesSent} ` +
+    `Presenter telemetry: framesEncoded=${phase.videoFramesEncoded} bytesSent=${phase.videoBytesSent} ` +
       `captureFramesPushed=${phase.captureFramesPushed} previewFramesSent=${phase.previewFramesSent} ` +
       `flowing=${phase.telemetryFlowing}`,
   );
@@ -714,13 +722,17 @@ async function waitForSpectatorVideo(page: Page, result: TestResult, captureMode
       result.spectatorVideoPlaying = videoState.playing;
       result.spectatorVideoWidth = videoState.width;
       result.spectatorVideoHeight = videoState.height;
-      // The synthetic source and the stream settings are both 720p, and the
-      // publish is single-layer — the spectator must receive the full
+      // The synthetic source and the stream settings share a resolution, and
+      // the publish is single-layer — the spectator must receive the full
       // resolution. A halved stream (960x520-class simulcast layer or a
       // source-resolution passthrough) fails here.
-      if (captureMode === 'synthetic' && (videoState.width !== 1280 || videoState.height !== 720)) {
+      const expectedDims = RESOLUTION_DIMENSIONS[passResolution] ?? RESOLUTION_DIMENSIONS['720p'];
+      if (
+        captureMode === 'synthetic' &&
+        (videoState.width !== expectedDims.width || videoState.height !== expectedDims.height)
+      ) {
         result.errors.push(
-          `Spectator received ${videoState.width}x${videoState.height}, expected the published 1280x720 (single layer)`,
+          `Spectator received ${videoState.width}x${videoState.height}, expected the published ${expectedDims.width}x${expectedDims.height} (single layer)`,
         );
       }
     } else {
@@ -958,7 +970,7 @@ function validateDiagnostics(result: TestResult, logEntries: LogEntry[]): void {
     result.errors.push('Spectator was not informed when the presenter stopped streaming');
   }
   if (!result.presenterVideoFlowing) {
-    result.errors.push('Presenter published no advancing video frames (videoFramesSent did not grow)');
+    result.errors.push('Presenter published no advancing video frames (videoFramesEncoded did not grow)');
   }
   if (result.previewFramesSent <= 0) {
     result.errors.push('Presenter emitted no preview frames (previewFramesSent stayed at 0)');
@@ -1027,7 +1039,7 @@ async function runTest(): Promise<TestResult> {
     spectatorFrameHasContent: false,
     spectatorNotifiedOfStop: false,
     presenterVideoFlowing: false,
-    presenterVideoFramesSent: 0,
+    presenterVideoFramesEncoded: 0,
     presenterVideoBytesSent: 0,
     presenterTelemetryFps: 0,
     captureFramesPushed: 0,
@@ -1075,17 +1087,20 @@ async function runTest(): Promise<TestResult> {
       streamSettingsPath,
       JSON.stringify(
         {
-          fps: 30,
-          bitrateLimit: 8_000_000,
+          fps: passFps,
+          bitrateLimit: passBitrate,
           videoCodec: codec,
-          resolution: '720p',
+          resolution: passResolution,
           apiEndpoint: 'http://localhost:3001',
         },
         null,
         2,
       ),
     );
-    log('CONFIG', `Wrote stream settings for codec ${codec}: 720p@30, 8 Mbps`);
+    log(
+      'CONFIG',
+      `Wrote stream settings for codec ${codec}: ${passResolution}@${passFps}, ${Math.round(passBitrate / 1_000_000)} Mbps`,
+    );
   };
 
   // Resources tracked for guaranteed cleanup — a failure at any step must not
