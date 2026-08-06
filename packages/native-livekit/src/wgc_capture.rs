@@ -33,9 +33,9 @@
 //!
 //! The engine feeds the exact same conversion → preview → publish pipeline
 //! as the Linux portal engine: packed BGRA frames into the shared
-//! `FrameCallback` contract, so `convert_and_push` (I420, encoder-target
-//! scaling, `NativeVideoSource`) and the JPEG preview emitter are reused
-//! unchanged.
+//! `FrameCallback` contract, so `convert_frame` (I420) + the paced
+//! delivery loop (encoder-target scaling, `NativeVideoSource`) and the
+//! JPEG preview emitter are reused unchanged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};

@@ -36,11 +36,11 @@
 //! IPC channel (no JSON, no base64) with an 8-byte `pts_us` header so the
 //! renderer can measure end-to-end latency.
 //!
-//! Threading: the capture thread owns the portal session and the preview poll
-//! loop; the `pw_stream` engine runs its own main loop on a separate thread,
-//! whose frame callback feeds the shared conversion buffer (mutex-guarded, as
-//! before). The picker wait polls the stop flag, so `stop()` never waits on a
-//! user that ignores the picker.
+//! Threading: the capture thread owns the portal session, the paced
+//! delivery loop and the preview poll loop; the `pw_stream` engine runs
+//! its own main loop on a separate thread, whose frame callback converts
+//! and queues frames for paced delivery. The picker wait polls the stop
+//! flag, so `stop()` never waits on a user that ignores the picker.
 
 /// Preview callback type: `(jpeg_bytes, pts_us)`. The engine stays
 /// Tauri-unaware — the Tauri backend forwards these bytes to the renderer's
@@ -56,6 +56,7 @@ type CaptureEndedCallback = Box<dyn Fn() + Send + Sync>;
 use arc_swap::ArcSwapOption;
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -110,6 +111,11 @@ const PREVIEW_FALLBACK_FPS: u32 = 30;
 const PREVIEW_MAX_FPS: u32 = 60;
 /// JPEG quality for the preview encode (libjpeg-turbo, 4:2:0 subsampling).
 const PREVIEW_JPEG_QUALITY: i32 = 90;
+/// Frames the delivery pacer holds between capture and encode. Sized so a
+/// source burst (the portal engine reads back inline in the `PipeWire`
+/// process callback, so delivery is naturally bursty) is absorbed without
+/// adding more than a frame of latency; drop-oldest keeps content fresh.
+const PACER_CAPACITY: usize = 4;
 
 /// Preview callback: invoked with JPEG bytes while a capture session is
 /// active. The engine stays Tauri-unaware — the Tauri backend wires this to
@@ -272,12 +278,12 @@ struct PreviewBuffers {
     compressor: Option<Result<Compressor, String>>,
 }
 
-/// Copies the latest converted frame out of the shared mutex as fast as
-/// possible (a raw plane memcpy, ~3 ms at 1080p), then — when the reported
-/// preview viewport is smaller than the source — scales it down to fit the
-/// viewport with libyuv (OBS preview behavior: the source is scaled to the
-/// window, aspect preserved). The I420 planes are converted to RGBA with
-/// libyuv and encoded to a JPEG with libjpeg-turbo. Independent of
+/// Copies the newest queued frame's planes as fast as possible (a raw
+/// plane memcpy, ~3 ms at 1080p), then — when the reported preview
+/// viewport is smaller than the source — scales it down to fit the
+/// viewport with libyuv (OBS preview behavior: the source is scaled to
+/// the window, aspect preserved). The I420 planes are converted to RGBA
+/// with libyuv and encoded to a JPEG with libjpeg-turbo. Independent of
 /// `VIDEO_SOURCE`, so the pre-roll preview works before any track is
 /// published. Returns whether a frame was emitted.
 #[allow(
@@ -285,16 +291,18 @@ struct PreviewBuffers {
     reason = "one linear preview emission (snapshot → scale → convert → encode → callback); splitting it would scatter the buffer bookkeeping"
 )]
 fn emit_preview_frame(
-    preview_source: &SharedFrameBuffer,
+    pacer: &FramePacer,
     bufs: &mut PreviewBuffers,
     last_generation: &mut u64,
     next_at: &mut Instant,
 ) -> bool {
-    let generation = PREVIEW_GENERATION.load(Ordering::Relaxed);
-    if generation == *last_generation || *next_at > Instant::now() {
+    let now = Instant::now();
+    if *next_at > now {
         return false;
     }
-    *last_generation = generation;
+    // Re-arm before processing, so a stale generation (no new captured
+    // frame) can never stall the loop's wake-up: the deadline is always
+    // in the future after this call.
     // Pre-roll previews run at a fixed cadence; once a track is live the
     // preview matches the stream fps (capped — a source faster than 60 fps
     // would otherwise flood the renderer channel).
@@ -303,17 +311,29 @@ fn emit_preview_frame(
         .map_or(PREVIEW_FALLBACK_FPS, |target| {
             target.fps.clamp(1, PREVIEW_MAX_FPS)
         });
-    *next_at = Instant::now() + Duration::from_millis(u64::from(1000 / fps));
-    let Ok(guard) = preview_source.lock() else {
+    *next_at = now + Duration::from_millis(u64::from(1000 / fps));
+    let generation = PREVIEW_GENERATION.load(Ordering::Relaxed);
+    if generation == *last_generation {
+        return false;
+    }
+    *last_generation = generation;
+    // The newest queued frame is the freshest content (a push never
+    // overflows without dropping older frames first). The planes are
+    // immutable, but the queue itself needs the lock for a stable
+    // reference; the copy below is the only hold.
+    let Ok(guard) = pacer.queue.lock() else {
         return false;
     };
-    let width = guard.buffer.width();
-    let height = guard.buffer.height();
+    let Some(back) = guard.back() else {
+        return false;
+    };
+    let width = back.buffer.width();
+    let height = back.buffer.height();
     if width == 0 || height == 0 {
         return false;
     }
-    let (stride_y, stride_u, stride_v) = guard.buffer.strides();
-    let (plane_y, plane_u, plane_v) = guard.buffer.data();
+    let (stride_y, stride_u, stride_v) = back.buffer.strides();
+    let (plane_y, plane_u, plane_v) = back.buffer.data();
     let uv_height = height.div_ceil(2);
     let y_len = (stride_y * height) as usize;
     let u_len = (stride_u * uv_height) as usize;
@@ -328,7 +348,7 @@ fn emit_preview_frame(
     src_plane_y[..y_len].copy_from_slice(&plane_y[..y_len]);
     src_plane_u[..u_len].copy_from_slice(&plane_u[..u_len]);
     src_plane_v[..v_len].copy_from_slice(&plane_v[..v_len]);
-    let pts_us = guard.timestamp_us;
+    let pts_us = back.timestamp_us;
     drop(guard);
     // OBS-style fit (`GetScaleAndCenterPos`): scale the source down to the
     // reported viewport when it does not fit; otherwise ship the source
@@ -426,37 +446,57 @@ fn emit_preview_frame(
     true
 }
 
-/// The latest converted frame, shared between the capture source (which
-/// swaps in a fresh, immutable buffer per frame) and the preview emitter
-/// (which snapshots it). The mutex never contends in practice — both
-/// holds are brief — but it gives the `'static` callback closure and the
-/// loop a shared owner for the snapshot.
-type SharedFrameBuffer = Arc<Mutex<VideoFrame<I420Buffer>>>;
+/// Frames awaiting paced delivery to the video source. The capture source
+/// converts and pushes; the capture loop pops one frame per
+/// encoder-target interval so the encoder (and the RTP timestamps it
+/// derives from arrival time) sees even pacing even when the source
+/// delivers in bursts.
+struct FramePacer {
+    queue: Mutex<VecDeque<VideoFrame<I420Buffer>>>,
+    /// Maximum frames held; the oldest is dropped when a push overflows.
+    capacity: usize,
+}
+
+impl FramePacer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::with_capacity(capacity)),
+            capacity,
+        }
+    }
+
+    /// Queues a converted frame, dropping the oldest queued frame when
+    /// full (drop-oldest: keep the freshest content, bound latency).
+    fn push(&self, frame: VideoFrame<I420Buffer>) {
+        let Ok(mut queue) = self.queue.lock() else {
+            STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        if queue.len() >= self.capacity {
+            let _ = queue.pop_front();
+            STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+        queue.push_back(frame);
+    }
+
+    /// Pops the oldest queued frame for delivery to the encoder.
+    fn pop(&self) -> Option<VideoFrame<I420Buffer>> {
+        self.queue.lock().ok()?.pop_front()
+    }
+}
+
 /// The capture-source frame callback: `(width, height, bgra, pts_us)`.
 pub(crate) type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 
-/// Converts a linear BGRA frame into a fresh I420 buffer, bumps the
-/// preview generation and pushes the frame into the active video source
-/// (if any). Shared by the portal engine and the synthetic generator.
+/// Converts a linear BGRA frame into a fresh, immutable I420 buffer.
 ///
 /// Every frame gets its own buffer: the encoder consumes frames
 /// asynchronously on its own queue (the cadence adapter posts them by
 /// value, `VideoStreamEncoder` encodes on the encoder thread), so a
 /// reused buffer would be torn or duplicated mid-read — blocky smearing
-/// during motion, independent of codec. The preview reads the latest
-/// snapshot at the source resolution; when the encoder target is
-/// smaller, a libyuv-scaled copy of the I420 planes is pushed to the
-/// video source instead, so the encoder never receives a frame larger
-/// than the published track's dimensions.
-fn convert_and_push(
-    width: u32,
-    height: u32,
-    bgra: &[u8],
-    preview_source: &SharedFrameBuffer,
-    scale_target: Option<ScaleTarget>,
-) {
-    // The conversion below is the only per-frame pass: the handed-out
-    // buffer is immutable afterwards, so no copy is needed.
+/// during motion, independent of codec. The conversion is the only
+/// per-frame pass; the handed-out buffer is never written again.
+fn convert_frame(width: u32, height: u32, bgra: &[u8]) -> VideoFrame<I420Buffer> {
     let mut out = I420Buffer::new(width, height);
     let (stride_y, stride_u, stride_v) = out.strides();
     let (plane_y, plane_u, plane_v) = out.data_mut();
@@ -473,62 +513,28 @@ fn convert_and_push(
         i32::try_from(width).unwrap_or(0),
         i32::try_from(height).unwrap_or(0),
     );
-    let timestamp_us = monotonic_us();
     PREVIEW_GENERATION.fetch_add(1, Ordering::Relaxed);
     STATS_LAST_WIDTH.store(width, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(height, Ordering::Relaxed);
-
-    // Swap the immutable snapshot; the preview emitter reads the same
-    // buffer the encoder got.
-    let Ok(mut frame_buffer) = preview_source.lock() else {
-        STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    frame_buffer.buffer = out;
-    frame_buffer.timestamp_us = timestamp_us;
-
-    let Some(source) = VIDEO_SOURCE.load_full() else {
-        STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    match scale_target.filter(|target| width != target.width || height != target.height) {
-        // libwebrtc's encoder has no explicit target size (VideoEncoding
-        // carries only bitrate/fps), so without this a 4K source would be
-        // encoded at 4K with the bitrate the user configured for 1080p —
-        // and a smaller source would stream at its own resolution instead
-        // of the configured one. Scale every frame to the configured
-        // dimensions, up or down (OBS-style canvas scaling).
-        // I420Buffer::scale is libwebrtc's libyuv-backed scaler.
-        Some(target) => {
-            let scaled = frame_buffer.buffer.scale(
-                i32::try_from(target.width).unwrap_or(0),
-                i32::try_from(target.height).unwrap_or(0),
-            );
-            let scaled_frame = VideoFrame {
-                rotation: VideoRotation::VideoRotation0,
-                timestamp_us,
-                frame_metadata: None,
-                buffer: scaled,
-            };
-            source.capture_frame(&scaled_frame);
-        }
-        None => source.capture_frame(&frame_buffer),
+    VideoFrame {
+        rotation: VideoRotation::VideoRotation0,
+        timestamp_us: monotonic_us(),
+        frame_metadata: None,
+        buffer: out,
     }
-    STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Builds the frame callback shared by the portal engine and the
-/// synthetic generator: counts the frame, converts it to I420 and pushes
-/// it — scaled down to the published track's resolution when larger.
-fn make_on_frame(preview_source: SharedFrameBuffer) -> FrameCallback {
+/// Builds the frame callback shared by the portal engine, the WGC engine
+/// and the synthetic generator: counts the frame, converts it to I420 and
+/// queues it for the paced delivery loop.
+fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
     Box::new(move |width, height, bgra, _pts_us| {
         STATS_DEQUEUED.fetch_add(1, Ordering::Relaxed);
         if width == 0 || height == 0 {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let scale_target = SCALE_TARGET.load_full().map(|t| *t);
-        convert_and_push(width, height, bgra, &preview_source, scale_target);
+        pacer.push(convert_frame(width, height, bgra));
     })
 }
 
@@ -640,19 +646,13 @@ fn run_capture(
     ready_tx: &mpsc::Sender<Result<(), String>>,
     source: CaptureSource,
 ) {
-    // The latest converted frame is shared between the source callback
-    // (pw or generator thread) and the preview emitter (this thread).
-    // The mutex never contends in practice — both holds are brief — but
-    // it gives the 'static callback closure and the loop a shared owner
-    // for the snapshot.
-    let frame_buffer = VideoFrame {
-        rotation: VideoRotation::VideoRotation0,
-        timestamp_us: 0,
-        frame_metadata: None,
-        buffer: I420Buffer::new(1, 1),
-    };
-    let preview_source = Arc::new(Mutex::new(frame_buffer));
-    let on_frame = make_on_frame(Arc::clone(&preview_source));
+    // Paced delivery: the source thread converts and queues frames; this
+    // loop pops one frame per encoder-target interval, so the encoder
+    // (and the RTP timestamps it derives from arrival time) sees even
+    // pacing even when the source delivers in bursts. The same queue is
+    // the preview's window onto the newest frame.
+    let pacer = Arc::new(FramePacer::new(PACER_CAPACITY));
+    let on_frame = make_on_frame(Arc::clone(&pacer));
 
     #[cfg(target_os = "linux")]
     let mut portal: Option<ScreenCastPortal> = None;
@@ -769,6 +769,7 @@ fn run_capture(
     };
     let mut last_preview_generation = 0u64;
     let mut next_preview_at = Instant::now();
+    let mut next_delivery_at = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         // The compositor closes the portal session when the captured source
@@ -789,23 +790,76 @@ fn run_capture(
                 callback();
             }
         }
-        // WGC: poll the capturer at the encoder target fps (paced inside);
-        // the callback converts and pushes synchronously, so a poll is all
-        // the loop needs to do. `ERROR_PERMANENT` (captured window closed)
-        // stops polling and fires the capture-ended callback once — the
-        // renderer tears the share down through the Stop path, like a
-        // closed portal session.
-        #[cfg(target_os = "windows")]
-        if let Some(engine) = wgc.as_mut() {
-            engine.poll();
+        // Paced delivery tick: one queued frame per encoder-target
+        // interval (fallback cadence before a track is live), so RTP
+        // pacing at the receiver stays even. The WGC engine is polled on
+        // the same tick — it self-paces inside, so extra polls are no-ops.
+        let now = Instant::now();
+        if now >= next_delivery_at {
+            #[cfg(target_os = "windows")]
+            if let Some(engine) = wgc.as_mut() {
+                engine.poll();
+            }
+            if let Some(mut frame) = pacer.pop() {
+                match VIDEO_SOURCE.load_full() {
+                    Some(source) => {
+                        // libwebrtc's encoder has no explicit target size
+                        // (VideoEncoding carries only bitrate/fps), so
+                        // without this a 4K source would be encoded at 4K
+                        // with the bitrate the user configured for 1080p —
+                        // and a smaller source would stream at its own
+                        // resolution instead of the configured one. Scale
+                        // every frame to the configured dimensions, up or
+                        // down (OBS-style canvas scaling). I420Buffer::scale
+                        // is libwebrtc's libyuv-backed scaler.
+                        match SCALE_TARGET.load_full().map(|t| *t).filter(|target| {
+                            frame.buffer.width() != target.width
+                                || frame.buffer.height() != target.height
+                        }) {
+                            Some(target) => {
+                                let scaled = frame.buffer.scale(
+                                    i32::try_from(target.width).unwrap_or(0),
+                                    i32::try_from(target.height).unwrap_or(0),
+                                );
+                                let scaled_frame = VideoFrame {
+                                    rotation: VideoRotation::VideoRotation0,
+                                    timestamp_us: frame.timestamp_us,
+                                    frame_metadata: None,
+                                    buffer: scaled,
+                                };
+                                source.capture_frame(&scaled_frame);
+                            }
+                            None => source.capture_frame(&frame),
+                        }
+                        STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    None => {
+                        STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            let fps = SCALE_TARGET
+                .load_full()
+                .map_or(PREVIEW_FALLBACK_FPS, |target| {
+                    target.fps.clamp(1, PREVIEW_MAX_FPS)
+                });
+            let interval = Duration::from_micros(1_000_000 / u64::from(fps));
+            // Snap forward when more than one interval behind, so a stall
+            // never triggers a catch-up burst of frames.
+            next_delivery_at = (next_delivery_at + interval).max(now);
         }
         emit_preview_frame(
-            &preview_source,
+            &pacer,
             &mut preview_bufs,
             &mut last_preview_generation,
             &mut next_preview_at,
         );
-        thread::sleep(Duration::from_millis(8));
+        // Sleep until the next delivery or preview deadline (capped so
+        // the portal session check and the stop flag stay responsive).
+        let wake = next_delivery_at
+            .min(next_preview_at)
+            .min(now + Duration::from_millis(100));
+        thread::sleep(wake.saturating_duration_since(Instant::now()));
     }
     #[cfg(target_os = "linux")]
     if let Some(mut capture) = capture {
