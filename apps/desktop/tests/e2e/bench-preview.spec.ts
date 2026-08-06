@@ -168,8 +168,8 @@ async function transportRun(payloadBytes: number, frames: number, intervalMs: nu
 describe('Preview transport and end-to-end benchmark', () => {
   it('measures raw channel throughput for the two payload sizes', async function () {
     this.timeout(180_000);
-    // 640×360 RGBA (option 2) and a representative q=90 JPEG (option 1),
-    // both at ~60 fps cadence for 3 s.
+    // 640×360 BGRA (921 KB/frame — the raw preview payload size) and a
+    // 100 KB/frame baseline, both at ~60 fps cadence for 3 s.
     const jpeg = await transportRun(100_000, 180, 16);
     result.transport.jpeg = jpeg;
     const rgba = await transportRun(640 * 360 * 4, 180, 16);
@@ -181,7 +181,7 @@ describe('Preview transport and end-to-end benchmark', () => {
     writeResult();
   });
 
-  it('measures the end-to-end preview path (capture → JPEG → channel → canvas)', async function () {
+  it('measures the end-to-end preview path (capture → BGRA → channel → canvas)', async function () {
     this.timeout(180_000);
     // Arm the renderer's bench hook (main.tsx records arrival, PreviewCanvas
     // records draw completion), then drive the real preview pipeline with

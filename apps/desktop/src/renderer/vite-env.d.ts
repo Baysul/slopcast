@@ -4,5 +4,6 @@
 // [pts_us, arrival_ms, draw_ms] per drawn frame. Never touched in normal runs.
 interface Window {
   __PREVIEW_BENCH__?: boolean;
+  __PREVIEW_RENDERER__?: 'webgpu' | 'webgl2' | 'canvas2d' | 'none';
   __PREVIEW_BENCH_DATA__?: Array<[number, number, number | null]>;
 }

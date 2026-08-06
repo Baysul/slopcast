@@ -32,6 +32,28 @@ if (import.meta.env.VITE_E2E === '1') {
   await import('@wdio/tauri-plugin');
 }
 
+/** Parses one raw preview channel payload (16-byte little-endian header —
+ * `u64 pts_us`, `u32 width`, `u32 height` — followed by tightly packed BGRA
+ * rows) into a frame. Null when malformed; a malformed payload must never
+ * crash the preview pipeline. */
+function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
+  if (!(payload instanceof ArrayBuffer)) return null;
+  if (payload.byteLength < 16) return null;
+  const view = new DataView(payload);
+  let ptsUs = 0;
+  let width = 0;
+  let height = 0;
+  try {
+    ptsUs = Number(view.getBigUint64(0, true));
+    width = view.getUint32(8, true);
+    height = view.getUint32(12, true);
+  } catch {
+    return null;
+  }
+  if (width === 0 || height === 0) return null;
+  return { ptsUs, width, height, data: payload.slice(16) };
+}
+
 // Debug aid: print every live PipeWire audio stream node's full property
 // dictionary (the same view pw-dump shows) when a capture starts, so a missed
 // auto-resolve can be matched against the real nodes. Fire-and-forget: never
@@ -156,24 +178,15 @@ export const PresenterApp: React.FC = () => {
     if (window.__PREVIEW_BENCH__) {
       window.__PREVIEW_BENCH_DATA__ = [];
     }
-    // The preview channel: the backend pushes JPEG frames (8-byte LE
-    // pts_us header + JPEG bytes) through Tauri's raw channel transport.
-    // Tauri's Channel unwraps its message envelope, so the callback receives
-    // the raw ArrayBuffer payload directly.
+    // The preview channel: the backend pushes raw BGRA frames (16-byte LE
+    // header: u64 pts_us, u32 width, u32 height — then tightly packed BGRA
+    // rows) through Tauri's raw channel transport. Tauri's Channel unwraps
+    // its message envelope, so the callback receives the raw ArrayBuffer
+    // payload directly.
     const channel = new Channel<ArrayBuffer>((payload) => {
       if (disposed) return;
-      // The raw transport delivers ArrayBuffers; anything else (e.g. a
-      // postMessage fallback that shipped a JSON number array) must never
-      // crash the preview pipeline.
-      if (!(payload instanceof ArrayBuffer)) return;
-      if (payload.byteLength < 8) return;
-      let ptsUs = 0;
-      try {
-        ptsUs = Number(new DataView(payload).getBigUint64(0, true));
-      } catch {
-        return;
-      }
-      setPreviewFrame({ ptsUs, data: payload.slice(8) });
+      const frame = parsePreviewPayload(payload);
+      if (frame) setPreviewFrame(frame);
     });
     void desktopApi.registerPreviewChannel(channel).then((ok) => {
       if (!ok && !disposed) {

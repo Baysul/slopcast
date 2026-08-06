@@ -26,23 +26,29 @@
 //! channel) is fully exercised on Windows too; macOS remains video-less
 //! (`Ok(false)` from `start()` — no capture route).
 //!
-//! Preview transport: the captured I420 planes are converted to RGBA with
-//! libyuv (`I420ToABGR` — the only fourcc with `gl.RGBA` memory order) and
-//! encoded to JPEG with libjpeg-turbo (`turbojpeg`). Previews are scaled to
-//! fit the renderer's preview card — OBS-style "scale to the window"
-//! (`GetScaleAndCenterPos` fit math, libyuv downscale, aspect preserved) —
-//! and emitted at the stream's framerate, so the IPC channel only carries
-//! what the card can show. The Tauri backend forwards the bytes over a raw
-//! IPC channel (no JSON, no base64) with an 8-byte `pts_us` header so the
-//! renderer can measure end-to-end latency.
+//! Preview transport: the capture engine delivers linear BGRA (the DMA-BUF
+//! readback's native byte order, tightly packed). The preview thread keeps
+//! the newest BGRA frame, scales it to fit the renderer's preview card —
+//! OBS-style "scale to the window" (aspect preserved, never upscaled) — and
+//! emits it at the stream's framerate, so the IPC channel only carries what
+//! the card can show. The Tauri backend forwards the bytes over a raw IPC
+//! channel (no JSON, no base64) with a 16-byte little-endian header
+//! (`u64 pts_us`, `u32 width`, `u32 height`) so the renderer can size its
+//! texture and measure end-to-end latency; the renderer uploads the BGRA
+//! pixels into a persistent GPU texture as-is (no per-frame decode, no
+//! channel shuffling).
 //!
-//! Threading: the capture thread owns the portal session, the paced
-//! delivery loop and the preview poll loop; the `pw_stream` engine runs
-//! its own main loop on a separate thread, whose frame callback converts
-//! and queues frames for paced delivery. The picker wait polls the stop
-//! flag, so `stop()` never waits on a user that ignores the picker.
+//! Threading: the capture thread owns the portal session and the paced
+//! delivery loop; a dedicated preview thread emits frames at its own cadence
+//! (it only reads the newest stashed BGRA under a brief lock), so the
+//! scale/copy work can never delay a delivery. The `pw_stream`
+//! engine runs its own main loop on a separate thread, whose frame callback
+//! converts and queues frames for paced delivery. The picker wait polls the
+//! stop flag, so `stop()` never waits on a user that ignores the picker.
 
-/// Preview callback type: `(jpeg_bytes, pts_us)`. The engine stays
+/// Preview callback type: `(payload, pts_us)`, where `payload` is the raw
+/// channel frame — 16-byte little-endian header (`u64 pts_us`, `u32 width`,
+/// `u32 height`) followed by tightly packed BGRA rows. The engine stays
 /// Tauri-unaware — the Tauri backend forwards these bytes to the renderer's
 /// raw IPC channel.
 type PreviewFrameCallback = Box<dyn Fn(Vec<u8>, i64) + Send + Sync>;
@@ -61,7 +67,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use turbojpeg::{Compressor, PixelFormat};
 
 #[cfg(target_os = "linux")]
 use native_rust::video_capture::{PwVideoCapture, ScreenCastPortal, StartOutcome};
@@ -109,8 +114,6 @@ const PREVIEW_FALLBACK_FPS: u32 = 30;
 /// Upper bound for the live preview cadence — a source faster than this
 /// (e.g. a 120 Hz monitor) would otherwise flood the renderer channel.
 const PREVIEW_MAX_FPS: u32 = 60;
-/// JPEG quality for the preview encode (libjpeg-turbo, 4:2:0 subsampling).
-const PREVIEW_JPEG_QUALITY: i32 = 90;
 /// Frames the delivery pacer holds between capture and encode. Sized so a
 /// source burst (the portal engine reads back inline in the `PipeWire`
 /// process callback, so delivery is naturally bursty) is absorbed without
@@ -257,42 +260,94 @@ fn fit_preview_size(
 
 /// Scratch buffers reused across preview emissions (allocated once per
 /// session).
-struct PreviewBuffers {
-    /// Snapshot of the latest frame's I420 planes at the source resolution,
-    /// copied out of the shared mutex so the expensive plane processing below
-    /// never blocks the capture thread (which writes the same buffer in
-    /// `on_frame`). Reallocated only when the source resolution changes.
-    src: Option<I420Buffer>,
-    /// The planes actually encoded: the source-resolution snapshot when the
-    /// source fits the viewport, or the viewport-fitted libyuv downscale.
-    /// Tightly packed (stride == width), same layout as `src`.
+struct PreviewScaleBufs {
+    /// Viewport-fitted BGRA pixels (tightly packed, stride == width * 4).
+    scaled: Vec<u8>,
+    /// Final channel payload: 16-byte header + the fitted pixels.
     out: Vec<u8>,
-    /// Converted to tightly packed RGBA via libyuv `I420ToABGR` (the only
-    /// fourcc with `gl.RGBA` memory order).
-    rgba: Vec<u8>,
-    /// Reused JPEG output buffer (resized to the compressor's guaranteed
-    /// maximum, then truncated to the actual encoded length).
-    jpeg: Vec<u8>,
-    /// Lazily created libjpeg-turbo compressor; the error is cached so a
-    /// broken JPEG stack is logged once, not every frame.
-    compressor: Option<Result<Compressor, String>>,
 }
 
-/// Copies the newest queued frame's planes as fast as possible (a raw
-/// plane memcpy, ~3 ms at 1080p), then — when the reported preview
-/// viewport is smaller than the source — scales it down to fit the
-/// viewport with libyuv (OBS preview behavior: the source is scaled to
-/// the window, aspect preserved). The I420 planes are converted to RGBA
-/// with libyuv and encoded to a JPEG with libjpeg-turbo. Independent of
+/// The newest captured BGRA frame, stashed by the capture callback for the
+/// preview thread (which reads it without touching the paced queue). The
+/// Vec keeps its allocation across frames.
+struct PreviewBgra {
+    width: u32,
+    height: u32,
+    pts_us: i64,
+    bgra: Vec<u8>,
+}
+
+static PREVIEW_BGRA: Mutex<Option<PreviewBgra>> = Mutex::new(None);
+
+/// Bilinear BGRA scale — channel-agnostic: every byte of the 4-byte pixels
+/// is filtered independently, so no color-space knowledge is needed.
+/// `fit_preview_size` never upscales, so this is a pure downscale (or an
+/// exact copy when the source already fits the viewport).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "bilinear lerp of byte values stays within [0, 255] by construction (fit math never upscales); f32 lerp of u8 is exact"
+)]
+fn scale_bgra_bilinear(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: &mut Vec<u8>,
+) {
+    let sw = src_w as usize;
+    let sh = src_h as usize;
+    let dw = dst_w as usize;
+    let dh = dst_h as usize;
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        dst.clear();
+        return;
+    }
+    if sw == dw && sh == dh {
+        dst.resize(src.len(), 0);
+        dst.copy_from_slice(src);
+        return;
+    }
+    dst.resize(dw * dh * 4, 0);
+    for dy in 0..dh {
+        let y0 = (dy * sh) / dh;
+        let y1 = (y0 + 1).min(sh - 1);
+        let fy = ((dy * sh) % dh) as f32 / dh as f32;
+        let row0 = &src[y0 * sw * 4..(y0 + 1) * sw * 4];
+        let row1 = &src[y1 * sw * 4..(y1 + 1) * sw * 4];
+        let out = &mut dst[dy * dw * 4..(dy + 1) * dw * 4];
+        for dx in 0..dw {
+            let x0 = (dx * sw) / dw;
+            let x1 = (x0 + 1).min(sw - 1);
+            let fx = ((dx * sw) % dw) as f32 / dw as f32;
+            let base = dx * 4;
+            for c in 0..4 {
+                let p00 = f32::from(row0[x0 * 4 + c]);
+                let p10 = f32::from(row0[x1 * 4 + c]);
+                let p01 = f32::from(row1[x0 * 4 + c]);
+                let p11 = f32::from(row1[x1 * 4 + c]);
+                let top = p00 + (p10 - p00) * fx;
+                let bottom = p01 + (p11 - p01) * fx;
+                out[base + c] = (top + (bottom - top) * fy) as u8;
+            }
+        }
+    }
+}
+
+/// Snapshot the newest captured BGRA frame and ship it to the renderer as a
+/// raw channel payload: `[pts_us u64 LE][width u32 LE][height u32 LE][tight
+/// BGRA rows]`, scaled to fit the reported preview viewport (OBS-style
+/// "scale to the window", aspect preserved, never upscaled). Independent of
 /// `VIDEO_SOURCE`, so the pre-roll preview works before any track is
 /// published. Returns whether a frame was emitted.
 #[allow(
     clippy::too_many_lines,
-    reason = "one linear preview emission (snapshot → scale → convert → encode → callback); splitting it would scatter the buffer bookkeeping"
+    reason = "one linear preview emission (snapshot → fit → scale → callback); splitting it would scatter the buffer bookkeeping"
 )]
 fn emit_preview_frame(
-    pacer: &FramePacer,
-    bufs: &mut PreviewBuffers,
+    bufs: &mut PreviewScaleBufs,
     last_generation: &mut u64,
     next_at: &mut Instant,
 ) -> bool {
@@ -317,131 +372,37 @@ fn emit_preview_frame(
         return false;
     }
     *last_generation = generation;
-    // The newest queued frame is the freshest content (a push never
-    // overflows without dropping older frames first). The planes are
-    // immutable, but the queue itself needs the lock for a stable
-    // reference; the copy below is the only hold.
-    let Ok(guard) = pacer.queue.lock() else {
+
+    // The capture callback stashes the newest BGRA frame here (a push never
+    // overwrites without first bumping the generation). The scale happens
+    // under the lock — a brief hold the callback's own stash waits on, at a
+    // 16.7 ms cadence.
+    let Ok(guard) = PREVIEW_BGRA.lock() else {
         return false;
     };
-    let Some(back) = guard.back() else {
+    let Some(entry) = guard.as_ref() else {
         return false;
     };
-    let width = back.buffer.width();
-    let height = back.buffer.height();
-    if width == 0 || height == 0 {
-        return false;
-    }
-    let (stride_y, stride_u, stride_v) = back.buffer.strides();
-    let (plane_y, plane_u, plane_v) = back.buffer.data();
-    let uv_height = height.div_ceil(2);
-    let y_len = (stride_y * height) as usize;
-    let u_len = (stride_u * uv_height) as usize;
-    let v_len = (stride_v * uv_height) as usize;
-    let src = bufs
-        .src
-        .get_or_insert_with(|| I420Buffer::new(width, height));
-    if src.width() != width || src.height() != height {
-        *src = I420Buffer::new(width, height);
-    }
-    let (src_plane_y, src_plane_u, src_plane_v) = src.data_mut();
-    src_plane_y[..y_len].copy_from_slice(&plane_y[..y_len]);
-    src_plane_u[..u_len].copy_from_slice(&plane_u[..u_len]);
-    src_plane_v[..v_len].copy_from_slice(&plane_v[..v_len]);
-    let pts_us = back.timestamp_us;
-    drop(guard);
-    // OBS-style fit (`GetScaleAndCenterPos`): scale the source down to the
-    // reported viewport when it does not fit; otherwise ship the source
-    // resolution untouched (the renderer's CSS upscales it).
-    let (out_w, out_h) = if let Some((fit_w, fit_h)) = PREVIEW_VIEWPORT
+    let (width, height) = (entry.width, entry.height);
+    let pts_us = entry.pts_us;
+    let (out_w, out_h) = PREVIEW_VIEWPORT
         .load_full()
         .and_then(|vp| fit_preview_size(width, height, vp.0, vp.1))
-    {
-        let scaled = src.scale(
-            i32::try_from(fit_w).unwrap_or(0),
-            i32::try_from(fit_h).unwrap_or(0),
-        );
-        let (py, pu, pv) = scaled.data();
-        let total = py.len() + pu.len() + pv.len();
-        bufs.out.resize(total, 0);
-        bufs.out[..py.len()].copy_from_slice(py);
-        bufs.out[py.len()..py.len() + pu.len()].copy_from_slice(pu);
-        bufs.out[py.len() + pu.len()..].copy_from_slice(pv);
-        (fit_w, fit_h)
-    } else {
-        bufs.out.resize(y_len + u_len + v_len, 0);
-        bufs.out[..y_len].copy_from_slice(&src_plane_y[..y_len]);
-        bufs.out[y_len..y_len + u_len].copy_from_slice(&src_plane_u[..u_len]);
-        bufs.out[y_len + u_len..].copy_from_slice(&src_plane_v[..v_len]);
-        (width, height)
-    };
-    // `out` is tightly packed (stride == width), so the planes split cleanly.
-    let out_chroma_w = out_w.div_ceil(2);
-    let out_chroma_h = out_h.div_ceil(2);
-    let luma_len = (out_w * out_h) as usize;
-    let chroma_len = (out_chroma_w * out_chroma_h) as usize;
-    let (plane_y, rest) = bufs.out.split_at(luma_len);
-    let (plane_u, plane_v) = rest.split_at(chroma_len);
-
-    // libyuv converts the (possibly viewport-fitted) I420 planes to tightly
-    // packed RGBA (memory order R,G,B,A via I420ToABGR — libyuv's "RGBA"
-    // fourcc is [A,B,G,R]) — the exact byte order libjpeg-turbo's
-    // PixelFormat::RGBA expects, so the JPEG encode needs no channel
-    // shuffling.
-    bufs.rgba.resize((out_w * out_h * 4) as usize, 0);
-    yuv_helper::i420_to_abgr(
-        plane_y,
-        out_w,
-        plane_u,
-        out_chroma_w,
-        plane_v,
-        out_chroma_w,
-        &mut bufs.rgba,
-        out_w * 4,
-        i32::try_from(out_w).unwrap_or(0),
-        i32::try_from(out_h).unwrap_or(0),
-    );
-
-    if bufs.compressor.is_none() {
-        let result = Compressor::new()
-            .and_then(|mut compressor| {
-                compressor
-                    .set_quality(PREVIEW_JPEG_QUALITY)
-                    .map(|()| compressor)
-            })
-            .map_err(|e| e.to_string());
-        if let Err(e) = &result {
-            log::error!("[desktop-capture] JPEG compressor init failed: {e}");
-        }
-        bufs.compressor = Some(result);
-    }
-    let Some(Ok(compressor)) = bufs.compressor.as_mut() else {
-        return false;
-    };
-    let Ok(max_len) = compressor.buf_len(
-        usize::try_from(out_w).unwrap_or(0),
-        usize::try_from(out_h).unwrap_or(0),
-    ) else {
-        return false;
-    };
-    bufs.jpeg.resize(max_len, 0);
-    let Ok(written) = compressor.compress_to_slice(
-        turbojpeg::Image {
-            pixels: bufs.rgba.as_slice(),
-            width: usize::try_from(out_w).unwrap_or(0),
-            pitch: usize::try_from(out_w * 4).unwrap_or(0),
-            height: usize::try_from(out_h).unwrap_or(0),
-            format: PixelFormat::RGBA,
-        },
-        &mut bufs.jpeg,
-    ) else {
-        return false;
-    };
-    bufs.jpeg.truncate(written);
+        .unwrap_or((width, height));
+    scale_bgra_bilinear(&entry.bgra, width, height, out_w, out_h, &mut bufs.scaled);
+    drop(guard);
+    // The channel payload: 16-byte little-endian header + the fitted BGRA
+    // rows. The renderer parses width/height to size its texture and uploads
+    // the pixels as-is (bgra8unorm — no channel shuffling anywhere).
+    bufs.out.clear();
+    bufs.out.extend_from_slice(&pts_us.to_le_bytes());
+    bufs.out.extend_from_slice(&out_w.to_le_bytes());
+    bufs.out.extend_from_slice(&out_h.to_le_bytes());
+    bufs.out.extend_from_slice(&bufs.scaled);
 
     STATS_PREVIEW_SENT.fetch_add(1, Ordering::Relaxed);
     if let Some(callback) = PREVIEW_CALLBACK.load_full() {
-        callback(bufs.jpeg.clone(), pts_us);
+        callback(bufs.out.clone(), pts_us);
     }
     true
 }
@@ -530,6 +491,23 @@ fn convert_frame(width: u32, height: u32, bgra: &[u8]) -> VideoFrame<I420Buffer>
 fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
     Box::new(move |width, height, bgra, _pts_us| {
         STATS_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+        // Stash the newest frame for the preview thread (skipped when no
+        // preview is subscribed — a 1080p BGRA copy is ~8 MB).
+        if PREVIEW_CALLBACK.load_full().is_some()
+            && let Ok(mut slot) = PREVIEW_BGRA.lock()
+        {
+            let entry = slot.get_or_insert_with(|| PreviewBgra {
+                width,
+                height,
+                pts_us: 0,
+                bgra: Vec::new(),
+            });
+            entry.width = width;
+            entry.height = height;
+            entry.pts_us = monotonic_us();
+            entry.bgra.resize((width * height * 4) as usize, 0);
+            entry.bgra.copy_from_slice(bgra);
+        }
         if width == 0 || height == 0 {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
@@ -759,16 +737,40 @@ fn run_capture(
         }
     }
 
-    // Reused scratch buffers for the preview emitter (allocated once).
-    let mut preview_bufs = PreviewBuffers {
-        src: None,
-        out: Vec::new(),
-        rgba: Vec::new(),
-        jpeg: Vec::new(),
-        compressor: None,
-    };
-    let mut last_preview_generation = 0u64;
-    let mut next_preview_at = Instant::now();
+    // The preview emitter runs on its own thread: it reads the newest
+    // queued frame and encodes a JPEG at its own cadence, so the
+    // (expensive) scale/ABGR/JPEG work can never delay a paced delivery
+    // in the loop below. A failed spawn only disables the preview.
+    let preview_stop = Arc::clone(stop);
+    let preview_handle =
+        match thread::Builder::new()
+            .name("preview-emitter".into())
+            .spawn(move || {
+                let mut preview_bufs = PreviewScaleBufs {
+                    scaled: Vec::new(),
+                    out: Vec::new(),
+                };
+                let mut last_preview_generation = 0u64;
+                let mut next_preview_at = Instant::now();
+                while !preview_stop.load(Ordering::Relaxed) {
+                    emit_preview_frame(
+                        &mut preview_bufs,
+                        &mut last_preview_generation,
+                        &mut next_preview_at,
+                    );
+                    // Sleep until the next preview deadline (capped so the stop
+                    // flag stays responsive).
+                    let wake = next_preview_at.min(Instant::now() + Duration::from_millis(100));
+                    thread::sleep(wake.saturating_duration_since(Instant::now()));
+                }
+            }) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
+                log::error!("[desktop-capture] preview thread spawn failed: {e}");
+                None
+            }
+        };
     let mut next_delivery_at = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
@@ -844,21 +846,17 @@ fn run_capture(
                     target.fps.clamp(1, PREVIEW_MAX_FPS)
                 });
             let interval = Duration::from_micros(1_000_000 / u64::from(fps));
-            // Snap forward when more than one interval behind, so a stall
-            // never triggers a catch-up burst of frames.
-            next_delivery_at = (next_delivery_at + interval).max(now);
+            // Deliveries are spaced exactly one interval apart. After a
+            // stall the next deadline is a full interval after the frame
+            // just delivered — never `now`, which would pop a second
+            // frame immediately: the encoder stamps both with
+            // near-identical RTP times and the receiver sees a frame
+            // pair flash, then a gap (the rubberbanding pattern).
+            next_delivery_at = now + interval;
         }
-        emit_preview_frame(
-            &pacer,
-            &mut preview_bufs,
-            &mut last_preview_generation,
-            &mut next_preview_at,
-        );
-        // Sleep until the next delivery or preview deadline (capped so
-        // the portal session check and the stop flag stay responsive).
-        let wake = next_delivery_at
-            .min(next_preview_at)
-            .min(now + Duration::from_millis(100));
+        // Sleep until the next delivery deadline (capped so the portal
+        // session check and the stop flag stay responsive).
+        let wake = next_delivery_at.min(now + Duration::from_millis(100));
         thread::sleep(wake.saturating_duration_since(Instant::now()));
     }
     #[cfg(target_os = "linux")]
@@ -866,6 +864,9 @@ fn run_capture(
         capture.stop();
     }
     if let Some(handle) = generator {
+        let _ = handle.join();
+    }
+    if let Some(handle) = preview_handle {
         let _ = handle.join();
     }
     // Dropping the WGC engine destroys the libwebrtc capturer (stopping its
@@ -1145,67 +1146,35 @@ mod probe {
         assert!(first_frame.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 
-    /// The preview JPEG encode round-trips through libjpeg-turbo with the
-    /// dominant colors intact: red top half, blue bottom half. Pins the
-    /// `PixelFormat::RGBA` byte order (a swapped format would turn the
-    /// blocks cyan/magenta).
+    /// The preview BGRA downscale keeps the dominant colors intact: red top
+    /// half, blue bottom half. Pins the bilinear scaler's channel handling
+    /// (a swapped channel order would turn the blocks cyan/magenta).
     #[test]
-    fn preview_jpeg_round_trip_keeps_dominant_colors() {
-        const W: usize = 64;
-        const H: usize = 48;
-        let mut rgba = vec![0u8; W * H * 4];
-        for (i, pixel) in rgba.chunks_exact_mut(4).enumerate() {
-            if i / W < H / 2 {
-                pixel.copy_from_slice(&[255, 0, 0, 255]);
+    fn scale_bgra_keeps_dominant_colors() {
+        const W: u32 = 128;
+        const H: u32 = 96;
+        let mut bgra = vec![0u8; (W * H * 4) as usize];
+        for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
+            if i / (W as usize) < (H as usize) / 2 {
+                pixel.copy_from_slice(&[0, 0, 255, 255]); // BGRA: red
             } else {
-                pixel.copy_from_slice(&[0, 0, 255, 255]);
+                pixel.copy_from_slice(&[255, 0, 0, 255]); // BGRA: blue
             }
         }
 
-        let mut compressor = Compressor::new().unwrap_or_else(|e| panic!("compressor: {e}"));
-        compressor
-            .set_quality(PREVIEW_JPEG_QUALITY)
-            .unwrap_or_else(|e| panic!("quality: {e}"));
-        let max_len = compressor
-            .buf_len(W, H)
-            .unwrap_or_else(|e| panic!("buf_len: {e}"));
-        let mut jpeg = vec![0u8; max_len];
-        let written = compressor
-            .compress_to_slice(
-                turbojpeg::Image {
-                    pixels: rgba.as_slice(),
-                    width: W,
-                    pitch: W * 4,
-                    height: H,
-                    format: PixelFormat::RGBA,
-                },
-                &mut jpeg,
-            )
-            .unwrap_or_else(|e| panic!("compress: {e}"));
-        jpeg.truncate(written);
-        assert!(
-            jpeg.len() < rgba.len() / 4,
-            "JPEG must be far smaller than the raw RGBA frame"
-        );
-
-        let decoded = turbojpeg::decompress(&jpeg, PixelFormat::RGBA)
-            .unwrap_or_else(|e| panic!("decompress: {e}"));
-        assert_eq!(decoded.width, W);
-        assert_eq!(decoded.height, H);
+        let mut dst = Vec::new();
+        scale_bgra_bilinear(&bgra, W, H, W / 2, H / 2, &mut dst);
+        assert_eq!(dst.len(), (W / 2 * H / 2 * 4) as usize);
         let pixel_at = |x: usize, y: usize| {
-            let i = (y * decoded.pitch + x * 4) as usize;
-            (
-                decoded.pixels[i],
-                decoded.pixels[i + 1],
-                decoded.pixels[i + 2],
-            )
+            let i = (y * (W as usize / 2) + x) * 4;
+            (dst[i], dst[i + 1], dst[i + 2])
         };
-        let (r, g, b) = pixel_at(W / 2, H / 4);
+        let (b, g, r) = pixel_at((W / 4) as usize, (H / 8) as usize);
         assert!(
             r > 200 && g < 80 && b < 80,
             "top half must stay red, got ({r},{g},{b})"
         );
-        let (r, g, b) = pixel_at(W / 2, 3 * H / 4);
+        let (b, g, r) = pixel_at((W / 4) as usize, (3 * H / 8) as usize);
         assert!(
             b > 200 && r < 80 && g < 80,
             "bottom half must stay blue, got ({r},{g},{b})"
@@ -1344,35 +1313,24 @@ mod probe {
         }
         report("raw byte copy", start.elapsed(), dst.len(), ITERATIONS);
 
-        // Reused compressor + buffer, exactly like the production emitter.
-        let mut compressor = Compressor::new().unwrap_or_else(|e| panic!("compressor: {e}"));
-        compressor
-            .set_quality(PREVIEW_JPEG_QUALITY)
-            .unwrap_or_else(|e| panic!("quality: {e}"));
-        let max_len = compressor
-            .buf_len(W, H)
-            .unwrap_or_else(|e| panic!("buf_len: {e}"));
-        let mut jpeg = vec![0u8; max_len];
-        let mut jpeg_len = 0;
+        // The production preview: bilinear BGRA scale to a fitted viewport
+        // (reused output buffer, exactly like the emitter).
+        let mut scaled = Vec::new();
         let start = Instant::now();
         for _ in 0..ITERATIONS {
-            jpeg_len = compressor
-                .compress_to_slice(
-                    turbojpeg::Image {
-                        pixels: rgba.as_slice(),
-                        width: W,
-                        pitch: W * 4,
-                        height: H,
-                        format: PixelFormat::RGBA,
-                    },
-                    &mut jpeg,
-                )
-                .unwrap_or_else(|e| panic!("compress: {e}"));
+            scale_bgra_bilinear(
+                &rgba,
+                u32::try_from(W).unwrap_or(0),
+                u32::try_from(H).unwrap_or(0),
+                u32::try_from(W / 2).unwrap_or(0),
+                u32::try_from(H / 2).unwrap_or(0),
+                &mut scaled,
+            );
         }
         report(
-            "turbojpeg q=90 (reused buffer)",
+            "bgra bilinear 640x360 -> 320x180",
             start.elapsed(),
-            jpeg_len,
+            scaled.len(),
             ITERATIONS,
         );
     }

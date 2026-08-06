@@ -18,7 +18,6 @@ arc-swap = "1.9.2"
 base64 = "0.22"
 livekit = { version = "0.8", features = ["rustls-tls-native-roots"] }
 log = "0.4"
-turbojpeg = "1.5"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
 

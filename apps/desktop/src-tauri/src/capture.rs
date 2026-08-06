@@ -112,29 +112,29 @@ fn start_real_capture(
     native_livekit::start_desktop_capture()
 }
 
-/// The renderer's preview channel: the preview callback forwards JPEG bytes
-/// here (prefixed with an 8-byte little-endian `pts_us` header) whenever the
+/// The renderer's preview channel: the preview callback forwards raw BGRA
+/// frames here (16-byte little-endian header — `u64 pts_us`, `u32 width`,
+/// `u32 height` — followed by tightly packed BGRA rows) whenever the
 /// renderer has registered one. Raw payloads travel over Tauri's binary
 /// channel path — no base64, no JSON per frame — and the header lets the
-/// renderer measure end-to-end preview latency.
+/// renderer size its GPU texture and measure end-to-end preview latency.
 static PREVIEW_CHANNEL: Mutex<Option<Channel<InvokeResponseBody>>> = Mutex::new(None);
 
 /// Registers the preview callback (MIGRATION §9.1): the capture thread
-/// invokes it with JPEG bytes `(data, pts_us)` at up to 60 fps, and they are
-/// forwarded to the renderer's preview channel. The capture engine only
+/// invokes it with raw BGRA payloads `(bytes, pts_us)` at up to 60 fps, and
+/// they are forwarded to the renderer's preview channel. The payload is
+/// already self-describing (the engine's 16-byte header carries the pts and
+/// dimensions), so the bytes pass through untouched. The capture engine only
 /// knows this callback — Tauri stays out of native-livekit.
 pub fn register_preview_channel_callback() {
-    native_livekit::set_preview_callback(Box::new(move |bytes, pts_us| {
+    native_livekit::set_preview_callback(Box::new(move |bytes, _pts_us| {
         let Ok(guard) = PREVIEW_CHANNEL.lock() else {
             return;
         };
         let Some(channel) = guard.as_ref() else {
             return;
         };
-        let mut payload = Vec::with_capacity(8 + bytes.len());
-        payload.extend_from_slice(&pts_us.to_le_bytes());
-        payload.extend_from_slice(&bytes);
-        let _ = channel.send(InvokeResponseBody::Raw(payload));
+        let _ = channel.send(InvokeResponseBody::Raw(bytes));
     }));
 }
 
@@ -292,29 +292,57 @@ pub fn get_video_capture_stats() -> DesktopCaptureStats {
     native_livekit::get_desktop_capture_stats()
 }
 
-/// Starts a capture-only pre-roll (MIGRATION §9.1): the portal picker
-/// appears (Linux), the renderer's picker selection starts the WGC capturer
-/// (Windows), frames flow to the preview channel, but no track is published
-/// yet — `go_live` publishes it. Audio stays renderer-owned: the audio
-/// target is only known to the renderer, which calls `start_audio_capture`
-/// separately after going live. In synthetic e2e mode the test-pattern
-/// source runs instead of the real route.
+/// Resolution preset → capture dimensions (mirrors `RESOLUTION_DIMENSIONS`
+/// in `@slopcast/shared-types`).
+#[must_use]
+fn resolution_dims(preset: &str) -> (u32, u32) {
+    match preset {
+        "480p" => (854, 480),
+        "1080p" => (1920, 1080),
+        "1440p" => (2560, 1440),
+        "2160p" => (3840, 2160),
+        _ => (1280, 720),
+    }
+}
+
+/// Starts the capture in pre-roll mode: frames flow to the preview, no track
+/// is published (Linux portal picker appears; Windows starts the WGC
+/// capturer for the renderer's source selection). In synthetic e2e mode the
+/// test-pattern source runs instead of the real route.
 ///
 /// # Errors
 ///
 /// Returns an error on platforms without a capture route, when a Windows
 /// source selection is missing, or when the capturer fails to start.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn start_capture_preview(source: Option<CaptureSourceSelection>) -> Result<(), String> {
+pub async fn start_capture_preview(
+    app: AppHandle,
+    source: Option<CaptureSourceSelection>,
+) -> Result<(), String> {
     if !video_capture_available() && !e2e_capture_mode() {
         return Err("Screen capture is not supported on this platform".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
         if e2e_capture_mode() {
+            // Drive the synthetic source from the persisted stream settings
+            // (resolution + fps) so e2e passes exercise the configured
+            // cadence — a hardcoded 720p@30 source silently caps every pass.
+            let saved = crate::settings::get_stream_settings(app)
+                .unwrap_or_else(|_| crate::settings::default_stream_settings());
+            let (width, height) = resolution_dims(&saved.resolution);
+            // SAFETY-free by construction: the sanitizer bounds fps to
+            // [1, 240], so the f64 → u32 round-trip cannot truncate or
+            // lose the sign.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "sanitized fps is bounded to [1, 240], so the f64 → u32 round-trip cannot truncate or lose the sign"
+            )]
+            let fps = saved.fps.round() as u32;
             let config = native_livekit::CaptureConfig {
-                width: 1280,
-                height: 720,
-                fps: 30,
+                width,
+                height,
+                fps,
                 video_codec: None,
                 max_bitrate: None,
             };
