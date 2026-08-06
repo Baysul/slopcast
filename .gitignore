@@ -66,3 +66,6 @@ package-lock.json
 
 # Tauri generated schemas (from capabilities/ at build time)
 apps/desktop/src-tauri/gen/
+
+# git worktrees (nested biome.json would break the root Biome run)
+.worktrees/
