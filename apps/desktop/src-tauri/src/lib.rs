@@ -28,6 +28,22 @@ const _FRONTEND_STAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/slopcas
 /// callback wiring, the command surface and the exit-time cleanup that
 /// tears down capture state.
 pub fn run() {
+    // linuxdeploy-plugin-gtk's AppImage hook (apprun-hooks/linuxdeploy-plugin-gtk.sh)
+    // exports `GDK_BACKEND=x11` — a stale tauri#8541 workaround — sending the app
+    // to XWayland, where tao's CSD fix (Wayland-only) never engages and KWin draws
+    // a native titlebar on top of the custom one. Undo it when running from an
+    // AppImage on a Wayland session so GTK auto-detects the backend; on X11
+    // sessions or non-AppImage launches this is a no-op.
+    #[cfg(target_os = "linux")]
+    if std::env::var("APPDIR").is_ok()
+        && std::env::var("WAYLAND_DISPLAY").is_ok()
+        && std::env::var("GDK_BACKEND").as_deref() == Ok("x11")
+    {
+        // SAFETY: single-threaded here (top of `main`, before the event loop or
+        // any thread spawns) and before GTK reads the variable.
+        unsafe { std::env::remove_var("GDK_BACKEND") };
+    }
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_window_state::Builder::default().build())
