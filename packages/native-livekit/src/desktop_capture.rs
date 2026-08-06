@@ -148,10 +148,10 @@ pub(crate) fn set_capture_ended_callback(callback: CaptureEndedCallback) {
 /// the flag is reset per session in `reset_stats`.
 #[cfg(target_os = "windows")]
 pub(crate) fn fire_capture_ended_once() {
-    if !CAPTURE_ENDED_EMITTED.swap(true, Ordering::Relaxed) {
-        if let Some(callback) = CAPTURE_ENDED_CALLBACK.load_full() {
-            callback();
-        }
+    if !CAPTURE_ENDED_EMITTED.swap(true, Ordering::Relaxed)
+        && let Some(callback) = CAPTURE_ENDED_CALLBACK.load_full()
+    {
+        callback();
     }
 }
 
@@ -826,6 +826,10 @@ fn run_capture(
 /// Returns an error if a capture session is already active, the thread
 /// cannot be spawned, or the portal session fails to initialize within
 /// five seconds.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "non-Linux arm is a constant Ok(false) stub; the Result signature carries the Linux portal errors"
+)]
 pub(crate) fn start() -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     {

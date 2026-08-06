@@ -820,7 +820,7 @@ mod tests {
         // never at the unrelated app.
         let win = super::super::kwin::WindowMatch {
             pid: std::process::id(),
-            caption: "VSCodium — cunny".into(),
+            caption: "VSCodium".into(),
         };
         let unrelated =
             pid_fallback_app(999_999, "Spotify".into()).unwrap_or_else(|| panic!("app"));

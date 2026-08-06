@@ -3,7 +3,7 @@
 //! (`livekit::webrtc::desktop_capturer` — libwebrtc 0.3.44 over
 //! webrtc-sys 0.3.41, already in the dependency tree; no forks, no patches).
 //!
-//! Why WGC via libwebrtc instead of the `windows` crate's GraphicsCapture
+//! Why WGC via libwebrtc instead of the `windows` crate's `GraphicsCapture`
 //! APIs directly: the shim (`webrtc-sys` `desktop_capturer.cpp`, `_WIN64`)
 //! already wires the options — `allow_wgc_screen_capturer` /
 //! `allow_wgc_window_capturer`, `allow_directx_capturer` as the pre-2004
@@ -82,8 +82,8 @@ pub struct CaptureSourceInfo {
 /// RAII guard for the calling thread's COM apartment (MTA). WGC is
 /// WinRT-based and libwebrtc's capturer requires the thread to own an
 /// apartment before the first `capture_frame`. `CoUninitialize` runs only
-/// when this guard actually initialized the apartment (S_OK/S_FALSE); an
-/// already-initialized thread (RPC_E_CHANGED_MODE) is left untouched.
+/// when this guard actually initialized the apartment (`S_OK`/`S_FALSE`); an
+/// already-initialized thread (`RPC_E_CHANGED_MODE`) is left untouched.
 struct ComApartment {
     uninit: bool,
 }

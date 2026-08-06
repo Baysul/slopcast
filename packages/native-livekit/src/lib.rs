@@ -181,7 +181,7 @@ pub fn arm_pipewire_shims() {
     unsafe { webrtc_initialize_pipewire(std::ptr::null_mut()) };
 }
 
-/// No-op on platforms without the libwebrtc PipeWire shims.
+/// No-op on platforms without the libwebrtc `PipeWire` shims.
 #[cfg(not(target_os = "linux"))]
 pub fn arm_pipewire_shims() {}
 
