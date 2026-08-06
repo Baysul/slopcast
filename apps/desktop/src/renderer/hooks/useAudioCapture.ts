@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { desktopApi } from '../api/desktop';
 import { notify } from '../lib/toast';
 import type { CaptureContext } from '../types';
-import { groupAudioApps } from '../utils/audio-grouping';
+import { audioAppsEqual, groupAudioApps } from '../utils/audio-grouping';
 import { audioWaveStore } from '../utils/audio-level-store';
 
 const AUDIO_APPS_POLL_MS = 3000;
@@ -111,33 +111,27 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
 
   const audioAppIdRef = useRef<number | null>(null);
-  const hasAudioAppsRef = useRef(false);
 
   // Keep the list identity stable across polls so memoized consumers
   // (AudioAppPicker, audioAppGroups) don't re-render on unchanged data.
+  // The comparison includes media/window titles — they change while
+  // ids/names stay identical, so a title-only update must reach the UI.
   const loadAudioApps = useCallback(async () => {
     const apps = await desktopApi.getAudioApps();
-    setAudioApps((prev) => {
-      const same =
-        prev.length === apps.length && prev.every((app, i) => app.id === apps[i]?.id && app.name === apps[i]?.name);
-      return same ? prev : apps;
-    });
+    setAudioApps((prev) => (audioAppsEqual(prev, apps) ? prev : apps));
   }, []);
 
-  // Audio apps auto-refresh
-  useEffect(() => {
-    hasAudioAppsRef.current = audioApps.length > 0;
-  }, [audioApps.length]);
-
+  // Audio apps auto-refresh; safe during a live share (read-only PipeWire
+  // enumeration, selection keyed by id is never mutated by a refresh).
   useEffect(() => {
     void loadAudioApps();
     const interval = setInterval(() => {
-      if (document.visibilityState === 'visible' && (!isSharing || !hasAudioAppsRef.current)) {
+      if (document.visibilityState === 'visible') {
         void loadAudioApps();
       }
     }, AUDIO_APPS_POLL_MS);
     return () => clearInterval(interval);
-  }, [loadAudioApps, isSharing]);
+  }, [loadAudioApps]);
 
   // Audio waveform metering
   useEffect(() => {

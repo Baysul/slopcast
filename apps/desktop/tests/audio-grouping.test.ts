@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { type AudioAppGroup, groupAudioApps } from '../src/renderer/utils/audio-grouping.ts';
+import { type AudioAppGroup, audioAppsEqual, groupAudioApps } from '../src/renderer/utils/audio-grouping.ts';
 
 interface App {
   id: number;
@@ -110,4 +110,46 @@ test('existing media title is never replaced by a later member', () => {
 
 test('empty input yields no groups', () => {
   assert.deepEqual(groupAudioApps([]), []);
+});
+
+test('poll dedup keeps an unchanged list identical', () => {
+  const list = [
+    app({ id: 1, name: 'Spotify', mediaTitle: 'Artist - Track', windowTitle: 'Spotify Free' }),
+    app({ id: 2, name: 'Firefox', windowTitle: 'Tab One' }),
+  ];
+  assert.equal(audioAppsEqual(list, [...list]), true);
+});
+
+test('poll dedup notices a media title change', () => {
+  const before = [app({ id: 1, name: 'Spotify', mediaTitle: 'Old Song' })];
+  const after = [app({ id: 1, name: 'Spotify', mediaTitle: 'New Song' })];
+  assert.equal(audioAppsEqual(before, after), false);
+});
+
+test('poll dedup notices a window title change', () => {
+  const before = [app({ id: 1, name: 'Firefox', windowTitle: 'Tab One' })];
+  const after = [app({ id: 1, name: 'Firefox', windowTitle: 'Tab Two' })];
+  assert.equal(audioAppsEqual(before, after), false);
+});
+
+test('poll dedup notices a title arriving or clearing', () => {
+  assert.equal(
+    audioAppsEqual(
+      [app({ id: 1, name: 'Spotify', mediaTitle: null })],
+      [app({ id: 1, name: 'Spotify', mediaTitle: 'Song' })],
+    ),
+    false,
+  );
+  assert.equal(
+    audioAppsEqual(
+      [app({ id: 1, name: 'Spotify', mediaTitle: 'Song' })],
+      [app({ id: 1, name: 'Spotify', mediaTitle: null })],
+    ),
+    false,
+  );
+});
+
+test('poll dedup notices name and length changes', () => {
+  assert.equal(audioAppsEqual([app({ id: 1, name: 'A' })], [app({ id: 1, name: 'B' })]), false);
+  assert.equal(audioAppsEqual([app({ id: 1, name: 'A' })], []), false);
 });
