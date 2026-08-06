@@ -47,6 +47,23 @@ pub fn run() {
 
     let app = builder
         .setup(|app| {
+            // WebKitGTK ships with smooth scrolling disabled by default
+            // (Chromium — the old Electron shell — always had it on), so
+            // wheel/trackpad scrolls jump in discrete steps instead of
+            // interpolating per compositor frame. The app reads as running
+            // at a low framerate for that reason; restore per-frame
+            // scrolling so the page tracks the display's refresh rate.
+            #[cfg(target_os = "linux")]
+            {
+                use webkit2gtk::{SettingsExt, WebViewExt};
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.with_webview(|webview| {
+                        if let Some(settings) = webview.inner().settings() {
+                            settings.set_enable_smooth_scrolling(true);
+                        }
+                    });
+                }
+            }
             // Arm libwebrtc's bundled PipeWire dlopen shims before any
             // native-rust PipeWire call. Our code no longer pulls them (the
             // in-house engine replaced `DesktopCapturer`), but the peer
