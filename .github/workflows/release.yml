@@ -108,7 +108,7 @@ jobs:
       #   wayland-client (wayland-sys)                            -> libwayland-dev
       #   pipewire-0.3 / glib                                     -> capture engine
       #   librsvg2-dev + patchelf                                 -> bundler (deb/AppImage icons)
-      #   cmake                                                   -> turbojpeg-sys (builds libjpeg-turbo from source)
+      #   cmake/nasm                                              -> turbojpeg-sys (builds libjpeg-turbo from source; SIMD needs nasm)
       - name: Install Linux system deps
         if: runner.os == 'Linux'
         run: |
@@ -123,6 +123,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             cmake \
+            nasm \
             libpipewire-0.3-dev \
             libglib2.0-dev \
             libx11-dev \
