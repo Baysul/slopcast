@@ -1,0 +1,8 @@
+[Desktop Entry]
+Categories=Utility;
+Exec=slopcast
+StartupWMClass=slopcast
+Icon=slopcast
+Name=Slopcast
+Terminal=false
+Type=Application
