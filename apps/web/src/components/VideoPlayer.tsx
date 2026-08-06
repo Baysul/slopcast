@@ -149,10 +149,14 @@ const usePlaybackControls = (mediaStream: MediaStream | null, fullBleed?: boolea
     const video = videoRef.current;
     if (!video) return;
 
+    const applyTracks = (): void => {
+      const videoTracks = mediaStream?.getVideoTracks() ?? [];
+      setHasVideoTrack(videoTracks.length > 0 && videoTracks[0].enabled);
+    };
+
     if (mediaStream) {
       video.srcObject = mediaStream;
-      const videoTracks = mediaStream.getVideoTracks();
-      setHasVideoTrack(videoTracks.length > 0 && videoTracks[0].enabled);
+      applyTracks();
       setNeedsUserGesture(false);
       setIsPlaying(false);
       setIsMuted(false);
@@ -160,13 +164,22 @@ const usePlaybackControls = (mediaStream: MediaStream | null, fullBleed?: boolea
       playWithMuteFallback(video).then((needsGesture) => {
         applyPlayResult(video, needsGesture, setIsPlaying, setIsMuted, setNeedsUserGesture, false);
       });
-    } else {
-      video.srcObject = null;
-      setHasVideoTrack(false);
-      setNeedsUserGesture(false);
-      setIsPlaying(false);
-      setIsMuted(false);
+      // RoomPage mutates one stable stream identity in place (track
+      // subscribe/unsubscribe), so this effect never re-runs for a track
+      // change — listen on the stream itself to keep hasVideoTrack honest.
+      mediaStream.addEventListener('addtrack', applyTracks);
+      mediaStream.addEventListener('removetrack', applyTracks);
+      return () => {
+        mediaStream.removeEventListener('addtrack', applyTracks);
+        mediaStream.removeEventListener('removetrack', applyTracks);
+      };
     }
+
+    video.srcObject = null;
+    applyTracks();
+    setNeedsUserGesture(false);
+    setIsPlaying(false);
+    setIsMuted(false);
   }, [mediaStream]);
 
   const handleUserGesture = () => {

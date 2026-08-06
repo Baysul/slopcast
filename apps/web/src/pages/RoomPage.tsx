@@ -17,6 +17,9 @@ const DECODER_STALL_CHECK_MS = 2000;
 // own signal handshake, but the status badge must never sit on "Connecting..."
 // indefinitely if a future bump regresses that.
 const CONNECT_TIMEOUT_MS = 20000;
+// A track re-publish (settings change) unsubscribes then re-subscribes the
+// video track within a beat; wait before declaring the stream ended.
+const STREAM_END_GRACE_MS = 500;
 
 const logH264Sdp = (room: Room): void => {
   try {
@@ -49,6 +52,55 @@ const collectExistingTracks = (room: Room): MediaStreamTrack[] => {
   return tracks;
 };
 
+// Stream liveness is defined by video publications: the presenter publishes
+// an audio track for the whole room lifetime, so audio alone means "presenter
+// connected, not sharing" — never "live". Only publications with a live track
+// count: when the SFU closes a downtrack, TrackUnsubscribed fires from the
+// track-ended path *before* the participant-update cleanup removes the stale
+// publication, so the maps lag the event.
+const hasRemoteVideo = (room: Room): boolean =>
+  [...room.remoteParticipants.values()].some((participant) =>
+    [...participant.videoTrackPublications.values()].some((publication) => publication.track != null),
+  );
+
+// Ensures a managed stream exists. Fresh streams re-attach every
+// still-subscribed audio track: the presenter's audio publication survives a
+// stop/restart cycle within the same room, so it never re-subscribes.
+const ensureManagedStream = (room: Room, managedStreamRef: React.RefObject<MediaStream | null>): MediaStream => {
+  if (managedStreamRef.current) {
+    return managedStreamRef.current;
+  }
+  const stream = new MediaStream();
+  for (const existing of collectExistingTracks(room)) {
+    if (existing.kind === 'audio') {
+      stream.addTrack(existing);
+    }
+  }
+  managedStreamRef.current = stream;
+  return stream;
+};
+
+const endStream = (
+  managedStreamRef: React.RefObject<MediaStream | null>,
+  setMediaStream: (stream: MediaStream | null) => void,
+  setConnectionStatus: (status: 'connecting' | 'live' | 'disconnected' | 'closed' | 'error') => void,
+  setStatusText: (text: string) => void,
+): void => {
+  if (managedStreamRef.current) {
+    const stream = managedStreamRef.current;
+    managedStreamRef.current = null;
+    // Only the unsubscribed video tracks are dead; the presenter's audio
+    // track stays subscribed in the room and must not be stopped — it is
+    // re-attached to the next stream when the presenter shares again.
+    for (const track of stream.getVideoTracks()) {
+      track.stop();
+    }
+  }
+  setMediaStream(null);
+  setConnectionStatus('disconnected');
+  setStatusText('Stream ended — waiting for presenter...');
+};
+
 const attachExistingTracks = (
   room: Room,
   managedStreamRef: React.RefObject<MediaStream | null>,
@@ -72,8 +124,15 @@ const attachExistingTracks = (
     }
   }
   setMediaStream(managedStreamRef.current);
-  setConnectionStatus('live');
-  setStatusText('Live');
+  if (existingTracks.some((track) => track.kind === 'video')) {
+    setConnectionStatus('live');
+    setStatusText('Live');
+  } else {
+    // Only the room-lifetime audio track is up: the presenter is connected
+    // but not sharing yet.
+    setConnectionStatus('connecting');
+    setStatusText('Connected — waiting for stream...');
+  }
 };
 
 const firstVideoReceiver = (room: Room): RTCRtpReceiver | undefined => {
@@ -182,6 +241,7 @@ export const RoomPage: React.FC = () => {
   const stallCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stallStartRef = useRef<number>(0);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Set when a connection attempt fails; guards the badge state from being
   // overwritten by the tear-down events (Disconnected) that follow.
   const connectFailedRef = useRef(false);
@@ -266,6 +326,10 @@ export const RoomPage: React.FC = () => {
       stallCheckRef.current = null;
     }
     stallStartRef.current = 0;
+    if (streamEndTimerRef.current) {
+      clearTimeout(streamEndTimerRef.current);
+      streamEndTimerRef.current = null;
+    }
 
     if (managedStreamRef.current) {
       managedStreamRef.current.getTracks().forEach((t) => {
@@ -284,47 +348,60 @@ export const RoomPage: React.FC = () => {
 
     room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
       if (isStale()) return;
-      if (!managedStreamRef.current) {
-        managedStreamRef.current = new MediaStream();
+      if (streamEndTimerRef.current) {
+        clearTimeout(streamEndTimerRef.current);
+        streamEndTimerRef.current = null;
       }
-      if (!managedStreamRef.current.getTracks().includes(track.mediaStreamTrack)) {
-        managedStreamRef.current.addTrack(track.mediaStreamTrack);
+      const stream = ensureManagedStream(room, managedStreamRef);
+      if (!stream.getTracks().includes(track.mediaStreamTrack)) {
+        stream.addTrack(track.mediaStreamTrack);
       }
       // Reuse the same MediaStream object identity: mutating it in place keeps
       // VideoPlayer's srcObject binding stable, so playback is never restarted
       // by a track subscribe/unsubscribe.
-      setMediaStream(managedStreamRef.current);
-      setConnectionStatus('live');
-      setStatusText('Live');
-      logH264Sdp(room);
+      setMediaStream(stream);
+      if (track.kind === 'video') {
+        setConnectionStatus('live');
+        setStatusText('Live');
+        logH264Sdp(room);
+      } else if (!hasRemoteVideo(room)) {
+        // Audio alone means the presenter is connected but not sharing. Never
+        // downgrade an already-live stream.
+        setConnectionStatus('connecting');
+        setStatusText('Connected — waiting for stream...');
+      }
     });
 
     room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
       if (isStale()) return;
+      if (track.kind !== 'video') return;
       if (managedStreamRef.current) {
         managedStreamRef.current.removeTrack(track.mediaStreamTrack);
       }
-      const hasTracks = [...room.remoteParticipants.values()].some((p) => p.trackPublications.size > 0);
-      if (!hasTracks) {
-        if (managedStreamRef.current) {
-          managedStreamRef.current.getTracks().forEach((t) => {
-            t.stop();
-          });
-          managedStreamRef.current = null;
-        }
-        setMediaStream(null);
-        setConnectionStatus('disconnected');
-        setStatusText('Stream ended — waiting for presenter...');
-      } else {
-        setMediaStream(managedStreamRef.current);
+      // Do NOT gate on the publication maps here: the event fires from the
+      // track-ended path while the stale publication is still present (the
+      // participant-update cleanup lags). Arm the grace timer instead and let
+      // it re-check the settled state. A re-publish (settings change) and the
+      // presenter leaving both pass through here; give a re-subscribe or the
+      // participant teardown a beat to arrive before declaring the stream
+      // ended.
+      if (streamEndTimerRef.current) {
+        clearTimeout(streamEndTimerRef.current);
       }
+      streamEndTimerRef.current = setTimeout(() => {
+        streamEndTimerRef.current = null;
+        if (isStale()) return;
+        if (hasRemoteVideo(room)) return;
+        if (room.remoteParticipants.size === 0) return; // ParticipantDisconnected owns this state
+        endStream(managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
+      }, STREAM_END_GRACE_MS);
     });
 
     room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
       if (isStale()) return;
       switch (state) {
         case ConnectionState.Connected:
-          if (managedStreamRef.current && managedStreamRef.current.getTracks().length > 0) {
+          if (managedStreamRef.current && managedStreamRef.current.getVideoTracks().length > 0) {
             setConnectionStatus('live');
             setStatusText('Live');
           } else {
@@ -450,6 +527,10 @@ export const RoomPage: React.FC = () => {
       if (stallCheckRef.current) {
         clearInterval(stallCheckRef.current);
         stallCheckRef.current = null;
+      }
+      if (streamEndTimerRef.current) {
+        clearTimeout(streamEndTimerRef.current);
+        streamEndTimerRef.current = null;
       }
       if (managedStreamRef.current) {
         managedStreamRef.current.getTracks().forEach((t) => {
