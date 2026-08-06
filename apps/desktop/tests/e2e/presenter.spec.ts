@@ -19,7 +19,11 @@
 //      false and eglVendor present
 //   6. Hold: keep the app alive until the harness releases it after the
 //      spectator phase — the tauri-service kills the app at session end, so
-//      this spec must still be running while Playwright verifies the stream
+//      this spec must still be running while Playwright verifies the stream.
+//      Mid-hold the harness may request a stop (E2E_STOP_FLAG): the spec
+//      stops the share through the real UI (Stop Screenshare → confirm) and
+//      acks with E2E_STOPPED_FLAG so the spectator can verify the badge
+//      leaves "Live" while the room connection stays up.
 //
 // Progress is written to E2E_PHASE_JSON after every step; the harness polls
 // that file and writes E2E_RELEASE_FLAG to end the hold early (immediately
@@ -97,6 +101,8 @@ interface PhaseResult {
 
 const phaseJsonPath = process.env.E2E_PHASE_JSON;
 const releaseFlagPath = process.env.E2E_RELEASE_FLAG;
+const stopFlagPath = process.env.E2E_STOP_FLAG;
+const stoppedFlagPath = process.env.E2E_STOPPED_FLAG;
 const websiteUrl = process.env.E2E_WEBSITE_URL;
 const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
 const codec = process.env.E2E_CODEC ?? 'h264';
@@ -273,6 +279,21 @@ const snapshotPresenterTelemetry = async (): Promise<{
   return { telemetry, stats };
 };
 
+/// Stops the live share through the real UI (Stop Screenshare → confirm Stop)
+/// so the spectator can verify it is informed. The room connection stays up.
+async function stopShareForSpectatorCheck(): Promise<void> {
+  const stopBtn = browser.$('button=Stop Screenshare');
+  await stopBtn.waitForDisplayed({ timeout: 30_000 });
+  await stopBtn.click();
+  const confirmStop = browser.$('button=Stop');
+  await confirmStop.waitForDisplayed({ timeout: 10_000 });
+  await confirmStop.click();
+  // Idle stage: the share controls are back, proving the stop completed.
+  const startBtn = browser.$('button=Start Screenshare');
+  await startBtn.waitForDisplayed({ timeout: 30_000 });
+  console.log('[e2e] stop completed — presenter back to the idle stage');
+}
+
 describe('Slopcast presenter phase (Tauri)', () => {
   // A test that dies with an uncaught error (not an assert) must still land
   // in phase.errors immediately — otherwise the harness can hand off a
@@ -403,6 +424,15 @@ describe('Slopcast presenter phase (Tauri)', () => {
       if (existsSync(releaseFlagPath)) {
         console.log('[e2e] release flag seen — ending presenter session');
         return;
+      }
+      // Stop-propagation round-trip: the harness asks for a stop mid-hold so
+      // the spectator can verify the badge leaves Live. The room stays
+      // connected — the presenter's audio track outlives the share, which is
+      // exactly the state that used to leave spectators on a stale "Live".
+      if (stopFlagPath && stoppedFlagPath && !existsSync(stoppedFlagPath) && existsSync(stopFlagPath)) {
+        await stopShareForSpectatorCheck();
+        writeFileSync(stoppedFlagPath, 'stopped');
+        console.log('[e2e] share stopped — waiting for the spectator check to complete');
       }
       await new Promise((r) => setTimeout(r, 2000));
     }

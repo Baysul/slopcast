@@ -84,6 +84,9 @@ interface TestResult {
   spectatorFramesFlowing: boolean;
   /** Pixel check: the decoded frame is not uniformly black. */
   spectatorFrameHasContent: boolean;
+  /** Stop-propagation round-trip: after the presenter stops, the spectator
+   * badge must leave "Live" and report the stream ended. */
+  spectatorNotifiedOfStop: boolean;
   /** Presenter-side native telemetry: published video frames, bytes, capture-pipeline pushes. */
   presenterVideoFlowing: boolean;
   presenterVideoFramesSent: number;
@@ -123,10 +126,17 @@ const RESULT_PATH = path.join(OUTPUT_DIR, 'e2e-result.json');
 /// tauri-service then tears the app down at session end.
 const PRESENTER_RELEASE_FLAG = path.join(OUTPUT_DIR, '.presenter-release');
 const PRESENTER_PHASE_JSON = path.join(OUTPUT_DIR, 'presenter-phase.json');
+/// Stop-propagation round-trip: the harness requests the presenter stop its
+/// share mid-hold via PRESENTER_STOP_FLAG; the spec acks with
+/// PRESENTER_STOPPED_FLAG once the UI reached the idle stage again.
+const PRESENTER_STOP_FLAG = path.join(OUTPUT_DIR, '.presenter-stop-request');
+const PRESENTER_STOPPED_FLAG = path.join(OUTPUT_DIR, '.presenter-stopped');
 
 const HEALTH_POLL_MS = 500;
 const STARTUP_TIMEOUT_MS = 30_000;
 const SPECTATOR_CONNECT_TIMEOUT_MS = 20_000;
+const PRESENTER_STOP_TIMEOUT_MS = 60_000;
+const STREAM_END_TIMEOUT_MS = 30_000;
 const STREAM_TIMEOUT_MS = 20_000;
 
 const FATAL_PATTERNS = [
@@ -553,6 +563,8 @@ async function runPresenterPhase(
       WEBKIT_DISABLE_DMABUF_RENDERER: '1',
       E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
       E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
+      E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
+      E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
       E2E_WEBSITE_URL: config.websiteUrl,
       E2E_CODEC: codec,
       E2E_CAPTURE: captureMode,
@@ -801,6 +813,56 @@ async function checkDecoderStall(page: Page, result: TestResult): Promise<void> 
   }
 }
 
+const waitForFile = async (filePath: string, timeoutMs: number): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(filePath)) return true;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+};
+
+/**
+ * Stop-propagation round-trip: the presenter stops its share through the real
+ * UI while the spectator watches. The room stays open (the presenter keeps the
+ * connection), so the only signal the spectator can rely on is the track
+ * unpublish — the badge must leave "Live" and report the stream ended instead
+ * of hanging on the stale live state (regression: audio publication outlived
+ * the video, so "no tracks left" never became true).
+ */
+async function runPresenterStopRoundTrip(page: Page, result: TestResult): Promise<void> {
+  log('TEST', '=== Presenter stop round-trip (spectator must be informed) ===');
+  // A stale ack from a previous codec pass/attempt must not skip the wait.
+  rmSync(PRESENTER_STOPPED_FLAG, { force: true });
+  writeFileSync(PRESENTER_STOP_FLAG, 'stop');
+  const stopped = await waitForFile(PRESENTER_STOPPED_FLAG, PRESENTER_STOP_TIMEOUT_MS);
+  if (!stopped) {
+    log('TEST', 'Presenter never acknowledged the stop request');
+    result.errors.push('Presenter never stopped on request (stopped flag not written)');
+    return;
+  }
+  try {
+    await page.waitForFunction(
+      () => {
+        const badges = document.querySelectorAll('[role="status"]');
+        for (const badge of badges) {
+          const text = badge.textContent?.toLowerCase() ?? '';
+          if (text.includes('stream ended') || text.includes('presenter left')) {
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeout: STREAM_END_TIMEOUT_MS },
+    );
+    result.spectatorNotifiedOfStop = true;
+    log('SPECTATOR', 'Badge reports the stream ended — stop propagated to the spectator');
+  } catch (err) {
+    log('SPECTATOR', `Badge never reported the stream ended: ${err}`);
+    result.errors.push('Spectator was not informed when the presenter stopped (badge never left Live)');
+  }
+}
+
 async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, captureMode: string): Promise<Browser> {
   log('TEST', '=== Step 3: Spectator Automation (Chromium) ===');
 
@@ -850,6 +912,8 @@ async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, cap
 
   await checkDecoderStall(spectatorPage, result);
 
+  await runPresenterStopRoundTrip(spectatorPage, result);
+
   return browser;
 }
 
@@ -889,6 +953,9 @@ function validateDiagnostics(result: TestResult, logEntries: LogEntry[]): void {
   }
   if (!result.spectatorFrameHasContent) {
     result.errors.push('Spectator video frames are uniformly black (capture malfunction)');
+  }
+  if (!result.spectatorNotifiedOfStop) {
+    result.errors.push('Spectator was not informed when the presenter stopped streaming');
   }
   if (!result.presenterVideoFlowing) {
     result.errors.push('Presenter published no advancing video frames (videoFramesSent did not grow)');
@@ -958,6 +1025,7 @@ async function runTest(): Promise<TestResult> {
     spectatorVideoHeight: 0,
     spectatorFramesFlowing: false,
     spectatorFrameHasContent: false,
+    spectatorNotifiedOfStop: false,
     presenterVideoFlowing: false,
     presenterVideoFramesSent: 0,
     presenterVideoBytesSent: 0,
@@ -1169,6 +1237,7 @@ function printSummary(result: TestResult): void {
   log('SUMMARY', `Spec Connected:  ${result.spectatorConnected}`);
   log('SUMMARY', `Video Received:  ${result.spectatorVideoReceived}`);
   log('SUMMARY', `Video Playing:   ${result.spectatorVideoPlaying}`);
+  log('SUMMARY', `Stop Notified:   ${result.spectatorNotifiedOfStop}`);
   log('SUMMARY', `Video Size:      ${result.spectatorVideoWidth}x${result.spectatorVideoHeight}`);
   log('SUMMARY', `Presenter FPS:   ${result.presenterTelemetryFps}`);
   log('SUMMARY', `Decoder Stall:   ${result.decoderStallDetected}`);
