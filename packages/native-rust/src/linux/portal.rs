@@ -36,8 +36,11 @@ const SESSION_INTERFACE: &str = "org.freedesktop.portal.Session";
 
 /// Portal `types` bitmask for "any screen content" (monitor|window).
 const CAPTURE_TYPES_ANY: u32 = 0b11;
-/// Portal `cursor_mode` value for an embedded (composited) cursor.
+/// Portal `cursor_mode` values — the same bitmask as
+/// `AvailableCursorModes`: 1 hidden, 2 embedded, 4 metadata.
+const CURSOR_MODE_HIDDEN: u32 = 0b01;
 const CURSOR_MODE_EMBEDDED: u32 = 0b10;
+const CURSOR_MODE_METADATA: u32 = 0b100;
 /// Portal `persist_mode` value for "do not persist" (restore-token wiring is
 /// a documented follow-up, see SCREEN-CAPTURE-INHOUSE.md §8).
 const PERSIST_MODE_NONE: u32 = 0;
@@ -291,10 +294,19 @@ impl ScreenCastPortal {
         options.insert("multiple", Value::Bool(false));
         // Setting a cursor mode the portal does not advertise closes the
         // session, hence the bitmask guard (libwebrtc's exact check).
+        // `SLOPCAST_CURSOR_MODE=hidden|metadata` overrides the embedded
+        // default — a diagnostic for compositor cursor-compositing
+        // issues (frames alternating between stale and fresh content
+        // while the cursor moves).
+        let cursor_mode = match std::env::var("SLOPCAST_CURSOR_MODE").as_deref() {
+            Ok("hidden") => CURSOR_MODE_HIDDEN,
+            Ok("metadata") => CURSOR_MODE_METADATA,
+            _ => CURSOR_MODE_EMBEDDED,
+        };
         if let Ok(modes) = self.portal.get_property::<u32>("AvailableCursorModes")
-            && modes & CURSOR_MODE_EMBEDDED != 0
+            && modes & cursor_mode != 0
         {
-            options.insert("cursor_mode", Value::U32(CURSOR_MODE_EMBEDDED));
+            options.insert("cursor_mode", Value::U32(cursor_mode));
         }
         // persist_mode/restore_token are v4+ options; passing them to an
         // older portal also closes the session.
