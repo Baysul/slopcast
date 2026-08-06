@@ -395,7 +395,7 @@ impl WasapiManager {
         let join = std::thread::Builder::new()
             .name("wasapi-loopback-capture".into())
             .spawn(move || {
-                let _ = run_capture(target_pid, stop_send_handle, startup_tx, run_rx);
+                let _ = run_capture(target_pid, stop_send_handle, &startup_tx, &run_rx);
             })
             .map_err(|e| format!("Failed to spawn WASAPI thread: {e}"))?;
 
@@ -1386,8 +1386,8 @@ fn build_capture_session(
 fn run_capture(
     target_pid: u32,
     stop_handle: SendHandle,
-    startup_tx: Sender<Result<CaptureMode, String>>,
-    run_rx: std::sync::mpsc::Receiver<()>,
+    startup_tx: &Sender<Result<CaptureMode, String>>,
+    run_rx: &std::sync::mpsc::Receiver<()>,
 ) -> Result<(), String> {
     // SAFETY: standard per-thread COM init on the dedicated capture thread;
     // balanced by CoUninitialize below on success.
