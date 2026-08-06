@@ -1,8 +1,8 @@
 //! Tauri backend for the Slopcast desktop presenter.
 //!
-//! Replaces the Electron main process: every preload IPC channel maps to a
-//! command here (see MIGRATION.md §5), audio/video capture and the `LiveKit`
-//! room run entirely in Rust via the `native-rust` / `native-livekit` crates.
+//! Every renderer IPC call maps to a command here (see MIGRATION.md §5);
+//! audio/video capture and the `LiveKit` room run entirely in Rust via the
+//! `native-rust` / `native-livekit` crates.
 
 pub mod audio;
 pub mod capture;
@@ -25,8 +25,8 @@ use tauri::Manager;
 const _FRONTEND_STAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/slopcast-frontend-stamp"));
 
 /// Builds and runs the Tauri application: plugins, managed state, the audio
-/// callback wiring, the command surface and the lifecycle cleanup that
-/// mirrors Electron's `before-quit` handler.
+/// callback wiring, the command surface and the exit-time cleanup that
+/// tears down capture state.
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
@@ -48,7 +48,7 @@ pub fn run() {
     let app = builder
         .setup(|app| {
             // WebKitGTK ships with smooth scrolling disabled by default
-            // (Chromium — the old Electron shell — always had it on), so
+            // (Chromium always had it on), so
             // wheel/trackpad scrolls jump in discrete steps instead of
             // interpolating per compositor frame. The app reads as running
             // at a low framerate for that reason; restore per-frame
@@ -129,7 +129,7 @@ pub fn run() {
 
     app.run(|_app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {
-            // Mirrors Electron's `before-quit` cleanup in main/index.ts.
+            // Exit-time capture teardown (before-quit cleanup).
             let _ = native_rust::stop_audio_capture();
             let _ = native_rust::stop_audio_metering();
             let _ = native_livekit::stop_video_track();

@@ -18,8 +18,7 @@ export interface CaptureContext {
   windowCaption: string | null;
 }
 
-/// The subset of the app config exposed by the `get_app_config` command,
-/// identical to the Electron `get-app-config` handler.
+/// The subset of the app config exposed by the `get_app_config` command.
 export interface AppConfig {
   apiEndpoint: string;
   livekitUrl: string;
@@ -35,8 +34,7 @@ export interface PlatformInfo {
 /// primary action while previewing.
 export type CaptureStage = 'idle' | 'previewing' | 'live';
 
-/// Result of `start_native_capture`, matching the Electron handler's
-/// `{ ok, nodeId, videoEnabled }` shape.
+/// Result of `start_native_capture`: `{ ok, nodeId, videoEnabled }`.
 export interface CaptureStartResult {
   ok: boolean;
   nodeId: number | null;
@@ -106,8 +104,7 @@ export interface DesktopCaptureStats {
   lastHeight: number;
 }
 
-/// EGL probe output from `probe_gpu_info`, replacing Electron's
-/// `app.getGPUInfo('complete')` (D5).
+/// EGL probe output from `probe_gpu_info` (D5).
 export interface GpuInfo {
   eglVendor: string | null;
   glRenderer: string | null;

@@ -1,6 +1,5 @@
 //! Audio commands: application enumeration, exclusive capture, metering and
-//! the Wayland audio-source resolution cascade — ports of the Electron
-//! `audio.ts` / `video.ts` handlers.
+//! the Wayland audio-source resolution cascade.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

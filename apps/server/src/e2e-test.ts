@@ -29,7 +29,7 @@ import { type AppConfig, loadConfig } from '@slopcast/shared-types/config';
 
 import type { Browser, Page } from 'playwright';
 
-/// GPU probe output (D5): replaces Electron's `app.getGPUInfo('complete')`.
+/// GPU probe output (D5): dlopen'd EGL probe report from `probe_gpu_info`.
 interface GpuInfo {
   eglVendor: string | null;
   glRenderer: string | null;
@@ -540,7 +540,7 @@ async function runPresenterPhase(
         '(add --no-bundle when AppImage bundling is unavailable in the environment)',
     );
   }
-  log('ELECTRON', `Launching Tauri app from ${appBinary}`);
+  log('TAURI', `Launching Tauri app from ${appBinary}`);
 
   // Fresh handshake files: a stale release flag from a previous attempt would
   // end the spec's hold test immediately. Also kill stray app instances from
@@ -634,12 +634,12 @@ async function runPresenterPhase(
 
   if (phase.gpuReport) {
     writeFileSync(GPU_REPORT_PATH, JSON.stringify(phase.gpuReport, null, 2));
-    log('ELECTRON', `GPU report written to ${GPU_REPORT_PATH}`);
+    log('TAURI', `GPU report written to ${GPU_REPORT_PATH}`);
   }
 
-  log('ELECTRON', `Room created: code=${phase.roomCode} url=${phase.shareUrl}`);
+  log('TAURI', `Room created: code=${phase.roomCode} url=${phase.shareUrl}`);
   log(
-    'ELECTRON',
+    'TAURI',
     `Presenter telemetry: framesSent=${phase.videoFramesSent} bytesSent=${phase.videoBytesSent} ` +
       `captureFramesPushed=${phase.captureFramesPushed} previewFramesSent=${phase.previewFramesSent} ` +
       `flowing=${phase.telemetryFlowing}`,

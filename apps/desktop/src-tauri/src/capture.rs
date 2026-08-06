@@ -1,5 +1,5 @@
-//! Capture commands — ports of the Electron `video.ts` handlers, driving
-//! `native-livekit`'s desktop capturer and video track.
+//! Capture commands — driving `native-livekit`'s desktop capturer and
+//! video track.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -119,8 +119,8 @@ pub fn clear_preview_viewport() -> bool {
     true
 }
 
-/// Result of `start_native_capture`, matching the Electron handler's
-/// `{ ok, nodeId, videoEnabled }` shape (X11/Windows degrades to audio-only).
+/// Result of `start_native_capture`: `{ ok, nodeId, videoEnabled }`
+/// (X11/Windows degrades to audio-only).
 #[derive(Debug, Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureStartResult {
@@ -142,8 +142,8 @@ impl CaptureStartResult {
 
 /// Starts the native capture: publishes the video track and starts the
 /// desktop capturer (the portal picker appears on Wayland). On non-Wayland
-/// sessions the share degrades to audio-only, exactly like the Electron
-/// handler (synthetic e2e mode bypasses the Wayland gate).
+/// sessions the share degrades to audio-only (synthetic e2e mode bypasses
+/// the Wayland gate).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_native_capture(config: CaptureConfig) -> CaptureStartResult {
     if !is_wayland() && !e2e_capture_mode() {

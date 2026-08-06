@@ -1,5 +1,4 @@
-//! Cached capture context — replaces `lastCaptureContext` in the Electron
-//! `video.ts` main-process module.
+//! Cached capture context (managed state).
 #![allow(
     clippy::needless_pass_by_value,
     reason = "Tauri command arguments (State and owned payloads) must be taken by value for the #[tauri::command] macro"
@@ -30,7 +29,7 @@ impl CaptureContextCache {
 }
 
 /// Returns the cached capture context (or `null` before the first
-/// introspection), matching the Electron `get-capture-context` handler.
+/// introspection).
 #[must_use]
 #[tauri::command]
 pub fn get_capture_context(

@@ -1,5 +1,5 @@
-//! Room commands — ports of the Electron `room.ts` handlers, driving the
-//! native `LiveKit` publisher in `native-livekit`.
+//! Room commands — driving the native `LiveKit` publisher in
+//! `native-livekit`.
 
 use native_livekit::{
     NativeCodecInfo, NativeTelemetry, connect_livekit_room, disconnect_livekit_room,

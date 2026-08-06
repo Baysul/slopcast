@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-/// Fully resolved app configuration (internal state; the command surface only
-/// exposes `apiEndpoint` + `livekitUrl`, matching the Electron handler).
+/// Fully resolved app configuration (internal state; the command surface
+/// exposes only `apiEndpoint` + `livekitUrl`).
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub server_port: u16,
@@ -187,8 +187,8 @@ fn assert_production_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Managed state holding the config loaded once at startup (mirrors the
-/// Electron main process loading `loadConfig()` at module scope).
+/// Managed state holding the config, loaded once at startup
+/// (`loadConfig()` at module scope).
 pub struct AppConfigState(pub AppConfig);
 
 impl AppConfigState {
@@ -203,8 +203,7 @@ impl AppConfigState {
     }
 }
 
-/// The subset the renderer consumes, identical to the Electron
-/// `get-app-config` handler.
+/// The subset the renderer consumes via the `get_app_config` command.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicAppConfig {

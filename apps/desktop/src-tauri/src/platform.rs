@@ -1,5 +1,5 @@
-//! Platform introspection: Wayland detection and the EGL GPU probe that
-//! replaces Electron's `app.getGPUInfo('complete')` (D5).
+//! Platform introspection: Wayland detection and the dlopen'd EGL GPU
+//! probe (D5).
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::os::raw::c_int;
@@ -12,8 +12,8 @@ pub struct PlatformInfo {
     pub is_wayland: bool,
 }
 
-/// Mirrors `isWayland` in the Electron `context.ts`: Linux only, and either
-/// the session type is Wayland or `WAYLAND_DISPLAY` is set.
+/// Wayland detection: Linux only, and either the session type is Wayland
+/// or `WAYLAND_DISPLAY` is set.
 #[must_use]
 pub fn is_wayland() -> bool {
     if !cfg!(target_os = "linux") {

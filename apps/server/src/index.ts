@@ -35,7 +35,7 @@ const allowedOrigins = new Set([
   'http://[::1]:5173',
   // Tauri v2 production/webkit registrations: the packaged desktop renderer
   // is served from the `tauri://localhost` custom protocol, so its API fetch
-  // carries that origin (Electron-era `file://` never hit CORS checks).
+  // carries that origin, so its API fetches go through the CORS allowlist.
   'tauri://localhost',
   'http://tauri.localhost',
 ]);

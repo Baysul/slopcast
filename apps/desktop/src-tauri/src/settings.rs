@@ -1,5 +1,5 @@
 //! Persistence for `stream-settings.json` and `onboarding.json` in the app
-//! config dir (`~/.config/slopcast`, identical to Electron's `userData`).
+//! config dir (`~/.config/slopcast`).
 //!
 //! TS↔Rust sync rule: `StreamSettings`, `default_stream_settings` and
 //! `sanitize_stream_settings` mirror `DEFAULT_STREAM_SETTINGS` and
@@ -129,7 +129,7 @@ pub fn get_stream_settings(app: tauri::AppHandle) -> Result<StreamSettings, Stri
 }
 
 /// Sanitizes and persists `stream-settings.json` (2-space indented, trailing
-/// newline — same bytes as the Electron writer).
+/// newline).
 #[must_use]
 #[tauri::command]
 pub fn save_stream_settings(app: tauri::AppHandle, settings: serde_json::Value) -> bool {
