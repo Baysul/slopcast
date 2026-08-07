@@ -270,11 +270,19 @@ struct PreviewScaleBufs {
 
 /// The newest captured I420 frame, stashed by the capture callback for the
 /// preview thread (which reads it without touching the paced queue). The
-/// planes Vec keeps its allocation across frames.
+/// planes Vec keeps its allocation across frames. The three length fields
+/// mirror the *actual* plane slice lengths — `I420Buffer::new` sizes the
+/// chroma planes as `ceil(w/2) × ceil(h/2)`, which exceeds `w*h/4`
+/// arithmetic whenever either dimension is odd (mid-resize frames, e.g.
+/// 1280×693); sizing the copy by arithmetic panicked with a
+/// `copy_from_slice` length mismatch.
 struct PreviewI420 {
     width: u32,
     height: u32,
     pts_us: i64,
+    y_len: usize,
+    u_len: usize,
+    v_len: usize,
     planes: Vec<u8>,
 }
 
@@ -317,7 +325,7 @@ fn emit_preview_frame(
     }
     *last_generation = generation;
 
-    let (width, height, pts_us) = {
+    let (width, height, pts_us, y_len, u_len, v_len) = {
         let Ok(guard) = PREVIEW_I420.lock() else {
             return false;
         };
@@ -329,7 +337,14 @@ fn emit_preview_frame(
         // stall the capture callback's stash write (the lock is shared).
         bufs.planes.clear();
         bufs.planes.extend_from_slice(&entry.planes);
-        (entry.width, entry.height, entry.pts_us)
+        (
+            entry.width,
+            entry.height,
+            entry.pts_us,
+            entry.y_len,
+            entry.u_len,
+            entry.v_len,
+        )
     };
     if width == 0 || height == 0 {
         return false;
@@ -345,12 +360,20 @@ fn emit_preview_frame(
     // bilinear pass, and none of it under the shared lock.
     let mut src = I420Buffer::new(width, height);
     {
-        let y_len = (width * height) as usize;
-        let uv_len = y_len / 4;
+        // Same allocator and (width, height) as the stash's source ⇒ the
+        // reconstructed slices match its lengths; clamp + zero-fill anyway,
+        // because a panic here would abort the process (the PipeWire
+        // process callback cannot unwind).
         let (plane_y, plane_u, plane_v) = src.data_mut();
-        plane_y.copy_from_slice(&bufs.planes[..y_len]);
-        plane_u.copy_from_slice(&bufs.planes[y_len..y_len + uv_len]);
-        plane_v.copy_from_slice(&bufs.planes[y_len + uv_len..]);
+        let n = plane_y.len().min(y_len);
+        plane_y[..n].copy_from_slice(&bufs.planes[..n]);
+        plane_y[n..].fill(0);
+        let n = plane_u.len().min(u_len);
+        plane_u[..n].copy_from_slice(&bufs.planes[y_len..y_len + n]);
+        plane_u[n..].fill(0);
+        let n = plane_v.len().min(v_len);
+        plane_v[..n].copy_from_slice(&bufs.planes[y_len + u_len..y_len + u_len + n]);
+        plane_v[n..].fill(0);
     }
     let scaled = src.scale(
         i32::try_from(out_w).unwrap_or(0),
@@ -492,18 +515,27 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
                 width,
                 height,
                 pts_us: 0,
+                y_len: 0,
+                u_len: 0,
+                v_len: 0,
                 planes: Vec::new(),
             });
             entry.width = width;
             entry.height = height;
             entry.pts_us = monotonic_us();
-            let y_len = (width * height) as usize;
-            let uv_len = y_len / 4;
-            entry.planes.resize(y_len + 2 * uv_len, 0);
+            // Size from the actual plane slices: the chroma planes hold
+            // `ceil(w/2) × ceil(h/2)` samples, which is more than `w*h/4`
+            // for odd dimensions (mid-resize frames).
             let (plane_y, plane_u, plane_v) = frame.buffer.data();
-            entry.planes[..y_len].copy_from_slice(plane_y);
-            entry.planes[y_len..y_len + uv_len].copy_from_slice(plane_u);
-            entry.planes[y_len + uv_len..].copy_from_slice(plane_v);
+            entry.y_len = plane_y.len();
+            entry.u_len = plane_u.len();
+            entry.v_len = plane_v.len();
+            entry
+                .planes
+                .resize(entry.y_len + entry.u_len + entry.v_len, 0);
+            entry.planes[..entry.y_len].copy_from_slice(plane_y);
+            entry.planes[entry.y_len..entry.y_len + entry.u_len].copy_from_slice(plane_u);
+            entry.planes[entry.y_len + entry.u_len..].copy_from_slice(plane_v);
         }
         pacer.push(frame);
     })
@@ -1232,6 +1264,51 @@ mod probe {
             b > 200 && r < 80 && g < 80,
             "bottom half must stay blue, got ({r},{g},{b})"
         );
+    }
+
+    /// The stash → rebuild path must round-trip odd dimensions exactly: the
+    /// chroma planes hold `ceil(w/2) × ceil(h/2)` samples, more than the
+    /// `w*h/4` arithmetic (mid-resize frames, e.g. 1280×693 — sizing by
+    /// arithmetic panicked with a `copy_from_slice` length mismatch).
+    #[test]
+    fn i420_stash_roundtrip_handles_odd_dimensions() {
+        const W: u32 = 1280;
+        const H: u32 = 693;
+        let mut src = I420Buffer::new(W, H);
+        {
+            let (plane_y, plane_u, plane_v) = src.data_mut();
+            for (i, byte) in plane_y.iter_mut().enumerate() {
+                *byte = u8::try_from(i % 251).unwrap_or(0);
+            }
+            for (i, byte) in plane_u.iter_mut().enumerate() {
+                *byte = u8::try_from(i % 97).unwrap_or(0);
+            }
+            for (i, byte) in plane_v.iter_mut().enumerate() {
+                *byte = u8::try_from(i % 61).unwrap_or(0);
+            }
+        }
+        let (plane_y, plane_u, plane_v) = src.data();
+        let (y_len, u_len, v_len) = (plane_y.len(), plane_u.len(), plane_v.len());
+        // The trap this test pins: ceil rounding makes the chroma planes
+        // bigger than `w*h/4` for odd heights.
+        assert!(u_len > ((W * H) / 4) as usize);
+        let mut planes = vec![0u8; y_len + u_len + v_len];
+        planes[..y_len].copy_from_slice(plane_y);
+        planes[y_len..y_len + u_len].copy_from_slice(plane_u);
+        planes[y_len + u_len..].copy_from_slice(plane_v);
+
+        // Emitter side: same allocator + same dims ⇒ identical lengths.
+        let mut rebuilt = I420Buffer::new(W, H);
+        {
+            let (plane_y, plane_u, plane_v) = rebuilt.data_mut();
+            assert_eq!(plane_y.len(), y_len);
+            assert_eq!(plane_u.len(), u_len);
+            assert_eq!(plane_v.len(), v_len);
+            plane_y.copy_from_slice(&planes[..y_len]);
+            plane_u.copy_from_slice(&planes[y_len..y_len + u_len]);
+            plane_v.copy_from_slice(&planes[y_len + u_len..]);
+        }
+        assert_eq!(src.data(), rebuilt.data());
     }
 
     /// Headless probe of the whole synthetic pipeline: frames must flow
