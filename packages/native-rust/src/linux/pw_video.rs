@@ -23,7 +23,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Frame callback contract: `(width, height, bgra, pts_us)`.
 ///
@@ -397,6 +397,10 @@ struct CaptureUserData {
     last_error: Option<String>,
 }
 
+/// Rate-limiter for the slow-frame log: at most one line per 3 s, so a
+/// pathologically slow process callback can never spam the app log.
+static LAST_SLOW_LOG: Mutex<Option<Instant>> = Mutex::new(None);
+
 /// libwebrtc's `OnStreamProcess` + `ProcessBuffer`: dequeue all buffers, keep
 /// the last, hand the earlier ones back immediately; then read the kept
 /// buffer's first data if it is a DMA-BUF. `Buffer`'s `Drop` re-queues, so
@@ -462,11 +466,13 @@ fn process_buffer(stream: &pipewire::stream::Stream, user_data: &mut CaptureUser
     // `owned_fds` stays alive through the readback; `planes` holds raw fd
     // numbers, so it does not borrow from it.
 
+    let t_start = Instant::now();
     let (width, height, format) = user_data.negotiated;
     let needed = width as usize * height as usize * 4;
     if user_data.scratch.len() != needed {
         user_data.scratch.resize(needed, 0);
     }
+    let t_readback = Instant::now();
     if let Err(e) = user_data.egl.read_dmabuf(
         width,
         height,
@@ -481,12 +487,31 @@ fn process_buffer(stream: &pipewire::stream::Stream, user_data: &mut CaptureUser
         }
         return;
     }
+    let readback_ms = t_readback.elapsed().as_secs_f64() * 1000.0;
     if format == VideoFormat::RGBA || format == VideoFormat::RGBx {
         convert_rgbx_to_bgrx(&mut user_data.scratch);
     }
     let pts_us = monotonic_pts_us();
     (user_data.on_frame)(width, height, &user_data.scratch, pts_us);
     // `buffer` drops here and is re-queued to the stream.
+
+    // Slow-frame instrumentation: PipeWire recycles a buffer only once the
+    // callback returns, so the callback duration IS the source's delivery
+    // ceiling. A frame at or above the 60 fps budget (16.7 ms) caps the
+    // source at or below ~60 fps; ~50 ms caps it at ~20 fps. Rate-limited to
+    // one line per 3 s.
+    let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
+    if total_ms >= 15.0 {
+        let Ok(mut last) = LAST_SLOW_LOG.lock() else {
+            return;
+        };
+        if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+            *last = Some(Instant::now());
+            log::info!(
+                "[pw-video] slow process_buffer: total {total_ms:.1} ms (readback {readback_ms:.1} ms) at {width}x{height}"
+            );
+        }
+    }
 }
 
 #[allow(

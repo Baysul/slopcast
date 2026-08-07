@@ -261,82 +261,26 @@ fn fit_preview_size(
 /// Scratch buffers reused across preview emissions (allocated once per
 /// session).
 struct PreviewScaleBufs {
-    /// Viewport-fitted BGRA pixels (tightly packed, stride == width * 4).
-    scaled: Vec<u8>,
-    /// Final channel payload: 16-byte header + the fitted pixels.
+    /// I420 planes copied out of the stash under a brief lock (packed
+    /// Y, U, V with `y_len = w*h` and `uv_len = w*h/4` each).
+    planes: Vec<u8>,
+    /// Final channel payload: 16-byte header + the fitted BGRA pixels.
     out: Vec<u8>,
 }
 
-/// The newest captured BGRA frame, stashed by the capture callback for the
+/// The newest captured I420 frame, stashed by the capture callback for the
 /// preview thread (which reads it without touching the paced queue). The
-/// Vec keeps its allocation across frames.
-struct PreviewBgra {
+/// planes Vec keeps its allocation across frames.
+struct PreviewI420 {
     width: u32,
     height: u32,
     pts_us: i64,
-    bgra: Vec<u8>,
+    planes: Vec<u8>,
 }
 
-static PREVIEW_BGRA: Mutex<Option<PreviewBgra>> = Mutex::new(None);
+static PREVIEW_I420: Mutex<Option<PreviewI420>> = Mutex::new(None);
 
-/// Bilinear BGRA scale — channel-agnostic: every byte of the 4-byte pixels
-/// is filtered independently, so no color-space knowledge is needed.
-/// `fit_preview_size` never upscales, so this is a pure downscale (or an
-/// exact copy when the source already fits the viewport).
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    reason = "bilinear lerp of byte values stays within [0, 255] by construction (fit math never upscales); f32 lerp of u8 is exact"
-)]
-fn scale_bgra_bilinear(
-    src: &[u8],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
-    dst: &mut Vec<u8>,
-) {
-    let sw = src_w as usize;
-    let sh = src_h as usize;
-    let dw = dst_w as usize;
-    let dh = dst_h as usize;
-    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
-        dst.clear();
-        return;
-    }
-    if sw == dw && sh == dh {
-        dst.resize(src.len(), 0);
-        dst.copy_from_slice(src);
-        return;
-    }
-    dst.resize(dw * dh * 4, 0);
-    for dy in 0..dh {
-        let y0 = (dy * sh) / dh;
-        let y1 = (y0 + 1).min(sh - 1);
-        let fy = ((dy * sh) % dh) as f32 / dh as f32;
-        let row0 = &src[y0 * sw * 4..(y0 + 1) * sw * 4];
-        let row1 = &src[y1 * sw * 4..(y1 + 1) * sw * 4];
-        let out = &mut dst[dy * dw * 4..(dy + 1) * dw * 4];
-        for dx in 0..dw {
-            let x0 = (dx * sw) / dw;
-            let x1 = (x0 + 1).min(sw - 1);
-            let fx = ((dx * sw) % dw) as f32 / dw as f32;
-            let base = dx * 4;
-            for c in 0..4 {
-                let p00 = f32::from(row0[x0 * 4 + c]);
-                let p10 = f32::from(row0[x1 * 4 + c]);
-                let p01 = f32::from(row1[x0 * 4 + c]);
-                let p11 = f32::from(row1[x1 * 4 + c]);
-                let top = p00 + (p10 - p00) * fx;
-                let bottom = p01 + (p11 - p01) * fx;
-                out[base + c] = (top + (bottom - top) * fy) as u8;
-            }
-        }
-    }
-}
-
-/// Snapshot the newest captured BGRA frame and ship it to the renderer as a
+/// Snapshot the newest captured frame and ship it to the renderer as a
 /// raw channel payload: `[pts_us u64 LE][width u32 LE][height u32 LE][tight
 /// BGRA rows]`, scaled to fit the reported preview viewport (OBS-style
 /// "scale to the window", aspect preserved, never upscaled). Independent of
@@ -373,36 +317,76 @@ fn emit_preview_frame(
     }
     *last_generation = generation;
 
-    // The capture callback stashes the newest BGRA frame here (a push never
-    // overwrites without first bumping the generation). The scale happens
-    // under the lock — a brief hold the callback's own stash waits on, at a
-    // 16.7 ms cadence.
-    let Ok(guard) = PREVIEW_BGRA.lock() else {
-        return false;
+    let (width, height, pts_us) = {
+        let Ok(guard) = PREVIEW_I420.lock() else {
+            return false;
+        };
+        let Some(entry) = guard.as_ref() else {
+            return false;
+        };
+        // Copy the stashed planes out under the brief lock; the scale and
+        // conversion below run outside it, so a slow emission can never
+        // stall the capture callback's stash write (the lock is shared).
+        bufs.planes.clear();
+        bufs.planes.extend_from_slice(&entry.planes);
+        (entry.width, entry.height, entry.pts_us)
     };
-    let Some(entry) = guard.as_ref() else {
+    if width == 0 || height == 0 {
         return false;
-    };
-    let (width, height) = (entry.width, entry.height);
-    let pts_us = entry.pts_us;
+    }
     let (out_w, out_h) = PREVIEW_VIEWPORT
         .load_full()
         .and_then(|vp| fit_preview_size(width, height, vp.0, vp.1))
         .unwrap_or((width, height));
-    scale_bgra_bilinear(&entry.bgra, width, height, out_w, out_h, &mut bufs.scaled);
-    drop(guard);
+
+    // Rebuild the I420 frame from the stashed planes and scale it with
+    // libyuv (SIMD), then convert to the BGRA the renderer's texture
+    // expects — same colors, a fraction of the cost of the old scalar
+    // bilinear pass, and none of it under the shared lock.
+    let mut src = I420Buffer::new(width, height);
+    {
+        let y_len = (width * height) as usize;
+        let uv_len = y_len / 4;
+        let (plane_y, plane_u, plane_v) = src.data_mut();
+        plane_y.copy_from_slice(&bufs.planes[..y_len]);
+        plane_u.copy_from_slice(&bufs.planes[y_len..y_len + uv_len]);
+        plane_v.copy_from_slice(&bufs.planes[y_len + uv_len..]);
+    }
+    let scaled = src.scale(
+        i32::try_from(out_w).unwrap_or(0),
+        i32::try_from(out_h).unwrap_or(0),
+    );
+
     // The channel payload: 16-byte little-endian header + the fitted BGRA
     // rows. The renderer parses width/height to size its texture and uploads
     // the pixels as-is (bgra8unorm — no channel shuffling anywhere).
+    let payload_len = out_w as usize * out_h as usize * 4;
     bufs.out.clear();
-    bufs.out.extend_from_slice(&pts_us.to_le_bytes());
-    bufs.out.extend_from_slice(&out_w.to_le_bytes());
-    bufs.out.extend_from_slice(&out_h.to_le_bytes());
-    bufs.out.extend_from_slice(&bufs.scaled);
+    bufs.out.resize(16 + payload_len, 0);
+    bufs.out[..8].copy_from_slice(&pts_us.to_le_bytes());
+    bufs.out[8..12].copy_from_slice(&out_w.to_le_bytes());
+    bufs.out[12..16].copy_from_slice(&out_h.to_le_bytes());
+    let (plane_y, plane_u, plane_v) = scaled.data();
+    let (stride_y, stride_u, stride_v) = scaled.strides();
+    // libyuv's I420ToARGB writes `[B, G, R, A]` — the renderer's BGRA
+    // texture order. (`I420ToBGRA` writes `[A, R, G, B]`: libyuv names
+    // formats by FOURCC value, rotated from the intuitive spelling.)
+    yuv_helper::i420_to_argb(
+        plane_y,
+        stride_y,
+        plane_u,
+        stride_u,
+        plane_v,
+        stride_v,
+        &mut bufs.out[16..],
+        out_w * 4,
+        i32::try_from(out_w).unwrap_or(0),
+        i32::try_from(out_h).unwrap_or(0),
+    );
 
     STATS_PREVIEW_SENT.fetch_add(1, Ordering::Relaxed);
     if let Some(callback) = PREVIEW_CALLBACK.load_full() {
-        callback(bufs.out.clone(), pts_us);
+        callback(std::mem::take(&mut bufs.out), pts_us);
     }
     true
 }
@@ -491,28 +475,37 @@ fn convert_frame(width: u32, height: u32, bgra: &[u8]) -> VideoFrame<I420Buffer>
 fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
     Box::new(move |width, height, bgra, _pts_us| {
         STATS_DEQUEUED.fetch_add(1, Ordering::Relaxed);
-        // Stash the newest frame for the preview thread (skipped when no
-        // preview is subscribed — a 1080p BGRA copy is ~8 MB).
-        if PREVIEW_CALLBACK.load_full().is_some()
-            && let Ok(mut slot) = PREVIEW_BGRA.lock()
-        {
-            let entry = slot.get_or_insert_with(|| PreviewBgra {
-                width,
-                height,
-                pts_us: 0,
-                bgra: Vec::new(),
-            });
-            entry.width = width;
-            entry.height = height;
-            entry.pts_us = monotonic_us();
-            entry.bgra.resize((width * height * 4) as usize, 0);
-            entry.bgra.copy_from_slice(bgra);
-        }
         if width == 0 || height == 0 {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        pacer.push(convert_frame(width, height, bgra));
+        let frame = convert_frame(width, height, bgra);
+        // Stash the newest frame's I420 planes for the preview thread
+        // (skipped when no preview is subscribed — 1080p planes are
+        // ~2.25 MB, a third of the old BGRA copy). The stash write is a
+        // brief memcpy under the lock; the emitter copies out the same way,
+        // so neither side ever holds the lock for a scale or convert.
+        if PREVIEW_CALLBACK.load_full().is_some()
+            && let Ok(mut slot) = PREVIEW_I420.lock()
+        {
+            let entry = slot.get_or_insert_with(|| PreviewI420 {
+                width,
+                height,
+                pts_us: 0,
+                planes: Vec::new(),
+            });
+            entry.width = width;
+            entry.height = height;
+            entry.pts_us = monotonic_us();
+            let y_len = (width * height) as usize;
+            let uv_len = y_len / 4;
+            entry.planes.resize(y_len + 2 * uv_len, 0);
+            let (plane_y, plane_u, plane_v) = frame.buffer.data();
+            entry.planes[..y_len].copy_from_slice(plane_y);
+            entry.planes[y_len..y_len + uv_len].copy_from_slice(plane_u);
+            entry.planes[y_len + uv_len..].copy_from_slice(plane_v);
+        }
+        pacer.push(frame);
     })
 }
 
@@ -747,7 +740,7 @@ fn run_capture(
             .name("preview-emitter".into())
             .spawn(move || {
                 let mut preview_bufs = PreviewScaleBufs {
-                    scaled: Vec::new(),
+                    planes: Vec::new(),
                     out: Vec::new(),
                 };
                 let mut last_preview_generation = 0u64;
@@ -1171,11 +1164,12 @@ mod probe {
         assert!(first_frame.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 
-    /// The preview BGRA downscale keeps the dominant colors intact: red top
-    /// half, blue bottom half. Pins the bilinear scaler's channel handling
-    /// (a swapped channel order would turn the blocks cyan/magenta).
+    /// The preview pipeline (I420 stash → libyuv scale → BGRA payload)
+    /// keeps the dominant colors intact: red top half, blue bottom half.
+    /// Pins the channel handling (a swapped order would turn the blocks
+    /// cyan/magenta).
     #[test]
-    fn scale_bgra_keeps_dominant_colors() {
+    fn i420_preview_path_keeps_dominant_colors() {
         const W: u32 = 128;
         const H: u32 = 96;
         let mut bgra = vec![0u8; (W * H * 4) as usize];
@@ -1187,9 +1181,43 @@ mod probe {
             }
         }
 
-        let mut dst = Vec::new();
-        scale_bgra_bilinear(&bgra, W, H, W / 2, H / 2, &mut dst);
-        assert_eq!(dst.len(), (W / 2 * H / 2 * 4) as usize);
+        let mut src = I420Buffer::new(W, H);
+        {
+            let (stride_y, stride_u, stride_v) = src.strides();
+            let (plane_y, plane_u, plane_v) = src.data_mut();
+            yuv_helper::argb_to_i420(
+                &bgra,
+                W * 4,
+                plane_y,
+                stride_y,
+                plane_u,
+                stride_u,
+                plane_v,
+                stride_v,
+                i32::try_from(W).unwrap_or(0),
+                i32::try_from(H).unwrap_or(0),
+            );
+        }
+        let scaled = src.scale(
+            i32::try_from(W / 2).unwrap_or(0),
+            i32::try_from(H / 2).unwrap_or(0),
+        );
+        let mut dst = vec![0u8; ((W / 2) * (H / 2) * 4) as usize];
+        let (plane_y, plane_u, plane_v) = scaled.data();
+        let (stride_y, stride_u, stride_v) = scaled.strides();
+        yuv_helper::i420_to_argb(
+            plane_y,
+            stride_y,
+            plane_u,
+            stride_u,
+            plane_v,
+            stride_v,
+            &mut dst,
+            (W / 2) * 4,
+            i32::try_from(W / 2).unwrap_or(0),
+            i32::try_from(H / 2).unwrap_or(0),
+        );
+
         let pixel_at = |x: usize, y: usize| {
             let i = (y * (W as usize / 2) + x) * 4;
             (dst[i], dst[i + 1], dst[i + 2])
@@ -1338,24 +1366,73 @@ mod probe {
         }
         report("raw byte copy", start.elapsed(), dst.len(), ITERATIONS);
 
-        // The production preview: bilinear BGRA scale to a fitted viewport
-        // (reused output buffer, exactly like the emitter).
-        let mut scaled = Vec::new();
-        let start = Instant::now();
-        for _ in 0..ITERATIONS {
-            scale_bgra_bilinear(
+        // The production preview: I420 stash copy → libyuv scale → BGRA
+        // payload (reused buffers, exactly like the emitter).
+        let mut src = I420Buffer::new(u32::try_from(W).unwrap_or(0), u32::try_from(H).unwrap_or(0));
+        {
+            let (stride_y, stride_u, stride_v) = src.strides();
+            let (plane_y, plane_u, plane_v) = src.data_mut();
+            yuv_helper::argb_to_i420(
                 &rgba,
-                u32::try_from(W).unwrap_or(0),
-                u32::try_from(H).unwrap_or(0),
-                u32::try_from(W / 2).unwrap_or(0),
-                u32::try_from(H / 2).unwrap_or(0),
-                &mut scaled,
+                u32::try_from(W * 4).unwrap_or(0),
+                plane_y,
+                stride_y,
+                plane_u,
+                stride_u,
+                plane_v,
+                stride_v,
+                i32::try_from(W).unwrap_or(0),
+                i32::try_from(H).unwrap_or(0),
             );
         }
+        let mut planes = Vec::new();
+        {
+            let y_len = W * H;
+            let uv_len = y_len / 4;
+            planes.resize(y_len + 2 * uv_len, 0);
+            let (plane_y, plane_u, plane_v) = src.data();
+            planes[..y_len].copy_from_slice(plane_y);
+            planes[y_len..y_len + uv_len].copy_from_slice(plane_u);
+            planes[y_len + uv_len..].copy_from_slice(plane_v);
+        }
+        let mut payload = Vec::new();
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            let mut src =
+                I420Buffer::new(u32::try_from(W).unwrap_or(0), u32::try_from(H).unwrap_or(0));
+            {
+                let y_len = W * H;
+                let uv_len = y_len / 4;
+                let (plane_y, plane_u, plane_v) = src.data_mut();
+                plane_y.copy_from_slice(&planes[..y_len]);
+                plane_u.copy_from_slice(&planes[y_len..y_len + uv_len]);
+                plane_v.copy_from_slice(&planes[y_len + uv_len..]);
+            }
+            let scaled = src.scale(
+                i32::try_from(W / 2).unwrap_or(0),
+                i32::try_from(H / 2).unwrap_or(0),
+            );
+            let (plane_y, plane_u, plane_v) = scaled.data();
+            let (stride_y, stride_u, stride_v) = scaled.strides();
+            payload.resize(16 + (W / 2) * (H / 2) * 4, 0);
+            yuv_helper::i420_to_argb(
+                plane_y,
+                stride_y,
+                plane_u,
+                stride_u,
+                plane_v,
+                stride_v,
+                &mut payload[16..],
+                u32::try_from(W / 2).unwrap_or(0) * 4,
+                i32::try_from(W / 2).unwrap_or(0),
+                i32::try_from(H / 2).unwrap_or(0),
+            );
+            std::hint::black_box(&payload);
+        }
         report(
-            "bgra bilinear 640x360 -> 320x180",
+            "i420 scale+convert 640x360 -> 320x180",
             start.elapsed(),
-            scaled.len(),
+            payload.len(),
             ITERATIONS,
         );
     }

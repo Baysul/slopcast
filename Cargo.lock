@@ -3156,6 +3156,7 @@ dependencies = [
  "crossbeam-queue",
  "futures-util",
  "libc",
+ "log",
  "pipewire",
  "windows 0.62.2",
  "windows-core 0.62.2",
