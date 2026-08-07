@@ -1298,6 +1298,77 @@ mod probe {
         );
     }
 
+    /// The preview pipeline must preserve horizontal orientation: a mirror
+    /// anywhere in convert → stash → scale → payload would swap left and
+    /// right halves. (The renderer samples mirrored bar positions in e2e, but
+    /// the conversion layer is the unit-testable boundary — a flip here would
+    /// ship to the spectator too.)
+    #[test]
+    fn i420_preview_path_preserves_horizontal_orientation() {
+        const W: u32 = 128;
+        const H: u32 = 96;
+        let mut bgra = vec![0u8; (W * H * 4) as usize];
+        for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
+            if i % (W as usize) < (W as usize) / 2 {
+                pixel.copy_from_slice(&[0, 0, 255, 255]); // BGRA: red — left half
+            } else {
+                pixel.copy_from_slice(&[255, 0, 0, 255]); // BGRA: blue — right half
+            }
+        }
+
+        let mut src = I420Buffer::new(W, H);
+        {
+            let (stride_y, stride_u, stride_v) = src.strides();
+            let (plane_y, plane_u, plane_v) = src.data_mut();
+            yuv_helper::argb_to_i420(
+                &bgra,
+                W * 4,
+                plane_y,
+                stride_y,
+                plane_u,
+                stride_u,
+                plane_v,
+                stride_v,
+                i32::try_from(W).unwrap_or(0),
+                i32::try_from(H).unwrap_or(0),
+            );
+        }
+        let scaled = src.scale(
+            i32::try_from(W / 2).unwrap_or(0),
+            i32::try_from(H / 2).unwrap_or(0),
+        );
+        let mut dst = vec![0u8; ((W / 2) * (H / 2) * 4) as usize];
+        let (plane_y, plane_u, plane_v) = scaled.data();
+        let (stride_y, stride_u, stride_v) = scaled.strides();
+        yuv_helper::i420_to_argb(
+            plane_y,
+            stride_y,
+            plane_u,
+            stride_u,
+            plane_v,
+            stride_v,
+            &mut dst,
+            (W / 2) * 4,
+            i32::try_from(W / 2).unwrap_or(0),
+            i32::try_from(H / 2).unwrap_or(0),
+        );
+
+        let pixel_at = |x: usize, y: usize| {
+            let i = (y * (W as usize / 2) + x) * 4;
+            (dst[i], dst[i + 1], dst[i + 2])
+        };
+        let (b, g, r) = pixel_at((W / 8) as usize, (H / 4) as usize);
+        assert!(
+            r > 200 && g < 80 && b < 80,
+            "left half must stay red (no horizontal flip), got ({r},{g},{b})"
+        );
+        let (b, g, r) = pixel_at((3 * W / 8) as usize, (H / 4) as usize);
+        assert!(
+            b > 200 && r < 80 && g < 80,
+            "right half must stay blue (no horizontal flip), got ({r},{g},{b})"
+        );
+    }
+
     /// The stash → rebuild path must round-trip odd dimensions exactly: the
     /// chroma planes hold `ceil(w/2) × ceil(h/2)` samples, more than the
     /// `w*h/4` arithmetic (mid-resize frames, e.g. 1280×693 — sizing by
