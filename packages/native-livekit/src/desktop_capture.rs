@@ -772,6 +772,16 @@ fn run_capture(
             }
         };
     let mut next_delivery_at = Instant::now();
+    // The last frame actually pushed to the video source. When the pacer is
+    // empty on a delivery tick (the portal capture is event-driven — KWin
+    // records a frame only when the compositor renders or the cursor moves,
+    // so a low-activity screen delivers far fewer frames than the refresh
+    // rate), it is re-pushed with a fresh timestamp so the RTP cadence stays
+    // even instead of stalling: the encoder compresses the duplicates to
+    // near-nothing and the receiver never sees a gap. This mirrors the WGC
+    // engine, whose capturer already re-delivers the last frame on static
+    // content.
+    let mut last_frame: Option<VideoFrame<I420Buffer>> = None;
 
     while !stop.load(Ordering::Relaxed) {
         // The compositor closes the portal session when the captured source
@@ -802,8 +812,8 @@ fn run_capture(
             if let Some(engine) = wgc.as_mut() {
                 engine.poll();
             }
-            if let Some(mut frame) = pacer.pop() {
-                match VIDEO_SOURCE.load_full() {
+            match pacer.pop() {
+                Some(mut frame) => match VIDEO_SOURCE.load_full() {
                     Some(source) => {
                         // libwebrtc's encoder has no explicit target size
                         // (VideoEncoding carries only bitrate/fps), so
@@ -814,29 +824,44 @@ fn run_capture(
                         // every frame to the configured dimensions, up or
                         // down (OBS-style canvas scaling). I420Buffer::scale
                         // is libwebrtc's libyuv-backed scaler.
-                        match SCALE_TARGET.load_full().map(|t| *t).filter(|target| {
-                            frame.buffer.width() != target.width
-                                || frame.buffer.height() != target.height
-                        }) {
-                            Some(target) => {
-                                let scaled = frame.buffer.scale(
-                                    i32::try_from(target.width).unwrap_or(0),
-                                    i32::try_from(target.height).unwrap_or(0),
-                                );
-                                let scaled_frame = VideoFrame {
-                                    rotation: VideoRotation::VideoRotation0,
-                                    timestamp_us: frame.timestamp_us,
-                                    frame_metadata: None,
-                                    buffer: scaled,
-                                };
-                                source.capture_frame(&scaled_frame);
-                            }
-                            None => source.capture_frame(&frame),
-                        }
+                        let push_frame =
+                            match SCALE_TARGET.load_full().map(|t| *t).filter(|target| {
+                                frame.buffer.width() != target.width
+                                    || frame.buffer.height() != target.height
+                            }) {
+                                Some(target) => {
+                                    let scaled = frame.buffer.scale(
+                                        i32::try_from(target.width).unwrap_or(0),
+                                        i32::try_from(target.height).unwrap_or(0),
+                                    );
+                                    VideoFrame {
+                                        rotation: VideoRotation::VideoRotation0,
+                                        timestamp_us: frame.timestamp_us,
+                                        frame_metadata: None,
+                                        buffer: scaled,
+                                    }
+                                }
+                                None => frame,
+                            };
+                        source.capture_frame(&push_frame);
+                        last_frame = Some(push_frame);
                         STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
                     }
                     None => {
                         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+                None => {
+                    // Keepalive: an empty pacer usually means the compositor
+                    // simply had nothing to record, not that delivery should
+                    // stop. Re-push the last frame — the same immutable
+                    // buffer, timestamp refreshed — so arrival pacing (and
+                    // therefore the receiver's RTP cadence) stays even.
+                    if let Some(source) = VIDEO_SOURCE.load_full()
+                        && let Some(last) = last_frame.as_mut()
+                    {
+                        last.timestamp_us = monotonic_us();
+                        source.capture_frame(last);
                     }
                 }
             }
