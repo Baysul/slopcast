@@ -283,7 +283,19 @@ fn stop_audio_ring_internal(guard: &mut Option<AudioRingSession>) {
         session.stop.store(true, Ordering::Relaxed);
         if let Some(join) = session.worker.take() {
             join.thread().unpark();
-            let _ = join.join();
+            // Reap the worker on a detached thread: it synchronously runs
+            // the user PCM callback, and joining it while
+            // `AUDIO_RING_LIFECYCLE` (and `CAPTURE_STATE` above it) is held
+            // would deadlock the moment that callback ever re-enters
+            // capture control. Same detached-reaper pattern as the capture
+            // and metering workers. The worker drains and exits on its stop
+            // flag; `AUDIO_PRODUCER` is already swapped to `None`, so no new
+            // chunks can arrive.
+            let _ = thread::Builder::new()
+                .name("audio-ring-reaper".into())
+                .spawn(move || {
+                    let _ = join.join();
+                });
         }
     }
 
