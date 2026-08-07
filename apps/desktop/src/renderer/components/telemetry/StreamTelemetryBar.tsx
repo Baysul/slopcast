@@ -1,6 +1,6 @@
 import { fmtBitrate, fmtLoss } from '@slopcast/shared-types';
 import { TriangleAlert } from 'lucide-react';
-import type React from 'react';
+import React from 'react';
 
 export interface StreamTelemetry {
   live: boolean;
@@ -145,7 +145,11 @@ const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemet
   );
 };
 
-export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
+// Memoized: rendered inside the memoized `ScreensharePreview`, which
+// re-renders at capture rate (fresh `previewFrame` prop every frame) —
+// without the memo the sparkline rebuilt its SVG strings 60×/s even though
+// `telemetry` only changes once per second.
+export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = React.memo(({ telemetry: t }) => {
   const fpsDegrade = t.frameRate != null && t.targetFrameRate != null && t.frameRate < t.targetFrameRate * 0.75;
   const lossDegrade = t.packetLossPct != null && t.packetLossPct > 1;
   let fpsValue = '—';
@@ -224,4 +228,4 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = ({ t
       </div>
     </div>
   );
-};
+});

@@ -51,7 +51,11 @@ function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
     return null;
   }
   if (width === 0 || height === 0) return null;
-  return { ptsUs, width, height, data: payload.slice(16) };
+  // Zero-copy view over the payload (header stripped): the IPC buffer is
+  // fresh per message and never reused, so the view is safe. The old
+  // `payload.slice(16)` copied the whole frame — at 60 fps that was
+  // 122-514 MB/s of main-thread allocation + GC.
+  return { ptsUs, width, height, data: new Uint8Array(payload, 16) };
 }
 
 // Debug aid: print every live PipeWire audio stream node's full property
@@ -382,7 +386,12 @@ export const PresenterApp: React.FC = () => {
     setCaptureStage('live');
     setTelemetry({ ...idleTelemetry(), live: true });
     startTelemetryPolling(getTelemetryInputs);
-    void logLiveAudioSources();
+    // Debug aid for auto-resolve misses: a full PipeWire enumeration +
+    // per-node JSON dump on every go-live. Dev and e2e builds only — in
+    // production this stalls the main thread and floods the console.
+    if (import.meta.env.DEV || import.meta.env.VITE_E2E === '1') {
+      void logLiveAudioSources();
+    }
     void logSelectedApplication(null);
   }, [
     resolveAudioTarget,

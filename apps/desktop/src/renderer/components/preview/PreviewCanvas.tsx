@@ -158,11 +158,12 @@ class WebGl2Preview {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       // The raw bytes are BGRA; they are uploaded labeled as RGBA and the
       // fragment shader swaps the channels at sample time (see PREVIEW_FRAG)
-      // — zero-copy, no per-frame JS swizzle.
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(data));
+      // — zero-copy, no per-frame JS swizzle. `frame.data` is already a
+      // Uint8Array view; wrapping it again would copy.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
     } else {
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(data));
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
     }
   }
 
@@ -217,7 +218,7 @@ class WebGpuPreview {
       this.rebuildPipeline();
     }
     if (!this.texture) return;
-    device.queue.writeTexture({ texture: this.texture }, new Uint8Array(frame.data), { bytesPerRow: frame.width * 4 }, [
+    device.queue.writeTexture({ texture: this.texture }, frame.data, { bytesPerRow: frame.width * 4 }, [
       frame.width,
       frame.height,
     ]);
@@ -304,7 +305,7 @@ class WebGpuPreview {
 function drawCanvas2d(ctx: CanvasRenderingContext2D, frame: PreviewFrame): void {
   const { width, height, data } = frame;
   const image = ctx.createImageData(width, height);
-  const pixels = new Uint8Array(data);
+  const pixels = data;
   const out = image.data;
   for (let i = 0; i < pixels.length; i += 4) {
     out[i] = pixels[i + 2]; // R

@@ -81,7 +81,10 @@ export interface DesktopCaptureConfig {
 /// channel header (`u64 pts_us`, `u32 width`, `u32 height`) is already
 /// stripped by the channel callback.
 export interface PreviewFrame {
-  data: ArrayBuffer;
+  /** Zero-copy view over the channel payload (the 16-byte header stripped);
+   * the IPC buffer is fresh per message, so the view stays valid for the
+   * lifetime of this frame object. */
+  data: Uint8Array;
   ptsUs: number;
   width: number;
   height: number;
