@@ -270,6 +270,12 @@ pub fn disconnect_livekit_room() -> Result<(), String> {
         let _ = state.stop.send(());
     }
     *guard = None;
+    // Release the room lock before the capture teardown below: `feed_pcm`
+    // (the audio-callback path) and every room command block on `LIVEKIT`,
+    // and `desktop_capture::stop()` joins the capture thread (~100-300 ms).
+    // Holding the lock across that join stalled the audio callback for the
+    // whole teardown on every room recreate.
+    drop(guard);
     desktop_capture::stop();
     ROOM_CONNECTED.store(false, Ordering::SeqCst);
     SPECTATOR_COUNT.store(0, Ordering::Relaxed);

@@ -1016,11 +1016,18 @@ fn start_with(source: CaptureSource) -> Result<bool, String> {
         }
         Ok(Err(reason)) => {
             stop.store(true, Ordering::Relaxed);
+            // Release the state lock before joining: the error-path join is
+            // unbounded (the portal handshake blocks in zbus and never polls
+            // `stop`), and `stop()`/`disconnect_livekit_room` block on this
+            // lock — a hung portal would otherwise freeze them (and, via
+            // `LIVEKIT`, the audio callback) permanently.
+            drop(guard);
             let _ = handle.join();
             Err(reason)
         }
         Err(_) => {
             stop.store(true, Ordering::Relaxed);
+            drop(guard);
             let _ = handle.join();
             Err("Timed out starting desktop capture".into())
         }
