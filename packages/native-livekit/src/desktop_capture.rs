@@ -266,6 +266,11 @@ struct PreviewScaleBufs {
     planes: Vec<u8>,
     /// Final channel payload: 16-byte header + the fitted BGRA pixels.
     out: Vec<u8>,
+    /// Reusable I420 frame rebuilt from `planes`; recreated only when the
+    /// source dimensions change. The old per-emission `I420Buffer::new`
+    /// allocated a full-source-res buffer (≈2.25 MB @1080p, ≈12 MB @4K)
+    /// on every emitted frame.
+    src: Option<I420Buffer>,
 }
 
 /// The newest captured I420 frame, stashed by the capture callback for the
@@ -349,16 +354,35 @@ fn emit_preview_frame(
     if width == 0 || height == 0 {
         return false;
     }
-    let (out_w, out_h) = PREVIEW_VIEWPORT
+    // Emit only when the renderer has reported a viewport: with no card
+    // mounted (or a zero-sized one) nobody can display the frame, and
+    // falling back to the source resolution shipped full-res frames into
+    // the channel — 4K at 60 fps ≈ 33 MB/frame into Tauri's unbounded
+    // channel queue, which a stalled webview never drains (OOM-scale).
+    let Some((out_w, out_h)) = PREVIEW_VIEWPORT
         .load_full()
         .and_then(|vp| fit_preview_size(width, height, vp.0, vp.1))
-        .unwrap_or((width, height));
+    else {
+        return false;
+    };
 
     // Rebuild the I420 frame from the stashed planes and scale it with
     // libyuv (SIMD), then convert to the BGRA the renderer's texture
     // expects — same colors, a fraction of the cost of the old scalar
-    // bilinear pass, and none of it under the shared lock.
-    let mut src = I420Buffer::new(width, height);
+    // bilinear pass, and none of it under the shared lock. The source
+    // buffer is reused across emissions and recreated only on a source
+    // dimension change.
+    if bufs
+        .src
+        .as_ref()
+        .is_none_or(|s| s.width() != width || s.height() != height)
+    {
+        bufs.src = Some(I420Buffer::new(width, height));
+    }
+    let src = bufs
+        .src
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("src was just assigned above"));
     {
         // Same allocator and (width, height) as the stash's source ⇒ the
         // reconstructed slices match its lengths; clamp + zero-fill anyway,
@@ -774,6 +798,7 @@ fn run_capture(
                 let mut preview_bufs = PreviewScaleBufs {
                     planes: Vec::new(),
                     out: Vec::new(),
+                    src: None,
                 };
                 let mut last_preview_generation = 0u64;
                 let mut next_preview_at = Instant::now();
@@ -1319,7 +1344,7 @@ mod probe {
     }
 
     /// Headless probe of the whole synthetic pipeline: frames must flow
-    /// through conversion and the JPEG preview emitter must fire even with
+    /// through conversion and the preview emitter must fire even with
     /// no video track published. Run with:
     ///
     /// ```sh
@@ -1335,6 +1360,14 @@ mod probe {
             video_codec: None,
             max_bitrate: None,
         };
+        // The stash write and the emission are gated on a registered
+        // preview callback (the Tauri backend registers one in the app; a
+        // bare probe must do the same), and the emitter skips frames until
+        // a viewport is reported (no card = nothing to display, and
+        // full-res fallback emission was an OOM vector) — so the probe
+        // registers both, like the renderer does.
+        set_preview_callback(Box::new(|_bytes, _pts_us| {}));
+        set_preview_viewport(640, 360);
         let started = start_synthetic_capture(&config).unwrap_or_else(|e| panic!("start: {e}"));
         assert!(started);
         std::thread::sleep(Duration::from_millis(1500));

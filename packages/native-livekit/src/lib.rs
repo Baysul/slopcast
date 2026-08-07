@@ -462,8 +462,10 @@ pub fn set_preview_viewport(width: u32, height: u32) {
     desktop_capture::set_preview_viewport(width, height);
 }
 
-/// Clears the reported preview viewport; previews fall back to the source
-/// resolution until the renderer reports again.
+/// Clears the reported preview viewport; the emitter skips frames until the
+/// renderer reports a size again (no mounted preview card = nothing to
+/// display — full-source-resolution fallback emission was an OOM vector
+/// into the channel queue).
 pub fn clear_preview_viewport() {
     desktop_capture::clear_preview_viewport();
 }
@@ -606,7 +608,47 @@ async fn run_worker(
     ROOM_CONNECTED.store(true, Ordering::SeqCst);
 
     let samples_per_10ms = (SAMPLE_RATE / 100 * CHANNELS) as usize;
-    let mut buffer = VecDeque::new();
+
+    // PCM delivery runs as its own task on this current-thread runtime: the
+    // main loop must keep polling `pcm_rx` while a command handler awaits
+    // (publish/unpublish SDP+ICE negotiation, `get_stats`), or the 128-chunk
+    // channel fills in ~1.28 s and `feed_pcm` drops-newest — audible audio
+    // gaps during every go-live and encoder-settings change. The spawned
+    // task is polled by the executor whenever the main task awaits, so the
+    // audio path stays live across the whole select loop.
+    let audio_pump = {
+        let audio = audio.clone();
+        tokio::spawn(async move {
+            let mut buffer = VecDeque::new();
+            let max_backlog_samples = MAX_AUDIO_BACKLOG_MS * samples_per_10ms;
+            while let Some(pcm_chunk) = pcm_rx.recv().await {
+                buffer.extend(pcm_chunk);
+                // Drop-oldest backlog bound: a stalled upstream (ring,
+                // channel or worker) must never push audio content seconds
+                // behind the live video. Skipping the stale tail after a
+                // hiccup keeps audio near-live instead of lagging forever
+                // (the C++ audio source plays its buffer at real-time rate,
+                // so an unbound backlog would never drain faster than it
+                // grows).
+                while buffer.len() > max_backlog_samples {
+                    buffer.pop_front();
+                }
+                let mut chunks = Vec::new();
+                drain_pcm_chunks(&mut buffer, samples_per_10ms, &mut chunks);
+                for chunk in chunks {
+                    let frame = AudioFrame {
+                        data: chunk.into(),
+                        sample_rate: SAMPLE_RATE,
+                        num_channels: CHANNELS,
+                        samples_per_channel: SAMPLE_RATE / 100,
+                    };
+                    if let Err(e) = audio.capture_frame(&frame).await {
+                        log::error!("[livekit] audio capture_frame error: {e}");
+                    }
+                }
+            }
+        })
+    };
 
     loop {
         tokio::select! {
@@ -647,38 +689,12 @@ async fn run_worker(
                     );
                 }
             }
-            pcm = pcm_rx.recv() => {
-                let Some(pcm_chunk) = pcm else {
-                    break;
-                };
-                buffer.extend(pcm_chunk);
-                // Drop-oldest backlog bound: a stalled upstream (ring,
-                // channel or worker) must never push audio content seconds
-                // behind the live video. Skipping the stale tail after a
-                // hiccup keeps audio near-live instead of lagging forever
-                // (the C++ audio source plays its buffer at real-time rate,
-                // so an unbound backlog would never drain faster than it
-                // grows).
-                let max_backlog_samples = MAX_AUDIO_BACKLOG_MS * samples_per_10ms;
-                while buffer.len() > max_backlog_samples {
-                    buffer.pop_front();
-                }
-                let mut chunks = Vec::new();
-                drain_pcm_chunks(&mut buffer, samples_per_10ms, &mut chunks);
-                for chunk in chunks {
-                    let frame = AudioFrame {
-                        data: chunk.into(),
-                        sample_rate: SAMPLE_RATE,
-                        num_channels: CHANNELS,
-                        samples_per_channel: SAMPLE_RATE / 100,
-                    };
-                    if let Err(e) = audio.capture_frame(&frame).await {
-                        log::error!("[livekit] audio capture_frame error: {e}");
-                    }
-                }
-            }
         }
     }
+
+    // The pump outlives the loop by design; dropping it with the runtime at
+    // worker exit flushes nothing pending (the channel senders are gone).
+    drop(audio_pump);
 
     handle_stop_video(&room).await;
 
