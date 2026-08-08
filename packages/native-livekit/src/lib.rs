@@ -49,17 +49,15 @@ pub struct CaptureConfig {
 #[serde(rename_all = "camelCase")]
 pub struct NativeTelemetry {
     pub video_codec: Option<String>,
-    /// The actual encoder libwebrtc used for the video track ("VAAPI H264
-    /// Encoder", "`OpenH264`", "NVENC…", `Media Foundation` "…", "libvpx", …).
-    /// Filled from the `encoderImplementation` outbound-rtp stat; `None`
-    /// while the value is not yet reported by the stack.
+    /// The actual encoder libwebrtc used for the video track, from the
+    /// `encoderImplementation` outbound-rtp stat; `None` until the stack
+    /// reports it.
     pub encoder_implementation: Option<String>,
     pub video_bytes_sent: Option<f64>,
     pub video_packets_sent: Option<f64>,
     pub video_packets_lost: Option<f64>,
-    /// `framesEncoded` from the outbound-rtp stat — m144 never increments
-    /// `framesSent` (dead member), so this is the advancing counter the
-    /// renderer derives fps from.
+    /// `framesEncoded` from the outbound-rtp stat (m144's `framesSent`
+    /// never increments); the renderer derives fps from this.
     pub video_frames_encoded: Option<f64>,
     pub video_width: Option<u32>,
     pub video_height: Option<u32>,
@@ -116,14 +114,10 @@ pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
         .collect()
 }
 
-/// Per-stage counters for the desktop capture pipeline, reset on every
-/// `startDesktopCapture`. `framesDequeued` counts frames received from the
-/// capturer; `framesPushed` counts those converted to I420 and delivered to
-/// the video track; `framesDropped` counts frames skipped while no track was
-/// active; `previewFramesSent` counts JPEG preview frames emitted via the
-/// preview callback (scaled to fit the renderer's preview card — OBS-style
-/// "scale to the window" — at the stream's framerate); `captureErrors`
-/// counts capturer-reported failures.
+/// Per-stage capture counters, reset on every `startDesktopCapture`.
+/// `previewFramesSent` counts preview frames scaled to the renderer's
+/// preview card (OBS-style "scale to the window") at the stream framerate;
+/// `captureErrors` counts capturer failures.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopCaptureStats {
@@ -153,25 +147,22 @@ struct NativeLiveKit {
     _join: std::thread::JoinHandle<()>,
 }
 
-/// Bounded PCM queue: ~1.28 s of 10 ms audio chunks. A full channel means
-/// WebRTC audio encoding is stalled; the newest chunk is dropped rather than
-/// letting memory grow without bound (same drop-newest policy as `audio_ring`).
+/// ~1.28 s of 10 ms chunks; full means WebRTC encoding is stalled, so the
+/// newest chunk is dropped (drop-newest, like `audio_ring`).
 const PCM_CHANNEL_CAPACITY: usize = 128;
 
 static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
 
-/// The worker's PCM sender, kept separately from `LIVEKIT` so the audio
-/// path (`feed_pcm`, on the audio-ring worker) never contends with
-/// `connect_livekit_room`'s long lock hold. Set once the worker starts,
-/// cleared on disconnect. `Sender` is `Clone` + `Send`, so handing out a
-/// clone under this tiny lock and sending after release is safe.
+/// Worker's PCM sender, kept under its own lock (not `LIVEKIT`): `feed_pcm`
+/// runs on the audio-ring worker and must never block on
+/// `connect_livekit_room`'s long lock hold — that was the original deadlock.
 static PCM_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>> = Mutex::new(None);
 
 static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
 static SPECTATOR_COUNT: AtomicU32 = AtomicU32::new(0);
 static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// The published video track's source; the desktop capturer feeds it frames.
-/// `None` while no track is active — capture frames are dropped then.
+/// `None` while no track is active.
 pub(crate) static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
 
 // The bundled libwebrtc statically links hidden-weak `pw_*` dlopen shims
@@ -199,7 +190,6 @@ pub fn arm_pipewire_shims() {
     unsafe { webrtc_initialize_pipewire(std::ptr::null_mut()) };
 }
 
-/// No-op on platforms without the libwebrtc `PipeWire` shims.
 #[cfg(not(target_os = "linux"))]
 pub fn arm_pipewire_shims() {}
 
@@ -273,8 +263,7 @@ pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Disconnects from the live room, stopping the video track and desktop
-/// capture, and tearing down the worker thread.
+/// Disconnects the room and tears down the worker thread.
 ///
 /// # Errors
 ///
@@ -408,15 +397,12 @@ pub fn start_desktop_capture() -> Result<bool, String> {
 }
 
 /// Starts the WGC desktop capturer (Windows-only) for the source the
-/// renderer's picker selected. Returns once the capture session is running;
-/// frames flow from the first paced poll, and the existing preview → go-live
-/// flow proceeds unchanged.
+/// renderer's picker selected.
 ///
 /// # Errors
 ///
-/// Returns an error if a capture session is already active, the thread
-/// cannot be spawned, or the capturer fails to initialize within five
-/// seconds.
+/// Returns an error if a capture session is already active or the capturer
+/// fails to initialize within five seconds.
 #[cfg(target_os = "windows")]
 pub fn start_windows_capture(kind: WgcSourceKind, id: u64) -> Result<bool, String> {
     desktop_capture::start_windows(kind, id)
@@ -435,15 +421,15 @@ pub fn get_windows_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     wgc_capture::get_windows_capture_sources()
 }
 
-/// Stops the active desktop capture session (closing its portal stream).
+/// Stops the active desktop capture session.
 #[must_use]
 pub fn stop_desktop_capture() -> bool {
     desktop_capture::stop()
 }
 
-/// Starts the synthetic test-pattern capture used by the headless e2e and
-/// probes: generated BGRA frames feed the exact same conversion and publish
-/// path as the portal engine, with no picker and no Wayland requirement.
+/// Starts synthetic test-pattern capture (headless e2e / probes): generated
+/// BGRA frames feed the exact same conversion and publish path as the portal
+/// engine — no picker, no Wayland requirement.
 ///
 /// # Errors
 ///
@@ -460,14 +446,13 @@ pub fn is_desktop_capture_active() -> bool {
     desktop_capture::is_active()
 }
 
-/// Returns the current desktop capture stage counters.
 #[must_use]
 pub fn get_desktop_capture_stats() -> DesktopCaptureStats {
     desktop_capture::stats()
 }
 
 /// Registers the preview callback: the capture thread invokes it with
-/// JPEG bytes `(data, pts_us)` while a capture session is active. The
+/// BGRA frames `(data, pts_us)` while a capture session is active. The
 /// engine stays Tauri-unaware — the Tauri backend forwards the bytes to the
 /// renderer's preview channel. Replaces any previously registered callback.
 pub fn set_preview_callback(callback: Box<dyn Fn(Vec<u8>, i64) + Send + Sync>) {
@@ -491,7 +476,6 @@ pub fn set_capture_ended_callback(callback: Box<dyn Fn() + Send + Sync>) {
 /// Reports the renderer's preview viewport size in device pixels; the
 /// preview emitter scales every frame to fit inside it (OBS-style "scale to
 /// the window"), so the IPC channel only carries what the card can show.
-/// Replaces any previously reported size.
 pub fn set_preview_viewport(width: u32, height: u32) {
     desktop_capture::set_preview_viewport(width, height);
 }
@@ -579,11 +563,9 @@ fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
                             Some(f64::from(outbound.outbound.frames_encoded));
                         telemetry.video_width = Some(outbound.outbound.frame_width);
                         telemetry.video_height = Some(outbound.outbound.frame_height);
-                        // libwebrtc stats timestamps are microseconds since
-                        // the Unix epoch; the DTO contract is milliseconds —
-                        // the renderer computes deltas from this field, and a
-                        // µs delta divided as ms made every rate 1000x too
-                        // small (a healthy 28 Mbps stream read as 28 kbps).
+                        // libwebrtc timestamps are µs since epoch; the renderer computes
+                        // deltas from this ms field, and a µs delta read as ms made every
+                        // rate 1000x too small (28 Mbps read as 28 kbps).
                         telemetry.timestamp_ms = Some(outbound.rtc.timestamp as f64 / 1000.0);
                     }
                     "audio" => {
@@ -647,9 +629,7 @@ async fn run_worker(
     // main loop must keep polling `pcm_rx` while a command handler awaits
     // (publish/unpublish SDP+ICE negotiation, `get_stats`), or the 128-chunk
     // channel fills in ~1.28 s and `feed_pcm` drops-newest — audible audio
-    // gaps during every go-live and encoder-settings change. The spawned
-    // task is polled by the executor whenever the main task awaits, so the
-    // audio path stays live across the whole select loop.
+    // gaps during every go-live and encoder-settings change.
     let audio_pump = {
         let audio = audio.clone();
         tokio::spawn(async move {
@@ -726,8 +706,7 @@ async fn run_worker(
         }
     }
 
-    // The pump outlives the loop by design; dropping it with the runtime at
-    // worker exit flushes nothing pending (the channel senders are gone).
+    // Drop the pump; the channel senders are gone, so nothing further is delivered.
     drop(audio_pump);
 
     handle_stop_video(&room).await;

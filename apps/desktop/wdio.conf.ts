@@ -1,4 +1,4 @@
-// WebdriverIO config for the Tauri presenter e2e phase (MIGRATION §12).
+// WebdriverIO config for the Tauri presenter e2e phase.
 // Run by the harness (`apps/server/src/e2e-test.ts`) via
 // `pnpm --filter desktop exec wdio run ./wdio.conf.ts`; the `e2e` cargo
 // feature must be enabled in the binary under test

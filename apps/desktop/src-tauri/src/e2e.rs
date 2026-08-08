@@ -1,4 +1,4 @@
-//! E2E-only wiring (MIGRATION §12): registers the embedded `WebDriver` plugins
+//! E2E-only wiring: registers the embedded `WebDriver` plugins
 //! under the `e2e` cargo feature. Production builds exclude this module, so
 //! the unauthenticated localhost `WebDriver` surface never ships.
 

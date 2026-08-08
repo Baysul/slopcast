@@ -1,54 +1,27 @@
-//! Desktop video capture engine: libwebrtc `DesktopCapturer` — the `PipeWire`
-//! capturer (XDG portal picker) on Linux, WGC on Windows — plus a synthetic
-//! test pattern everywhere.
+//! Desktop video capture engine: libwebrtc `DesktopCapturer` — `PipeWire`
+//! (XDG portal picker) on Linux via `linux_capture`, WGC on Windows via
+//! `wgc_capture`, plus a synthetic test-pattern source everywhere. All arms
+//! feed the same packed-BGRA → I420 → paced-delivery → publish pipeline, so
+//! the whole encode → SFU → spectator chain is testable without a portal
+//! picker (the headless e2e uses `Synthetic`; macOS has no capture route).
 //!
-//! On Linux the engine is `linux_capture` (`LinuxDesktopCapture`): libwebrtc's
-//! own `PipeWire` capturer (`livekit::webrtc::desktop_capturer`, bundled in the
-//! m144 prebuilt), which replaces the former in-house portal + `pw_stream` +
-//! EGL engine (SCREEN-CAPTURE-INHOUSE.md, now superseded). The portal picker
-//! opens inside `start_capture`, so the session is reported "running" before
-//! the user answers it; frames flow once a source is picked. The portal's
-//! async `GDBus` handshake is dispatched on the capture thread (see
-//! `LinuxDesktopCapture`).
-//!
-//! On Windows the same pipeline is fed by `wgc_capture` (`WgcCapture`, a
-//! `CaptureSource::Wgc` arm): libwebrtc's `DesktopCapturer` with the WGC
-//! backend, reachable through the same bundled bindings, polled at the
-//! encoder target fps from the shared capture loop. The renderer's in-app
-//! picker supplies the `(kind, id)` selection — Windows has no system
-//! picker.
-//!
-//! A `Synthetic` source (used by the headless e2e, manual probes and the
-//! preview benchmark) feeds generated test-pattern BGRA frames through the
-//! exact same conversion and publish path, so the whole encode → SFU →
-//! spectator chain is testable without a portal picker. It is available on
-//! every platform, so the preview pipeline (convert → downscale → JPEG →
-//! channel) is fully exercised on Windows too; macOS remains video-less
-//! (`Ok(false)` from `start()` — no capture route).
-//!
-//! Preview transport: the capture engines deliver tightly packed BGRA (rows
-//! re-packed from the capturer's possibly padded stride). The preview thread
-//! keeps the newest I420 planes, scales them to fit the renderer's preview
-//! card — OBS-style "scale to the window" (aspect preserved, never upscaled)
-//! — and emits the BGRA payload at the stream's framerate, so the IPC
-//! channel only carries what the card can show. The Tauri backend forwards
-//! the bytes over a raw IPC channel (no JSON, no base64) with a 16-byte
-//! little-endian header (`u64 pts_us`, `u32 width`, `u32 height`) so the
-//! renderer can size its texture and measure end-to-end latency; the
-//! renderer uploads the BGRA pixels into a persistent GPU texture as-is (no
-//! per-frame decode, no channel shuffling).
+//! Preview transport: the preview thread keeps the newest I420 planes,
+//! scales them to the renderer's preview card (aspect preserved, never
+//! upscaled), and emits packed BGRA at the stream's framerate so the channel
+//! only carries what the card can show — with a 16-byte little-endian header
+//! (`u64 pts_us`, `u32 width`, `u32 height`) so the renderer can size its
+//! texture and measure end-to-end latency. The renderer uploads the pixels
+//! into a persistent GPU texture as-is.
 //!
 //! Threading: the capture thread owns the engine and the paced delivery
 //! loop; a dedicated preview thread emits frames at its own cadence (it only
-//! reads the newest stashed I420 planes under a brief lock), so the
-//! scale/copy work can never delay a delivery. `stop()` is polled by the
-//! loop itself, so it never waits on a user that ignores the picker.
+//! reads the newest stashed I420 planes under a brief lock), so scale/copy
+//! work can never delay a delivery. `stop()` is polled by the loop itself,
+//! so it never waits on a user that ignores the picker.
 
-/// Preview callback type: `(payload, pts_us)`, where `payload` is the raw
-/// channel frame — 16-byte little-endian header (`u64 pts_us`, `u32 width`,
-/// `u32 height`) followed by tightly packed BGRA rows. The engine stays
-/// Tauri-unaware — the Tauri backend forwards these bytes to the renderer's
-/// raw IPC channel.
+/// Preview callback type: `(payload, pts_us)` — `payload` is the raw
+/// channel frame: 16-byte little-endian header + tightly packed BGRA rows
+/// (see the module doc). The engine stays Tauri-unaware.
 type PreviewFrameCallback = Box<dyn Fn(Vec<u8>, i64) + Send + Sync>;
 
 /// Capture-ended callback type: invoked once when the portal session closes
@@ -87,7 +60,7 @@ pub(crate) static STATS_DEQUEUED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STATS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Capture session failures (portal errors, cancelled picker, engine start).
 pub(crate) static STATS_ERRORS: AtomicU64 = AtomicU64::new(0);
-/// JPEG preview frames handed to the preview callback.
+/// Preview frames handed to the preview callback.
 pub(crate) static STATS_PREVIEW_SENT: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STATS_LAST_WIDTH: AtomicU32 = AtomicU32::new(0);
 pub(crate) static STATS_LAST_HEIGHT: AtomicU32 = AtomicU32::new(0);
@@ -115,7 +88,7 @@ const PREVIEW_MAX_FPS: u32 = 60;
 /// adding more than a frame of latency; drop-oldest keeps content fresh.
 const PACER_CAPACITY: usize = 4;
 
-/// Preview callback: invoked with JPEG bytes while a capture session is
+/// Preview callback: invoked with a BGRA frame while a capture session is
 /// active. The engine stays Tauri-unaware — the Tauri backend wires this to
 /// the renderer's preview channel.
 static PREVIEW_CALLBACK: ArcSwapOption<PreviewFrameCallback> = ArcSwapOption::const_empty();
@@ -134,8 +107,8 @@ pub(crate) fn clear_preview_callback() {
     PREVIEW_CALLBACK.store(None);
 }
 
-/// Invoked once per capture when the portal session closes unexpectedly
-/// (the compositor ended the stream — e.g. the captured window was closed).
+/// The capture-ended callback; `CAPTURE_ENDED_EMITTED` fires it at most
+/// once per session.
 static CAPTURE_ENDED_CALLBACK: ArcSwapOption<CaptureEndedCallback> = ArcSwapOption::const_empty();
 /// Guards the ended callback so a session fires it exactly once.
 static CAPTURE_ENDED_EMITTED: AtomicBool = AtomicBool::new(false);
@@ -199,7 +172,7 @@ pub(crate) fn capture_poll_fps() -> u32 {
 /// The renderer's preview viewport size `(width, height)` in device pixels
 /// (the card the preview canvas is drawn into). The preview emitter scales
 /// every frame to fit inside it — OBS-style "scale to the window" — instead
-/// of shipping full-resolution JPEGs through the IPC channel.
+/// of shipping full-resolution frames through the IPC channel.
 static PREVIEW_VIEWPORT: ArcSwapOption<(u32, u32)> = ArcSwapOption::const_empty();
 
 /// Reports the preview viewport size; the renderer calls this on mount and
@@ -255,15 +228,12 @@ fn fit_preview_size(
 /// Scratch buffers reused across preview emissions (allocated once per
 /// session).
 struct PreviewScaleBufs {
-    /// I420 planes copied out of the stash under a brief lock (packed
-    /// Y, U, V with `y_len = w*h` and `uv_len = w*h/4` each).
+    /// I420 planes copied out of the stash under a brief lock.
     planes: Vec<u8>,
     /// Final channel payload: 16-byte header + the fitted BGRA pixels.
     out: Vec<u8>,
     /// Reusable I420 frame rebuilt from `planes`; recreated only when the
-    /// source dimensions change. The old per-emission `I420Buffer::new`
-    /// allocated a full-source-res buffer (≈2.25 MB @1080p, ≈12 MB @4K)
-    /// on every emitted frame.
+    /// source dimensions change.
     src: Option<I420Buffer>,
 }
 
@@ -309,9 +279,6 @@ fn emit_preview_frame(
     // Re-arm before processing, so a stale generation (no new captured
     // frame) can never stall the loop's wake-up: the deadline is always
     // in the future after this call.
-    // Pre-roll previews run at a fixed cadence; once a track is live the
-    // preview matches the stream fps (capped — a source faster than 60 fps
-    // would otherwise flood the renderer channel).
     let fps = SCALE_TARGET
         .load_full()
         .map_or(PREVIEW_FALLBACK_FPS, |target| {
@@ -360,12 +327,10 @@ fn emit_preview_frame(
         return false;
     };
 
-    // Rebuild the I420 frame from the stashed planes and scale it with
-    // libyuv (SIMD), then convert to the BGRA the renderer's texture
-    // expects — same colors, a fraction of the cost of the old scalar
-    // bilinear pass, and none of it under the shared lock. The source
-    // buffer is reused across emissions and recreated only on a source
-    // dimension change.
+    // Rebuild the I420 frame from the stashed planes and scale with libyuv,
+    // then convert to the BGRA the renderer expects — none of it under the
+    // shared lock. The source buffer is reused across emissions, recreated
+    // only on a source dimension change.
     if bufs
         .src
         .as_ref()
@@ -480,8 +445,7 @@ pub(crate) type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 /// asynchronously on its own queue (the cadence adapter posts them by
 /// value, `VideoStreamEncoder` encodes on the encoder thread), so a
 /// reused buffer would be torn or duplicated mid-read — blocky smearing
-/// during motion, independent of codec. The conversion is the only
-/// per-frame pass; the handed-out buffer is never written again.
+/// during motion, independent of codec.
 fn convert_frame(width: u32, height: u32, bgra: &[u8]) -> VideoFrame<I420Buffer> {
     let mut out = I420Buffer::new(width, height);
     let (stride_y, stride_u, stride_v) = out.strides();
@@ -652,8 +616,7 @@ fn run_capture(
     // Paced delivery: the source thread converts and queues frames; this
     // loop pops one frame per encoder-target interval, so the encoder
     // (and the RTP timestamps it derives from arrival time) sees even
-    // pacing even when the source delivers in bursts. The same queue is
-    // the preview's window onto the newest frame.
+    // pacing even when the source delivers in bursts.
     let pacer = Arc::new(FramePacer::new(PACER_CAPACITY));
     let on_frame = make_on_frame(Arc::clone(&pacer));
 
@@ -727,8 +690,8 @@ fn run_capture(
     }
 
     // The preview emitter runs on its own thread: it reads the newest
-    // queued frame and encodes a JPEG at its own cadence, so the
-    // (expensive) scale/ABGR/JPEG work can never delay a paced delivery
+    // queued frame and scales/copies it at its own cadence, so the
+    // (expensive) scale/pack work can never delay a paced delivery
     // in the loop below. A failed spawn only disables the preview.
     let preview_stop = Arc::clone(stop);
     let preview_handle =
@@ -808,15 +771,12 @@ fn run_capture(
             }
         };
     let mut next_delivery_at = Instant::now();
-    // The last frame actually pushed to the video source. When the pacer is
-    // empty on a delivery tick (the portal capture is event-driven — KWin
-    // records a frame only when the compositor renders or the cursor moves,
-    // so a low-activity screen delivers far fewer frames than the refresh
-    // rate), it is re-pushed with a fresh timestamp so the RTP cadence stays
-    // even instead of stalling: the encoder compresses the duplicates to
-    // near-nothing and the receiver never sees a gap. This mirrors the WGC
-    // engine, whose capturer already re-delivers the last frame on static
-    // content.
+    // When the pacer is empty on a delivery tick (the portal capture is
+    // event-driven — KWin records only on compositor render or cursor move),
+    // the last frame is re-pushed with a fresh timestamp so the RTP cadence
+    // stays even instead of stalling; the encoder compresses the duplicates
+    // to near-nothing. Mirrors the WGC engine, which re-delivers the last
+    // frame on static content.
     let mut last_frame: Option<VideoFrame<I420Buffer>> = None;
     // Rate-limits the slow-scale log below (at most one line per 3 s).
     // Initialized so the first slow scale always logs.
@@ -829,10 +789,9 @@ fn run_capture(
     let mut dbg_last_dequeued = STATS_DEQUEUED.load(Ordering::Relaxed);
 
     while !stop.load(Ordering::Relaxed) {
-        // Paced delivery tick: one queued frame per encoder-target
-        // interval (fallback cadence before a track is live), so RTP
-        // pacing at the receiver stays even. Both engines are polled on
-        // the same tick — they self-pace inside, so extra polls are no-ops.
+        // Delivery tick: one queued frame per encoder-target interval, so the
+        // receiver's RTP cadence stays even. Both engines are polled on the
+        // same tick — they self-pace inside, so extra polls are no-ops.
         let now = Instant::now();
         if now >= next_delivery_at {
             #[cfg(target_os = "windows")]
@@ -847,15 +806,10 @@ fn run_capture(
             match pacer.pop() {
                 Some(mut frame) => {
                     if let Some(source) = VIDEO_SOURCE.load_full() {
-                        // libwebrtc's encoder has no explicit target size
-                        // (VideoEncoding carries only bitrate/fps), so
-                        // without this a 4K source would be encoded at 4K
-                        // with the bitrate the user configured for 1080p —
-                        // and a smaller source would stream at its own
-                        // resolution instead of the configured one. Scale
-                        // every frame to the configured dimensions, up or
-                        // down (OBS-style canvas scaling). I420Buffer::scale
-                        // is libwebrtc's libyuv-backed scaler.
+                        // Scale to the configured target, up or down (OBS-style
+                        // canvas scaling): libwebrtc's encoder has no explicit
+                        // size, so a 4K source would otherwise stream at 4K with
+                        // the user's 1080p bitrate (see `ScaleTarget`).
                         let push_frame = match SCALE_TARGET.load_full().map(|t| *t).filter(
                             |target| {
                                 frame.buffer.width() != target.width
@@ -894,29 +848,22 @@ fn run_capture(
                         last_frame = Some(push_frame);
                         STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
                     } else {
-                        // Seed `last_frame` with the newest frame even
-                        // without a live track. Go Live swaps `VIDEO_SOURCE`
-                        // in while the pacer is usually empty (KWin records
-                        // only on damage or cursor move), and the keepalive
-                        // arm below needs a frame to re-push — without this
-                        // the stream stays empty until the source produces
-                        // motion, which in practice means waiting for audio
-                        // to start playing.
+                        // Seed `last_frame` even without a live track: Go Live
+                        // swaps `VIDEO_SOURCE` in while the pacer is usually
+                        // empty (KWin records only on damage), and the keepalive
+                        // arm needs a frame to re-push — without this the stream
+                        // stays empty until the source produces motion.
                         last_frame = Some(frame);
                         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 None => {
                     // Keepalive: an empty pacer usually means the compositor
-                    // simply had nothing to record, not that delivery should
-                    // stop. Both engines re-deliver their last frame while
-                    // running (WGC's frame pool, the `PipeWire` capturer's
-                    // `latest_available_frame_`), but a dropped corrupt
-                    // buffer or a gap between the picker answer and the
-                    // first frame can still leave a delivery tick empty —
-                    // re-push the last frame (same immutable buffer,
-                    // timestamp refreshed) so arrival pacing (and therefore
-                    // the receiver's RTP cadence) stays even.
+                    // had nothing to record, not that delivery should stop —
+                    // but a dropped corrupt buffer or the gap between picker
+                    // answer and first frame can still leave a tick empty.
+                    // Re-push the last frame (same immutable buffer, timestamp
+                    // refreshed) so arrival pacing stays even.
                     if let Some(source) = VIDEO_SOURCE.load_full()
                         && let Some(last) = last_frame.as_mut()
                     {
@@ -1100,12 +1047,7 @@ pub(crate) fn is_active() -> bool {
 }
 
 /// Per-stage counters for the desktop capture pipeline, reset on every
-/// `start_desktop_capture`. `frames_dequeued` counts frames received from
-/// the source; `frames_pushed` counts those converted to `I420` and
-/// delivered to the video track; `frames_dropped` counts frames skipped
-/// while no track was active; `preview_frames_sent` counts JPEG preview
-/// frames emitted via the preview callback; `capture_errors` counts
-/// portal/engine failures.
+/// `start_desktop_capture`.
 pub(crate) fn stats() -> crate::DesktopCaptureStats {
     crate::DesktopCaptureStats {
         frames_dequeued: STATS_DEQUEUED.load(Ordering::Relaxed).cast_signed(),
@@ -1468,9 +1410,9 @@ mod probe {
         assert_eq!((s.last_width, s.last_height), (1280, 720));
     }
 
-    /// Manual control probe: runs the whole in-house pipeline (portal →
-    /// `pw_stream` → EGL readback → conversion) through the public capture
-    /// API in a plain Rust process. Run with:
+    /// Manual control probe: runs the whole Linux capture engine (libwebrtc
+    /// `PipeWire` capturer → conversion → paced delivery) through the public
+    /// capture API in a plain Rust process. Run with:
     ///
     /// ```sh
     /// cargo test --release -p native-livekit -- --ignored capture_engine_probe --nocapture

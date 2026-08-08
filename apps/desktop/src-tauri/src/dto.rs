@@ -2,7 +2,7 @@
 //!
 //! `native-rust` types carry no serde derives; these mirrors restore the
 //! camelCase JSON shapes the preload bridge exposed, so the renderer-facing
-//! contract (MIGRATION.md §5) matches the old IPC surface exactly.
+//! contract matches the old IPC surface exactly.
 
 use std::collections::HashMap;
 

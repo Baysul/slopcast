@@ -51,7 +51,7 @@ export interface CaptureSourceSelection {
   id: number;
 }
 
-/// Live capture-stage state machine for the pre-roll flow (MIGRATION §9.2):
+/// Live capture-stage state machine for the pre-roll flow:
 /// preview capture runs before the track is published, and "Go Live" is the
 /// primary action while previewing.
 export type CaptureStage = 'idle' | 'previewing' | 'live';

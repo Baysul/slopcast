@@ -23,7 +23,7 @@ import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
 import './index.css';
 
-// E2E-only (MIGRATION §12): the WDIO frontend plugin snapshots the raw Tauri
+// E2E-only: the WDIO frontend plugin snapshots the raw Tauri
 // core (`window.__wdio_original_core__`) that `browser.tauri.execute` needs
 // and forwards console logs. Bundled in every build but only executed when
 // the e2e build sets VITE_E2E=1, so production runs never touch it.
@@ -459,7 +459,7 @@ export const PresenterApp: React.FC = () => {
           setCaptureStage('previewing');
           return;
         }
-        // Pre-roll unavailable (preview backend not merged yet, MIGRATION §9.2):
+        // Pre-roll unavailable (preview backend not merged yet):
         // degrade to the combined start.
         await startCombinedShare(source);
       } catch (err: unknown) {

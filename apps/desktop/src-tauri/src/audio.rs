@@ -15,10 +15,7 @@ use crate::dto::{AudioAppDto, AudioAppWaveDto, CaptureContextDto};
 /// `@slopcast/shared-types`).
 const WAVE_EPSILON: f64 = 0.002;
 
-/// Registers the PCM and waveform callbacks once at startup (MIGRATION §3.1):
-/// PCM flows straight into the native `LiveKit` publisher, and waveform
-/// snapshots are pushed to the renderer with the shared-epsilon dedup that
-/// `audio.ts` implemented in the main process.
+/// Registers the PCM and waveform callbacks once at startup.
 pub fn register_audio_callbacks(app: &tauri::AppHandle) {
     native_rust::set_audio_data_callback(Box::new(|pcm| {
         let _ = native_livekit::feed_pcm(pcm);
@@ -52,8 +49,7 @@ pub fn register_audio_callbacks(app: &tauri::AppHandle) {
     }));
 }
 
-/// Target for audio capture as sent by the renderer: a `PipeWire` node ID /
-/// Windows PID number (negative = system audio) or a textual label.
+/// Audio capture target as sent by the renderer: a numeric node id / PID, or a textual label.
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AudioTargetArg {
@@ -158,10 +154,9 @@ pub async fn stop_audio_metering() -> Result<bool, String> {
         .map_err(|e| format!("stop audio metering task failed: {e}"))?
 }
 
-/// Resolves the audio application for the captured source, Wayland cascade
-/// only (port of `resolveAudioForWayland` in `video.ts`): `PipeWire`
-/// introspection first (retried as xdg-desktop-portal may lag), then a
-/// name match, then the capture context.
+/// Resolves the audio application for the captured source (Wayland-only):
+/// `PipeWire` introspection first (retried as xdg-desktop-portal may lag),
+/// then a name match, then the capture context.
 ///
 /// # Errors
 ///
@@ -189,7 +184,7 @@ pub async fn resolve_audio_source(
             return Ok(Some(AudioAppDto::from(app_match)));
         }
 
-        // Layer 3: capture context (caches the introspection like video.ts).
+        // Layer 3: capture context.
         if let Ok(context) = native_rust::get_capture_context() {
             if let Some(cache) = app.try_state::<CaptureContextCache>() {
                 cache.update(CaptureContextDto::from(&context));

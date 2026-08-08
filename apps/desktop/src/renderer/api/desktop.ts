@@ -1,5 +1,5 @@
 // Typed Tauri command wrapper — the renderer's only backend entry point.
-// The surface is exactly the MIGRATION.md §5 table: every preload channel maps
+// The surface is exactly the old preload IPC: every channel maps
 // to a snake_case command (camelCase args), audio waves and preview frames come
 // in as events. Each call degrades gracefully: when the command is missing or
 // the backend isn't merged yet, it resolves to a typed fallback (false / null /

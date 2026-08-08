@@ -18,32 +18,25 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// ---------- Per-app audio waveform metering ----------
-
 const METER_WAVE_COLUMNS: usize = 96;
-/// ~85 ms of mono audio at 48 kHz: long enough for an organic, filled
-/// waveform strip rather than a jittery oscilloscope trace.
 const METER_WAVE_WINDOW: usize = 4096;
 const METER_WAVE_INTERVAL_MS: u64 = 33;
 const METER_DEFAULT_RATE: u32 = 48_000;
 const METER_DEFAULT_CHANNELS: u16 = 2;
-// A meter whose ring has received no samples for this long is considered
-// paused: its rolling window holds stale audio, so the pass publishes silence
-// instead of re-decimating old samples.
+// Ring silent this long → paused: publish silence instead of re-decimating
+// stale audio.
 const METER_STALE_MS: u64 = 150;
-// Mono sample queue between the process callback and the wave pass. Holds over
-// two worst-case pass gaps (~2 × 50 ms × 48 kHz); a stalled pass only drops
-// the newest samples, which the decimated waveform renders invisible.
+// Mono queue between the process callback and the wave pass. Over two worst-case
+// pass gaps, so a stalled pass only drops the newest samples (invisible after
+// decimation).
 const METER_RING_CAPACITY: usize = 4096;
 
 /// Per-app meter state shared between the worker thread and the JS thread.
-/// The process callback pushes mono samples into the lock-free ring and the
-/// wave pass drains it; `wave` is published to the JS thread under its mutex.
 struct MeterLevel {
     samples: ArrayQueue<f32>,
     rate: AtomicU32,
     channels: AtomicU16,
-    /// `METER_WAVE_COLUMNS` interleaved (min, max) amplitude pairs in [-1, 1].
+    /// 96 interleaved (min, max) pairs; amplitudes in [-1, 1].
     wave: Mutex<Vec<f32>>,
 }
 
@@ -63,10 +56,8 @@ struct MeterStream {
     _listener: StreamListener<Arc<MeterLevel>>,
     level: Arc<MeterLevel>,
     /// Rolling mono window drained from `level.samples`, capped at
-    /// `METER_WAVE_WINDOW`. Worker-thread only, so it is a plain `Vec`.
+    /// `METER_WAVE_WINDOW`. Worker-thread only, hence a plain `Vec`.
     window: Vec<f32>,
-    /// Pass timestamp of the last time new samples were drained from the ring.
-    /// Worker-thread only.
     last_feed: Instant,
 }
 
@@ -77,9 +68,8 @@ struct MeterSession {
 
 static METER_STATE: Mutex<Option<MeterSession>> = Mutex::new(None);
 
-/// Registered by the desktop backend; the meter worker pushes the waveform
-/// snapshot through this instead of the caller polling, which held the meter
-/// locks on the main thread every 33 ms.
+/// The meter worker pushes each waveform snapshot here; the renderer reads
+/// them via `get_audio_wave`.
 static AUDIO_WAVE_CALLBACK: ArcSwapOption<Box<dyn Fn(Vec<AudioAppWave>) + Send + Sync>> =
     ArcSwapOption::const_empty();
 
@@ -91,8 +81,8 @@ pub(crate) fn clear_wave_callback() {
     AUDIO_WAVE_CALLBACK.store(None);
 }
 
-/// Non-destructive snapshot of every meter's published wave; dropped (not
-/// queued) if the caller is busy, since the next 33 ms tick supersedes it.
+/// Non-destructive wave snapshot; dropped if the caller is busy — the next
+/// 33 ms tick supersedes it.
 fn invoke_wave_callback(waves: Vec<AudioAppWave>) {
     let guard = AUDIO_WAVE_CALLBACK.load();
     let Some(callback) = guard.as_ref() else {
@@ -115,8 +105,6 @@ fn wave_snapshot(meters: &HashMap<u32, MeterStream>) -> Vec<AudioAppWave> {
     out
 }
 
-/// `EnumFormat` param offering exactly F32LE with native rate/channels, so meter
-/// streams never force format conversion in the graph.
 fn meter_format_param() -> Option<Vec<u8>> {
     let mut audio_info = AudioInfoRaw::new();
     audio_info.set_format(AudioFormat::F32LE);
@@ -133,10 +121,8 @@ fn meter_format_param() -> Option<Vec<u8>> {
     Some(serialized.0.into_inner())
 }
 
-/// Downmixes the meter's latest buffer quantum to mono and pushes it into the
-/// lock-free ring. Pushing drops the newest samples when the ring is full (a
-/// stalled wave pass) rather than blocking; the decimated envelope renders
-/// such a few-ms gap invisible.
+/// Downmix this quantum to mono and queue it (drop-newest when full; the
+/// decimated envelope hides a few-ms gap).
 fn meter_process_quantum(stream: &pipewire::stream::Stream, level: &Arc<MeterLevel>) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -182,13 +168,8 @@ fn meter_process_quantum(stream: &pipewire::stream::Stream, level: &Arc<MeterLev
     }
 }
 
-/// Creates a capture stream tapped into the given application node. AUTOCONNECT
-/// links the app's output ports to the meter's input ports additively — the
-/// app's existing links (speaker playback) are never touched.
-///
-/// The process callback only downmixes each quantum to mono and queues it; all
-/// FFT work happens on the worker thread between loop iterations, so the audio
-/// path stays allocation-free.
+/// Tap the app's output with a capture stream. `AUTOCONNECT` links additively —
+/// the app's existing links to the speaker are never touched.
 fn meter_stream(
     core: &pipewire::core::CoreRc,
     node_id: u32,
@@ -256,10 +237,9 @@ fn meter_stream(
     })
 }
 
-/// Decimates a mono sample window into `METER_WAVE_COLUMNS` interleaved
-/// (min, max) amplitude pairs. Raw per-column extrema; silence renders as a
-/// flat line. NaN samples are treated as 0.0 — a NaN in any column would
-/// poison both the min and the max, and the JS side renders the pair directly.
+/// Decimate a mono window into 96 interleaved (min, max) pairs. NaN is
+/// treated as 0.0 — a NaN would poison both min and max, which the JS side
+/// renders directly.
 fn decimate_wave(window: &[f32], wave: &mut [f32]) {
     let len = window.len();
     let bucket = len.div_ceil(METER_WAVE_COLUMNS);
@@ -283,13 +263,10 @@ fn decimate_wave(window: &[f32], wave: &mut [f32]) {
     }
 }
 
-/// Decimates every meter's sample window into `METER_WAVE_COLUMNS` interleaved
-/// (min, max) amplitude pairs and publishes them. Runs on the worker thread
-/// only; raw per-column extrema need no smoothing — silence renders as a flat
-/// line, and overlapping windows (~60% at 48 kHz) keep motion continuous.
-/// Meters whose ring has been silent for `METER_STALE_MS` publish zeros: their
-/// window still holds pre-pause audio, and re-decimating it would pin the bars
-/// instead of letting them flatline.
+/// Decimate every meter's rolling window into 96 (min, max) pairs and publish
+/// them. Meters silent for `METER_STALE_MS` publish zeros — their window still
+/// holds pre-pause audio, so re-decimating would pin the bars instead of
+/// letting them flatline.
 fn run_wave_pass(meters: &mut HashMap<u32, MeterStream>) {
     for meter in meters.values_mut() {
         let level = &meter.level;
@@ -401,9 +378,8 @@ fn run_meter_session(stop: Arc<AtomicBool>, ready_tx: mpsc::Sender<Result<(), St
     let _ = ready_tx.send(Ok(()));
 
     while !stop.load(Ordering::SeqCst) {
-        // 50ms bound only limits idle sleeping; with live audio the loop wakes
-        // on stream buffer events as they arrive, so metering latency is
-        // unaffected while a tight timeout would just spin the thread.
+        // 50 ms idle bound: with live audio the loop wakes on buffer events, so
+        // metering latency is unaffected and a tighter timeout would just spin.
         pw.main_loop
             .loop_()
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
@@ -465,9 +441,8 @@ pub(crate) fn stop_audio_metering() -> bool {
     if let Some(session) = guard.take() {
         session.stop.store(true, Ordering::SeqCst);
         // Reap off-thread: the meter thread only checks the stop flag between
-        // 50 ms loop iterations, and a join here would stall the main process.
-        // A new metering session may start concurrently; the old one exits
-        // within one iteration and its streams are dropped with it.
+        // 50 ms loop iterations, so a join here would stall the main process.
+        // The streams are dropped with the session.
         let _ = thread::Builder::new()
             .name("pw-meter-reaper".into())
             .spawn(move || {

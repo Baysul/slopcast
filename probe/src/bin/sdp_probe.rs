@@ -25,10 +25,22 @@ fn main() {
         Ok("av1") => VideoCodec::AV1,
         _ => VideoCodec::VP8,
     };
-    let width: u32 = std::env::var("PROBE_WIDTH").ok().and_then(|v| v.parse().ok()).unwrap_or(1280);
-    let height: u32 = std::env::var("PROBE_HEIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(720);
-    let fps: u32 = std::env::var("PROBE_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
-    let bitrate: u64 = std::env::var("PROBE_BITRATE").ok().and_then(|v| v.parse().ok()).unwrap_or(80_000_000);
+    let width: u32 = std::env::var("PROBE_WIDTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1280);
+    let height: u32 = std::env::var("PROBE_HEIGHT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(720);
+    let fps: u32 = std::env::var("PROBE_FPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let bitrate: u64 = std::env::var("PROBE_BITRATE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(80_000_000);
 
     let token = livekit_api::access_token::AccessToken::with_api_key("devkey", "secret")
         .with_identity("sdp-probe")

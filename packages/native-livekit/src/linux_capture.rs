@@ -1,20 +1,15 @@
 //! Linux desktop capture engine: libwebrtc's `DesktopCapturer` with the
 //! `PipeWire` backend (XDG Desktop Portal `ScreenCast`), driven through the
 //! livekit crate's bundled bindings — the same `desktop_capturer` module the
-//! Windows arm uses for WGC, no forks, no patches.
-//!
-//! Why this instead of the in-house portal + `pw_stream` engine it replaces:
-//! the m144 prebuilt (`webrtc-51ef663`, webrtc-sys 0.3.41) ships the whole
-//! `PipeWire` capturer (`base_capturer_pipewire.cc` / `screencast_portal.cc` /
-//! `shared_screencast_stream.cc`), including the three `KWin` corrupt-buffer
-//! checks (header-meta CORRUPTED, chunk CORRUPTED, `MemFd` `size == 0`) and
-//! the cursor handling — ~3,000 lines of hand-rolled zbus/EGL code go away
-//! and the portal protocol maintenance moves upstream.
+//! Windows arm uses for WGC, no forks, no patches. It replaces the former
+//! in-house portal + `pw_stream` + EGL engine (see SCREEN-CAPTURE-INHOUSE.md):
+//! the m144 prebuilt ships the whole `PipeWire` capturer including the three
+//! `KWin` corrupt-buffer checks and cursor handling, so ~3,000 lines of
+//! hand-rolled zbus/EGL code and portal-protocol maintenance move upstream.
 //!
 //! Capture semantics (verified against `webrtc-sdk/webrtc@m144_release`):
 //! - `DesktopCaptureSourceType::Generic` → `kAnyScreenContent` (Screen |
-//!   Window bits) — the KDE picker shows monitors *and* windows, the same
-//!   UX the in-house engine had.
+//!   Window bits) — the KDE picker shows monitors *and* windows.
 //! - `get_source_list()` returns only a placeholder on Wayland; the real
 //!   selection happens in the portal picker opened by `start_capture(None)`.
 //! - `capture_frame()` is a non-blocking poll; the callback fires
@@ -40,10 +35,8 @@
 //!   source is picked. With it, the whole portal flow stays on the capture
 //!   thread and can never race `CaptureFrame`.
 //!
-//! The engine feeds the exact same conversion → preview → publish pipeline
-//! as the WGC arm: packed BGRA frames into the shared `FrameCallback`
-//! contract, so `convert_frame` (I420, fresh buffer per frame) and the paced
-//! delivery loop are reused unchanged.
+//! Feeds the shared packed-BGRA `FrameCallback` contract (see
+//! `desktop_capture`), reusing `convert_frame` and the paced delivery loop.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,9 +59,7 @@ use crate::desktop_capture::{
 /// target fps (or the fallback preview cadence before a track is live).
 pub(crate) struct LinuxDesktopCapture {
     capturer: DesktopCapturer,
-    /// Set on the first `ERROR_PERMANENT`; polling stops so the shared loop
-    /// keeps running (preview stays idle) until the renderer calls `stop()` —
-    /// the same lifecycle as a closed portal session.
+    /// Set on the first `ERROR_PERMANENT`; polling stops until `stop()`.
     ended: Arc<AtomicBool>,
     /// Next `capture_frame` tick; paced so the pipeline never sees more
     /// polls than the encoder target.
@@ -103,9 +94,7 @@ impl LinuxDesktopCapture {
                 // Wayland: the `PipeWire` capturer reports no real source list;
                 // the placeholder (or `None`) selects the portal picker.
                 let source = capturer.get_source_list().into_iter().next();
-                // Scratch buffer for stride-padded frames: `PipeWire` delivers
-                // row-strided BGRA, while the shared pipeline contract is
-                // tightly packed (stride == width * 4).
+                // Scratch buffer to re-pack stride-padded rows into the packed-BGRA contract.
                 let mut packed: Vec<u8> = Vec::new();
                 let mut on_frame = on_frame;
                 capturer.start_capture(source, move |result| match result {
@@ -177,23 +166,12 @@ impl LinuxDesktopCapture {
         }
         let glib_ctx = &self.glib_ctx;
         let capturer = &mut self.capturer;
-        // Dispatch pending portal GDBus callbacks (CreateSession /
-        // SelectSources / Start responses, the SessionClosed signal) on this
-        // thread before polling — the capturer's portal state machine
-        // advances only while its context is iterated.
-        //
-        // The context must stay pushed as this thread's thread-default while
-        // the callbacks run, not just while the capturer is created: GDBus
-        // method-call replies dispatch on the thread-default context of the
-        // *calling* thread (GTask captures it at call time), and signal
-        // subscriptions dispatch on the subscriber's thread-default. Without
-        // the push, every reply after proxy creation (CreateSession /
-        // SelectSources / Start / OpenPipeWireRemote) lands on the
-        // process-global context the GTK main thread runs, and the final
-        // reply handler executes the blocking PipeWire setup
-        // (`StartScreenCastStream`: EGL init, `pw_thread_loop_wait` core
-        // sync, stream connect) on the UI thread — the app freezes the
-        // moment the picker selection is confirmed.
+        // Dispatch pending portal GDBus callbacks before polling — the
+        // capturer's portal state machine advances only while its context is
+        // iterated. The context must stay pushed as thread-default while
+        // callbacks run (GDBus replies dispatch on the caller's
+        // thread-default context — see the module doc for the UI-thread
+        // freeze this prevents).
         let _ = glib_ctx.with_thread_default(|| {
             while glib_ctx.pending() {
                 glib_ctx.iteration(false);

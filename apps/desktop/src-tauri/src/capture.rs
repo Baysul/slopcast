@@ -122,9 +122,7 @@ fn start_real_capture(
 /// no queue — the renderer fetches at its own pace.
 pub static LATEST_FRAME: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
-/// Registers the preview callback: the capture thread invokes it with raw
-/// BGRA payloads at up to 60 fps and the latest payload is stored for the
-/// `frame://` protocol handler (the renderer fetches it directly).
+/// Registers the preview callback: stashes each raw BGRA payload in `LATEST_FRAME`.
 pub fn register_preview_frame_callback() {
     native_livekit::set_preview_callback(Box::new(move |bytes, _pts_us| {
         if let Ok(mut slot) = LATEST_FRAME.lock() {
@@ -156,7 +154,7 @@ pub fn register_capture_ended_callback(app: &AppHandle) {
 
 /// Reports the renderer's preview card size (device pixels) so the preview
 /// emitter scales frames to fit it — OBS-style "scale to the window" —
-/// instead of shipping full-resolution JPEGs through the channel.
+/// instead of shipping full-resolution frames through the channel.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_preview_viewport(width: u32, height: u32) -> bool {
@@ -173,8 +171,7 @@ pub fn clear_preview_viewport() -> bool {
     true
 }
 
-/// Result of `start_native_capture`: `{ ok, nodeId, videoEnabled }`
-/// (X11/macOS degrade to audio-only).
+/// Result of `start_native_capture` (X11/macOS degrade to audio-only).
 #[derive(Debug, Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureStartResult {
@@ -240,8 +237,7 @@ pub async fn update_native_video(config: CaptureConfig) -> Result<bool, String> 
     Ok(updated)
 }
 
-/// Stops everything: the video track, the desktop capture and the audio
-/// capture (MIGRATION §5: "track + capture + audio stop").
+/// Stops the video track, desktop capture and audio capture.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn stop_native_capture() -> bool {
@@ -250,7 +246,7 @@ pub async fn stop_native_capture() -> bool {
     native_rust::stop_audio_capture().unwrap_or(false)
 }
 
-/// Stops only the desktop capture session (closing its portal stream).
+/// Stops only the desktop capture session.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn stop_video_capture() -> bool {
@@ -309,9 +305,6 @@ pub async fn start_capture_preview(
             let saved = crate::settings::get_stream_settings(app)
                 .unwrap_or_else(|_| crate::settings::default_stream_settings());
             let (width, height) = resolution_dims(&saved.resolution);
-            // SAFETY-free by construction: the sanitizer bounds fps to
-            // [1, 240], so the f64 → u32 round-trip cannot truncate or
-            // lose the sign.
             #[allow(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
@@ -327,9 +320,9 @@ pub async fn start_capture_preview(
             };
             native_livekit::start_synthetic_capture(&config)?;
         } else {
-            // The real route ignores the encoder config — the WGC engine
-            // captures at the source's native resolution and the encoder
-            // target is applied when `go_live` publishes the track.
+            // The real route ignores the encoder config — capture runs at
+            // the source's native resolution; the encoder target is applied
+            // when `go_live` publishes the track.
             let config = native_livekit::CaptureConfig {
                 width: 0,
                 height: 0,
@@ -366,7 +359,7 @@ pub async fn start_synthetic_capture(config: CaptureConfig) -> CaptureStartResul
     .unwrap_or_else(|e| CaptureStartResult::failed(format!("synthetic capture task failed: {e}")))
 }
 
-/// Publishes the previewed capture (MIGRATION §9.1): when a pre-roll capture
+/// Publishes the previewed capture: when a pre-roll capture
 /// is already active the track is published against it (frames keep flowing
 /// to both the preview and the track); otherwise the combined start runs
 /// (publish + capture start, using the renderer's Windows source selection
@@ -422,10 +415,8 @@ pub async fn get_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     }
 }
 
-/// Benchmark-only (Phase 2 of the preview transport comparison): a channel
-/// the `bench_push_frames` command pushes raw payloads into, so the renderer
-/// can measure Tauri's raw channel throughput and latency in isolation —
-/// option 1's ~100 KB JPEG frames vs option 2's 921 KB RGBA frames.
+/// Benchmark-only: raw-payload channel for `bench_push_frames` throughput/latency
+/// measurements.
 static BENCH_CHANNEL: Mutex<Option<Channel<InvokeResponseBody>>> = Mutex::new(None);
 
 /// Registers the benchmark channel. Replaces any previously registered one.

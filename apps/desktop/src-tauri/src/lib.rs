@@ -1,8 +1,4 @@
 //! Tauri backend for the Slopcast desktop presenter.
-//!
-//! Every renderer IPC call maps to a command here (see MIGRATION.md §5);
-//! audio/video capture and the `LiveKit` room run entirely in Rust via the
-//! `native-rust` / `native-livekit` crates.
 
 pub mod audio;
 pub mod capture;
@@ -134,9 +130,6 @@ pub fn run() {
 
     let app = builder
         .setup(|app| {
-            // Dev builds load the vite dev server (`devUrl`); fall back to
-            // the embedded frontend when no server is running (standalone
-            // debug binaries).
             #[cfg(dev)]
             fallback_to_embedded_without_dev_server(app);
             // WebKitGTK ships with smooth scrolling disabled by default
@@ -221,7 +214,7 @@ pub fn run() {
 
     app.run(|_app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {
-            // Exit-time capture teardown (before-quit cleanup).
+            // Exit-time capture teardown.
             let _ = native_rust::stop_audio_capture();
             let _ = native_rust::stop_audio_metering();
             let _ = native_livekit::stop_video_track();

@@ -2,7 +2,7 @@ import { MonitorX } from 'lucide-react';
 import React from 'react';
 
 // Full-height gate rendered when the backend reports no video capture route
-// (MIGRATION §10.2): no share controls render at all, since the backend is
+// (gated behind the platform video check): no share controls render at all, since the backend is
 // in `unsupported` state and every capture command errors. On Linux that
 // means a non-Wayland session (X11); on other platforms (macOS) screen
 // capture is not implemented yet. Windows never renders this — WGC is a

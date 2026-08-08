@@ -24,17 +24,17 @@ An open-source, self-hostable screenshare ecosystem that gives presenters surgic
 
 ## Operating Context
 
-- **Presenter** launches the Electron Desktop App, creates a room, selects a window to share, and optionally overrides the auto-detected audio source. Audio capture happens through native OS audio APIs (PipeWire on Linux, WASAPI on Windows).
+- **Presenter** launches the Desktop App, creates a room, selects a window to share, and optionally overrides the auto-detected audio source. Audio capture happens through native OS audio APIs (PipeWire on Linux, WASAPI on Windows).
 - **Spectators** open a browser URL or enter a room code on the Web App. They are strictly read-only: they receive video + filtered audio tracks via WebRTC. No install, no account.
 - **Rooms are ephemeral.** Created on demand, identified by a unique room code, and closed when the presenter disconnects. No persistent storage of streams.
 - A **Signaling Server** manages WebSocket connections, room state, and WebRTC signalling between presenter and spectators.
 
 ## Capabilities and Constraints
 
-- **Desktop App (Electron):** Screenshare capture, per-window audio capture (virtual capture sink linked only to target app), room creation, WebRTC broadcasting to multiple spectators.
+- **Desktop App (Tauri 2):** Screenshare capture, per-window audio capture (virtual capture sink linked only to target app), room creation, WebRTC broadcasting to multiple spectators.
 - **Web App (React):** Room join by code/link, WebRTC video+audio reception, spectator-only enforcement (no publish capability), connection state management.
 - **Signaling Server (Express + ws):** Room creation with unique code, participant tracking, role assignment, WebRTC signaling relay (offers/answers/ICE candidates).
-- **Native Rust Engine (napi-rs):** PipeWire graph control for virtual capture sink creation and target-only audio linking on Linux. WASAPI loopback (Windows) is in progress.
+- **Native Rust Engine (`packages/native-rust` + `native-livekit`):** PipeWire graph control for virtual capture sink creation and target-only audio linking on Linux; WASAPI process loopback on Windows; LiveKit room + publishing.
 - **Key constraints:**
   - Web client cannot publish media streams (enforced by design and protocol).
   - Audio capture on Linux depends on PipeWire; KDE windows lack identity metadata for auto-detection.
@@ -50,7 +50,7 @@ An open-source, self-hostable screenshare ecosystem that gives presenters surgic
 
 ## Evidence on Hand
 
-- **Working code:** Linux PipeWire audio capture (`packages/native-rust/src/linux/`), WebRTC signaling (`apps/server/`), web spectator UI (`apps/web/`), desktop presenter UI (`apps/desktop/src/renderer/`), Electron main process (`apps/desktop/src/main/`).
+- **Working code:** Linux PipeWire audio capture (`packages/native-rust/src/linux/`), WebRTC signaling (`apps/server/`), web spectator UI (`apps/web/`), desktop presenter UI + Tauri backend (`apps/desktop/`).
 - **README/AGENTS.md:** Extensive product and architecture documentation.
 - **No design assets exist.** No DESIGN.md, no logo, no color tokens, no brand guidelines.
 

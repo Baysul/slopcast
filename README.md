@@ -14,7 +14,7 @@ Cross-platform room-based screen and audio sharing — present from the desktop 
 
 Slopcast is a room-based screen and audio sharing app. The presenter launches the desktop app, creates a room, and shares their screen together with exactly one application's audio. Spectators open the room link in any browser — no download or registration required.
 
-- **Desktop app (Linux, Windows)** — Electron + React UI with a Rust native engine for presenting.
+- **Desktop app (Linux, Windows)** — Tauri 2 + React UI with a Rust backend for presenting.
 - **Exclusive per-application audio capture** — PipeWire on Linux (Wayland/X11), WASAPI process loopback on Windows. Only the selected app's audio is streamed; no other sound ever leaks into the stream.
 - **Browser spectators** — a lightweight React web app, strictly receive-only. No capture APIs; spectator tokens cannot publish.
 - **LiveKit SFU** — the Selective Forwarding Unit fans out video and audio to any number of spectators without loading the presenter.
@@ -233,12 +233,12 @@ Well first of all, native Linux desktop support is a must. The app should:
 
 ```
 apps/
-├── desktop/     Electron + React + Rust (presenter)
+├── desktop/     Tauri 2 + React + Rust (presenter)
 ├── web/         React browser app (spectator-only)
 └── server/      Express + WebSocket signaling server
 packages/
-├── native-livekit/ napi-rs LiveKit Rust SDK bridge (main-process WebRTC publishing)
-├── native-rust/    napi-rs native engine (PipeWire/WASAPI audio capture, PipeWire video)
+├── native-livekit/ Rust LiveKit room + publishing crate (libwebrtc)
+├── native-rust/    Rust capture engine (PipeWire/WASAPI audio, video)
 └── shared-types/   Shared TypeScript interfaces
 ```
 
@@ -259,7 +259,7 @@ Room codes, ports, and LiveKit credentials are read from `slopcast.config.json` 
 | **Linux** | [PipeWire](https://pipewire.org/) (`libpipewire-0.3-dev`), `xdg-desktop-portal` (Wayland), `libx11-dev`, `pkg-config`, `clang` |
 | **Windows** | MSVC 2022+ (Build Tools for Visual Studio) |
 
-The native Rust module (`packages/native-rust`) is compiled via napi-rs and linked into the Electron main process. A C++20-capable toolchain is required (gcc >= 10, clang >= 10, or MSVC 2022+).
+The native Rust crates (`packages/native-rust`, `packages/native-livekit`) are linked directly into the Tauri backend (`apps/desktop/src-tauri`). A C++20-capable toolchain is required (gcc >= 10, clang >= 10, or MSVC 2022+) for libwebrtc.
 
 ### Server & Web
 

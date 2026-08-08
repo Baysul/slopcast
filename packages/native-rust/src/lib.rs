@@ -27,7 +27,7 @@ pub struct AudioApp {
 pub struct AudioAppWave {
     pub id: i32,
     /// 96 interleaved (min, max) amplitude pairs of the last ~85 ms of mono
-    /// audio, each value in [-1, 1].
+    /// audio, each in [-1, 1].
     pub columns: Vec<f64>,
 }
 
@@ -229,9 +229,7 @@ pub fn init_engine() -> String {
 /// Runs the global `PipeWire` library init exactly once on the main thread,
 /// before the event loop serves IPC. On Linux this is only safe after
 /// libwebrtc's `pw_*` dlopen shims are armed (`native_livekit::arm_pipewire_shims`)
-/// — its `PipeWire` video capture module keeps them in the link even though
-/// our code no longer references `DesktopCapturer`; see the Linux module.
-/// No-op on other platforms.
+/// — its `PipeWire` video capture module keeps them in the link.
 #[cfg(target_os = "linux")]
 pub fn ensure_pipewire_init() {
     platform::ensure_pipewire_init();
@@ -240,7 +238,7 @@ pub fn ensure_pipewire_init() {
 #[cfg(not(target_os = "linux"))]
 pub fn ensure_pipewire_init() {}
 
-/// Lists active audio applications visible to the native layer.
+/// Lists active audio applications.
 ///
 /// # Errors
 ///
@@ -260,11 +258,8 @@ pub fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, String> {
     platform::dump_audio_sources()
 }
 
-/// Starts exclusive audio capture for the given application.
-///
-/// `target` is an `AudioTarget` — a `PipeWire` node ID (Linux) or process ID
-/// (Windows), with `-1` selecting system audio and Linux values below `-1`
-/// selecting a process-id target (`-pid`), or a per-platform textual target.
+/// Starts exclusive audio capture for the given application. See
+/// [`AudioTarget`] for `target` semantics.
 ///
 /// # Errors
 ///
@@ -307,7 +302,7 @@ pub fn is_audio_capture_active() -> Result<bool, String> {
 ///
 /// # Errors
 ///
-/// Delegates to `list_audio_applications` and propagates its errors.
+/// Returns an error if audio enumeration fails.
 pub fn resolve_audio_app_by_name(label: &str) -> Result<Option<AudioApp>, String> {
     let apps = platform::list_audio_applications()?;
     Ok(find_best_audio_match(&apps, label))
@@ -346,11 +341,9 @@ pub fn stop_audio_metering() -> Result<bool, String> {
     Ok(platform::stop_audio_metering())
 }
 
-/// Registers a callback that receives the current waveform readings for all
-/// metered applications. Each entry carries 96 interleaved (min, max)
-/// amplitude pairs. The meter worker pushes at ~33 ms cadence; the callback is
-/// invoked non-blocking, so ticks are dropped (never queued) when the caller
-/// is busy.
+/// Registers a callback receiving waveform readings for all metered apps (see
+/// `AudioAppWave::columns` for the format). The meter worker pushes at ~33 ms
+/// cadence, non-blocking — ticks are dropped, never queued.
 pub fn set_wave_callback(callback: Box<dyn Fn(Vec<AudioAppWave>) + Send + Sync>) {
     platform::set_wave_callback(callback);
 }
@@ -387,7 +380,6 @@ pub fn get_audio_ring_stats() -> AudioRingStats {
     }
 }
 
-/// Resets telemetry counters for the audio ring buffer.
 pub fn reset_audio_ring_stats() {
     audio_ring::reset_audio_ring_stats();
 }

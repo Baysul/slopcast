@@ -1,4 +1,4 @@
-// WebdriverIO presenter-phase spec for the e2e harness (MIGRATION §12.2).
+// WebdriverIO presenter-phase spec for the e2e harness.
 //
 // Driven by `apps/server/src/e2e-test.ts` as a subprocess. Runs against the
 // Tauri app binary built with the `e2e` cargo feature; the embedded

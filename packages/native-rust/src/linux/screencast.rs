@@ -97,17 +97,14 @@ fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     if suffix.is_empty() || classify_kde_screencast(suffix) != KdeScreencast::Window {
         return None;
     }
-    // The suffix is the captured window's desktop file name; KWin reports the
-    // owning PID and window caption for it over D-Bus.
     let win = kwin::resolve_window(suffix)?;
     if let Ok(apps) = list_audio_applications()
         && let Some(app) = match_kde_window_to_apps(&apps, &win, suffix)
     {
         return Some(app);
     }
-    // Layer 5: the window's own process as a PID capture target — resolves
-    // apps with no active audio stream yet (e.g. Spotify while paused). The
-    // capture session links their audio the moment it starts playing.
+    // Layer 5: the window's own process as a PID target — captures apps with no
+    // active stream yet (e.g. Spotify while paused).
     window_pid_fallback(&win, suffix)
 }
 
@@ -160,7 +157,7 @@ fn match_kde_window_to_apps(
         }
     }
 
-    // Layer 2: Match by non-generic window process candidates.
+    // Layer 2: window-process candidates (comm / cmdline binary).
     let comm = std::fs::read_to_string(format!("/proc/{}/comm", win.pid)).ok();
     let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", win.pid)).ok();
     let mut candidates: Vec<String> = Vec::new();
@@ -197,7 +194,7 @@ fn match_kde_window_to_apps(
         return Some(app);
     }
 
-    // Layer 4: Match desktop file name suffix if not generic.
+    // Layer 4: desktop file name suffix.
     if !is_generic_launcher(suffix)
         && let Some(app) = crate::find_best_audio_match(apps, suffix)
     {
@@ -272,22 +269,19 @@ struct VideoScan {
     source_type: Option<&'static str>,
     media_name: Option<String>,
     video_node_count: u32,
-    /// Highest `object.serial` observed among screencast nodes — ensures the
-    /// active stream (most recently created) is chosen over lingering nodes.
+    /// Highest `object.serial` seen — serials order streams by creation time, so
+    /// this picks the active stream over lingering ones.
     highest_serial: u64,
-    /// `(object.serial, media.name)` per KDE screencast node — the serial
-    /// orders streams by creation time.
+    /// `(object.serial, media.name)` per KDE screencast node.
     kde_media_names: Vec<(u64, String)>,
     capture_names: Vec<String>,
     screencast_node_id: Option<u32>,
-    /// xdg-desktop-portal screencast metadata (`portal.screencast.*`) of the
-    /// captured window, read off the screencast video node.
+    /// xdg-desktop-portal metadata (`portal.screencast.*`) of the captured window.
     portal_props: Option<HashMap<String, String>>,
 }
 
 /// Collect only the xdg-desktop-portal metadata keys (`portal.screencast.*`)
-/// from the screencast video node's registry + info props — the portal's own
-/// record of the captured window, without dumping the whole `PipeWire` node.
+/// from the screencast video node's registry + info props.
 fn merge_portal_props(
     out: &mut Option<HashMap<String, String>>,
     registry: &HashMap<String, String>,
@@ -450,10 +444,7 @@ fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
             }
         }
 
-        // Resolve audio only for the active stream. If it returns None (the
-        // window could not be resolved, or it is not a capturable window),
-        // return None directly — do NOT loop through older lingering
-        // screencast streams (e.g. Steam/FFXIV).
+        // Resolve only the active stream; never fall through to older lingering ones.
         return resolve_kde_screencast_audio(active_mn);
     }
 
@@ -462,7 +453,7 @@ fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
         return None;
     }
 
-    // 3. For GNOME / XDG portal screencast streams, match against running audio apps.
+    // 3. GNOME / XDG portal streams: match the capture names against running apps.
     if let Ok(apps) = list_audio_applications()
         && let Some(app) = scan
             .capture_names
@@ -472,8 +463,7 @@ fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
         return Some(app);
     }
 
-    // 4. Portal window apps with no active audio stream yet: resolve the
-    // portal app id to a running process and target it by PID.
+    // 4. Portal app with no active stream: resolve its id to a running process.
     scan.capture_names.iter().find_map(|name| {
         let pid = resolve_pid_for_portal_app(name)?;
         let display = process_display_name(pid.cast_unsigned(), name);

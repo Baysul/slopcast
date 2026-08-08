@@ -54,7 +54,7 @@ pub fn get_spectator_count() -> u32 {
 }
 
 /// Collects the latest libwebrtc stats for the local published tracks; keeps
-/// the worker's 500 ms answer-timeout fallback (MIGRATION §8).
+/// the worker's 500 ms answer-timeout fallback.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_native_telemetry() -> NativeTelemetry {

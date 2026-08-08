@@ -6,7 +6,7 @@
  *   1. Parse slopcast.config.json for ports and endpoints
  *   2. Kill conflicting processes, spawn server + web dev servers
  *   3. Launch the Tauri presenter via WebdriverIO (embedded WebDriver):
- *      Wayland assertion, create room, preview + Go Live (MIGRATION §12)
+ *      Wayland assertion, create room, preview + Go Live
  *   4. Launch Chromium spectator: join room, verify video stream
  *   5. Diagnostic validation: console logs, GPU probe report, stream health
  *   6. Graceful cleanup with retry-on-failure logic
@@ -525,7 +525,7 @@ async function waitForPresenterPhase(wdioProc: ChildProcess, timeoutMs: number):
 }
 
 /// Runs the presenter phase as a WebdriverIO subprocess against the Tauri
-/// binary (embedded WebDriver, MIGRATION §12). The spec drives the UI,
+/// binary (embedded WebDriver). The spec drives the UI,
 /// samples telemetry and probes the GPU; the harness only orchestrates:
 /// spawn, poll `presenter-phase.json`, then hand the room over to the
 /// spectator phase. The spec's final test holds the session open until the

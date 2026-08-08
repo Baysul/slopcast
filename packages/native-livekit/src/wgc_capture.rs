@@ -31,11 +31,9 @@
 //!   `capture_frame()` — WGC is WinRT-based and the shim expects the thread
 //!   to already own an apartment.
 //!
-//! The engine feeds the exact same conversion → preview → publish pipeline
-//! as the Linux portal engine: packed BGRA frames into the shared
-//! `FrameCallback` contract, so `convert_frame` (I420) + the paced
-//! delivery loop (encoder-target scaling, `NativeVideoSource`) and the
-//! JPEG preview emitter are reused unchanged.
+//! Feeds the shared packed-BGRA `FrameCallback` contract (see
+//! `desktop_capture`), reusing `convert_frame`, the paced delivery loop
+//! and the preview emitter unchanged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -231,9 +229,8 @@ impl WgcCapture {
 
         let ended = Arc::new(AtomicBool::new(false));
         let ended_cb = Arc::clone(&ended);
-        // Scratch buffer for stride-padded frames: WGC rows can be padded to
-        // a D3D11 row pitch, while the shared pipeline contract is tightly
-        // packed (stride == width * 4).
+        // Scratch buffer to re-pack stride-padded rows into the packed-BGRA
+        // contract (WGC rows pad to a D3D11 row pitch).
         let mut packed: Vec<u8> = Vec::new();
         let mut on_frame = on_frame;
         capturer.start_capture(Some(source), move |result| match result {

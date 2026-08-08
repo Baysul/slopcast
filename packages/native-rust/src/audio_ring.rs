@@ -12,14 +12,12 @@ use std::time::Duration;
 /// hold in the first place).
 const AUDIO_QUEUE_CAPACITY: usize = 8;
 
-/// PCM format parameters: 48 kHz stereo 16-bit PCM (2 channels * 2 bytes/sample = 4 bytes/frame).
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_CHANNELS: u16 = 2;
 const DEFAULT_SAMPLE_BYTES: usize = 2; // i16
 pub const PCM_FRAME_SIZE: usize = (DEFAULT_CHANNELS as usize) * DEFAULT_SAMPLE_BYTES; // 4 bytes
 
-/// Default slot capacity (16 KiB = 16,384 bytes).
-/// At 48 kHz stereo 16-bit PCM (192,000 B/s), 16 KiB covers ~85.33 ms (4,096 frames).
+/// Default slot capacity: 16 KiB, ~85 ms of 48 kHz stereo 16-bit PCM (192,000 B/s).
 pub const DEFAULT_SLOT_CAPACITY: usize = 16_384;
 
 /// PCM data callback: 48 kHz stereo 16-bit signed integer samples. The ring
@@ -87,7 +85,6 @@ fn align_down(value: usize, alignment: usize) -> usize {
     (value / alignment) * alignment
 }
 
-/// Calculates slot capacity in bytes from audio parameters, aligned to PCM frame boundaries.
 pub fn calculate_slot_capacity(
     sample_rate: u32,
     channels: u16,
@@ -107,8 +104,8 @@ pub fn calculate_slot_capacity(
     align_down(target, frame_size)
 }
 
-/// RT-safe lock-free non-blocking push of PCM audio bytes into the global audio ring buffer.
-/// Safe to call directly from `PipeWire` or WASAPI real-time process callbacks.
+/// Lock-free non-blocking push; safe to call directly from PipeWire/WASAPI
+/// real-time process callbacks.
 pub fn push_pcm_bytes(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
@@ -151,6 +148,7 @@ pub fn push_pcm_bytes(bytes: &[u8]) {
 
     let mut pushed = false;
     for chunk in payload.chunks(slot_capacity) {
+        // No free slot: drop the chunk and count it as truncated.
         let Some(mut slot) = producer.free_slots.pop() else {
             RING_DROPS.fetch_add(1, Ordering::Relaxed);
             TRUNCATED_BYTES.fetch_add(chunk.len() as u64, Ordering::Relaxed);

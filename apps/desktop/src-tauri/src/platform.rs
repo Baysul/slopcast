@@ -10,15 +10,11 @@ use std::path::PathBuf;
 pub struct PlatformInfo {
     pub platform: String,
     pub is_wayland: bool,
-    /// Whether a real video capture route exists on this platform: Wayland
-    /// (portal + `pw_stream`) on Linux, WGC (`libwebrtc` `DesktopCapturer`)
-    /// on Windows. X11 and macOS have no capture route — the share degrades
-    /// to audio-only there.
+    /// Whether a real video capture route exists: Wayland on Linux, WGC on
+    /// Windows. X11/macOS have none — the share degrades to audio-only.
     pub video_capture_available: bool,
 }
 
-/// Wayland detection: Linux only, and either the session type is Wayland
-/// or `WAYLAND_DISPLAY` is set.
 #[must_use]
 pub fn is_wayland() -> bool {
     if !cfg!(target_os = "linux") {
@@ -28,8 +24,6 @@ pub fn is_wayland() -> bool {
         || std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty())
 }
 
-/// Whether a real video capture route exists on this platform (see
-/// `PlatformInfo::video_capture_available`).
 #[must_use]
 pub fn video_capture_available() -> bool {
     cfg!(target_os = "windows") || is_wayland()
@@ -72,8 +66,7 @@ type EglQueryString = unsafe extern "C" fn(*mut c_void, c_int) -> *const c_char;
 type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 type GlGetString = unsafe extern "C" fn(u32) -> *const c_char;
 
-/// Opens the first `/dev/dri/renderD*` node to prove hardware-accelerated
-/// rendering is reachable — mirrors libwebrtc's own render-node acquisition.
+/// The first `/dev/dri/renderD*` node, if any.
 fn first_render_node() -> Option<PathBuf> {
     std::fs::read_dir("/dev/dri")
         .ok()?
@@ -87,15 +80,6 @@ fn first_render_node() -> Option<PathBuf> {
         .min()
 }
 
-/// Mirrors `app.getGPUInfo('complete')` (D5): dlopens `libEGL.so.1` (same
-/// dlopen pattern libwebrtc uses — no new crate), initializes a surfaceless
-/// display and reports vendor/renderer/version plus a software-rasterizer
-/// flag.
-///
-/// # Errors
-///
-/// Returns an error when no DRM render node exists, `libEGL.so.1` cannot be
-/// loaded, or EGL fails to initialize.
 /// RAII guard for the dlopen'd `libEGL.so.1` handle: every error path closes
 /// it exactly once via `Drop`.
 struct EglLib(*mut c_void);
