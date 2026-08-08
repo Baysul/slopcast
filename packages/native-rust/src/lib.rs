@@ -12,18 +12,6 @@ use crate::linux as platform;
 #[cfg(target_os = "windows")]
 use crate::windows as platform;
 
-/// In-house desktop video capture engine (SCREEN-CAPTURE-INHOUSE.md Phases
-/// A–C): the `ScreenCast` portal client (`ScreenCastPortal`, zbus) and the
-/// `pw_stream` capture engine (`PwVideoCapture`, DMA-BUF + EGL readback).
-/// Wired together by the desktop capture pipeline in `native-livekit`;
-/// Linux-only.
-#[cfg(target_os = "linux")]
-pub mod video_capture {
-    pub use crate::linux::{
-        PortalStream, PwVideoCapture, ScreenCastPortal, StartOutcome, VideoFrameCallback,
-    };
-}
-
 #[derive(Debug, Clone)]
 pub struct AudioApp {
     pub id: i32,

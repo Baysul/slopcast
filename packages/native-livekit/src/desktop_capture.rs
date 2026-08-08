@@ -1,22 +1,22 @@
-//! Desktop video capture engine: in-house portal + `pw_stream` + EGL readback
-//! on Linux, libwebrtc `DesktopCapturer` (WGC) on Windows, synthetic test
-//! pattern everywhere.
+//! Desktop video capture engine: libwebrtc `DesktopCapturer` — the `PipeWire`
+//! capturer (XDG portal picker) on Linux, WGC on Windows — plus a synthetic
+//! test pattern everywhere.
 //!
-//! Replaces libwebrtc's `DesktopCapturer` on Linux (SCREEN-CAPTURE-INHOUSE.md
-//! Phase D). The capture thread runs the `ScreenCast` portal handshake
-//! (zbus) and then hands the portal fd + node id to the `pw_stream` engine
-//! (`native_rust::video_capture`), whose EGL/DMA-BUF readback delivers linear
-//! BGRA frames to the same conversion callback as before: `argb_to_i420` →
-//! `VideoFrame<I420Buffer>` → the active `NativeVideoSource`. The portal
-//! picker opens inside the portal `Start` phase, so the session is reported
-//! "running" before the user answers it; frames flow once a source is picked.
+//! On Linux the engine is `linux_capture` (`LinuxDesktopCapture`): libwebrtc's
+//! own `PipeWire` capturer (`livekit::webrtc::desktop_capturer`, bundled in the
+//! m144 prebuilt), which replaces the former in-house portal + `pw_stream` +
+//! EGL engine (SCREEN-CAPTURE-INHOUSE.md, now superseded). The portal picker
+//! opens inside `start_capture`, so the session is reported "running" before
+//! the user answers it; frames flow once a source is picked. The portal's
+//! async `GDBus` handshake is dispatched on the capture thread (see
+//! `LinuxDesktopCapture`).
 //!
 //! On Windows the same pipeline is fed by `wgc_capture` (`WgcCapture`, a
 //! `CaptureSource::Wgc` arm): libwebrtc's `DesktopCapturer` with the WGC
-//! backend, reachable through the livekit crate's bundled bindings
-//! (`livekit::webrtc::desktop_capturer`), polled at the encoder target fps
-//! from the shared capture loop. The renderer's in-app picker supplies the
-//! `(kind, id)` selection — Windows has no system picker.
+//! backend, reachable through the same bundled bindings, polled at the
+//! encoder target fps from the shared capture loop. The renderer's in-app
+//! picker supplies the `(kind, id)` selection — Windows has no system
+//! picker.
 //!
 //! A `Synthetic` source (used by the headless e2e, manual probes and the
 //! preview benchmark) feeds generated test-pattern BGRA frames through the
@@ -26,25 +26,23 @@
 //! channel) is fully exercised on Windows too; macOS remains video-less
 //! (`Ok(false)` from `start()` — no capture route).
 //!
-//! Preview transport: the capture engine delivers linear BGRA (the DMA-BUF
-//! readback's native byte order, tightly packed). The preview thread keeps
-//! the newest BGRA frame, scales it to fit the renderer's preview card —
-//! OBS-style "scale to the window" (aspect preserved, never upscaled) — and
-//! emits it at the stream's framerate, so the IPC channel only carries what
-//! the card can show. The Tauri backend forwards the bytes over a raw IPC
-//! channel (no JSON, no base64) with a 16-byte little-endian header
-//! (`u64 pts_us`, `u32 width`, `u32 height`) so the renderer can size its
-//! texture and measure end-to-end latency; the renderer uploads the BGRA
-//! pixels into a persistent GPU texture as-is (no per-frame decode, no
-//! channel shuffling).
+//! Preview transport: the capture engines deliver tightly packed BGRA (rows
+//! re-packed from the capturer's possibly padded stride). The preview thread
+//! keeps the newest I420 planes, scales them to fit the renderer's preview
+//! card — OBS-style "scale to the window" (aspect preserved, never upscaled)
+//! — and emits the BGRA payload at the stream's framerate, so the IPC
+//! channel only carries what the card can show. The Tauri backend forwards
+//! the bytes over a raw IPC channel (no JSON, no base64) with a 16-byte
+//! little-endian header (`u64 pts_us`, `u32 width`, `u32 height`) so the
+//! renderer can size its texture and measure end-to-end latency; the
+//! renderer uploads the BGRA pixels into a persistent GPU texture as-is (no
+//! per-frame decode, no channel shuffling).
 //!
-//! Threading: the capture thread owns the portal session and the paced
-//! delivery loop; a dedicated preview thread emits frames at its own cadence
-//! (it only reads the newest stashed BGRA under a brief lock), so the
-//! scale/copy work can never delay a delivery. The `pw_stream`
-//! engine runs its own main loop on a separate thread, whose frame callback
-//! converts and queues frames for paced delivery. The picker wait polls the
-//! stop flag, so `stop()` never waits on a user that ignores the picker.
+//! Threading: the capture thread owns the engine and the paced delivery
+//! loop; a dedicated preview thread emits frames at its own cadence (it only
+//! reads the newest stashed I420 planes under a brief lock), so the
+//! scale/copy work can never delay a delivery. `stop()` is polled by the
+//! loop itself, so it never waits on a user that ignores the picker.
 
 /// Preview callback type: `(payload, pts_us)`, where `payload` is the raw
 /// channel frame — 16-byte little-endian header (`u64 pts_us`, `u32 width`,
@@ -67,9 +65,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-
-#[cfg(target_os = "linux")]
-use native_rust::video_capture::{PwVideoCapture, ScreenCastPortal, StartOutcome};
 
 use crate::{CaptureConfig, VIDEO_SOURCE};
 
@@ -152,10 +147,9 @@ pub(crate) fn set_capture_ended_callback(callback: CaptureEndedCallback) {
 }
 
 /// Fires the capture-ended callback exactly once per capture session when
-/// the captured source is gone (WGC `ERROR_PERMANENT` — the captured window
-/// was closed). Mirrors the portal `session_closed` check in the poll loop;
-/// the flag is reset per session in `reset_stats`.
-#[cfg(target_os = "windows")]
+/// the captured source is gone: WGC `ERROR_PERMANENT` (captured window
+/// closed) or the `PipeWire` portal session closing (compositor ended the
+/// stream). The flag is reset per session in `reset_stats`.
 pub(crate) fn fire_capture_ended_once() {
     if !CAPTURE_ENDED_EMITTED.swap(true, Ordering::Relaxed)
         && let Some(callback) = CAPTURE_ENDED_CALLBACK.load_full()
@@ -189,11 +183,11 @@ pub(crate) fn clear_scale_target() {
     SCALE_TARGET.store(None);
 }
 
-/// Poll cadence for engines that pace themselves (the WGC engine): the
-/// encoder target fps when a track is live (capped at the preview ceiling),
-/// else the fallback preview cadence. Re-read per poll via `ArcSwap`, so
-/// going live mid-capture speeds the capture up without a restart.
-#[cfg(target_os = "windows")]
+/// Poll cadence for engines that pace themselves (the WGC engine and the
+/// Linux `PipeWire` engine): the encoder target fps when a track is live
+/// (capped at the preview ceiling), else the fallback preview cadence.
+/// Re-read per poll via `ArcSwap`, so going live mid-capture speeds the
+/// capture up without a restart.
 pub(crate) fn capture_poll_fps() -> u32 {
     SCALE_TARGET
         .load_full()
@@ -386,7 +380,7 @@ fn emit_preview_frame(
     {
         // Same allocator and (width, height) as the stash's source ⇒ the
         // reconstructed slices match its lengths; clamp + zero-fill anyway,
-        // because a panic here would abort the process (the PipeWire
+        // because a panic here would abort the process (the `PipeWire`
         // process callback cannot unwind).
         let (plane_y, plane_u, plane_v) = src.data_mut();
         let n = plane_y.len().min(y_len);
@@ -573,33 +567,14 @@ pub(crate) fn monotonic_us() -> i64 {
     i64::try_from(anchor.elapsed().as_micros()).unwrap_or(0)
 }
 
-/// Starts the `pw_stream` engine for a negotiated portal stream: opens the
-/// isolated `PipeWire` remote on the portal fd and captures the stream's
-/// node, delivering linear BGRA frames to `on_frame`.
-#[cfg(target_os = "linux")]
-fn start_pw_capture(
-    portal: &ScreenCastPortal,
-    stream: &native_rust::video_capture::PortalStream,
-    on_frame: native_rust::video_capture::VideoFrameCallback,
-) -> Result<PwVideoCapture, String> {
-    // When the portal reports no size, offer no fixed size either — a
-    // fixed value that does not match the source's resolution fails the
-    // format intersection.
-    let (width, height) = stream.size.map_or((0, 0), |(w, h)| {
-        (u32::try_from(w).unwrap_or(0), u32::try_from(h).unwrap_or(0))
-    });
-    let fd = portal.open_pipewire_remote()?;
-    PwVideoCapture::start(Some(fd), stream.node_id, width, height, 0, on_frame)
-}
-
-/// What feeds the capture pipeline: the portal screencast (real screens,
-/// Linux-only), the WGC capturer (real screens/windows, Windows-only) or a
-/// synthetic test pattern (headless e2e / probes / benchmarks, all
-/// platforms).
+/// What feeds the capture pipeline: the libwebrtc `PipeWire` capturer (real
+/// screens/windows through the portal picker, Linux-only), the WGC capturer
+/// (real screens/windows, Windows-only) or a synthetic test pattern (headless
+/// e2e / probes / benchmarks, all platforms).
 #[derive(Debug, Clone, Copy)]
 enum CaptureSource {
     #[cfg(target_os = "linux")]
-    Portal,
+    Desktop,
     #[cfg(target_os = "windows")]
     Wgc {
         kind: crate::WgcSourceKind,
@@ -655,15 +630,16 @@ fn synthetic_frame(width: u32, height: u32, frame_index: u64, bgra: &mut [u8]) {
     }
 }
 
-/// The capture thread: owns the portal session (Portal) or the synthetic
-/// generator thread, plus the preview poll loop.
+/// The capture thread: owns the `PipeWire` portal engine (Linux), the WGC
+/// engine (Windows) or the synthetic generator thread, plus the preview poll
+/// loop.
 ///
-/// Phase A (portal handshake) runs here; the ready signal is sent after
-/// `SelectSources` and before `Start`, because the native picker opens
-/// inside `Start` and the caller must see the session as running while
-/// the user chooses a source. A cancelled picker or a failed engine start
-/// leaves the session idling (old behavior): no frames, one counted
-/// error, the user stops manually.
+/// On Linux the portal picker opens inside `start_capture` (libwebrtc's
+/// async portal handshake), so the ready signal is sent right after the
+/// engine starts and the caller sees the session as running while the user
+/// chooses a source. A failed engine start sends the error back over
+/// `ready_tx`; a session that dies later (portal failure, captured window
+/// closed) surfaces as `ERROR_PERMANENT` → the `capture-ended` event.
 #[allow(
     clippy::too_many_lines,
     reason = "one linear capture lifecycle (source acquisition → preview loop → teardown); splitting it would scatter the failure accounting"
@@ -682,61 +658,25 @@ fn run_capture(
     let on_frame = make_on_frame(Arc::clone(&pacer));
 
     #[cfg(target_os = "linux")]
-    let mut portal: Option<ScreenCastPortal> = None;
-    #[cfg(target_os = "linux")]
-    let mut capture: Option<PwVideoCapture> = None;
+    let mut desktop: Option<crate::linux_capture::LinuxDesktopCapture> = None;
     #[cfg(target_os = "windows")]
     let mut wgc: Option<crate::wgc_capture::WgcCapture> = None;
     let mut generator = None;
 
     match source {
         #[cfg(target_os = "linux")]
-        CaptureSource::Portal => {
-            let connection = match zbus::blocking::Connection::session() {
-                Ok(connection) => connection,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(format!("Portal session bus: {e}")));
-                    return;
+        CaptureSource::Desktop => {
+            match crate::linux_capture::LinuxDesktopCapture::start(on_frame) {
+                Ok(engine) => {
+                    CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+                    let _ = ready_tx.send(Ok(()));
+                    desktop = Some(engine);
                 }
-            };
-            let portal_session = match ScreenCastPortal::connect(connection) {
-                Ok(portal) => portal,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
                     return;
                 }
-            };
-            if let Err(e) = portal_session.select_sources() {
-                let _ = ready_tx.send(Err(e));
-                return;
             }
-
-            CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
-            let _ = ready_tx.send(Ok(()));
-
-            // Phases B + C: `pw_stream` on the portal fd, EGL readback → on_frame.
-            match portal_session.start(Some(stop.as_ref())) {
-                Ok(StartOutcome::Stream(stream)) => {
-                    if !stop.load(Ordering::Relaxed) {
-                        match start_pw_capture(&portal_session, &stream, Box::new(on_frame)) {
-                            Ok(engine) => capture = Some(engine),
-                            Err(e) => {
-                                STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
-                                log::error!("[desktop-capture] capture engine failed: {e}");
-                            }
-                        }
-                    }
-                }
-                Ok(StartOutcome::Cancelled) => {
-                    STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
-                    log::error!("[desktop-capture] portal picker cancelled");
-                }
-                Err(e) => {
-                    STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
-                    log::error!("[desktop-capture] portal error: {e}");
-                }
-            }
-            portal = Some(portal_session);
         }
         #[cfg(target_os = "windows")]
         CaptureSource::Wgc { kind, id } => {
@@ -839,32 +779,18 @@ fn run_capture(
         .unwrap_or(Instant::now());
 
     while !stop.load(Ordering::Relaxed) {
-        // The compositor closes the portal session when the captured source
-        // disappears (e.g. the presenter closed the captured window/app).
-        // That ends the share: fire the callback once and let the renderer
-        // tear the track and capture down. Our own `stop()` never sets the
-        // flag while the loop runs — the session is only closed in `Drop`,
-        // after the loop exits.
-        #[cfg(target_os = "linux")]
-        if !CAPTURE_ENDED_EMITTED.load(Ordering::Relaxed)
-            && portal
-                .as_ref()
-                .is_some_and(ScreenCastPortal::session_closed)
-        {
-            CAPTURE_ENDED_EMITTED.store(true, Ordering::Relaxed);
-            log::info!("[desktop-capture] portal session closed — captured source is gone");
-            if let Some(callback) = CAPTURE_ENDED_CALLBACK.load_full() {
-                callback();
-            }
-        }
         // Paced delivery tick: one queued frame per encoder-target
         // interval (fallback cadence before a track is live), so RTP
-        // pacing at the receiver stays even. The WGC engine is polled on
-        // the same tick — it self-paces inside, so extra polls are no-ops.
+        // pacing at the receiver stays even. Both engines are polled on
+        // the same tick — they self-pace inside, so extra polls are no-ops.
         let now = Instant::now();
         if now >= next_delivery_at {
             #[cfg(target_os = "windows")]
             if let Some(engine) = wgc.as_mut() {
+                engine.poll();
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(engine) = desktop.as_mut() {
                 engine.poll();
             }
             match pacer.pop() {
@@ -932,9 +858,14 @@ fn run_capture(
                 None => {
                     // Keepalive: an empty pacer usually means the compositor
                     // simply had nothing to record, not that delivery should
-                    // stop. Re-push the last frame — the same immutable
-                    // buffer, timestamp refreshed — so arrival pacing (and
-                    // therefore the receiver's RTP cadence) stays even.
+                    // stop. Both engines re-deliver their last frame while
+                    // running (WGC's frame pool, the `PipeWire` capturer's
+                    // `latest_available_frame_`), but a dropped corrupt
+                    // buffer or a gap between the picker answer and the
+                    // first frame can still leave a delivery tick empty —
+                    // re-push the last frame (same immutable buffer,
+                    // timestamp refreshed) so arrival pacing (and therefore
+                    // the receiver's RTP cadence) stays even.
                     if let Some(source) = VIDEO_SOURCE.load_full()
                         && let Some(last) = last_frame.as_mut()
                     {
@@ -963,9 +894,7 @@ fn run_capture(
         thread::sleep(wake.saturating_duration_since(Instant::now()));
     }
     #[cfg(target_os = "linux")]
-    if let Some(mut capture) = capture {
-        capture.stop();
-    }
+    drop(desktop);
     if let Some(handle) = generator {
         let _ = handle.join();
     }
@@ -976,25 +905,22 @@ fn run_capture(
     // capture session) before the COM apartment is released.
     #[cfg(target_os = "windows")]
     drop(wgc);
-    // Dropping the portal closes the session (and its screencast node).
-    #[cfg(target_os = "linux")]
-    drop(portal);
     CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
 }
 
 /// Starts the desktop capturer on its own thread. On Linux, returns once
-/// the portal session is created; the native portal picker then appears and
-/// frames flow after the user selects a source. On Windows the renderer's
-/// picker selection is required — use `start_windows` — and on other
-/// platforms there is no capture source yet, so this reports video as
+/// the libwebrtc `PipeWire` capturer is started; the portal picker then
+/// appears and frames flow after the user selects a source. On Windows the
+/// renderer's picker selection is required — use `start_windows` — and on
+/// other platforms there is no capture source yet, so this reports video as
 /// unavailable (`Ok(false)`) while the synthetic source and the whole
 /// preview pipeline remain usable.
 ///
 /// # Errors
 ///
 /// Returns an error if a capture session is already active, the thread
-/// cannot be spawned, or the portal session fails to initialize within
-/// five seconds.
+/// cannot be spawned, or the capturer fails to initialize within five
+/// seconds.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "non-Linux arm is a constant Ok(false) stub; the Result signature carries the Linux portal errors"
@@ -1002,7 +928,7 @@ fn run_capture(
 pub(crate) fn start() -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     {
-        start_with(CaptureSource::Portal)
+        start_with(CaptureSource::Desktop)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1069,11 +995,11 @@ fn start_with(source: CaptureSource) -> Result<bool, String> {
         }
         Ok(Err(reason)) => {
             stop.store(true, Ordering::Relaxed);
-            // Release the state lock before joining: the error-path join is
-            // unbounded (the portal handshake blocks in zbus and never polls
-            // `stop`), and `stop()`/`disconnect_livekit_room` block on this
-            // lock — a hung portal would otherwise freeze them (and, via
-            // `LIVEKIT`, the audio callback) permanently.
+            // Release the state lock before joining: the error-path join
+            // waits for the capture thread, which returns promptly once the
+            // engine start failed; `stop()`/`disconnect_livekit_room` block
+            // on this lock, so a hung engine would otherwise freeze them
+            // (and, via `LIVEKIT`, the audio callback) permanently.
             drop(guard);
             let _ = handle.join();
             Err(reason)

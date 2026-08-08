@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 
 mod desktop_capture;
 
+#[cfg(target_os = "linux")]
+mod linux_capture;
+
 #[cfg(target_os = "windows")]
 mod wgc_capture;
 
@@ -145,7 +148,6 @@ enum WorkerCmd {
 }
 
 struct NativeLiveKit {
-    pcm_tx: tokio::sync::mpsc::Sender<Vec<i16>>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
     stop: tokio::sync::oneshot::Sender<()>,
     _join: std::thread::JoinHandle<()>,
@@ -173,13 +175,13 @@ static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
 
 // The bundled libwebrtc statically links hidden-weak `pw_*` dlopen shims
-// (`pipewire_stubs.o`, `modules::portal::*`). They are NOT pulled by our
-// code anymore (the in-house engine replaced `DesktopCapturer`), but the
-// peer connection factory keeps libwebrtc's `PipeWire` *video capture module*
-// (`video_capture_pipewire.o`) in the link, and its `pw_*` references still
-// drag the shims in. The shims tail-jump through static pointers that stay
-// NULL until `InitializePipewire` dlopens `libpipewire` and arms them — any
-// earlier `pw_init` call SIGSEGVs, so the app must arm them at startup.
+// (`pipewire_stubs.o`, `modules::portal::*`). Our `DesktopCapturer` usage
+// (the Linux PipeWire capturer in `linux_capture`) and the peer connection
+// factory (which keeps libwebrtc's `PipeWire` *video capture module*,
+// `video_capture_pipewire.o`, in the link) both drag the shims in. The
+// shims tail-jump through static pointers that stay NULL until
+// `InitializePipewire` dlopens `libpipewire` and arms them — any earlier
+// `pw_init` call SIGSEGVs, so the app must arm them at startup.
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     #[link_name = "_ZN14modules_portal18InitializePipewireEPv"]
@@ -264,7 +266,6 @@ pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to spawn: {e}"))?;
 
     *guard = Some(NativeLiveKit {
-        pcm_tx,
         cmd_tx,
         stop: stop_tx,
         _join: handle,

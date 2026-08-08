@@ -1,13 +1,10 @@
 mod apps;
 mod capture;
-mod egl;
 mod graph;
 mod kwin;
 mod metering;
 mod mpris;
-mod portal;
 mod procinfo;
-mod pw_video;
 mod screencast;
 
 pub(crate) use apps::{dump_audio_sources, list_audio_applications};
@@ -18,11 +15,6 @@ pub(crate) use metering::{
     clear_wave_callback, set_wave_callback, start_audio_metering, stop_audio_metering,
 };
 pub(crate) use screencast::{get_capture_context, resolve_audio_app_for_captured_window};
-
-// The in-house capture engine (Phases A–C) is consumed by native-livekit's
-// desktop capture pipeline; the crate root re-exports these.
-pub use portal::{PortalStream, ScreenCastPortal, StartOutcome};
-pub use pw_video::{PwVideoCapture, VideoFrameCallback};
 
 use std::cell::RefCell;
 use std::rc::Rc;
