@@ -8,7 +8,6 @@
 
 import type { AudioApp, AudioAppWave, StreamSettings } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
-import type { Channel } from '@tauri-apps/api/core';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
@@ -135,11 +134,11 @@ export const desktopApi = {
   // platforms, where the portal picker or the platform gate applies).
   getCaptureSources: (): Promise<CaptureSourceInfo[]> => invokeOr('get_capture_sources', undefined, []),
   probeGpuInfo: (): Promise<GpuInfo | null> => invokeOr('probe_gpu_info', undefined, null),
-  // Preview transport: the renderer registers a raw Channel once on mount;
-  // the backend pushes JPEG frames (8-byte pts_us header + JPEG bytes) into
-  // it at up to 60 fps — no base64, no JSON per frame.
-  registerPreviewChannel: (channel: Channel<ArrayBuffer>): Promise<boolean> =>
-    invokeOk('register_preview_channel', { channel }),
+  // Preview transport: the backend keeps the latest raw BGRA frame and
+  // serves it directly via a `frame://` custom protocol (no tauri IPC
+  // needed — tauri's raw-body delivery is too slow on WebKitGTK). The
+  // renderer fetches it via `fetch('frame://...')` at its own pace.
+  getPreviewFrame: (): Promise<ArrayBuffer> => fetch(`frame://frame.bin?t=${Date.now()}`).then((r) => r.arrayBuffer()),
   // The renderer reports its preview card size (device pixels) so the backend
   // scales preview frames to fit the card (OBS-style) instead of shipping
   // full-resolution JPEGs through the channel.

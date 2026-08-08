@@ -112,29 +112,24 @@ fn start_real_capture(
     native_livekit::start_desktop_capture()
 }
 
-/// The renderer's preview channel: the preview callback forwards raw BGRA
-/// frames here (16-byte little-endian header — `u64 pts_us`, `u32 width`,
-/// `u32 height` — followed by tightly packed BGRA rows) whenever the
-/// renderer has registered one. Raw payloads travel over Tauri's binary
-/// channel path — no base64, no JSON per frame — and the header lets the
-/// renderer size its GPU texture and measure end-to-end preview latency.
-static PREVIEW_CHANNEL: Mutex<Option<Channel<InvokeResponseBody>>> = Mutex::new(None);
+/// The most recent preview payload, kept for the `frame://` custom-protocol
+/// handler. One slot, replaced per emission — bounded by construction.
+///
+/// Why not `tauri::ipc::Channel` or a per-invoke `Response`? Both deliver
+/// raw bodies (>1 KB) through the same slow `__TAURI_CHANNEL__|fetch`
+/// machinery on `WebKitGTK` (~4 s per 2 MB response). A custom URI scheme
+/// serves bytes directly from the protocol handler — no IPC, no ordering,
+/// no queue — the renderer fetches at its own pace.
+pub static LATEST_FRAME: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
-/// Registers the preview callback (MIGRATION §9.1): the capture thread
-/// invokes it with raw BGRA payloads `(bytes, pts_us)` at up to 60 fps, and
-/// they are forwarded to the renderer's preview channel. The payload is
-/// already self-describing (the engine's 16-byte header carries the pts and
-/// dimensions), so the bytes pass through untouched. The capture engine only
-/// knows this callback — Tauri stays out of native-livekit.
-pub fn register_preview_channel_callback() {
+/// Registers the preview callback: the capture thread invokes it with raw
+/// BGRA payloads at up to 60 fps and the latest payload is stored for the
+/// `frame://` protocol handler (the renderer fetches it directly).
+pub fn register_preview_frame_callback() {
     native_livekit::set_preview_callback(Box::new(move |bytes, _pts_us| {
-        let Ok(guard) = PREVIEW_CHANNEL.lock() else {
-            return;
-        };
-        let Some(channel) = guard.as_ref() else {
-            return;
-        };
-        let _ = channel.send(InvokeResponseBody::Raw(bytes));
+        if let Ok(mut slot) = LATEST_FRAME.lock() {
+            *slot = Some(bytes);
+        }
     }));
 }
 
@@ -157,22 +152,6 @@ pub fn register_capture_ended_callback(app: &AppHandle) {
         };
         let _ = emitter.emit("capture-ended", ());
     }));
-}
-
-/// Registers the renderer's preview channel; the renderer calls this once on
-/// mount so preview frames can flow. Replaces any previously registered
-/// channel (e.g. after a webview reload).
-///
-/// # Errors
-///
-/// Returns an error when the channel state lock is poisoned.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn register_preview_channel(channel: Channel<InvokeResponseBody>) -> Result<(), String> {
-    let Ok(mut guard) = PREVIEW_CHANNEL.lock() else {
-        return Err("preview channel lock poisoned".into());
-    };
-    *guard = Some(channel);
-    Ok(())
 }
 
 /// Reports the renderer's preview card size (device pixels) so the preview

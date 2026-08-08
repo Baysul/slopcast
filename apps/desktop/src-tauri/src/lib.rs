@@ -17,6 +17,7 @@ pub mod settings;
 mod e2e;
 
 use tauri::Manager;
+use tauri::http;
 
 // Build-script hook: `build.rs` rewrites this stamp whenever any renderer
 // asset changes, so this `include_bytes!` dependency recompiles the crate and
@@ -24,9 +25,51 @@ use tauri::Manager;
 // bundles leave a stale embed behind -> blank window).
 const _FRONTEND_STAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/slopcast-frontend-stamp"));
 
+/// Dev builds load the vite dev server (`devUrl`); a standalone debug binary
+/// with no server running shows a dead "Could not connect to localhost" page
+/// instead of the app. Probe the dev server once and fall back to the
+/// embedded frontend assets so the UI always loads, however the binary was
+/// launched.
+#[cfg(dev)]
+fn fallback_to_embedded_without_dev_server(app: &tauri::App) {
+    use std::net::ToSocketAddrs;
+    let Some(dev_url) = app.config().build.dev_url.as_ref() else {
+        return;
+    };
+    let Some(host) = dev_url.host_str() else {
+        return;
+    };
+    let Some(port) = dev_url.port_or_known_default() else {
+        return;
+    };
+    let reachable = (host, port).to_socket_addrs().is_ok_and(|mut addrs| {
+        addrs.any(|addr| {
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250))
+                .is_ok()
+        })
+    });
+    if reachable {
+        return;
+    }
+    log::info!("[bootstrap] dev server unreachable ({dev_url}) — loading embedded frontend");
+    if let Some(window) = app.get_webview_window("main")
+        && let Ok(url) = tauri::Url::parse("tauri://localhost/index.html")
+    {
+        let _ = window.navigate(url);
+    }
+}
+
 /// Builds and runs the Tauri application: plugins, managed state, the audio
 /// callback wiring, the command surface and the exit-time cleanup that
 /// tears down capture state.
+/// # Panics
+///
+/// Panics if the `frame://` protocol handler builder fails (should never
+/// happen with a valid header value).
+#[allow(
+    clippy::too_many_lines,
+    reason = "app bootstrap is inherently sequential"
+)]
 pub fn run() {
     // linuxdeploy-plugin-gtk's AppImage hook (apprun-hooks/linuxdeploy-plugin-gtk.sh)
     // exports `GDK_BACKEND=x11` — a stale tauri#8541 workaround — sending the app
@@ -58,11 +101,44 @@ pub fn run() {
                 .build(),
         );
 
+    // Custom URI scheme for the preview frames: the renderer fetches
+    // `frame://frame.bin?t=…` directly — no tauri IPC, no channel, no
+    // ordering. The handler reads from a shared slot (updated by the
+    // capture callback) and returns the bytes as-is.
+    //
+    // The response must carry `Access-Control-Allow-Origin`: WebKitGTK
+    // enforces CORS on custom-scheme fetches from the `tauri://localhost`
+    // page, and every fetch fails with "Load failed" without it (verified
+    // on 2.52.5). Tauri's own `ipc://` responses set the same header
+    // (tauri/src/ipc/protocol.rs); only webview code can reach a custom
+    // scheme, so `*` adds no exposure beyond what the page already has.
+    let builder = builder.register_uri_scheme_protocol("frame", |_app, _request| {
+        let body = crate::capture::LATEST_FRAME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default();
+        // SAFETY: a valid header name/value + Vec<u8> body always succeeds.
+        match http::Response::builder()
+            .header(http::header::CONTENT_TYPE, "application/octet-stream")
+            .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(body)
+        {
+            Ok(r) => r,
+            Err(_) => unreachable!("valid header and body"),
+        }
+    });
+
     #[cfg(feature = "e2e")]
     let builder = e2e::with_plugins(builder);
 
     let app = builder
         .setup(|app| {
+            // Dev builds load the vite dev server (`devUrl`); fall back to
+            // the embedded frontend when no server is running (standalone
+            // debug binaries).
+            #[cfg(dev)]
+            fallback_to_embedded_without_dev_server(app);
             // WebKitGTK ships with smooth scrolling disabled by default
             // (Chromium always had it on), so
             // wheel/trackpad scrolls jump in discrete steps instead of
@@ -92,7 +168,7 @@ pub fn run() {
             app.manage(context::CaptureContextCache::default());
             app.manage(config::AppConfigState::load()?);
             audio::register_audio_callbacks(app.handle());
-            capture::register_preview_channel_callback();
+            capture::register_preview_frame_callback();
             capture::register_capture_ended_callback(app.handle());
             Ok(())
         })
@@ -130,7 +206,6 @@ pub fn run() {
             capture::start_capture_preview,
             capture::go_live,
             capture::get_capture_sources,
-            capture::register_preview_channel,
             capture::set_preview_viewport,
             capture::clear_preview_viewport,
             capture::bench_register_channel,

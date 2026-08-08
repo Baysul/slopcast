@@ -1,6 +1,5 @@
 import type { VideoCodec } from '@slopcast/shared-types';
 import { codecLabel, RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
-import { Channel } from '@tauri-apps/api/core';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -56,6 +55,29 @@ function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
   // `payload.slice(16)` copied the whole frame — at 60 fps that was
   // 122-514 MB/s of main-thread allocation + GC.
   return { ptsUs, width, height, data: new Uint8Array(payload, 16) };
+}
+
+/** Fetch the latest preview frame from the `frame://` custom protocol
+ * and render it if the pts changed. */
+async function fetchAndRender(
+  lastPts: number,
+  onNewFrame: (pts: number) => void,
+  renderFrame: (frame: PreviewFrame) => void,
+): Promise<void> {
+  try {
+    const resp = await fetch(`frame://frame.bin?t=${Date.now()}`);
+    if (!resp.ok) return;
+    const buf = await resp.arrayBuffer();
+    if (buf.byteLength <= 16) return;
+    const frame = parsePreviewPayload(buf);
+    if (!frame || frame.ptsUs === lastPts) return;
+    onNewFrame(frame.ptsUs);
+    renderFrame(frame);
+  } catch (err) {
+    // Transient (e.g. no frame stashed yet); the poll loop self-heals on
+    // the next tick.
+    console.debug('[preview] frame fetch failed:', err);
+  }
 }
 
 // Debug aid: print every live PipeWire audio stream node's full property
@@ -182,21 +204,28 @@ export const PresenterApp: React.FC = () => {
     if (window.__PREVIEW_BENCH__) {
       window.__PREVIEW_BENCH_DATA__ = [];
     }
-    // The preview channel: the backend pushes raw BGRA frames (16-byte LE
-    // header: u64 pts_us, u32 width, u32 height — then tightly packed BGRA
-    // rows) through Tauri's raw channel transport. Tauri's Channel unwraps
-    // its message envelope, so the callback receives the raw ArrayBuffer
-    // payload directly.
-    const channel = new Channel<ArrayBuffer>((payload) => {
-      if (disposed) return;
-      const frame = parsePreviewPayload(payload);
-      if (frame) setPreviewFrame(frame);
-    });
-    void desktopApi.registerPreviewChannel(channel).then((ok) => {
-      if (!ok && !disposed) {
-        console.warn('[Presenter] preview channel registration failed — no live preview');
-      }
-    });
+    // The preview frame pull: the backend keeps the latest raw BGRA frame
+    // and the `frame://` custom protocol serves it directly — no tauri IPC,
+    // no channel, no ordering (tauri's IPC raw-body delivery is ~4 s per
+    // 2 MB response on WebKitGTK). The renderer fetches at its own pace via
+    // requestAnimationFrame, dedupes by pts (drop-oldest), and self-heals
+    // on any fetch failure.
+    const pollFrame = (): void => {
+      let lastPts = 0;
+      const poll = async (): Promise<void> => {
+        if (!disposed)
+          await fetchAndRender(
+            lastPts,
+            (pts) => {
+              lastPts = pts;
+            },
+            setPreviewFrame,
+          );
+        if (!disposed) requestAnimationFrame(poll);
+      };
+      requestAnimationFrame(poll);
+    };
+    pollFrame();
 
     return () => {
       disposed = true;
