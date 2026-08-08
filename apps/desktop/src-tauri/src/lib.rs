@@ -47,12 +47,71 @@ fn fallback_to_embedded_without_dev_server(app: &tauri::App) {
     if reachable {
         return;
     }
-    log::info!("[bootstrap] dev server unreachable ({dev_url}) — loading embedded frontend");
-    if let Some(window) = app.get_webview_window("main")
-        && let Ok(url) = tauri::Url::parse("tauri://localhost/index.html")
-    {
-        let _ = window.navigate(url);
+    log::info!("[bootstrap] dev server unreachable ({dev_url}) — serving frontend from disk");
+    // A dev build does not embed the frontend (tauri serves `devUrl` instead),
+    // so the `tauri://` protocol has no assets ("asset not found: index.html"
+    // blank window). The window's URL is `devUrl` — which is where the IPC
+    // bridge is injected — so serve the built `frontendDist` over HTTP on
+    // that exact port. The existing page load then succeeds with the bridge
+    // intact, no navigation needed.
+    let handle = app.handle().clone();
+    let host = host.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = serve_frontend(&host, port, &handle) {
+            log::error!("[bootstrap] frontend server failed: {e}");
+        }
+    });
+    // The server binds on a background thread; the window's devUrl load
+    // retries until it's up.
+}
+
+/// Minimal HTTP/1.1 static file server (dev-only, no new deps). Serves the
+/// app's frontend via `AssetResolver` (which reads `frontendDist` from disk
+/// in dev, embedded assets in release) so the window's devUrl page and its
+/// relative asset requests all resolve.
+#[cfg(dev)]
+fn serve_frontend(host: &str, port: u16, handle: &tauri::AppHandle) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind((host, port))?;
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else {
+            continue;
+        };
+        let handle = (*handle).clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .split('?')
+                .next()
+                .unwrap_or("/");
+            let path = path.trim_start_matches('/');
+            let path = if path.is_empty() { "index.html" } else { path };
+            let asset = handle.asset_resolver().get(path.to_string());
+            let (status, body, mime) = match asset {
+                Some(a) => ("200 OK", a.bytes, a.mime_type),
+                None => (
+                    "404 Not Found",
+                    b"not found".to_vec(),
+                    "text/plain".to_string(),
+                ),
+            };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        });
     }
+    Ok(())
 }
 
 /// Builds and runs the Tauri application: plugins, managed state, the audio
