@@ -59,18 +59,16 @@ const allocateUniqueCode = async (
   throw new AllocationError('Could not allocate a unique room code, try again', 503);
 };
 
-const mintPresenterTokens = async (
+const mintPresenterToken = async (
   apiKey: string,
   apiSecret: string,
   code: string,
   allocatedCodes: Map<string, number>,
-): Promise<{ token: string; identity: string; nativeToken: string; nativeIdentity: string }> => {
+): Promise<{ token: string; identity: string }> => {
   const identity = `presenter-${code}-${Date.now()}`;
-  const nativeIdentity = `audio-${code}-${Date.now()}`;
   try {
     const token = await presenterToken(apiKey, apiSecret, code, identity);
-    const nativeToken = await presenterToken(apiKey, apiSecret, code, nativeIdentity);
-    return { token, identity, nativeToken, nativeIdentity };
+    return { token, identity };
   } catch (err) {
     allocatedCodes.delete(code);
     console.error('Token minting failed for room code, code not allocated:', err);
@@ -129,7 +127,7 @@ export function initRoutes(
 
     try {
       const code = await allocateUniqueCode(roomClient, allocatedCodes);
-      const tokens = await mintPresenterTokens(apiKey, apiSecret, code, allocatedCodes);
+      const tokens = await mintPresenterToken(apiKey, apiSecret, code, allocatedCodes);
       res.json({ code, shareUrl: `${websiteUrl}/room/${code}`, ...tokens, livekitUrl: livekitWsUrl });
     } catch (err) {
       if (!(err instanceof AllocationError)) {
