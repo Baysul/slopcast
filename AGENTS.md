@@ -17,7 +17,7 @@ This repository contains a modern, room-based screen and audio sharing system. T
 * **Role Enforcement:**
   * **Desktop Application:** Presenter-focused UI. It creates rooms and publishes the screen share + exclusive per-app audio. Spectators join through the web client.
   * **Web Application:** Enforces **Spectator-Only** mode. The Web client UI hides all share controls and contains no capture API calls at all. The hard publish barrier is the SFU: spectator tokens are issued with `canPublish: false` / `canPublishData: false`, so LiveKit rejects any publish from a spectator. As a soft second layer, `POST /api/rooms` requires the `X-Client-Origin: desktop` header the desktop app sends — this is header-based (spoofable) and only keeps honest web clients from minting presenter tokens.
-  * **Token minting:** `POST /api/rooms` mints a presenter token (`token`, identity `presenter-<code>-<ts>`, used by the renderer via `connect_native_room`) and an additional `nativeToken` (identity `audio-<code>-<ts>`) that is currently unused by any client. Spectators get tokens from `GET /api/rooms/:code/token` (identity `spectator-<code>-<ts>`).
+  * **Token minting:** `POST /api/rooms` mints a presenter token (`token`, identity `presenter-<code>-<ts>`, used by the renderer via `connect_native_room`). Spectators get tokens from `GET /api/rooms/:code/token` (identity `spectator-<code>-<ts>`).
   * **Rate limiting:** `express-rate-limit` caps room creation at 10/min and spectator token requests at 30/min.
   * **CORS:** The server's allowlist includes the dev origins (`localhost:3000/5173`) and the packaged Tauri renderer origins (`tauri://localhost`, `http://tauri.localhost`).
 
@@ -363,7 +363,6 @@ All originally tracked tasks are complete:
 
 **Documented follow-ups (from code, not yet tracked):**
 - xdg-desktop-portal `restore_token` persistence for the ScreenCast session.
-- The server mints a `nativeToken` (identity `audio-<code>-<ts>`) that no client consumes — wire it up or drop it.
 - Windows e2e automation: the harness (`apps/server/src/e2e-test.ts`) is Linux-oriented (`pkill`, `XDG_CONFIG_HOME` isolation, shell paths); synthetic capture already works cross-platform once the harness is portable.
 
 ---

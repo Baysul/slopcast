@@ -77,12 +77,12 @@ fn start_capture(
         ok: true,
         ..CaptureStartResult::default()
     };
-    let started = if e2e_capture_mode() {
+    let start_result = if e2e_capture_mode() {
         native_livekit::start_synthetic_capture(config)
     } else {
         start_real_capture(config, source)
     };
-    match started {
+    match start_result {
         Ok(video_enabled) => result.video_enabled = video_enabled,
         Err(e) => return CaptureStartResult::failed(e),
     }

@@ -54,8 +54,8 @@ fn pw_init() -> Result<PwCtx, String> {
 }
 
 fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::MainLoopRc) {
-    let done = Rc::new(RefCell::new(false));
-    let done_clone = done.clone();
+    let sync_complete = Rc::new(RefCell::new(false));
+    let sync_complete_clone = sync_complete.clone();
     let Some(pending) = core.sync(0).ok() else {
         return;
     };
@@ -64,7 +64,7 @@ fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::M
         .add_listener_local()
         .done(move |id, seq| {
             if id == pipewire::core::PW_ID_CORE && seq == pending {
-                *done_clone.borrow_mut() = true;
+                *sync_complete_clone.borrow_mut() = true;
                 if let Some(ml) = main_loop_weak.upgrade() {
                     ml.quit();
                 }
@@ -72,7 +72,7 @@ fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::M
         })
         .register();
     for _ in 0..100 {
-        if *done.borrow() {
+        if *sync_complete.borrow() {
             break;
         }
         main_loop

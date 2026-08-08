@@ -643,8 +643,8 @@ fn extract_stereo_f32(frame_bytes: &[u8], format: &AudioFormat) -> (f32, f32) {
                     sample_bytes[2],
                     sample_bytes[3],
                 ];
-                let val = f32::from_le_bytes(b);
-                if val.is_nan() { 0.0 } else { val }
+                let sample = f32::from_le_bytes(b);
+                if sample.is_nan() { 0.0 } else { sample }
             }
             (SampleType::Float, 8) => {
                 let b = [
@@ -657,15 +657,15 @@ fn extract_stereo_f32(frame_bytes: &[u8], format: &AudioFormat) -> (f32, f32) {
                     sample_bytes[6],
                     sample_bytes[7],
                 ];
-                let val = f64::from_le_bytes(b);
-                if val.is_nan() { 0.0 } else { val as f32 }
+                let sample = f64::from_le_bytes(b);
+                if sample.is_nan() { 0.0 } else { sample as f32 }
             }
             (SampleType::Int, 2) => {
                 let b = [sample_bytes[0], sample_bytes[1]];
-                let raw_val = i16::from_le_bytes(b);
+                let raw = i16::from_le_bytes(b);
                 let shift = BITS_PER_SAMPLE_16 - format.valid_bits;
-                let val = (raw_val >> shift) << shift;
-                f32::from(val) / I16_NORM_FACTOR
+                let sample = (raw >> shift) << shift;
+                f32::from(sample) / I16_NORM_FACTOR
             }
             (SampleType::Int, 3) => {
                 let b2_sign = if sample_bytes[2] & I24_MSB_SIGN_BIT != 0 {
@@ -673,15 +673,15 @@ fn extract_stereo_f32(frame_bytes: &[u8], format: &AudioFormat) -> (f32, f32) {
                 } else {
                     0x00
                 };
-                let raw_val = i32::from_le_bytes([
+                let raw = i32::from_le_bytes([
                     sample_bytes[0],
                     sample_bytes[1],
                     sample_bytes[2],
                     b2_sign,
                 ]);
                 let shift = BITS_PER_SAMPLE_24 - format.valid_bits;
-                let val = (raw_val >> shift) << shift;
-                val as f32 / I24_NORM_FACTOR
+                let sample = (raw >> shift) << shift;
+                sample as f32 / I24_NORM_FACTOR
             }
             (SampleType::Int, 4) => {
                 let b = [
@@ -690,10 +690,10 @@ fn extract_stereo_f32(frame_bytes: &[u8], format: &AudioFormat) -> (f32, f32) {
                     sample_bytes[2],
                     sample_bytes[3],
                 ];
-                let raw_val = i32::from_le_bytes(b);
+                let raw = i32::from_le_bytes(b);
                 let shift = BITS_PER_SAMPLE_32 - format.valid_bits;
-                let val = (raw_val >> shift) << shift;
-                val as f32 / I32_NORM_FACTOR
+                let sample = (raw >> shift) << shift;
+                sample as f32 / I32_NORM_FACTOR
             }
             _ => 0.0,
         }

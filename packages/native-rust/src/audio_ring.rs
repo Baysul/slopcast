@@ -465,8 +465,8 @@ mod tests {
         reset_audio_ring_stats();
 
         // Push 18 bytes (4 frames = 16 bytes, 2 unaligned trailing bytes)
-        let data = vec![0u8; 18];
-        push_pcm_bytes(&data);
+        let payload = vec![0u8; 18];
+        push_pcm_bytes(&payload);
 
         let stats = get_audio_ring_stats();
         assert_eq!(stats.captured_chunks, 1);
@@ -483,8 +483,8 @@ mod tests {
         reset_audio_ring_stats();
 
         // Push 20,000 bytes (larger than 8,192 byte slot capacity)
-        let data = vec![1u8; 20000];
-        push_pcm_bytes(&data);
+        let payload = vec![1u8; 20000];
+        push_pcm_bytes(&payload);
 
         let stats = get_audio_ring_stats();
         assert_eq!(stats.captured_chunks, 1);
