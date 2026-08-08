@@ -200,8 +200,9 @@ async function samplePreviewCanvas(): Promise<{
   hasContent: boolean;
   barsCorrect: boolean;
   upright: boolean;
+  horizontal: boolean;
 }> {
-  const empty = { hasContent: false, barsCorrect: false, upright: false };
+  const empty = { hasContent: false, barsCorrect: false, upright: false, horizontal: false };
   const canvas = document.querySelector('canvas[aria-label="Live screenshare preview"]');
   if (!canvas) return empty;
   // Wait briefly for the first frame to be drawn by the WebGL path.
@@ -267,7 +268,14 @@ async function samplePreviewCanvas(): Promise<{
   const whiteBottom = whiteIn(Math.floor((3 * height) / 4) + 5, Math.floor((7 * height) / 8));
   const upright = whiteTop > whiteBottom * 1.05;
 
-  return { hasContent: total > 0 && nonBlack / total > 0.1, barsCorrect, upright };
+  // Horizontal mirror check: at the sample row bar 0 is white and bar 7 is
+  // black, so a mirrored render swaps the extremes (black leftmost). The
+  // `upright` check cannot see a horizontal flip.
+  const horizontal =
+    bar(0, [true, true, true]) && // white leftmost
+    bar(7, [false, false, false]); // black rightmost
+
+  return { hasContent: total > 0 && nonBlack / total > 0.1, barsCorrect, upright, horizontal };
 }
 
 const snapshotPresenterTelemetry = async (): Promise<{
@@ -370,6 +378,7 @@ describe('Slopcast presenter phase (Tauri)', () => {
     assert(preview.hasContent, 'Preview canvas has no visible frame content');
     assert(preview.barsCorrect, 'Preview colors are wrong (channel swap or grayscale conversion)');
     assert(preview.upright, 'Preview is rendered upside down');
+    assert(preview.horizontal, 'Preview is mirrored horizontally');
 
     const goLiveBtn = browser.$('button=Go Live');
     await goLiveBtn.waitForDisplayed({ timeout: 10_000 });
