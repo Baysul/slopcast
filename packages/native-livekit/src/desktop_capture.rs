@@ -742,16 +742,62 @@ fn run_capture(
                 };
                 let mut last_preview_generation = 0u64;
                 let mut next_preview_at = Instant::now();
+                // TEMP-DEBUG: per-second emission rate + avg cost + RSS.
+                let mut dbg_last = Instant::now();
+                let mut dbg_emitted = 0u64;
+                let mut dbg_time = Duration::ZERO;
                 while !preview_stop.load(Ordering::Relaxed) {
-                    emit_preview_frame(
+                    let t0 = Instant::now();
+                    let emitted = emit_preview_frame(
                         &mut preview_bufs,
                         &mut last_preview_generation,
                         &mut next_preview_at,
                     );
+                    if emitted {
+                        dbg_emitted += 1;
+                        dbg_time += t0.elapsed();
+                    }
                     // Sleep until the next preview deadline (capped so the stop
                     // flag stays responsive).
                     let wake = next_preview_at.min(Instant::now() + Duration::from_millis(100));
                     thread::sleep(wake.saturating_duration_since(Instant::now()));
+                    if dbg_last.elapsed() >= Duration::from_secs(1) {
+                        // TEMP-DEBUG: resident (field 2) + shared (field 3)
+                        // pages — SIZE (field 1) is mostly reserved virtual.
+                        let mem = std::fs::read_to_string("/proc/self/statm")
+                            .ok()
+                            .and_then(|s| {
+                                let mut it = s.split_whitespace();
+                                let rss = it.nth(1)?.parse::<u64>().ok()?;
+                                let shared = it.next()?.parse::<u64>().ok()?;
+                                Some((rss * 4 / 1024, shared * 4 / 1024))
+                            })
+                            .unwrap_or((0, 0));
+                        // TEMP-DEBUG counters stay far below 2^53, so the
+                        // u64 → f64 conversion loses no precision.
+                        #[allow(
+                            clippy::cast_precision_loss,
+                            reason = "debug counters stay far below 2^53"
+                        )]
+                        let avg_ms =
+                            dbg_time.as_secs_f64() * 1000.0 / dbg_emitted.max(1) as f64;
+                        log::info!(
+                            "[TEMP] preview emitted={dbg_emitted} avg={avg_ms:.1}ms rss={}MB shm={}MB vp={}x{} src={}x{}",
+                            mem.0,
+                            mem.1,
+                            PREVIEW_VIEWPORT
+                                .load_full()
+                                .map_or(0, |vp| vp.0),
+                            PREVIEW_VIEWPORT
+                                .load_full()
+                                .map_or(0, |vp| vp.1),
+                            STATS_LAST_WIDTH.load(Ordering::Relaxed),
+                            STATS_LAST_HEIGHT.load(Ordering::Relaxed),
+                        );
+                        dbg_emitted = 0;
+                        dbg_time = Duration::ZERO;
+                        dbg_last = Instant::now();
+                    }
                 }
             }) {
             Ok(handle) => Some(handle),
@@ -777,6 +823,10 @@ fn run_capture(
     let mut last_slow_scale = Instant::now()
         .checked_sub(Duration::from_secs(3))
         .unwrap_or(Instant::now());
+    // TEMP-DEBUG: capture-side rate counters.
+    let mut dbg_last = Instant::now();
+    let mut dbg_polls = 0u64;
+    let mut dbg_last_dequeued = STATS_DEQUEUED.load(Ordering::Relaxed);
 
     while !stop.load(Ordering::Relaxed) {
         // Paced delivery tick: one queued frame per encoder-target
@@ -792,6 +842,7 @@ fn run_capture(
             #[cfg(target_os = "linux")]
             if let Some(engine) = desktop.as_mut() {
                 engine.poll();
+                dbg_polls += 1;
             }
             match pacer.pop() {
                 Some(mut frame) => {
@@ -892,6 +943,17 @@ fn run_capture(
         // session check and the stop flag stay responsive).
         let wake = next_delivery_at.min(now + Duration::from_millis(100));
         thread::sleep(wake.saturating_duration_since(Instant::now()));
+        if dbg_last.elapsed() >= Duration::from_secs(1) {
+            let dq = STATS_DEQUEUED.load(Ordering::Relaxed);
+            log::info!(
+                "[TEMP] capture polls={dbg_polls} dequeued_delta={} gen={}",
+                dq - dbg_last_dequeued,
+                PREVIEW_GENERATION.load(Ordering::Relaxed),
+            );
+            dbg_polls = 0;
+            dbg_last_dequeued = dq;
+            dbg_last = Instant::now();
+        }
     }
     #[cfg(target_os = "linux")]
     drop(desktop);
