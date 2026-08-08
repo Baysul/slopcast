@@ -40,19 +40,19 @@ npm-debug.log*
 # Tool config
 .opencode/
 opencode.json
-.impeccable/
+# .impeccable/
 .mcp/
+.hermes/
 
 # Project documentation
-AGENTS.md
-DESIGN.md
+# AGENTS.md
+# DESIGN.md
 MIGRATION.md
-PRODUCT.md
+# PRODUCT.md
 SCREEN-CAPTURE-INHOUSE.md
 
 # Test artifacts
 test-output/
-dump.json
 
 # Configuration
 slopcast.config.json
