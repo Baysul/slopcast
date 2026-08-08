@@ -28,9 +28,17 @@
 //! - The portal handshake is async `GDBus`; callbacks dispatch only when the
 //!   thread-default `GMainContext` is iterated. `start` creates the capturer
 //!   under `MainContext::with_thread_default` (so the proxies bind to *our*
-//!   context, never the process-global one the GTK main thread runs), and
-//!   `poll` drains that context on the capture thread — the whole portal
-//!   flow stays single-threaded and can never race `CaptureFrame`.
+//!   context, never the process-global one the `GTK` main thread runs), and
+//!   `poll` drains that context — with the context kept pushed as the
+//!   thread-default for every iteration, because `GDBus` method-call replies
+//!   and signal subscriptions dispatch on the *calling* thread's
+//!   thread-default context (`GTask` captures it at call time), not on the
+//!   proxy's context. Without the push, the whole post-creation handshake
+//!   (`CreateSession` / `SelectSources` / `Start` / `OpenPipeWireRemote`)
+//!   lands on the `GTK` main thread, and the last reply handler runs the
+//!   blocking `PipeWire` setup on the `UI` thread — the app freezes when a
+//!   source is picked. With it, the whole portal flow stays on the capture
+//!   thread and can never race `CaptureFrame`.
 //!
 //! The engine feeds the exact same conversion → preview → publish pipeline
 //! as the WGC arm: packed BGRA frames into the shared `FrameCallback`
@@ -167,15 +175,32 @@ impl LinuxDesktopCapture {
         if now < self.next_poll_at {
             return;
         }
+        let glib_ctx = &self.glib_ctx;
+        let capturer = &mut self.capturer;
         // Dispatch pending portal GDBus callbacks (CreateSession /
         // SelectSources / Start responses, the SessionClosed signal) on this
         // thread before polling — the capturer's portal state machine
         // advances only while its context is iterated.
-        while self.glib_ctx.pending() {
-            self.glib_ctx.iteration(false);
-        }
+        //
+        // The context must stay pushed as this thread's thread-default while
+        // the callbacks run, not just while the capturer is created: GDBus
+        // method-call replies dispatch on the thread-default context of the
+        // *calling* thread (GTask captures it at call time), and signal
+        // subscriptions dispatch on the subscriber's thread-default. Without
+        // the push, every reply after proxy creation (CreateSession /
+        // SelectSources / Start / OpenPipeWireRemote) lands on the
+        // process-global context the GTK main thread runs, and the final
+        // reply handler executes the blocking PipeWire setup
+        // (`StartScreenCastStream`: EGL init, `pw_thread_loop_wait` core
+        // sync, stream connect) on the UI thread — the app freezes the
+        // moment the picker selection is confirmed.
+        let _ = glib_ctx.with_thread_default(|| {
+            while glib_ctx.pending() {
+                glib_ctx.iteration(false);
+            }
+            capturer.capture_frame();
+        });
         let interval_ms = u64::from(1000 / capture_poll_fps().max(1));
         self.next_poll_at = now + Duration::from_millis(interval_ms);
-        self.capturer.capture_frame();
     }
 }
