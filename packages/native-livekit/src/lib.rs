@@ -21,7 +21,7 @@ use livekit::webrtc::prelude::{RtcAudioSource, RtcVideoSource, VideoResolution};
 use livekit::webrtc::stats::RtcStats;
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
@@ -730,6 +730,7 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
         max_framerate: f64::from(config.fps),
     });
 
+    let publish_start = Instant::now();
     match room
         .local_participant()
         .publish_track(
@@ -748,7 +749,10 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
         )
         .await
     {
-        Ok(_) => log::info!("[livekit] video track published (codec={config:?})"),
+        Ok(_) => log::info!(
+            "[livekit] video track published (codec={config:?}) in {:.0} ms",
+            publish_start.elapsed().as_secs_f64() * 1000.0
+        ),
         Err(e) => {
             log::error!(
                 "[livekit] video track publish failed (codec={:?}, width={}, height={}, fps={}, bitrate={:?}): {e}",
