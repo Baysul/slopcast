@@ -832,6 +832,11 @@ fn run_capture(
     // engine, whose capturer already re-delivers the last frame on static
     // content.
     let mut last_frame: Option<VideoFrame<I420Buffer>> = None;
+    // Rate-limits the slow-scale log below (at most one line per 3 s).
+    // Initialized so the first slow scale always logs.
+    let mut last_slow_scale = Instant::now()
+        .checked_sub(Duration::from_secs(3))
+        .unwrap_or(Instant::now());
 
     while !stop.load(Ordering::Relaxed) {
         // The compositor closes the portal session when the captured source
@@ -863,8 +868,8 @@ fn run_capture(
                 engine.poll();
             }
             match pacer.pop() {
-                Some(mut frame) => match VIDEO_SOURCE.load_full() {
-                    Some(source) => {
+                Some(mut frame) => {
+                    if let Some(source) = VIDEO_SOURCE.load_full() {
                         // libwebrtc's encoder has no explicit target size
                         // (VideoEncoding carries only bitrate/fps), so
                         // without this a 4K source would be encoded at 4K
@@ -874,33 +879,56 @@ fn run_capture(
                         // every frame to the configured dimensions, up or
                         // down (OBS-style canvas scaling). I420Buffer::scale
                         // is libwebrtc's libyuv-backed scaler.
-                        let push_frame =
-                            match SCALE_TARGET.load_full().map(|t| *t).filter(|target| {
+                        let push_frame = match SCALE_TARGET.load_full().map(|t| *t).filter(
+                            |target| {
                                 frame.buffer.width() != target.width
                                     || frame.buffer.height() != target.height
-                            }) {
-                                Some(target) => {
-                                    let scaled = frame.buffer.scale(
-                                        i32::try_from(target.width).unwrap_or(0),
-                                        i32::try_from(target.height).unwrap_or(0),
+                            },
+                        ) {
+                            Some(target) => {
+                                let scale_start = Instant::now();
+                                let scaled = frame.buffer.scale(
+                                    i32::try_from(target.width).unwrap_or(0),
+                                    i32::try_from(target.height).unwrap_or(0),
+                                );
+                                let scale_ms = scale_start.elapsed().as_secs_f64() * 1000.0;
+                                if scale_ms >= 5.0
+                                    && last_slow_scale.elapsed() >= Duration::from_secs(3)
+                                {
+                                    last_slow_scale = Instant::now();
+                                    log::info!(
+                                        "[desktop-capture] slow target scale: {scale_ms:.1} ms ({}x{} -> {}x{})",
+                                        frame.buffer.width(),
+                                        frame.buffer.height(),
+                                        target.width,
+                                        target.height,
                                     );
-                                    VideoFrame {
-                                        rotation: VideoRotation::VideoRotation0,
-                                        timestamp_us: frame.timestamp_us,
-                                        frame_metadata: None,
-                                        buffer: scaled,
-                                    }
                                 }
-                                None => frame,
-                            };
+                                VideoFrame {
+                                    rotation: VideoRotation::VideoRotation0,
+                                    timestamp_us: frame.timestamp_us,
+                                    frame_metadata: None,
+                                    buffer: scaled,
+                                }
+                            }
+                            None => frame,
+                        };
                         source.capture_frame(&push_frame);
                         last_frame = Some(push_frame);
                         STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
-                    }
-                    None => {
+                    } else {
+                        // Seed `last_frame` with the newest frame even
+                        // without a live track. Go Live swaps `VIDEO_SOURCE`
+                        // in while the pacer is usually empty (KWin records
+                        // only on damage or cursor move), and the keepalive
+                        // arm below needs a frame to re-push — without this
+                        // the stream stays empty until the source produces
+                        // motion, which in practice means waiting for audio
+                        // to start playing.
+                        last_frame = Some(frame);
                         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
-                },
+                }
                 None => {
                     // Keepalive: an empty pacer usually means the compositor
                     // simply had nothing to record, not that delivery should
