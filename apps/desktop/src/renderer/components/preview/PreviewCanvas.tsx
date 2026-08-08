@@ -377,6 +377,17 @@ export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
         console.info('[PreviewCanvas] preview renderer: WebGPU');
         return;
       }
+      // TEMP wedge-hunt: WebGL2 wedged the webview's JS main thread after a
+      // few frames under the channel-era transport on this stack. Keep the
+      // CPU Canvas2D path until WebGL2 is re-tested against the frame://
+      // pull transport (see the freeze investigation notes).
+      const canvas2d = tryCanvas2d(canvas);
+      if (canvas2d) {
+        rendererRef.current = canvas2d;
+        window.__PREVIEW_RENDERER__ = 'canvas2d';
+        console.warn('[PreviewCanvas] TEMP: forced Canvas2D renderer');
+        return;
+      }
       const gl = tryWebGl2(canvas);
       if (gl) {
         rendererRef.current = gl;
@@ -384,14 +395,7 @@ export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
         console.info('[PreviewCanvas] preview renderer: WebGL2');
         return;
       }
-      const canvas2d = tryCanvas2d(canvas);
-      if (canvas2d) {
-        rendererRef.current = canvas2d;
-        window.__PREVIEW_RENDERER__ = 'canvas2d';
-        console.warn('[PreviewCanvas] no WebGL2 — using Canvas2D fallback');
-      } else {
-        window.__PREVIEW_RENDERER__ = 'none';
-      }
+      window.__PREVIEW_RENDERER__ = 'none';
     };
     void setup();
 
