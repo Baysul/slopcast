@@ -1,0 +1,350 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-30T00:00:00.000Z",
+  "title": "Design System: Slopcast",
+  "extensions": {
+    "colorMeta": {
+      "bg": {
+        "role": "neutral",
+        "displayName": "Darkroom Black",
+        "canonical": "oklch(0.1596 0.0203 265.6)",
+        "tonalRamp": [
+          "oklch(0.10 0.0203 265.6)",
+          "oklch(0.13 0.0203 265.6)",
+          "oklch(0.1596 0.0203 265.6)",
+          "oklch(0.18 0.0203 265.6)",
+          "oklch(0.21 0.0203 265.6)",
+          "oklch(0.24 0.0203 265.6)",
+          "oklch(0.28 0.0203 265.6)",
+          "oklch(0.32 0.0203 265.6)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Surface",
+        "canonical": "oklch(0.2101 0.0318 264.7)",
+        "tonalRamp": [
+          "oklch(0.10 0.0318 264.7)",
+          "oklch(0.16 0.0318 264.7)",
+          "oklch(0.2101 0.0318 264.7)",
+          "oklch(0.25 0.0318 264.7)",
+          "oklch(0.32 0.0318 264.7)",
+          "oklch(0.45 0.0318 264.7)",
+          "oklch(0.60 0.0318 264.7)",
+          "oklch(0.80 0.0318 264.7)"
+        ]
+      },
+      "elevated": {
+        "role": "neutral",
+        "displayName": "Elevated",
+        "canonical": "oklch(0.2781 0.0296 256.8)",
+        "tonalRamp": [
+          "oklch(0.12 0.0296 256.8)",
+          "oklch(0.20 0.0296 256.8)",
+          "oklch(0.2781 0.0296 256.8)",
+          "oklch(0.35 0.0296 256.8)",
+          "oklch(0.45 0.0296 256.8)",
+          "oklch(0.58 0.0296 256.8)",
+          "oklch(0.72 0.0296 256.8)",
+          "oklch(0.88 0.0296 256.8)"
+        ]
+      },
+      "control": {
+        "role": "neutral",
+        "displayName": "Control Fill",
+        "canonical": "oklch(0.3729 0.0306 259.7)",
+        "tonalRamp": [
+          "oklch(0.15 0.0306 259.7)",
+          "oklch(0.26 0.0306 259.7)",
+          "oklch(0.3729 0.0306 259.7)",
+          "oklch(0.48 0.0306 259.7)",
+          "oklch(0.58 0.0306 259.7)",
+          "oklch(0.68 0.0306 259.7)",
+          "oklch(0.78 0.0306 259.7)",
+          "oklch(0.90 0.0306 259.7)"
+        ]
+      },
+      "safelight": {
+        "role": "primary",
+        "displayName": "Safelight Amber",
+        "canonical": "oklch(0.6594 0.1096 57.8)",
+        "tonalRamp": [
+          "oklch(0.15 0.1096 57.8)",
+          "oklch(0.30 0.1096 57.8)",
+          "oklch(0.45 0.1096 57.8)",
+          "oklch(0.55 0.1096 57.8)",
+          "oklch(0.6594 0.1096 57.8)",
+          "oklch(0.75 0.1096 57.8)",
+          "oklch(0.85 0.1096 57.8)",
+          "oklch(0.95 0.1096 57.8)"
+        ]
+      },
+      "destructive": {
+        "role": "destructive",
+        "displayName": "Signal Red",
+        "canonical": "oklch(0.5858 0.222 17.6)",
+        "tonalRamp": [
+          "oklch(0.15 0.222 17.6)",
+          "oklch(0.30 0.222 17.6)",
+          "oklch(0.45 0.222 17.6)",
+          "oklch(0.55 0.222 17.6)",
+          "oklch(0.5858 0.222 17.6)",
+          "oklch(0.68 0.222 17.6)",
+          "oklch(0.78 0.222 17.6)",
+          "oklch(0.90 0.222 17.6)"
+        ]
+      },
+      "muted-text": {
+        "role": "neutral",
+        "displayName": "Muted Text",
+        "canonical": "oklch(0.7137 0.0192 261.3)",
+        "tonalRamp": [
+          "oklch(0.35 0.0192 261.3)",
+          "oklch(0.50 0.0192 261.3)",
+          "oklch(0.60 0.0192 261.3)",
+          "oklch(0.7137 0.0192 261.3)",
+          "oklch(0.78 0.0192 261.3)",
+          "oklch(0.85 0.0192 261.3)",
+          "oklch(0.90 0.0192 261.3)",
+          "oklch(0.95 0.0192 261.3)"
+        ]
+      },
+      "body-text": {
+        "role": "neutral",
+        "displayName": "Body Text",
+        "canonical": "oklch(0.8717 0.0093 258.3)",
+        "tonalRamp": [
+          "oklch(0.45 0.0093 258.3)",
+          "oklch(0.60 0.0093 258.3)",
+          "oklch(0.72 0.0093 258.3)",
+          "oklch(0.82 0.0093 258.3)",
+          "oklch(0.8717 0.0093 258.3)",
+          "oklch(0.90 0.0093 258.3)",
+          "oklch(0.94 0.0093 258.3)",
+          "oklch(0.97 0.0093 258.3)"
+        ]
+      },
+      "heading-text": {
+        "role": "neutral",
+        "displayName": "Heading Text",
+        "canonical": "oklch(0.967 0.0029 264.5)",
+        "tonalRamp": [
+          "oklch(0.55 0.0029 264.5)",
+          "oklch(0.68 0.0029 264.5)",
+          "oklch(0.78 0.0029 264.5)",
+          "oklch(0.87 0.0029 264.5)",
+          "oklch(0.92 0.0029 264.5)",
+          "oklch(0.95 0.0029 264.5)",
+          "oklch(0.967 0.0029 264.5)",
+          "oklch(0.99 0.0029 264.5)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Hero headlines on the web home page. Reserved; not currently rendered in the desktop app."
+      },
+      "heading": {
+        "displayName": "Heading",
+        "purpose": "Section titles, panel headers, modal titles — also used for the product wordmark."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "All reading text, descriptions, participant info. 14px with 65–75ch measure."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Form labels, card section titles, telemetry bar labels. Always uppercase with 0.05em tracking."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Telemetry values, room codes, technical identifiers. Tabular-nums for live readouts."
+      }
+    },
+    "shadows": [
+      {
+        "name": "card-rest",
+        "value": "0 1px 2px 0 rgba(0,0,0,0.05)",
+        "purpose": "Default card shadow (shadow-sm). Barely perceptible; surfaces are tonally separated."
+      },
+      {
+        "name": "preview-elevated",
+        "value": "0 25px 50px -12px rgba(0,0,0,0.25)",
+        "purpose": "Shadow-2xl on the desktop preview card. The single deliberate lift in the system."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.4, 0, 0.2, 1)",
+        "purpose": "Default easing for color, background, and opacity transitions (Tailwind default)."
+      },
+      {
+        "name": "duration-fast",
+        "value": "150ms",
+        "purpose": "Quick state transitions: hover color shifts, focus ring appearance."
+      },
+      {
+        "name": "duration-normal",
+        "value": "200ms",
+        "purpose": "Opacity transitions on video overlays, animated reveals."
+      },
+      {
+        "name": "duration-slow",
+        "value": "500ms",
+        "purpose": "Entrance/exit animations like the WelcomeBanner collapse."
+      }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "xl", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The sole call to action. Safelight amber fill, dark text. Only one per view.",
+      "html": "<button class=\"ds-btn-primary\">CREATE LIVE ROOM</button>",
+      "css": ".ds-btn-primary { background: var(--color-safelight); color: var(--color-safelight-foreground); font-size: 0.875rem; font-weight: 500; line-height: 1.25rem; padding: 0.5rem 1rem; border: none; border-radius: 0.375rem; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 2.5rem; transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-btn-primary:hover { background: var(--color-safelight-hover); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring), 0 0 0 4px var(--color-background); } .ds-btn-primary:disabled { opacity: 0.5; pointer-events: none; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Neutral actions. Elevated gray fill, light text.",
+      "html": "<button class=\"ds-btn-secondary\">CANCEL</button>",
+      "css": ".ds-btn-secondary { background: var(--color-secondary); color: var(--color-secondary-foreground); font-size: 0.875rem; font-weight: 500; line-height: 1.25rem; padding: 0.5rem 1rem; border: none; border-radius: 0.375rem; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 2.5rem; transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-btn-secondary:hover { background: color-mix(in oklch, var(--color-secondary), white 20%); } .ds-btn-secondary:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring), 0 0 0 4px var(--color-background); } .ds-btn-secondary:disabled { opacity: 0.5; pointer-events: none; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Transparent button with a 1px border. Hover fills with elevated gray.",
+      "html": "<button class=\"ds-btn-outline\">SETTINGS</button>",
+      "css": ".ds-btn-outline { background: transparent; color: var(--color-body-text); font-size: 0.875rem; font-weight: 500; line-height: 1.25rem; padding: 0.5rem 1rem; border: 1px solid var(--color-input); border-radius: 0.375rem; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 2.5rem; transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), color 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-btn-outline:hover { background: var(--color-accent); color: var(--color-accent-foreground); } .ds-btn-outline:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring), 0 0 0 4px var(--color-background); }"
+    },
+    {
+      "name": "Destructive Button",
+      "kind": "button",
+      "refersTo": "button-destructive",
+      "description": "Dangerous or irreversible actions. Signal red fill, white text.",
+      "html": "<button class=\"ds-btn-destructive\">STOP SCREENSHARE</button>",
+      "css": ".ds-btn-destructive { background: var(--color-destructive); color: var(--color-destructive-foreground); font-size: 0.875rem; font-weight: 500; line-height: 1.25rem; padding: 0.5rem 1rem; border: none; border-radius: 0.375rem; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 2.5rem; transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1); } .ds-btn-destructive:hover { background: color-mix(in oklch, var(--color-destructive), white 10%); } .ds-btn-destructive:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring), 0 0 0 4px var(--color-background); }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Grouped content container. 12px radius, surface gray with 80% opacity and glass blur on desktop; full opacity on web.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-card-header\"><div class=\"ds-card-title\">WINDOW AUDIO CAPTURE</div></div><div class=\"ds-card-content\"><p class=\"ds-body\">Auto-detected from your window selection. Click an app below to override.</p></div></div>",
+      "css": ".ds-card { background: color-mix(in oklch, var(--color-card), transparent 20%); border: 1px solid var(--color-border); border-radius: 0.5rem; backdrop-filter: blur(12px); box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05); color: var(--color-card-foreground); } .ds-card-header { display: flex; flex-direction: column; gap: 0.375rem; padding: 1.5rem; } .ds-card-title { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--color-muted-foreground); line-height: 1.25; } .ds-card-content { padding: 0 1.5rem 1.5rem; } .ds-body { font-size: 0.875rem; line-height: 1.625; color: var(--color-muted-foreground); max-width: 20rem; margin: 0; }"
+    },
+    {
+      "name": "Live Badge",
+      "kind": "chip",
+      "refersTo": "badge-live",
+      "description": "Signals that a stream is actively broadcasting. Amber text on amber glow background.",
+      "html": "<span class=\"ds-badge-live\"><span class=\"ds-badge-live-dot\" aria-hidden=\"true\"></span> LIVE</span>",
+      "css": ".ds-badge-live { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.625rem; border-radius: 9999px; border: 1px solid rgba(196,128,74,0.3); background: oklch(0.6594 0.1096 57.8 / 0.15); color: var(--color-safelight); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; user-select: none; transition: colors 150ms; } .ds-badge-live-dot { width: 0.5rem; height: 0.5rem; border-radius: 9999px; background: var(--color-safelight); animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; } @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }"
+    },
+    {
+      "name": "Info Badge",
+      "kind": "chip",
+      "refersTo": "badge-info",
+      "description": "Neutral status indicator. Used for spectators count or connection status before going live.",
+      "html": "<span class=\"ds-badge-info\">CONNECTING...</span>",
+      "css": ".ds-badge-info { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.625rem; border-radius: 9999px; border: 1px solid var(--color-accent); background: var(--color-secondary); color: var(--color-muted-foreground); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; user-select: none; }"
+    },
+    {
+      "name": "Disconnected Badge",
+      "kind": "chip",
+      "refersTo": "badge-disconnected",
+      "description": "Signals stream failure or disconnection. Red text on red glow background.",
+      "html": "<span class=\"ds-badge-disconnected\">DISCONNECTED</span>",
+      "css": ".ds-badge-disconnected { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.625rem; border-radius: 9999px; border: 1px solid oklch(0.5858 0.222 17.6 / 0.2); background: oklch(0.5858 0.222 17.6 / 0.1); color: var(--color-destructive); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; user-select: none; }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Standard text input. 8px radius, dark fill with light border, monospace option for room codes.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"e.g. abc-123-xyz\" />",
+      "css": ".ds-input { display: flex; width: 100%; height: 2.5rem; padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--color-input); background: var(--color-background); color: var(--color-foreground); font-size: 1rem; line-height: 1.5rem; transition: box-shadow 150ms; } .ds-input::placeholder { color: var(--color-muted-foreground); } .ds-input:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring), 0 0 0 4px var(--color-background); } .ds-input:disabled { cursor: not-allowed; opacity: 0.5; }"
+    },
+    {
+      "name": "Desktop Header",
+      "kind": "nav",
+      "refersTo": "header-desktop",
+      "description": "Sticky glass header for the desktop presenter app. Wordmark + platform pill + LIVE badge on the left, CTA on the right.",
+      "html": "<header class=\"ds-header\"><div class=\"ds-header-inner\"><div class=\"ds-header-left\"><div class=\"ds-brand-icon\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M13 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4\"/><polyline points=\"9 7 4 12 9 17\"/><line x1=\"15\" y1=\"12\" x2=\"4\" y2=\"12\"/></svg></div><span class=\"ds-wordmark\">Slopcast</span></div><button class=\"ds-btn-primary\">CREATE LIVE ROOM</button></div></header>",
+      "css": ".ds-header { position: sticky; top: 0; z-index: 10; border-bottom: 1px solid var(--color-border); background: color-mix(in oklch, var(--color-background), transparent 20%); backdrop-filter: blur(12px); } .ds-header-inner { max-width: 64rem; margin: 0 auto; padding: 0 1.5rem; height: 3.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; } .ds-header-left { display: flex; align-items: center; gap: 0.75rem; min-width: 0; } .ds-brand-icon { padding: 0.5rem; border-radius: 0.75rem; background: oklch(0.6594 0.1096 57.8 / 0.1); color: var(--color-safelight); flex-shrink: 0; } .ds-wordmark { font-size: 1.25rem; font-weight: 700; line-height: 1.25; letter-spacing: -0.025em; color: var(--color-foreground); flex-shrink: 0; }"
+    },
+    {
+      "name": "Telemetry Cell",
+      "kind": "custom",
+      "refersTo": "telemetry-cell",
+      "description": "A single data point in the stream telemetry bar. Uppercase label above a monospace tabular-nums value.",
+      "html": "<div class=\"ds-telemetry-cell\"><span class=\"ds-telemetry-label\">BITRATE</span><span class=\"ds-telemetry-value\">4.2 Mbps</span></div>",
+      "css": ".ds-telemetry-cell { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; flex-shrink: 0; } .ds-telemetry-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; line-height: 1; color: var(--color-muted-foreground); } .ds-telemetry-value { font-size: 0.875rem; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; color: var(--color-foreground); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Darkroom Studio",
+    "overview": "Slopcast's visual language is the darkroom at work. The interface is a dim, focused space where the only things that matter are the broadcast and the controls that serve it. Deep near-black backgrounds absorb distraction; layered grays define surfaces by density, not by light. The single roasted accent — Safelight — is the darkroom's glow: it signals live transmission, active capture, and anything that demands the user's attention. The rest of the interface recedes into shadow, precise and present but never competing with the stream.\n\nThis is not a gaming aesthetic — it is a *studio* aesthetic. Every control earns its place through purpose, not decoration. The stream is the subject; the chrome is the enlarger.",
+    "keyCharacteristics": [
+      "Monochrome with one shot of roasted amber; 90%+ of any surface is neutral.",
+      "Layered darkness distinguishes hierarchy: deeper bg for the canvas, lighter surfaces for controls.",
+      "Edges are soft but never timid — rounded corners on containers, sharp on controls.",
+      "Backdrop blur on overlays and headers creates atmospheric depth without breaking the dark field.",
+      "Motion is reserved for signal, not ornament: a pulse for live, a fade for presence, a glow for capture."
+    ],
+    "rules": [
+      {
+        "name": "The Safelight Rule",
+        "body": "The roasted amber accent appears on at most 10% of any screen. It is reserved exclusively for live/active/capture states and the primary call to action. Overuse dilutes its signal power — if everything glows, nothing is live.",
+        "section": "colors"
+      },
+      {
+        "name": "The No-Background Rule",
+        "body": "Backgrounds never carry color. Every visible tint comes from surface elevation (bg → surface → elevated), never from a colored wash. The Safelight accent lives only on elements with semantic meaning, never on chrome.",
+        "section": "colors"
+      },
+      {
+        "name": "The Indigo-Platform-Only Rule",
+        "body": "Indigo is the single, documented violation of the single-accent doctrine. It may appear only on the desktop presenter's Wayland/X11 platform-source pill, where it marks the native display-server context. It may not migrate to Web, may not be promoted to a project token, and may not be repurposed for any other state.",
+        "section": "colors"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "Surfaces are flat at rest. Shadow appears only as a response to elevation (preview card), never as a resting decoration.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use the Safelight accent sparingly — it signals live, active, or actionable. If it's not one of those three, it should be neutral.",
+      "Do let the stream own the viewport. The interface is the frame, not the picture.",
+      "Do use border-gray-800 for structural separation; it's visible but not distracting.",
+      "Do use backdrop blur for depth on overlays, headers, and banners — it creates atmospheric separation without lifting elements off the page.",
+      "Do keep icon-only controls accessible: aria-label, title, and a visible focus-visible ring matching the Safelight ring spec.",
+      "Do wrap dynamically-updating status pills in role=\"status\" aria-live=\"polite\" so screen readers announce transitions; mark their decorative ping dots aria-hidden.",
+      "Do give error toasts role=\"alert\" and decorative alert icons aria-hidden=\"true\" so the message text is what the screen reader announces.",
+      "Do use the Label role (text-xs font-semibold uppercase tracking-wider) for all form labels, card titles, and telemetry labels — keep the role consistent across surfaces.",
+      "Do use text-caption-text for the quietest metadata tier (sparkline captions, telemetry sub-values)."
+    ],
+    "donts": [
+      "Don't add a second accent color. The darkroom has one roasted safelight. If you need to distinguish a secondary state, use neutral hierarchy (weight, size, opacity), not another color. The single exception is the documented Indigo-Platform-Only desktop Wayland/X11 pill.",
+      "Don't add shadows as decoration. Flat is the default; shadow is a deliberate response to elevation or focus.",
+      "Don't use light mode or lighter background values for sections — the darkroom is dark everywhere. The darkest background is the canvas; every other surface is lighter, never lighter than Elevated for a fill.",
+      "Don't use gradient backgrounds on content sections. The page background is flat black; surfaces are flat gray. The only gradient is the brand icon box, the Spectator Banner aspirational design, and the gradient-faded video overlay chrome.",
+      "Don't hand-roll status pills and badges — use the shared Badge component. Compose variants via variant and use className only to make the container aware of its surface.",
+      "Don't inline icon-only buttons without an aria-label and visible focus-visible ring.",
+      "Don't use sub-12px text anywhere — 0.75rem (12px) is the floor. The Label role at text-xs is the smallest permitted size.",
+      "Don't use hardcoded gray values (e.g., text-gray-500) in components — use semantic tokens (text-muted-foreground, text-caption-text, text-foreground) so the palette stays consistent across themes."
+    ]
+  }
+}
