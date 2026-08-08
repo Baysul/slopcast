@@ -158,6 +158,13 @@ const PCM_CHANNEL_CAPACITY: usize = 128;
 
 static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
 
+/// The worker's PCM sender, kept separately from `LIVEKIT` so the audio
+/// path (`feed_pcm`, on the audio-ring worker) never contends with
+/// `connect_livekit_room`'s long lock hold. Set once the worker starts,
+/// cleared on disconnect. `Sender` is `Clone` + `Send`, so handing out a
+/// clone under this tiny lock and sending after release is safe.
+static PCM_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>> = Mutex::new(None);
+
 static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
 static SPECTATOR_COUNT: AtomicU32 = AtomicU32::new(0);
 static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -225,6 +232,15 @@ pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
     VIDEO_SOURCE.store(None);
 
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(PCM_CHANNEL_CAPACITY);
+    // Publish the sender under its own tiny lock before the long `LIVEKIT`
+    // hold below, so the audio path can reach it without ever contending
+    // with `connect_livekit_room`.
+    {
+        let Ok(mut sender_guard) = PCM_SENDER.lock() else {
+            return Err("PCM sender lock poisoned".into());
+        };
+        *sender_guard = Some(pcm_tx.clone());
+    }
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
 
@@ -270,6 +286,13 @@ pub fn disconnect_livekit_room() -> Result<(), String> {
         let _ = state.stop.send(());
     }
     *guard = None;
+    // Clear the dedicated PCM sender so a stale sender can never outlive the
+    // room (a late `feed_pcm` would otherwise try_send into a closed channel
+    // and report a spurious error). Never blocks the audio path: this lock is
+    // independent of `LIVEKIT`.
+    if let Ok(mut sender_guard) = PCM_SENDER.lock() {
+        *sender_guard = None;
+    }
     // Release the room lock before the capture teardown below: `feed_pcm`
     // (the audio-callback path) and every room command block on `LIVEKIT`,
     // and `desktop_capture::stop()` joins the capture thread (~100-300 ms).
@@ -317,15 +340,25 @@ fn drain_pcm_chunks(buffer: &mut VecDeque<i16>, samples_per_chunk: usize, out: &
 /// Returns an error if no room is connected or the worker's PCM channel is
 /// closed.
 pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
-    with_guard(|state| {
-        // Channel full: WebRTC encoding is stalled, drop the newest chunk.
-        match state.pcm_tx.try_send(pcm) {
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err("PCM channel closed".into())
-            }
-        }
-    })
+    // Read the sender out under the dedicated `PCM_SENDER` lock (never
+    // `LIVEKIT`): `connect_livekit_room` holds `LIVEKIT` for the whole
+    // worker-start + Room::connect + publish_track sequence, and this runs
+    // on the audio-ring worker. Blocking on `LIVEKIT` there stalls the ring
+    // and, via its join, the whole app — the original deadlock.
+    let sender = {
+        let guard = PCM_SENDER
+            .lock()
+            .map_err(|e| format!("PCM sender lock poisoned: {e}"))?;
+        let Some(sender) = guard.as_ref() else {
+            return Err("Room not connected".into());
+        };
+        sender.clone()
+    };
+    // Channel full: WebRTC encoding is stalled, drop the newest chunk.
+    match sender.try_send(pcm) {
+        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err("PCM channel closed".into()),
+    }
 }
 
 /// Publishes (or re-publishes) the screenshare video track with the given
