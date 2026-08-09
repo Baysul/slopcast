@@ -88,6 +88,21 @@ const PREVIEW_MAX_FPS: u32 = 60;
 /// adding more than a frame of latency; drop-oldest keeps content fresh.
 const PACER_CAPACITY: usize = 4;
 
+/// Ring A capacity: capture-resolution history slots kept for downstream
+/// consumers (the preview emitter and the keepalive delivery arm). Two slots
+/// hold the newest captured frame and its immediate predecessor; both readers
+/// only ever take the newest. Slots store the *original capture resolution*
+/// (e.g. native desktop size), so a dynamic client-side `SCALE_TARGET` change
+/// is honored at delivery time instead of being baked in at capture time.
+const HISTORY_RING_CAPACITY: usize = 2;
+
+/// Keepalive delivery ring (Ring B) capacity: delivery buffers the keepalive
+/// arm rotates through when the pacer runs dry. Sized larger than m144's
+/// encoder retention window (`kMaxFramesInPreparation` = 10), so no buffer
+/// instance is ever re-submitted — or repacked in place — while the
+/// asynchronous encode path may still reference it.
+const KEEPALIVE_RING_CAPACITY: usize = 16;
+
 /// Preview callback: invoked with a BGRA frame while a capture session is
 /// active. The engine stays Tauri-unaware — the Tauri backend wires this to
 /// the renderer's preview channel.
@@ -245,6 +260,12 @@ struct PreviewScaleBufs {
 /// arithmetic whenever either dimension is odd (mid-resize frames, e.g.
 /// 1280×693); sizing the copy by arithmetic panicked with a
 /// `copy_from_slice` length mismatch.
+///
+/// `width`/`height` are the **original capture resolution** (e.g. the native
+/// desktop size), not any delivery/`SCALE_TARGET` size: the preview emitter
+/// fits the card, and the keepalive arm scales to the current encoder target
+/// at delivery time — so a client-side resolution change is honored without
+/// touching the capture thread.
 struct PreviewI420 {
     width: u32,
     height: u32,
@@ -255,7 +276,81 @@ struct PreviewI420 {
     planes: Vec<u8>,
 }
 
-static PREVIEW_I420: Mutex<Option<PreviewI420>> = Mutex::new(None);
+/// Ring A: a small rotating history of the most recent capture-resolution
+/// I420 frames (the newest plus its immediate predecessor), written by the
+/// capture callback under a brief lock and read by the preview emitter and
+/// the keepalive delivery arm. Readers copy the newest slot out; the writer
+/// only ever pushes — drop-oldest keeps the ring bounded by construction.
+///
+/// A ring (not a single slot) so the keepalive arm never hands the same
+/// buffer instance to the encoder twice within the encoder's asynchronous
+/// retention window: Ring B (the delivery ring) rotates *fresh* packed
+/// buffers, but its source — this history — must always be a stable,
+/// immutable snapshot, which a ring of immutable slots provides.
+struct HistoryRing {
+    slots: Vec<PreviewI420>,
+    /// Write index; `slots[write_idx % len]` is replaced next push.
+    write_idx: usize,
+    /// Total frames written; readers use it to detect a new snapshot.
+    pushed: u64,
+}
+
+impl HistoryRing {
+    fn new(capacity: usize) -> Self {
+        Self {
+            slots: (0..capacity)
+                .map(|_| PreviewI420 {
+                    width: 0,
+                    height: 0,
+                    pts_us: 0,
+                    y_len: 0,
+                    u_len: 0,
+                    v_len: 0,
+                    planes: Vec::new(),
+                })
+                .collect(),
+            write_idx: 0,
+            pushed: 0,
+        }
+    }
+
+    /// Stores a capture-resolution I420 frame (copied under the caller's
+    /// lock). The length fields mirror the actual plane slice lengths.
+    fn push(
+        &mut self,
+        width: u32,
+        height: u32,
+        pts_us: i64,
+        planes: &[u8],
+        lens: (usize, usize, usize),
+    ) {
+        let (y_len, u_len, v_len) = lens;
+        let idx = self.write_idx % self.slots.len();
+        let slot = &mut self.slots[idx];
+        slot.width = width;
+        slot.height = height;
+        slot.pts_us = pts_us;
+        slot.y_len = y_len;
+        slot.u_len = u_len;
+        slot.v_len = v_len;
+        slot.planes.clear();
+        slot.planes.extend_from_slice(planes);
+        self.write_idx += 1;
+        self.pushed += 1;
+    }
+
+    /// Returns the newest snapshot (the most recently pushed slot), or
+    /// `None` when nothing has been captured yet.
+    fn newest(&self) -> Option<&PreviewI420> {
+        if self.pushed == 0 {
+            return None;
+        }
+        let idx = (self.write_idx - 1) % self.slots.len();
+        Some(&self.slots[idx])
+    }
+}
+
+static PREVIEW_I420: Mutex<Option<HistoryRing>> = Mutex::new(None);
 
 /// Snapshot the newest captured frame and ship it to the renderer as a
 /// raw channel payload: `[pts_us u64 LE][width u32 LE][height u32 LE][tight
@@ -295,12 +390,15 @@ fn emit_preview_frame(
         let Ok(guard) = PREVIEW_I420.lock() else {
             return false;
         };
-        let Some(entry) = guard.as_ref() else {
+        let Some(ring) = guard.as_ref() else {
             return false;
         };
-        // Copy the stashed planes out under the brief lock; the scale and
-        // conversion below run outside it, so a slow emission can never
+        // Copy the newest slot's planes out under the brief lock; the scale
+        // and conversion below run outside it, so a slow emission can never
         // stall the capture callback's stash write (the lock is shared).
+        let Some(entry) = ring.newest() else {
+            return false;
+        };
         bufs.planes.clear();
         bufs.planes.extend_from_slice(&entry.planes);
         (
@@ -436,6 +534,51 @@ impl FramePacer {
     }
 }
 
+/// Ring B: the keepalive delivery ring. The capture loop's keepalive arm
+/// (pacer empty) must keep the RTP cadence even without fresh frames, but it
+/// must never re-submit the same `VideoFrame`/`I420Buffer` instance while the
+/// encoder may still hold it asynchronously (the SDK exposes no release
+/// callback). Instead, each keepalive tick:
+///
+/// 1. Snapshot the newest capture-resolution planes from Ring A.
+/// 2. Scale them to the current `SCALE_TARGET` into the next ring slot.
+/// 3. Submit that slot as a `VideoFrame` with a fresh timestamp.
+///
+/// The ring rotates `KEEPALIVE_RING_CAPACITY` distinct buffer instances, so
+/// no instance is re-packed/re-submitted within that many ticks — well beyond
+/// m144's encoder retention window (`kMaxFramesInPreparation` = 10). The ring
+/// is owned by `run_capture` (single-threaded access), so no lock is needed.
+struct KeepaliveRing {
+    slots: Vec<VideoFrame<I420Buffer>>,
+    /// Next slot to fill; wraps every `KEEPALIVE_RING_CAPACITY` submissions.
+    next: usize,
+}
+
+impl KeepaliveRing {
+    fn new() -> Self {
+        Self {
+            slots: Vec::with_capacity(KEEPALIVE_RING_CAPACITY),
+            next: 0,
+        }
+    }
+
+    /// Returns the slot to pack this tick, growing the ring lazily (the
+    /// first `KEEPALIVE_RING_CAPACITY` ticks allocate one buffer each).
+    fn next_slot(&mut self, target: (u32, u32)) -> &mut VideoFrame<I420Buffer> {
+        if self.slots.len() < KEEPALIVE_RING_CAPACITY {
+            self.slots.push(VideoFrame {
+                rotation: VideoRotation::VideoRotation0,
+                timestamp_us: 0,
+                frame_metadata: None,
+                buffer: I420Buffer::new(target.0, target.1),
+            });
+        }
+        let slot = &mut self.slots[self.next];
+        self.next = (self.next + 1) % KEEPALIVE_RING_CAPACITY;
+        slot
+    }
+}
+
 /// The capture-source frame callback: `(width, height, bgra, pts_us)`.
 pub(crate) type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 
@@ -490,37 +633,115 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
         // ~2.25 MB, a third of the old BGRA copy). The stash write is a
         // brief memcpy under the lock; the emitter copies out the same way,
         // so neither side ever holds the lock for a scale or convert.
+        // Always stash at the *capture resolution*: Ring A feeds the
+        // keepalive delivery arm too, which scales to the current
+        // `SCALE_TARGET` at delivery time, so a client-side resolution
+        // change is honored without a capture restart.
         if PREVIEW_CALLBACK.load_full().is_some()
             && let Ok(mut slot) = PREVIEW_I420.lock()
         {
-            let entry = slot.get_or_insert_with(|| PreviewI420 {
-                width,
-                height,
-                pts_us: 0,
-                y_len: 0,
-                u_len: 0,
-                v_len: 0,
-                planes: Vec::new(),
-            });
-            entry.width = width;
-            entry.height = height;
-            entry.pts_us = monotonic_us();
-            // Size from the actual plane slices: the chroma planes hold
-            // `ceil(w/2) × ceil(h/2)` samples, which is more than `w*h/4`
-            // for odd dimensions (mid-resize frames).
+            let ring = slot.get_or_insert_with(|| HistoryRing::new(HISTORY_RING_CAPACITY));
             let (plane_y, plane_u, plane_v) = frame.buffer.data();
-            entry.y_len = plane_y.len();
-            entry.u_len = plane_u.len();
-            entry.v_len = plane_v.len();
-            entry
-                .planes
-                .resize(entry.y_len + entry.u_len + entry.v_len, 0);
-            entry.planes[..entry.y_len].copy_from_slice(plane_y);
-            entry.planes[entry.y_len..entry.y_len + entry.u_len].copy_from_slice(plane_u);
-            entry.planes[entry.y_len + entry.u_len..].copy_from_slice(plane_v);
+            let lens = (plane_y.len(), plane_u.len(), plane_v.len());
+            let planes_len = lens.0 + lens.1 + lens.2;
+            let mut planes = Vec::with_capacity(planes_len);
+            planes.extend_from_slice(plane_y);
+            planes.extend_from_slice(plane_u);
+            planes.extend_from_slice(plane_v);
+            ring.push(width, height, monotonic_us(), &planes, lens);
         }
         pacer.push(frame);
     })
+}
+
+/// Builds one keepalive frame from the newest Ring-A snapshot, honoring the
+/// current `SCALE_TARGET` at delivery time (Ring A stores the original
+/// capture resolution, so a client-side resolution change is applied here,
+/// not baked in at capture). Packs the snapshot into the next rotating
+/// Ring-B slot — each submission gets a fresh `I420Buffer` instance, so the
+/// encoder's asynchronous retention window never sees the same buffer twice.
+/// The frame carries the source frame's *capture* timestamp (not delivery
+/// time), keeping the `TimestampAligner`'s RTP timestamp chain monotonic.
+///
+/// Returns `None` when nothing has been captured yet (e.g. the portal picker
+/// is still open, or the gap before the first frame).
+fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
+    // Scale to the configured encoder target, or fall back to the source
+    // resolution when no track is live (the keepalive arm only runs with a
+    // live `VIDEO_SOURCE`, so `SCALE_TARGET` is normally set).
+    let target = SCALE_TARGET.load_full().map(|t| (t.width, t.height));
+    let (src_w, src_h, y_len, u_len, v_len, pts_us, planes) = {
+        let Ok(guard) = PREVIEW_I420.lock() else {
+            return None;
+        };
+        let ring = guard.as_ref()?;
+        let entry = ring.newest()?;
+        // Copy the newest snapshot's planes out under the brief lock; the
+        // scale and pack below run outside it.
+        let mut planes = Vec::with_capacity(entry.y_len + entry.u_len + entry.v_len);
+        planes.extend_from_slice(&entry.planes);
+        (
+            entry.width,
+            entry.height,
+            entry.y_len,
+            entry.u_len,
+            entry.v_len,
+            entry.pts_us,
+            planes,
+        )
+    };
+    let (out_w, out_h) = target.unwrap_or((src_w, src_h));
+
+    // Pack the snapshot's planes into the next ring slot's buffer **at the
+    // source dimensions** — the raw plane bytes are contiguous rows of
+    // `src_w × src_h` (stride == width), so they're only stride-correct when
+    // copied into a buffer of those exact dimensions. Packing into a
+    // target-sized buffer (as the earlier code did) would copy capture-stride
+    // rows into a different-stride buffer — silently truncating/reinterpreting
+    // when src ≠ out, and the subsequent `.scale()` would then scale garbage
+    // that already claims the target size. The preview path does the same
+    // (allocate at source, then scale) for the same reason.
+    let slot = ring.next_slot((src_w, src_h));
+    {
+        let (plane_y, plane_u, plane_v) = slot.buffer.data_mut();
+        let n = plane_y.len().min(y_len);
+        plane_y[..n].copy_from_slice(&planes[..n]);
+        let n = plane_u.len().min(u_len);
+        plane_u[..n].copy_from_slice(&planes[y_len..y_len + n]);
+        let n = plane_v.len().min(v_len);
+        plane_v[..n].copy_from_slice(&planes[y_len + u_len..y_len + u_len + n]);
+    }
+    if (src_w, src_h) != (out_w, out_h) {
+        slot.buffer = slot.buffer.scale(
+            i32::try_from(out_w).unwrap_or(0),
+            i32::try_from(out_h).unwrap_or(0),
+        );
+    }
+    // Stamp the keepalive with the *source frame's* capture timestamp, not
+    // wall-clock now: the real path (`convert_frame`) uses capture time, and
+    // `TimestampAligner::TranslateTimestamp` derives RTP timestamps from
+    // `timestamp_us`. Mixing domains (capture time for real frames, delivery
+    // time for keepalives) makes the aligner's offset estimate jump and the
+    // translated RTP timestamps jitter forward/backward — the receiver's
+    // jitter buffer then alternates between two frame buffers (the observed
+    // H.264 ping-pong). Re-sending the same content with its own capture
+    // timestamp keeps the capturer clock stable; the aligner clips to
+    // prev+1ms and the encoder compresses the duplicate to near-nothing.
+    slot.timestamp_us = pts_us;
+    // Hand the packed slot buffer out; the ring slot is re-packed on its next
+    // rotation, so the submitted frame's buffer instance stays unique within
+    // the retention window. The fresh buffer is at the *source* size — that's
+    // what `next_slot` packs into on the next rotation.
+    let slot = std::mem::replace(
+        slot,
+        VideoFrame {
+            rotation: VideoRotation::VideoRotation0,
+            timestamp_us: 0,
+            frame_metadata: None,
+            buffer: I420Buffer::new(src_w, src_h),
+        },
+    );
+    Some(slot)
 }
 
 /// Monotonic microsecond timestamp for video frames, anchored at first use.
@@ -727,11 +948,18 @@ fn run_capture(
     let mut next_delivery_at = Instant::now();
     // When the pacer is empty on a delivery tick (the portal capture is
     // event-driven — KWin records only on compositor render or cursor move),
-    // the last frame is re-pushed with a fresh timestamp so the RTP cadence
-    // stays even instead of stalling; the encoder compresses the duplicates
-    // to near-nothing. Mirrors the WGC engine, which re-delivers the last
-    // frame on static content.
-    let mut last_frame: Option<VideoFrame<I420Buffer>> = None;
+    // the newest captured frame is re-submitted with a fresh timestamp so the
+    // RTP cadence stays even instead of stalling; the encoder compresses the
+    // duplicates to near-nothing. Mirrors the WGC engine, which re-delivers
+    // the last frame on static content.
+    //
+    // The re-submission goes through Ring B: the keepalive arm snapshots the
+    // newest capture-resolution planes from Ring A, scales them to the
+    // current `SCALE_TARGET`, packs them into the next rotating slot, and
+    // submits a *fresh* `VideoFrame` — never mutating (or reusing within the
+    // retention window) the same buffer instance the encoder may still hold
+    // asynchronously.
+    let mut keepalive_ring = KeepaliveRing::new();
     // Rate-limits the slow-scale log below (at most one line per 3 s).
     // Initialized so the first slow scale always logs.
     let mut last_slow_scale = Instant::now()
@@ -755,9 +983,10 @@ fn run_capture(
             match pacer.pop() {
                 Some(mut frame) => {
                     if let Some(source) = VIDEO_SOURCE.load_full() {
-                        // Scale to the configured target, up or down (OBS-style
-                        // canvas scaling): libwebrtc's encoder has no explicit
-                        // size, so a 4K source would otherwise stream at 4K with
+                        // Fast path: a real captured frame. Scale to the
+                        // configured target, up or down (OBS-style canvas
+                        // scaling): libwebrtc's encoder has no explicit size,
+                        // so a 4K source would otherwise stream at 4K with
                         // the user's 1080p bitrate (see `ScaleTarget`).
                         let push_frame = match SCALE_TARGET.load_full().map(|t| *t).filter(
                             |target| {
@@ -794,15 +1023,13 @@ fn run_capture(
                             None => frame,
                         };
                         source.capture_frame(&push_frame);
-                        last_frame = Some(push_frame);
                         STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
                     } else {
-                        // Seed `last_frame` even without a live track: Go Live
-                        // swaps `VIDEO_SOURCE` in while the pacer is usually
-                        // empty (KWin records only on damage), and the keepalive
-                        // arm needs a frame to re-push — without this the stream
-                        // stays empty until the source produces motion.
-                        last_frame = Some(frame);
+                        // No live track: drop the frame, but the Ring-A stash
+                        // still holds the newest capture-resolution planes, so
+                        // Go Live can immediately keepalive on it (the pacer
+                        // is usually empty right after publish — KWin records
+                        // only on damage).
                         STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -811,13 +1038,14 @@ fn run_capture(
                     // had nothing to record, not that delivery should stop —
                     // but a dropped corrupt buffer or the gap between picker
                     // answer and first frame can still leave a tick empty.
-                    // Re-push the last frame (same immutable buffer, timestamp
-                    // refreshed) so arrival pacing stays even.
+                    // Re-submit the newest captured frame through Ring B
+                    // (fresh buffer + fresh timestamp) so arrival pacing
+                    // stays even and the encoder never sees the same buffer
+                    // instance twice within its async retention window.
                     if let Some(source) = VIDEO_SOURCE.load_full()
-                        && let Some(last) = last_frame.as_mut()
+                        && let Some(frame) = keepalive_frame(&mut keepalive_ring)
                     {
-                        last.timestamp_us = monotonic_us();
-                        source.capture_frame(last);
+                        source.capture_frame(&frame);
                     }
                 }
             }
@@ -1531,5 +1759,156 @@ mod probe {
         eprintln!(
             "[bench] {label}: {per_frame:?}/frame, {bytes_per_frame} B/frame, {mb_per_s:.1} MB/s"
         );
+    }
+
+    /// Ring A (history): the newest slot is always the last pushed, at the
+    /// *capture* resolution, and drop-oldest keeps the ring bounded.
+    #[test]
+    fn history_ring_keeps_newest_at_capture_resolution() {
+        let mut ring = HistoryRing::new(2);
+        let planes = |v: u8| vec![v; 4];
+        ring.push(1920, 1080, 1, &planes(1), (2, 1, 1));
+        ring.push(1280, 720, 2, &planes(2), (2, 1, 1));
+        // Overwrite the oldest (drop-oldest): the ring stays bounded at 2.
+        ring.push(2560, 1440, 3, &planes(3), (2, 1, 1));
+
+        let newest = ring
+            .newest()
+            .unwrap_or_else(|| panic!("newest must exist after a push"));
+        assert_eq!(
+            (newest.width, newest.height, newest.pts_us),
+            (2560, 1440, 3)
+        );
+        assert_eq!(newest.planes, planes(3));
+        assert_eq!(ring.slots.len(), 2, "ring must stay bounded at capacity");
+    }
+
+    /// Ring A: nothing to read before the first push.
+    #[test]
+    fn history_ring_is_empty_before_first_push() {
+        let ring = HistoryRing::new(2);
+        assert!(ring.newest().is_none());
+    }
+
+    /// Ring B (keepalive): consecutive submissions never reuse the same
+    /// slot instance within `KEEPALIVE_RING_CAPACITY` ticks (each tick packs
+    /// the slot's buffer in place, so a reused slot would mutate a buffer the
+    /// encoder may still hold).
+    #[test]
+    fn keepalive_ring_rotates_distinct_buffers() {
+        let mut ring = KeepaliveRing::new();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..(KEEPALIVE_RING_CAPACITY + 2) {
+            // The slot instance (address) is what gets packed and submitted;
+            // it must not repeat within the retention window.
+            let frame = ring.next_slot((1280, 720));
+            let ptr = std::ptr::addr_of!(*frame) as usize;
+            if i < KEEPALIVE_RING_CAPACITY {
+                // The first full rotation: every slot instance is distinct.
+                assert!(
+                    !seen.contains(&ptr),
+                    "slot instance must not be reused within {KEEPALIVE_RING_CAPACITY} ticks"
+                );
+            }
+            seen.insert(ptr);
+            assert_eq!(
+                (frame.buffer.width(), frame.buffer.height()),
+                (1280, 720),
+                "slot must be created at the delivery target size"
+            );
+        }
+    }
+
+    /// `keepalive_frame` honors a dynamic `SCALE_TARGET` change: Ring A holds
+    /// capture resolution, the delivered frame is at the current target.
+    #[test]
+    fn keepalive_frame_scales_to_current_target() {
+        set_preview_callback(Box::new(|_bytes, _pts_us| {}));
+        set_scale_target(640, 360, 30);
+        // Seed Ring A with a capture-resolution snapshot.
+        {
+            let mut ring = HistoryRing::new(2);
+            let planes = vec![0u8; 1280 * 720 + 640 * 360 + 640 * 360];
+            ring.push(1280, 720, 42, &planes, (1280 * 720, 640 * 360, 640 * 360));
+            let Ok(mut slot) = PREVIEW_I420.lock() else {
+                panic!("PREVIEW_I420 lock poisoned");
+            };
+            *slot = Some(ring);
+        }
+        let mut keepalive = KeepaliveRing::new();
+        let frame = keepalive_frame(&mut keepalive)
+            .unwrap_or_else(|| panic!("keepalive must produce a frame"));
+        assert_eq!(
+            (frame.buffer.width(), frame.buffer.height()),
+            (640, 360),
+            "keepalive must scale the capture-resolution snapshot to SCALE_TARGET"
+        );
+        assert_eq!(
+            frame.timestamp_us, 42,
+            "keepalive must carry the source frame's capture timestamp (not delivery time)"
+        );
+        clear_scale_target();
+        clear_preview_callback();
+        let Ok(mut slot) = PREVIEW_I420.lock() else {
+            panic!("PREVIEW_I420 lock poisoned");
+        };
+        *slot = None;
+    }
+
+    /// Regression: the keepalive packs capture-resolution planes into a slot
+    /// buffer allocated at the *source* dimensions, then scales. Earlier code
+    /// allocated the slot at the *target* size and copied capture-stride rows
+    /// into it — silently corrupting content whenever src ≠ out. A horizontal
+    /// gradient (each row = its own unique value) makes any stride
+    /// misalignment or truncation produce wrong pixels, not just a scale
+    /// artifact.
+    #[test]
+    fn keepalive_packs_source_planes_then_scales() {
+        set_preview_callback(Box::new(|_bytes, _pts_us| {}));
+        set_scale_target(640, 360, 30);
+        // Seed Ring A with a 1280x720 capture-resolution snapshot whose luma
+        // rows each carry a distinct value: row y has byte value (y & 0xFF).
+        {
+            let mut ring = HistoryRing::new(2);
+            let mut planes = vec![0u8; 1280 * 720 + 640 * 360 + 640 * 360];
+            for y in 0..720u32 {
+                let row = &mut planes[y as usize * 1280..(y as usize + 1) * 1280];
+                row.fill((y & 0xFF) as u8);
+            }
+            // Chroma planes: flat, distinct from any luma row value.
+            planes[1280 * 720..1280 * 720 + 640 * 360].fill(128);
+            planes[1280 * 720 + 640 * 360..].fill(128);
+            ring.push(1280, 720, 7, &planes, (1280 * 720, 640 * 360, 640 * 360));
+            let Ok(mut slot) = PREVIEW_I420.lock() else {
+                panic!("PREVIEW_I420 lock poisoned");
+            };
+            *slot = Some(ring);
+        }
+        let mut keepalive = KeepaliveRing::new();
+        let frame = keepalive_frame(&mut keepalive)
+            .unwrap_or_else(|| panic!("keepalive must produce a frame"));
+        assert_eq!((frame.buffer.width(), frame.buffer.height()), (640, 360));
+        // The output must be a genuine downscale of the gradient: the top
+        // output row ≈ top source rows (0..2), the bottom output row ≈ the
+        // bottom source row (row 719 = 0xCF = 207, sampled with edge clamp).
+        // A stride bug (copying 1280-wide rows into a 640-wide buffer) would
+        // put wrong row values in the output.
+        let (plane_y, _, _) = frame.buffer.data();
+        let top = plane_y[0];
+        let bottom = plane_y[(360 - 1) * 640];
+        assert!(
+            top <= 3,
+            "top output row must average the top source rows (got {top})"
+        );
+        assert!(
+            (200..=214).contains(&bottom),
+            "bottom output row must sample the bottom source row 719 = 0xCF (got {bottom})"
+        );
+        clear_scale_target();
+        clear_preview_callback();
+        let Ok(mut slot) = PREVIEW_I420.lock() else {
+            panic!("PREVIEW_I420 lock poisoned");
+        };
+        *slot = None;
     }
 }
