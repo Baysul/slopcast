@@ -53,6 +53,7 @@ SCREEN-CAPTURE-INHOUSE.md
 
 # Test artifacts
 test-output/
+probe/
 
 # Configuration
 slopcast.config.json
