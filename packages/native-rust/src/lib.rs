@@ -446,6 +446,9 @@ mod tests {
             id: 1,
             columns: vec![0.75],
         };
+        // The clone is the point: verify the derived Clone impl preserves
+        // every field. The original is intentionally unused afterwards.
+        #[allow(clippy::redundant_clone, reason = "the clone under test")]
         let cloned_wave = wave.clone();
         assert_eq!(cloned_wave.id, 1);
         assert!((cloned_wave.columns[0] - 0.75).abs() < f64::EPSILON);

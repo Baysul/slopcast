@@ -190,7 +190,7 @@ fn meter_stream(
     .ok()?;
 
     let listener = stream
-        .add_local_listener_with_user_data(level.clone())
+        .add_local_listener_with_user_data(Arc::clone(&level))
         .param_changed(|_stream, level, _id, param| {
             let Some(pod) = param else { return };
             let Ok((media_type, _)) = format_utils::parse_format(pod) else {
@@ -325,7 +325,7 @@ fn run_meter_session(stop: Arc<AtomicBool>, ready_tx: mpsc::Sender<Result<(), St
     let _reg_listener = registry
         .add_listener_local()
         .global({
-            let meters = meters.clone();
+            let meters = Rc::clone(&meters);
             let core = pw.core.clone();
             move |global| {
                 let Some(props) = global.props else { return };
@@ -366,7 +366,7 @@ fn run_meter_session(stop: Arc<AtomicBool>, ready_tx: mpsc::Sender<Result<(), St
             }
         })
         .global_remove({
-            let meters = meters.clone();
+            let meters = Rc::clone(&meters);
             move |id| {
                 meters.borrow_mut().remove(&id);
             }
@@ -408,7 +408,7 @@ pub(crate) fn start_audio_metering() -> Result<bool, String> {
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
     let join = {
-        let stop = stop.clone();
+        let stop = Arc::clone(&stop);
         thread::Builder::new()
             .name("pw-audio-metering".into())
             .spawn(move || run_meter_session(stop, ready_tx))

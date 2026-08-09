@@ -133,23 +133,23 @@ fn collect_client_pids(
     let client_pids: Rc<RefCell<HashMap<u32, u32>>> = Rc::new(RefCell::new(HashMap::new()));
     let client_info: Rc<RefCell<HashMap<u32, (u32, String)>>> =
         Rc::new(RefCell::new(HashMap::new()));
-    let cp = client_pids.clone();
-    let ci = client_info.clone();
-    let ap = apps.clone();
+    let cp = Rc::clone(&client_pids);
+    let ci = Rc::clone(&client_info);
+    let ap = Rc::clone(apps);
     // Node info props (e.g. `media.name`, where browsers put the tab title) are
     // not part of the registry advertisement — they only arrive after binding
     // the node. Audio stream nodes are bound here and kept until the second
     // sync round below has delivered their info events.
     let bound_nodes: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
         Rc::new(RefCell::new(Vec::new()));
-    let bindings = bound_nodes.clone();
+    let bindings = bound_nodes;
     let bind_registry: Rc<RefCell<Option<pipewire::registry::RegistryRc>>> =
         Rc::new(RefCell::new(None));
-    let reg_cell = bind_registry.clone();
+    let reg_cell = bind_registry;
     let core_rc = core.clone();
 
     let proc_list = Rc::new(iter_proc());
-    let proc_list_cb = proc_list.clone();
+    let proc_list_cb = proc_list;
 
     let _reg_listener = registry
         .add_listener_local()
@@ -242,7 +242,7 @@ fn collect_client_pids(
                         return;
                     };
                     let node_id = global.id;
-                    let apps_info = ap.clone();
+                    let apps_info = Rc::clone(&ap);
                     let listener = node
                         .add_listener_local()
                         .info(move |info| {
@@ -368,7 +368,7 @@ pub(crate) fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, Strin
     let bindings: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
         Rc::new(RefCell::new(Vec::new()));
     let bind_core = pw.core.clone();
-    let nodes_cb = nodes.clone();
+    let nodes_cb = Rc::clone(&nodes);
 
     let _reg_listener = registry
         .add_listener_local()
@@ -389,7 +389,7 @@ pub(crate) fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, Strin
             else {
                 return;
             };
-            let nodes_cell = nodes_cb.clone();
+            let nodes_cell = Rc::clone(&nodes_cb);
             let listener = node
                 .add_listener_local()
                 .info(move |info| {

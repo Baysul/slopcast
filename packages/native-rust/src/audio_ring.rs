@@ -15,16 +15,16 @@ const AUDIO_QUEUE_CAPACITY: usize = 8;
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_CHANNELS: u16 = 2;
 const DEFAULT_SAMPLE_BYTES: usize = 2; // i16
-pub const PCM_FRAME_SIZE: usize = (DEFAULT_CHANNELS as usize) * DEFAULT_SAMPLE_BYTES; // 4 bytes
+pub(crate) const PCM_FRAME_SIZE: usize = (DEFAULT_CHANNELS as usize) * DEFAULT_SAMPLE_BYTES; // 4 bytes
 
 /// Default slot capacity: 16 KiB, ~85 ms of 48 kHz stereo 16-bit PCM (192,000 B/s).
-pub const DEFAULT_SLOT_CAPACITY: usize = 16_384;
+pub(crate) const DEFAULT_SLOT_CAPACITY: usize = 16_384;
 
 /// PCM data callback: 48 kHz stereo 16-bit signed integer samples. The ring
 /// worker converts each frame-aligned byte chunk to `i16` samples before
 /// invoking the callback; the boxed `Fn` (not a thread-safe function) is
 /// called synchronously on the ring worker thread, so it must never block.
-pub type AudioDataCallback = dyn Fn(Vec<i16>) + Send + Sync;
+pub(crate) type AudioDataCallback = dyn Fn(Vec<i16>) + Send + Sync;
 
 struct AudioProducer {
     data_queue: Arc<crossbeam_queue::ArrayQueue<Vec<u8>>>,
@@ -40,7 +40,7 @@ struct AudioRingSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioRingStats {
+pub(crate) struct AudioRingStats {
     pub captured_chunks: u64,
     pub captured_bytes: u64,
     pub ring_drops: u64,
@@ -58,11 +58,11 @@ static AUDIO_PRODUCER: ArcSwapOption<AudioProducer> = ArcSwapOption::const_empty
 static AUDIO_RING_LIFECYCLE: Mutex<Option<AudioRingSession>> = Mutex::new(None);
 static AUDIO_CALLBACK: ArcSwapOption<Box<AudioDataCallback>> = ArcSwapOption::const_empty();
 
-pub fn set_audio_data_callback(callback: Box<dyn Fn(Vec<i16>) + Send + Sync>) {
+pub(crate) fn set_audio_data_callback(callback: Box<dyn Fn(Vec<i16>) + Send + Sync>) {
     AUDIO_CALLBACK.store(Some(Arc::new(callback)));
 }
 
-pub fn clear_audio_data_callback() {
+pub(crate) fn clear_audio_data_callback() {
     AUDIO_CALLBACK.store(None);
 }
 
@@ -85,7 +85,7 @@ fn align_down(value: usize, alignment: usize) -> usize {
     (value / alignment) * alignment
 }
 
-pub fn calculate_slot_capacity(
+pub(crate) fn calculate_slot_capacity(
     sample_rate: u32,
     channels: u16,
     sample_bytes: usize,
@@ -106,7 +106,7 @@ pub fn calculate_slot_capacity(
 
 /// Lock-free non-blocking push; safe to call directly from PipeWire/WASAPI
 /// real-time process callbacks.
-pub fn push_pcm_bytes(bytes: &[u8]) {
+pub(crate) fn push_pcm_bytes(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
@@ -172,7 +172,7 @@ pub fn push_pcm_bytes(bytes: &[u8]) {
     }
 }
 
-pub fn start_audio_ring() -> Result<(), String> {
+pub(crate) fn start_audio_ring() -> Result<(), String> {
     let calculated_capacity = calculate_slot_capacity(
         DEFAULT_SAMPLE_RATE,
         DEFAULT_CHANNELS,
@@ -183,7 +183,7 @@ pub fn start_audio_ring() -> Result<(), String> {
     start_audio_ring_with_capacity(calculated_capacity, PCM_FRAME_SIZE)
 }
 
-pub fn start_audio_ring_with_capacity(
+pub(crate) fn start_audio_ring_with_capacity(
     slot_capacity: usize,
     frame_size: usize,
 ) -> Result<(), String> {
@@ -213,11 +213,11 @@ pub fn start_audio_ring_with_capacity(
         let _ = free_slots.push(Vec::with_capacity(slot_capacity));
     }
 
-    let data_queue_worker = data_queue.clone();
-    let free_slots_worker = free_slots.clone();
+    let data_queue_worker = Arc::clone(&data_queue);
+    let free_slots_worker = Arc::clone(&free_slots);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let stop_clone = stop.clone();
+    let stop_clone = Arc::clone(&stop);
 
     let worker = thread::Builder::new()
         .name("audio-ring-worker".into())
@@ -300,14 +300,14 @@ fn stop_audio_ring_internal(guard: &mut Option<AudioRingSession>) {
     drop(old_producer);
 }
 
-pub fn stop_audio_ring() {
+pub(crate) fn stop_audio_ring() {
     let Ok(mut guard) = AUDIO_RING_LIFECYCLE.lock() else {
         return;
     };
     stop_audio_ring_internal(&mut guard);
 }
 
-pub fn get_audio_ring_stats() -> AudioRingStats {
+pub(crate) fn get_audio_ring_stats() -> AudioRingStats {
     AudioRingStats {
         captured_chunks: CAPTURED_CHUNKS.load(Ordering::Relaxed),
         captured_bytes: CAPTURED_BYTES.load(Ordering::Relaxed),
@@ -317,7 +317,7 @@ pub fn get_audio_ring_stats() -> AudioRingStats {
     }
 }
 
-pub fn reset_audio_ring_stats() {
+pub(crate) fn reset_audio_ring_stats() {
     CAPTURED_CHUNKS.store(0, Ordering::Relaxed);
     CAPTURED_BYTES.store(0, Ordering::Relaxed);
     RING_DROPS.store(0, Ordering::Relaxed);

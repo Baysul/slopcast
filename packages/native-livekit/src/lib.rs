@@ -231,7 +231,7 @@ pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
         let Ok(mut sender_guard) = PCM_SENDER.lock() else {
             return Err("PCM sender lock poisoned".into());
         };
-        *sender_guard = Some(pcm_tx.clone());
+        *sender_guard = Some(pcm_tx);
     }
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();

@@ -312,15 +312,15 @@ fn inspect_video_graph() -> Option<VideoScan> {
     let bind_core = pw.core.clone();
     let bind_registry: Rc<RefCell<Option<pipewire::registry::RegistryRc>>> =
         Rc::new(RefCell::new(None));
-    let reg_cell = bind_registry.clone();
+    let reg_cell = bind_registry;
 
     let _reg_listener = registry
         .add_listener_local()
         .global({
-            let scan = scan.clone();
-            let bind_core = bind_core.clone();
-            let reg_cell = reg_cell.clone();
-            let bindings = bindings.clone();
+            let scan = Rc::clone(&scan);
+            let bind_core = bind_core;
+            let reg_cell = reg_cell;
+            let bindings = bindings;
             move |global| {
                 let Some(props) = global.props else { return };
                 let media_class = props.get("media.class").unwrap_or("");
@@ -331,7 +331,7 @@ fn inspect_video_graph() -> Option<VideoScan> {
                 {
                     return;
                 }
-                let scan_info = scan.clone();
+                let scan_info = Rc::clone(&scan);
                 let mut scan = scan.borrow_mut();
                 scan.video_node_count += 1;
 

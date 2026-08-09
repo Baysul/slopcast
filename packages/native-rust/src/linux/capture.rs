@@ -150,7 +150,7 @@ fn bind_default_metadata(
     let metadata = registry
         .bind::<pipewire::metadata::Metadata, _>(global)
         .ok()?;
-    let t = tracker.clone();
+    let t = Rc::clone(tracker);
     let listener = metadata
         .add_listener_local()
         .property(move |subject, key, _type, value| {
@@ -177,7 +177,7 @@ fn bind_default_sink(
         let global = tracker_ref.system_sink_global(id)?;
         registry.bind::<pipewire::node::Node, _>(global).ok()?
     };
-    let desired = desired_layout.clone();
+    let desired = Rc::clone(desired_layout);
     let listener = proxy
         .add_listener_local()
         .param(move |_seq, param_type, _index, _next, pod| {
@@ -261,13 +261,13 @@ fn run_capture_session(
     let _reg_listener = registry
         .add_listener_local()
         .global({
-            let t = tracker.clone();
-            let s = shared.clone();
+            let t = Rc::clone(&tracker);
+            let s = Arc::clone(&shared);
             move |global| t.borrow_mut().add_global(global, &s)
         })
         .global_remove({
-            let t = tracker.clone();
-            let s = shared.clone();
+            let t = Rc::clone(&tracker);
+            let s = Arc::clone(&shared);
             move |id| t.borrow_mut().remove_global(id, &s)
         })
         .register();
@@ -332,7 +332,7 @@ fn run_capture_session(
             )
             .ok()?;
 
-            let ready_cell_clone = ready_cell.clone();
+            let ready_cell_clone = Rc::clone(ready_cell);
             let listener = stream
                 .add_local_listener_with_user_data(())
                 .state_changed(move |_stream, _old, state, _error| match state {
@@ -469,7 +469,7 @@ fn run_capture_session(
 
     if let Ok(pending) = pw.core.sync(0) {
         let flush_done = Rc::new(RefCell::new(false));
-        let fd = flush_done.clone();
+        let fd = Rc::clone(&flush_done);
         let ml_weak = pw.main_loop.downgrade();
         let _core_listener = pw
             .core
@@ -507,8 +507,8 @@ fn spawn_capture_session(target: TargetSpec) -> Result<CaptureSession, String> {
     let (target_tx, target_rx) = mpsc::channel::<TargetSpec>();
 
     let join = {
-        let shared = shared.clone();
-        let stop = stop.clone();
+        let shared = Arc::clone(&shared);
+        let stop = Arc::clone(&stop);
         thread::Builder::new()
             .name("pw-window-audio-capture".into())
             .spawn(move || run_capture_session(target, shared, stop, ready_tx, target_rx))

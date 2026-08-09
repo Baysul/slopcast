@@ -926,7 +926,7 @@ fn start_with(source: CaptureSource) -> Result<bool, String> {
     reset_stats();
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::channel();
-    let thread_stop = stop.clone();
+    let thread_stop = Arc::clone(&stop);
     let handle = thread::Builder::new()
         .name("desktop-capture".into())
         .spawn(move || run_capture(&thread_stop, &ready_tx, source))

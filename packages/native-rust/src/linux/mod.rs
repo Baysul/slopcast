@@ -55,7 +55,7 @@ fn pw_init() -> Result<PwCtx, String> {
 
 fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::MainLoopRc) {
     let sync_complete = Rc::new(RefCell::new(false));
-    let sync_complete_clone = sync_complete.clone();
+    let sync_complete_clone = Rc::clone(&sync_complete);
     let Some(pending) = core.sync(0).ok() else {
         return;
     };
