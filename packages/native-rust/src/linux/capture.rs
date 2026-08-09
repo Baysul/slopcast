@@ -3,7 +3,7 @@ use super::{ADAPTER_FACTORY, CAPTURE_NODE_DESCRIPTION, CAPTURE_NODE_NAME, pw_ini
 use crate::AudioTarget;
 use pipewire::properties::{PropertiesBox, properties};
 use pipewire::registry::GlobalObject;
-use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw};
+use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw, MAX_CHANNELS};
 use pipewire::spa::param::format::MediaType;
 use pipewire::spa::param::{ParamType, format_utils};
 use pipewire::spa::pod::{Object, Pod, Value};
@@ -320,17 +320,21 @@ fn run_capture_session(
             let mut params = [pod];
 
             let stream = StreamRc::new(
-                pw.core.clone(),
-                AUDIO_STREAM_NAME,
-                properties! {
-                    "media.class" => "Stream/Input/Audio",
-                    "node.name" => AUDIO_STREAM_NAME,
-                    "node.description" => "Slopcast Audio Capture",
-                    "node.dont-move" => "true",
-                    "node.dont-reconnect" => "true",
-                },
-            )
-            .ok()?;
+            pw.core.clone(),
+            AUDIO_STREAM_NAME,
+            properties! {
+                "media.class" => "Stream/Input/Audio",
+                "node.name" => AUDIO_STREAM_NAME,
+                "node.description" => "Slopcast Audio Capture",
+                "node.dont-move" => "true",
+                "node.dont-reconnect" => "true",
+                // Align the graph quantum with the 10 ms PCM frames we
+                // emit, so per-quantum delivery stays in step with the
+                // ring/channel cadence.
+                "node.latency" => format!("{}/{CAPTURE_SAMPLE_RATE}", CAPTURE_SAMPLE_RATE / 100),
+            },
+        )
+        .ok()?;
 
             let ready_cell_clone = Rc::clone(ready_cell);
             let listener = stream
@@ -346,6 +350,29 @@ fn run_capture_session(
                         if let Some(tx) = ready_cell_clone.borrow_mut().take() {
                             let _ = tx.send(Err(format!("PCM stream error: {e}")));
                         }
+                    }
+                })
+                .param_changed(|_stream, (), _id, param| {
+                    let Some(pod) = param else {
+                        return;
+                    };
+                    let Ok((media_type, _)) = format_utils::parse_format(pod) else {
+                        return;
+                    };
+                    if media_type != MediaType::Audio {
+                        return;
+                    }
+                    let mut info = AudioInfoRaw::new();
+                    if info.parse(pod).is_err() {
+                        return;
+                    }
+                    let rate = info.rate();
+                    let channels = info.channels();
+                    if rate != CAPTURE_SAMPLE_RATE || channels != CAPTURE_CHANNELS {
+                        eprintln!(
+                            "[audio-capture] negotiated {rate} Hz / {channels} ch, \
+                             expected {CAPTURE_SAMPLE_RATE} Hz / {CAPTURE_CHANNELS} ch"
+                        );
                     }
                 })
                 .process(move |s, ()| {
@@ -648,9 +675,24 @@ fn invoke_audio_data_callback(data: &[u8]) {
     });
 }
 
+/// The capture stream always negotiates this exact format; every downstream
+/// stage (ring, PCM channel, libwebrtc fast path) assumes 48 kHz stereo, and
+/// the libwebrtc fast path forwards frames verbatim without resampling. Left
+/// unconstrained, `PipeWire` negotiates the app stream's native rate (e.g.
+/// 44.1 kHz), which the 48 kHz contract then plays back ~8.8% fast — pops
+/// and out-of-tune audio.
+const CAPTURE_SAMPLE_RATE: u32 = 48_000;
+const CAPTURE_CHANNELS: u32 = 2;
+
 fn create_audio_capture_format() -> Option<Vec<u8>> {
     let mut audio_info = AudioInfoRaw::new();
     audio_info.set_format(AudioFormat::F32LE);
+    audio_info.set_rate(CAPTURE_SAMPLE_RATE);
+    audio_info.set_channels(CAPTURE_CHANNELS);
+    let mut position = [0u32; MAX_CHANNELS];
+    position[0] = pipewire::spa::sys::SPA_AUDIO_CHANNEL_FL;
+    position[1] = pipewire::spa::sys::SPA_AUDIO_CHANNEL_FR;
+    audio_info.set_position(position);
     let obj = Object {
         type_: SpaTypes::ObjectParamFormat.as_raw(),
         id: ParamType::EnumFormat.as_raw(),
