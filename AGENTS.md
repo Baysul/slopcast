@@ -235,8 +235,8 @@ The renderer is a sandboxed webview with `nodeIntegration`-equivalent access **d
 |---|---|
 | `pnpm dev:desktop` | Run the desktop app in dev mode (`tauri dev`, renderer on :5173) |
 | `pnpm dev:web` / `pnpm dev:server` | Web spectator / API server dev servers |
-| `pnpm build:desktop` | `pnpm check` + `pnpm --filter desktop tauri build` (AppImage + deb + nsis) |
-| `pnpm package:desktop` | `pnpm check` + `pnpm --filter desktop tauri build --no-bundle` |
+| `pnpm build:desktop` | `pnpm check` + `pnpm --filter desktop tauri build --no-bundle` (binary only) |
+| `pnpm package:desktop` | `pnpm check` + `pnpm --filter desktop tauri build` (AppImage + deb + nsis) |
 | `pnpm dist:desktop` | Build + produce all configured bundles (appimage, deb, nsis) |
 | `pnpm dist:desktop:linux` | Build Linux AppImage + deb (`--bundles deb,appimage`) |
 | `pnpm dist:desktop:linux:appimage` | Build Linux AppImage only |
