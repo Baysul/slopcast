@@ -280,7 +280,7 @@ struct WasapiState {
     mode: Option<CaptureMode>,
 }
 
-pub struct WasapiManager {
+pub(crate) struct WasapiManager {
     state: Mutex<Option<WasapiState>>,
 }
 
@@ -305,7 +305,7 @@ impl WasapiManager {
         }
     }
 
-    pub fn stop_audio_capture(&self) -> bool {
+    pub(crate) fn stop_audio_capture(&self) -> bool {
         let Ok(mut guard) = self.state.lock() else {
             return true;
         };
@@ -315,7 +315,7 @@ impl WasapiManager {
         true
     }
 
-    pub fn is_audio_capture_active(&self) -> bool {
+    pub(crate) fn is_audio_capture_active(&self) -> bool {
         let Ok(mut guard) = self.state.lock() else {
             return false;
         };
@@ -370,7 +370,7 @@ impl WasapiManager {
         }
     }
 
-    pub fn start_audio_capture(&self, target: &AudioTarget) -> Result<bool, String> {
+    pub(crate) fn start_audio_capture(&self, target: &AudioTarget) -> Result<bool, String> {
         let target_pid = match target {
             AudioTarget::Label(label) => {
                 let p = label
@@ -748,7 +748,7 @@ fn snapshot_process_names() -> HashMap<u32, String> {
     map
 }
 
-pub fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
+pub(crate) fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
     // SAFETY: standard per-thread COM initialization; balanced below on success.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let com_ok = hr == S_OK || hr == S_FALSE;
@@ -1430,19 +1430,19 @@ fn run_capture(
     run_result
 }
 
-pub fn start_audio_capture(target: &AudioTarget) -> Result<bool, String> {
+pub(crate) fn start_audio_capture(target: &AudioTarget) -> Result<bool, String> {
     MANAGER.start_audio_capture(target)
 }
 
-pub fn stop_audio_capture() -> bool {
+pub(crate) fn stop_audio_capture() -> bool {
     MANAGER.stop_audio_capture()
 }
 
-pub fn is_audio_capture_active() -> bool {
+pub(crate) fn is_audio_capture_active() -> bool {
     MANAGER.is_audio_capture_active()
 }
 
-pub fn switch_audio_capture(target: &AudioTarget) -> Result<bool, String> {
+pub(crate) fn switch_audio_capture(target: &AudioTarget) -> Result<bool, String> {
     start_audio_capture(target)
 }
 
@@ -1450,15 +1450,16 @@ pub fn switch_audio_capture(target: &AudioTarget) -> Result<bool, String> {
     clippy::unnecessary_wraps,
     reason = "keeps the platform-module signature uniform with the fallible linux implementation"
 )]
-pub fn dump_audio_sources() -> Result<Vec<std::collections::HashMap<String, String>>, String> {
+pub(crate) fn dump_audio_sources() -> Result<Vec<std::collections::HashMap<String, String>>, String>
+{
     Ok(Vec::new())
 }
 
-pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
+pub(crate) fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     None
 }
 
-pub fn get_capture_context() -> Result<crate::CaptureContext, String> {
+pub(crate) fn get_capture_context() -> Result<crate::CaptureContext, String> {
     Err("Capture context introspection is only available on Linux".into())
 }
 
@@ -1466,17 +1467,17 @@ pub fn get_capture_context() -> Result<crate::CaptureContext, String> {
     clippy::unnecessary_wraps,
     reason = "keeps the platform-module signature uniform with the fallible linux implementation"
 )]
-pub fn start_audio_metering() -> Result<bool, String> {
+pub(crate) fn start_audio_metering() -> Result<bool, String> {
     Ok(false)
 }
 
-pub fn stop_audio_metering() -> bool {
+pub(crate) fn stop_audio_metering() -> bool {
     true
 }
 
-pub fn set_wave_callback(_callback: Box<dyn Fn(Vec<crate::AudioAppWave>) + Send + Sync>) {}
+pub(crate) fn set_wave_callback(_callback: Box<dyn Fn(Vec<crate::AudioAppWave>) + Send + Sync>) {}
 
-pub fn clear_wave_callback() {}
+pub(crate) fn clear_wave_callback() {}
 
 #[cfg(test)]
 mod tests {
