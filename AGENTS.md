@@ -142,7 +142,7 @@ AI Agents operating within this codebase MUST leverage the following MCP tools:
 
 ## 5. Code Quality & Linting
 
-**Prioritize readability, maintainability, and minimalism.**
+**Prioritize readability, maintainability, and minimalism. Every line of code is a liability. When in doubt, do less.**
 
 ### TypeScript / JavaScript / JSON (Biome)
 
@@ -181,6 +181,73 @@ Follow these rules:
 - Don't extract shared code until it's duplicated 3+ times. Keep `pub` surface minimal — prefer `pub(crate)`.
 - Don't add crates, config, or files that aren't needed for the stated goal.
 - Code must be `rustfmt`- and `clippy`-clean, with no blanket lint suppressions (targeted `#[allow(..., reason = "...")]` is fine).
+
+## Style Rules
+
+**Spacing**
+
+Group a function body into up to four blocks, in this order, each separated
+from the next by exactly one blank line. Within a block, no blank lines.
+Omit any block that doesn't apply — don't force empty groups.
+
+1. **Guards** — early returns / validation, back-to-back, no blank lines
+   between them.
+2. **Definitions** — `let` bindings that compute or gather values used below.
+3. **Logic** — the calls and mutations that do the actual work.
+4. **Return** — the final expression or `Ok(...)`, alone.
+
+```rust
+fn process_order(order: &Order, inventory: &Inventory) -> Result<Receipt, OrderError> {
+    if order.items.is_empty() {
+        return Err(OrderError::EmptyOrder);
+    }
+    if !inventory.has_stock(&order.items) {
+        return Err(OrderError::OutOfStock);
+    }
+
+    let total = order.items.iter().map(|i| i.price * i.qty).sum();
+    let discount = compute_discount(order);
+    let final_total = total - discount;
+
+    inventory.reserve(&order.items)?;
+    let receipt = Receipt::new(order.id, final_total);
+
+    Ok(receipt)
+}
+```
+
+Notes on the example: the two guards have no blank line between them (same
+block). The three `let`s computing the total are one block. The reserve call
+and receipt construction are "logic" because they do work, not just compute a
+value, so they get their own block. `Ok(receipt)` stands alone.
+
+**Naming**
+- Standard Rust casing: `snake_case` for functions/variables/modules,
+  `UpperCamelCase` for types/traits/enums, `SCREAMING_SNAKE_CASE` for
+  consts/statics.
+- Names should reveal intent. Avoid generic catch-alls (`data`, `info`, `val`,
+  `tmp`, `thing`) — name for what the value represents, not its type or role.
+- Booleans get `is_` / `has_` / `should_` / `can_` prefixes.
+- Functions get verb or verb-phrase names describing what they do
+  (`parse_config`, not `config_stuff` or `handle_config`).
+- Avoid implementation-shaped type suffixes (`-Impl`, `-Helper`, `-Manager`)
+  unless the suffix is doing real descriptive work.
+- Use the same name for the same concept everywhere — don't call it `id` in one
+  module and `identifier` in another.
+- Single-letter names only in tight, obvious scopes (loop indices, short
+  closures like `|x| x + 1`) — not for anything spanning more than a few lines.
+- Abbreviations only where idiomatic in Rust/the domain (`ctx`, `cfg`, `idx`);
+  don't invent new ones.
+
+**Expression complexity**
+- Keep `match`, `if`, and `while` scrutinees simple: a variable, a field
+  access, or one short method call. If producing the value takes more than
+  one chained call, bind it to a named local first.
+- Don't nest a multi-line closure inside another expression — a match
+  scrutinee, a chained call, a function argument. Name it: either a local
+  binding or, if it's reused, a function. This is usually why `rustfmt`
+  output looks awkward — it's formatting an inherently tangled expression,
+  not making a bad choice.
 
 All Rust code must conform to the [Rust Style Guide](https://doc.rust-lang.org/stable/style-guide/) and pass `cargo clippy --all-targets -- -D warnings`. The `[lints.clippy]` config in **all three Rust crates** (`native-rust`, `native-livekit`, `apps/desktop/src-tauri`) enables `pedantic` plus hard `deny` on `unwrap_used`, `expect_used`, `undocumented_unsafe_blocks`, and `allow_attributes_without_reason`.
 
@@ -346,28 +413,7 @@ pnpm dist:desktop
 
 ---
 
-## 8. Immediate Task Backlog
-
-All originally tracked tasks are complete:
-
-- [x] **Task 1 (Server):** REST room service for room creation, code generation, and LiveKit token issuance (+ rate limiting, dual presenter tokens).
-- [x] **Task 2 (Web):** Web Spectator UI (`apps/web`) with WebRTC player and room code join screen (+ `ws://`→`wss://` normalization, spectator banner).
-- [x] **Task 3 (Desktop - Native):** Exclusive per-window audio capture in `packages/native-rust/src/linux` (obs-pipewire-audio-capture model: dedicated capture sink, target-only link topology, default-sink channel matching; + process-id targets for silent apps, `AudioTarget` label resolution cascade).
-- [x] **Task 4 (Desktop - Native):** WASAPI (Windows) loopback driver.
-- [x] **Task 5 (Desktop - UI):** Window audio target picker component in React (single-select; capture only the chosen app's audio).
-- [x] **Task 6 (Infrastructure):** Superseded mid-flight — the Electron shell was **replaced by Tauri 2** (pure-Rust backend, no napi-rs; see §2C) instead of being upgraded to Electron 43. Packaging moved from electron-builder to `tauri build` (appimage/deb/nsis).
-- [x] **Task 7 (Testing):** End-to-end harness validating presenter→spectator video flow — WebdriverIO presenter phase (Tauri binary, embedded WebDriver) + Playwright Chromium spectator phase, per-codec passes, GPU probe, log-based failure detection with retry logic.
-- [x] **Task 8 (Desktop/Web - UI):** Hand-rolled UI migrated to genuine shadcn/ui — both apps ship cva + Radix components under `components/ui/` with `components.json`.
-- [x] **Task 9 (Desktop - UI):** Monolithic `main.tsx` decomposed into focused components and hooks (`AudioAppPicker`, `SourcePicker`, `StreamSettingsPanel`, `ScreensharePreview`, `useNativeRoom`, `useAudioCapture`, `useStreamSettings`, ...).
-- [x] **Task 10 (Infrastructure):** Renderer type-check gate wired in — `desktop`'s check script runs `tsc -p tsconfig.renderer.json --noEmit`, invoked by `pnpm check`.
-
-**Documented follow-ups (from code, not yet tracked):**
-- xdg-desktop-portal `restore_token` persistence for the ScreenCast session.
-- Windows e2e automation: the harness (`apps/server/src/e2e-test.ts`) is Linux-oriented (`pkill`, `XDG_CONFIG_HOME` isolation, shell paths); synthetic capture already works cross-platform once the harness is portable.
-
----
-
-## 9. Key Dependency Versions
+## 8. Key Dependency Versions
 
 | Package | Version |
 |---|---|
@@ -390,7 +436,7 @@ All originally tracked tasks are complete:
 
 ---
 
-## 10. Git Commit Conventions
+## 9. Git Commit Conventions
 
 All commits must follow the [Conventional Commits](https://www.conventionalcommits.org/) format with a strict type prefix.
 
