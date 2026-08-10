@@ -29,7 +29,7 @@ export const config = {
         // Cargo workspace target dir lives at the repo root, not in src-tauri.
         // `pnpm --filter desktop exec wdio run` runs with cwd = apps/desktop,
         // so the root target dir is two levels up.
-        appBinaryPath: '../../target/release/slopcast',
+        appBinaryPath: process.env.E2E_APP_BINARY_PATH ?? '../../target/release/slopcast',
         driverProvider: 'embedded',
         captureBackendLogs: true,
         backendLogLevel: 'info',

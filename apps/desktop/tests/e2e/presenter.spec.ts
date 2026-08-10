@@ -103,6 +103,7 @@ const phaseJsonPath = process.env.E2E_PHASE_JSON;
 const releaseFlagPath = process.env.E2E_RELEASE_FLAG;
 const stopFlagPath = process.env.E2E_STOP_FLAG;
 const stoppedFlagPath = process.env.E2E_STOPPED_FLAG;
+const spectatorReadyFlagPath = process.env.E2E_SPECTATOR_READY_FLAG;
 const websiteUrl = process.env.E2E_WEBSITE_URL;
 const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
 const codec = process.env.E2E_CODEC ?? 'h264';
@@ -179,7 +180,7 @@ function assertCodecTelemetry(phase: PhaseResult): void {
   const impl = phase.encoderImplementation ?? '';
   console.log(`[e2e] h264 encoder implementation: ${impl || '(not yet reported)'}`);
   assert(
-    /VAAPI|NVENC|Media\s*Foundation|VideoToolbox/i.test(impl),
+    /VAAPI|vah264enc|NVENC|Media\s*Foundation|VideoToolbox/i.test(impl),
     `H264 was not hardware-encoded (encoderImplementation=${impl || 'empty'})`,
   );
 }
@@ -318,6 +319,31 @@ async function stopShareForSpectatorCheck(): Promise<void> {
   console.log('[e2e] stop completed — presenter back to the idle stage');
 }
 
+async function verifyPostSubscriptionTelemetry(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, TELEMETRY_SAMPLE_GAP_MS));
+  const snapshot = await snapshotPresenterTelemetry();
+  phase.videoBytesSent = snapshot.telemetry.videoBytesSent ?? 0;
+  writePhase();
+  assert(phase.videoBytesSent > 0, 'Presenter RTP bytes stayed at zero after the spectator subscribed');
+
+  let uiBitrate = '—';
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const bitrate = browser.$('[data-testid="telemetry-bitrate"]');
+    if (await bitrate.isExisting()) {
+      uiBitrate = (await bitrate.getText()).trim();
+      const parsed = Number.parseFloat(uiBitrate);
+      if (Number.isFinite(parsed) && parsed > 0) break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  assert(
+    Number.parseFloat(uiBitrate) > 0,
+    `Telemetry bar never showed live video bitrate after subscription (stuck at "${uiBitrate}")`,
+  );
+  writePhase();
+  console.log(`[e2e] post-subscription telemetry: bytesSent=${phase.videoBytesSent}, bitrate="${uiBitrate}"`);
+}
+
 describe('Slopcast presenter phase (Tauri)', () => {
   // A test that dies with an uncaught error (not an assert) must still land
   // in phase.errors immediately — otherwise the harness can hand off a
@@ -410,7 +436,9 @@ describe('Slopcast presenter phase (Tauri)', () => {
     // encoder or a crippled simulcast layer shows up as a low frame delta.
     const framesDelta = (t1.telemetry.videoFramesEncoded ?? 0) - (t0.telemetry.videoFramesEncoded ?? 0);
     phase.telemetryFps = Math.round(framesDelta / (TELEMETRY_SAMPLE_GAP_MS / 1000));
-    phase.telemetryFlowing = framesDelta > 0 && (t1.telemetry.videoBytesSent ?? 0) > 0 && t1.stats.framesPushed > 0;
+    // livekitwebrtcsink does not send RTP until the SFU has a subscriber. The
+    // hold step verifies bytes and the rendered bitrate after Chromium joins.
+    phase.telemetryFlowing = framesDelta > 0 && t1.stats.framesPushed > 0;
     writePhase();
 
     console.log(
@@ -420,7 +448,7 @@ describe('Slopcast presenter phase (Tauri)', () => {
         `captureFramesPushed=${phase.captureFramesPushed}, previewFramesSent=${phase.previewFramesSent}`,
     );
 
-    assert(phase.telemetryFlowing, 'Presenter video telemetry did not advance (frames/bytes stalled)');
+    assert(phase.telemetryFlowing, 'Presenter video telemetry did not advance (frames/capture stalled)');
     assert(
       phase.telemetryFps >= 15,
       `Presenter stream ran at ${phase.telemetryFps} fps — encoder collapsed or crippled layer (need >= 15)`,
@@ -458,6 +486,7 @@ describe('Slopcast presenter phase (Tauri)', () => {
 
   it('keeps the app alive until the spectator phase releases it', async () => {
     const deadline = Date.now() + HOLD_TIMEOUT_MS;
+    let spectatorTelemetryVerified = false;
     while (Date.now() < deadline) {
       if (existsSync(releaseFlagPath)) {
         console.log('[e2e] release flag seen — ending presenter session');
@@ -471,6 +500,10 @@ describe('Slopcast presenter phase (Tauri)', () => {
         await stopShareForSpectatorCheck();
         writeFileSync(stoppedFlagPath, 'stopped');
         console.log('[e2e] share stopped — waiting for the spectator check to complete');
+      }
+      if (spectatorReadyFlagPath && !spectatorTelemetryVerified && existsSync(spectatorReadyFlagPath)) {
+        await verifyPostSubscriptionTelemetry();
+        spectatorTelemetryVerified = true;
       }
       await new Promise((r) => setTimeout(r, 2000));
     }

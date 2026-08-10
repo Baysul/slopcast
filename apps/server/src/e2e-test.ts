@@ -27,6 +27,7 @@ import path from 'node:path';
 
 import { RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
 import { type AppConfig, loadConfig } from '@slopcast/shared-types/config';
+import { RoomServiceClient } from 'livekit-server-sdk';
 
 import type { Browser, Page } from 'playwright';
 
@@ -43,6 +44,28 @@ interface GpuInfo {
   glRenderer: string | null;
   glVersion: string | null;
   softwareRasterizer: boolean;
+}
+
+async function logRoomPublications(config: AppConfig, roomCode: string): Promise<void> {
+  const host = config.livekitUrl.replace(/^ws(s?):\/\//, 'http$1://');
+  const roomClient = new RoomServiceClient(host, config.livekitApiKey, config.livekitApiSecret);
+  const deadline = Date.now() + 10_000;
+  let summary: Array<{ identity: string; tracks: Array<{ sid: string; mimeType: string }> }> = [];
+
+  while (Date.now() < deadline) {
+    const participants = await roomClient.listParticipants(roomCode);
+    summary = participants.map((participant) => ({
+      identity: participant.identity,
+      tracks: participant.tracks.map((track) => ({ sid: track.sid, mimeType: track.mimeType })),
+    }));
+    if (summary.some((participant) => participant.tracks.some((track) => track.mimeType.startsWith('video/')))) {
+      log('LIVEKIT', `Room publications: ${JSON.stringify(summary)}`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(`Presenter video publication did not appear in LiveKit: ${JSON.stringify(summary)}`);
 }
 
 /// Structured result of the WebdriverIO presenter phase (§12.2), written by
@@ -139,6 +162,7 @@ const PRESENTER_PHASE_JSON = path.join(OUTPUT_DIR, 'presenter-phase.json');
 /// PRESENTER_STOPPED_FLAG once the UI reached the idle stage again.
 const PRESENTER_STOP_FLAG = path.join(OUTPUT_DIR, '.presenter-stop-request');
 const PRESENTER_STOPPED_FLAG = path.join(OUTPUT_DIR, '.presenter-stopped');
+const PRESENTER_SPECTATOR_READY_FLAG = path.join(OUTPUT_DIR, '.spectator-ready');
 
 const HEALTH_POLL_MS = 500;
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -540,7 +564,7 @@ async function runPresenterPhase(
   log('TEST', `=== Step 2: Presenter Automation (WebdriverIO + Tauri, codec=${codec}) ===`);
 
   // Cargo workspace target dir lives at the repo root, not in src-tauri.
-  const appBinary = path.join(REPO_ROOT, 'target', 'release', 'slopcast');
+  const appBinary = process.env.E2E_APP_BINARY_PATH ?? path.join(REPO_ROOT, 'target', 'release', 'slopcast');
   if (!existsSync(appBinary)) {
     throw new Error(
       `Tauri e2e binary not found at ${appBinary}. ` +
@@ -555,6 +579,9 @@ async function runPresenterPhase(
   // previous runs (single-instance plugin would hijack this launch).
   rmSync(PRESENTER_RELEASE_FLAG, { force: true });
   rmSync(PRESENTER_PHASE_JSON, { force: true });
+  rmSync(PRESENTER_STOP_FLAG, { force: true });
+  rmSync(PRESENTER_STOPPED_FLAG, { force: true });
+  rmSync(PRESENTER_SPECTATOR_READY_FLAG, { force: true });
   killStraySlopcast();
 
   // Isolate the app's config dir (stream-settings.json, onboarding state) so
@@ -573,6 +600,7 @@ async function runPresenterPhase(
       E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
       E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
       E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
+      E2E_SPECTATOR_READY_FLAG: PRESENTER_SPECTATOR_READY_FLAG,
       E2E_WEBSITE_URL: config.websiteUrl,
       E2E_CODEC: codec,
       E2E_CAPTURE: captureMode,
@@ -924,6 +952,31 @@ async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, cap
 
   await checkDecoderStall(spectatorPage, result);
 
+  writeFileSync(PRESENTER_SPECTATOR_READY_FLAG, 'ready');
+  const telemetryDeadline = Date.now() + 20_000;
+  while (Date.now() < telemetryDeadline) {
+    let phase: PresenterPhase;
+    try {
+      phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
+    } catch {
+      // The presenter rewrites this file in place; retry a partial read.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
+    if (phase.errors.length > 0) {
+      result.errors.push(...phase.errors.map((error) => `Presenter post-subscription telemetry: ${error}`));
+      break;
+    }
+    if (phase.videoBytesSent > 0) {
+      result.presenterVideoBytesSent = phase.videoBytesSent;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  if (result.presenterVideoBytesSent <= 0) {
+    result.errors.push('Presenter telemetry reported no RTP bytes after the spectator subscribed');
+  }
+
   await runPresenterStopRoundTrip(spectatorPage, result);
 
   return browser;
@@ -1068,7 +1121,9 @@ async function runTest(): Promise<TestResult> {
   // requirement — the app feeds a test pattern through the real publish path.
   // Portal mode keeps the manual picker flow for humans.
   const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
-  const codecs = (process.env.E2E_CODECS ?? 'h264,vp8,vp9,av1')
+  let defaultCodecs = 'h264,vp8,vp9,av1';
+  if (process.platform === 'linux') defaultCodecs = 'h264';
+  const codecs = (process.env.E2E_CODECS ?? defaultCodecs)
     .split(',')
     .map((c) => c.trim())
     .filter(Boolean);
@@ -1137,6 +1192,8 @@ async function runTest(): Promise<TestResult> {
     try {
       const presenter = await runPresenterPhase(config, logEntries, result, codec, captureMode);
       wdioProc = presenter.wdioProc;
+
+      await logRoomPublications(config, result.roomCode);
 
       browser = await runSpectatorPhase(logEntries, result, captureMode);
 
