@@ -68,5 +68,10 @@ package-lock.json
 # Tauri generated schemas (from capabilities/ at build time)
 apps/desktop/src-tauri/gen/
 
+# Generated stock GStreamer runtime (prepared before Linux build/package)
+apps/desktop/src-tauri/resources/gstreamer-plugins/*.so
+apps/desktop/src-tauri/resources/gstreamer-plugins/gst-plugin-scanner
+apps/desktop/src-tauri/resources/gstreamer-plugins/runtime-manifest.txt
+
 # git worktrees (nested biome.json would break the root Biome run)
 .worktrees/

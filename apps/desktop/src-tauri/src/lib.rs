@@ -12,6 +12,8 @@ pub mod settings;
 #[cfg(feature = "e2e")]
 mod e2e;
 
+use std::path::Path;
+
 use tauri::Manager;
 use tauri::http;
 
@@ -217,6 +219,32 @@ pub fn run() {
             // (SIGSEGV at startup when unarmed).
             native_livekit::arm_pipewire_shims();
             native_rust::ensure_pipewire_init();
+            #[cfg(target_os = "linux")]
+            {
+                // Bundled layouts (deb/AppImage) place resources directly in
+                // the resource dir (`/usr/lib/slopcast`); cargo-built binaries
+                // (`tauri build --no-bundle`, `tauri dev`) place them under
+                // `<exe_dir>/resources`. Try both so the same code serves the
+                // packaged app and the locally built one.
+                let resource_dir = app.path().resource_dir()?;
+                let exe_dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(Path::to_path_buf));
+                let mut candidates = vec![resource_dir.join("gstreamer-plugins")];
+                if let Some(exe_dir) = exe_dir {
+                    candidates.push(exe_dir.join("resources/gstreamer-plugins"));
+                }
+                let plugin_dir = candidates
+                    .into_iter()
+                    .find(|dir| dir.join("libgstrswebrtc.so").is_file())
+                    .ok_or_else(|| {
+                        std::io::Error::other(
+                            "Bundled GStreamer plugin directory not found (looked in the resource and executable dirs)",
+                        )
+                    })?;
+                native_livekit::load_gstreamer_plugins(&plugin_dir)
+                    .map_err(std::io::Error::other)?;
+            }
             app.manage(context::CaptureContextCache::default());
             app.manage(config::AppConfigState::load()?);
             audio::register_audio_callbacks(app.handle());

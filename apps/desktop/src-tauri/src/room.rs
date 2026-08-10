@@ -11,6 +11,8 @@ use native_livekit::{
 pub struct ConnectRoomArgs {
     pub url: String,
     pub token: String,
+    pub room_name: String,
+    pub identity: String,
 }
 
 /// Connects to a `LiveKit` room and publishes the screenshare audio track.
@@ -21,9 +23,11 @@ pub struct ConnectRoomArgs {
 /// cannot be spawned.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn connect_native_room(args: ConnectRoomArgs) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || connect_livekit_room(args.url, args.token))
-        .await
-        .map_err(|e| format!("connect room task failed: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        connect_livekit_room(args.url, args.token, args.room_name, args.identity)
+    })
+    .await
+    .map_err(|e| format!("connect room task failed: {e}"))?
 }
 
 /// Disconnects from the live room, stopping the video track and desktop

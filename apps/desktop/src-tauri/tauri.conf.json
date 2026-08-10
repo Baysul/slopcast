@@ -31,10 +31,21 @@
     "targets": ["appimage", "deb", "nsis"],
     "category": "Utility",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"],
+    "resources": ["resources/gstreamer-plugins/*"],
     "linux": {
       "deb": {
         "desktopTemplate": "templates/main.desktop",
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libpipewire-0.3-0"]
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libpipewire-0.3-0",
+          "libgstreamer1.0-0",
+          "libgstreamer-plugins-base1.0-0",
+          "gstreamer1.0-plugins-bad",
+          "gstreamer1.0-va",
+          "gstreamer1.0-nice",
+          "libopus0"
+        ]
       },
       "appimage": {
         "bundleMediaFramework": false
