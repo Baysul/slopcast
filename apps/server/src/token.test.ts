@@ -27,14 +27,14 @@ async function verifyToken(token: string): Promise<ClaimGrants> {
   return (await verifier.verify(token)) as ClaimGrants;
 }
 
-test('presenter token carries publish grants for the room', async () => {
+test('presenter token is publisher-only', async () => {
   const token = await presenterToken(API_KEY, API_SECRET, 'abc-123-xyz', 'presenter-abc-123-xyz-1');
   const grants = await verifyToken(token);
   assert.equal(grants.video.room, 'abc-123-xyz');
   assert.equal(grants.video.roomJoin, true);
   assert.equal(grants.video.canPublish, true);
-  assert.equal(grants.video.canSubscribe, true);
-  assert.equal(grants.video.canPublishData, true);
+  assert.equal(grants.video.canSubscribe, false);
+  assert.equal(grants.video.canPublishData, false);
 });
 
 test('spectator token cannot publish or publish data', async () => {

@@ -25,6 +25,14 @@ const spectatorTokenLimiter = rateLimit({
   message: { error: 'Too many token requests, please try again later' },
 });
 
+const spectatorCountLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many spectator count requests, please try again later' },
+});
+
 const allowedOrigins = new Set([
   config.websiteUrl,
   'http://localhost:3000',
@@ -59,6 +67,7 @@ app.use((req, res, next) => {
 // /api/rooms/:code/token, capping spectators at the create limit.
 app.post('/api/rooms', roomCreateLimiter);
 app.use('/api/rooms/:code/token', spectatorTokenLimiter);
+app.use('/api/rooms/:code/spectators', spectatorCountLimiter);
 app.use(
   initRoutes(
     config.livekitUrl,

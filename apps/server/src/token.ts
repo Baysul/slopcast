@@ -2,7 +2,9 @@ import { AccessToken } from 'livekit-server-sdk';
 
 export function presenterToken(apiKey: string, apiSecret: string, room: string, identity: string): Promise<string> {
   const at = new AccessToken(apiKey, apiSecret, { identity, ttl: '6h' });
-  at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true, canPublishData: true });
+  // Linux's direct publisher never subscribes, and no presenter path uses
+  // LiveKit data packets. Keep the grant least-privileged on every platform.
+  at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: false, canPublishData: false });
   return at.toJwt();
 }
 

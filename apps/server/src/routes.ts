@@ -24,6 +24,10 @@ export function toHttpUrl(url: string): string {
   return normalized;
 }
 
+export function countSpectators(participants: ReadonlyArray<{ identity: string }>): number {
+  return participants.filter((participant) => participant.identity.startsWith('spectator-')).length;
+}
+
 class AllocationError extends Error {
   constructor(
     message: string,
@@ -149,6 +153,22 @@ export function initRoutes(
     const token = await spectatorToken(apiKey, apiSecret, code, identity);
 
     res.json({ token, identity, livekitUrl: livekitWsUrl });
+  });
+
+  router.get('/api/rooms/:code/spectators', async (req, res) => {
+    const { code } = req.params;
+    if (!ROOM_CODE_RE.test(code)) {
+      res.status(400).json({ error: 'Invalid room code format' });
+      return;
+    }
+
+    try {
+      const participants = await roomClient.listParticipants(code);
+      res.json({ count: countSpectators(participants) });
+    } catch (err) {
+      console.error('Spectator count failed:', err);
+      res.status(503).json({ error: 'Spectator count temporarily unavailable' });
+    }
   });
 
   return router;
