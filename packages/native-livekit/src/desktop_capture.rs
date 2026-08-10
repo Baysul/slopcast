@@ -39,7 +39,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{CaptureConfig, VIDEO_SOURCE};
+use crate::CaptureConfig;
+#[cfg(not(target_os = "linux"))]
+use crate::VIDEO_SOURCE;
 
 pub(crate) struct DesktopCaptureSession {
     stop: Arc<AtomicBool>,
@@ -211,6 +213,21 @@ pub(crate) fn clear_preview_viewport() {
 /// preserving its aspect ratio. Returns `None` when the source already fits
 /// inside the viewport — previews are never upscaled past the source, the
 /// renderer's CSS does that.
+#[cfg(target_os = "linux")]
+fn publish_video_frame(frame: &VideoFrame<I420Buffer>) -> bool {
+    crate::gstreamer_publisher::push_video_frame(frame).is_ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_video_frame(frame: &VideoFrame<I420Buffer>) -> bool {
+    let Some(source) = VIDEO_SOURCE.load_full() else {
+        return false;
+    };
+
+    source.capture_frame(frame);
+    true
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -982,7 +999,7 @@ fn run_capture(
             }
             match pacer.pop() {
                 Some(mut frame) => {
-                    if let Some(source) = VIDEO_SOURCE.load_full() {
+                    if crate::is_video_track_active() {
                         // Fast path: a real captured frame. Scale to the
                         // configured target, up or down (OBS-style canvas
                         // scaling): libwebrtc's encoder has no explicit size,
@@ -1022,8 +1039,11 @@ fn run_capture(
                             }
                             None => frame,
                         };
-                        source.capture_frame(&push_frame);
-                        STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
+                        if publish_video_frame(&push_frame) {
+                            STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        }
                     } else {
                         // No live track: drop the frame, but the Ring-A stash
                         // still holds the newest capture-resolution planes, so
@@ -1042,10 +1062,10 @@ fn run_capture(
                     // (fresh buffer + fresh timestamp) so arrival pacing
                     // stays even and the encoder never sees the same buffer
                     // instance twice within its async retention window.
-                    if let Some(source) = VIDEO_SOURCE.load_full()
+                    if crate::is_video_track_active()
                         && let Some(frame) = keepalive_frame(&mut keepalive_ring)
                     {
-                        source.capture_frame(&frame);
+                        let _ = publish_video_frame(&frame);
                     }
                 }
             }

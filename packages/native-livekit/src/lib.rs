@@ -1,8 +1,17 @@
+#[cfg(not(target_os = "linux"))]
 use std::collections::VecDeque;
+#[cfg(not(target_os = "linux"))]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(not(target_os = "linux"))]
 use std::sync::{Arc, Mutex};
 
 mod desktop_capture;
+
+#[cfg(target_os = "linux")]
+mod gstreamer_encoder;
+
+#[cfg(target_os = "linux")]
+mod gstreamer_publisher;
 
 #[cfg(target_os = "linux")]
 mod linux_capture;
@@ -13,17 +22,29 @@ mod wgc_capture;
 #[cfg(target_os = "windows")]
 pub use wgc_capture::{CaptureSourceInfo, WgcSourceKind};
 
+#[cfg(not(target_os = "linux"))]
 use arc_swap::ArcSwapOption;
+#[cfg(not(target_os = "linux"))]
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
+#[cfg(not(target_os = "linux"))]
 use livekit::prelude::*;
+#[cfg(not(target_os = "linux"))]
 use livekit::track::{LocalTrack, LocalVideoTrack, TrackSource};
+#[cfg(not(target_os = "linux"))]
 use livekit::webrtc::audio_frame::AudioFrame;
+#[cfg(not(target_os = "linux"))]
 use livekit::webrtc::audio_source::AudioSourceOptions;
+#[cfg(not(target_os = "linux"))]
 use livekit::webrtc::audio_source::native::NativeAudioSource;
+#[cfg(not(target_os = "linux"))]
 use livekit::webrtc::prelude::{RtcAudioSource, RtcVideoSource, VideoResolution};
+#[cfg(not(target_os = "linux"))]
 use livekit::webrtc::stats::RtcStats;
+#[cfg(not(target_os = "linux"))]
 use livekit::webrtc::video_source::native::NativeVideoSource;
+#[cfg(not(target_os = "linux"))]
 use std::collections::HashMap;
+#[cfg(not(target_os = "linux"))]
 use std::time::{Duration, Instant};
 
 pub const SAMPLE_RATE: u32 = 48000;
@@ -33,6 +54,7 @@ pub const CHANNELS: u32 = 2;
 /// dropped (drop-oldest): bounds how far audio content can fall behind the
 /// live video after an upstream stall, at the cost of skipping the stale
 /// tail instead of playing it out late.
+#[cfg(not(target_os = "linux"))]
 const MAX_AUDIO_BACKLOG_MS: usize = 100;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -104,6 +126,16 @@ pub const NATIVE_HW_CODEC: &str = "h264";
 /// verified against the bundled libwebrtc in `get_native_supported_codecs`).
 #[must_use]
 pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
+    #[cfg(target_os = "linux")]
+    {
+        vec![NativeCodecInfo {
+            codec: "h264".into(),
+            label: "H.264".into(),
+            hardware: true,
+        }]
+    }
+
+    #[cfg(not(target_os = "linux"))]
     NATIVE_VIDEO_CODECS
         .iter()
         .map(|(codec, label)| NativeCodecInfo {
@@ -130,6 +162,7 @@ pub struct DesktopCaptureStats {
     pub last_height: i64,
 }
 
+#[cfg(not(target_os = "linux"))]
 enum WorkerCmd {
     StartVideo {
         config: CaptureConfig,
@@ -141,6 +174,7 @@ enum WorkerCmd {
     Shutdown,
 }
 
+#[cfg(not(target_os = "linux"))]
 struct NativeLiveKit {
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
     stop: tokio::sync::oneshot::Sender<()>,
@@ -149,20 +183,27 @@ struct NativeLiveKit {
 
 /// ~1.28 s of 10 ms chunks; full means WebRTC encoding is stalled, so the
 /// newest chunk is dropped (drop-newest, like `audio_ring`).
+#[cfg(not(target_os = "linux"))]
 const PCM_CHANNEL_CAPACITY: usize = 128;
 
+#[cfg(not(target_os = "linux"))]
 static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
 
 /// Worker's PCM sender, kept under its own lock (not `LIVEKIT`): `feed_pcm`
 /// runs on the audio-ring worker and must never block on
 /// `connect_livekit_room`'s long lock hold — that was the original deadlock.
+#[cfg(not(target_os = "linux"))]
 static PCM_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>> = Mutex::new(None);
 
+#[cfg(not(target_os = "linux"))]
 static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(target_os = "linux"))]
 static SPECTATOR_COUNT: AtomicU32 = AtomicU32::new(0);
+#[cfg(not(target_os = "linux"))]
 static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// The published video track's source; the desktop capturer feeds it frames.
 /// `None` while no track is active.
+#[cfg(not(target_os = "linux"))]
 pub(crate) static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
 
 // The bundled libwebrtc statically links hidden-weak `pw_*` dlopen shims
@@ -193,6 +234,23 @@ pub fn arm_pipewire_shims() {
 #[cfg(not(target_os = "linux"))]
 pub fn arm_pipewire_shims() {}
 
+/// Scans the packaged dynamic `GStreamer` plugins before the publisher starts.
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be scanned or a required
+/// publication element is unavailable.
+#[cfg(target_os = "linux")]
+pub fn load_gstreamer_plugins(plugin_dir: &std::path::Path) -> Result<(), String> {
+    gstreamer_publisher::load_plugins(plugin_dir)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn load_gstreamer_plugins(_plugin_dir: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
 fn with_guard<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce(&NativeLiveKit) -> Result<R, String>,
@@ -212,55 +270,69 @@ where
 ///
 /// Returns an error if a room is already connected or the worker thread cannot
 /// be spawned.
-pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
-    let mut guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    if guard.is_some() {
-        return Err("Native LiveKit room is already connected".into());
-    }
-
-    ROOM_CONNECTED.store(false, Ordering::Relaxed);
-    SPECTATOR_COUNT.store(0, Ordering::Relaxed);
-    VIDEO_ACTIVE.store(false, Ordering::Relaxed);
-    VIDEO_SOURCE.store(None);
-
-    let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(PCM_CHANNEL_CAPACITY);
-    // Publish the sender under its own tiny lock before the long `LIVEKIT`
-    // hold below, so the audio path can reach it without ever contending
-    // with `connect_livekit_room`.
+pub fn connect_livekit_room(
+    url: String,
+    token: String,
+    room_name: String,
+    identity: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
     {
-        let Ok(mut sender_guard) = PCM_SENDER.lock() else {
-            return Err("PCM sender lock poisoned".into());
-        };
-        *sender_guard = Some(pcm_tx);
+        gstreamer_publisher::connect(url, token, room_name, identity)
     }
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
 
-    let handle = std::thread::Builder::new()
-        .name("lk-worker".into())
-        .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                eprintln!("[livekit] Failed to build tokio runtime");
-                return;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (room_name, identity);
+        let mut guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        if guard.is_some() {
+            return Err("Native LiveKit room is already connected".into());
+        }
+
+        ROOM_CONNECTED.store(false, Ordering::Relaxed);
+        SPECTATOR_COUNT.store(0, Ordering::Relaxed);
+        VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+        VIDEO_SOURCE.store(None);
+
+        let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(PCM_CHANNEL_CAPACITY);
+        // Publish the sender under its own tiny lock before the long `LIVEKIT`
+        // hold below, so the audio path can reach it without ever contending
+        // with `connect_livekit_room`.
+        {
+            let Ok(mut sender_guard) = PCM_SENDER.lock() else {
+                return Err("PCM sender lock poisoned".into());
             };
+            *sender_guard = Some(pcm_tx);
+        }
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerCmd>();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
 
-            rt.block_on(async {
-                if let Err(e) = run_worker(url, token, pcm_rx, cmd_rx, stop_rx).await {
-                    log::error!("[livekit] worker error: {e}");
-                }
-            });
-        })
-        .map_err(|e| format!("Failed to spawn: {e}"))?;
+        let handle = std::thread::Builder::new()
+            .name("lk-worker".into())
+            .spawn(move || {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    eprintln!("[livekit] Failed to build tokio runtime");
+                    return;
+                };
 
-    *guard = Some(NativeLiveKit {
-        cmd_tx,
-        stop: stop_tx,
-        _join: handle,
-    });
-    Ok(())
+                rt.block_on(async {
+                    if let Err(e) = run_worker(url, token, pcm_rx, cmd_rx, stop_rx).await {
+                        log::error!("[livekit] worker error: {e}");
+                    }
+                });
+            })
+            .map_err(|e| format!("Failed to spawn: {e}"))?;
+
+        *guard = Some(NativeLiveKit {
+            cmd_tx,
+            stop: stop_tx,
+            _join: handle,
+        });
+        Ok(())
+    }
 }
 
 /// Disconnects the room and tears down the worker thread.
@@ -269,40 +341,59 @@ pub fn connect_livekit_room(url: String, token: String) -> Result<(), String> {
 ///
 /// Returns an error if the room state lock is poisoned.
 pub fn disconnect_livekit_room() -> Result<(), String> {
-    let mut guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    if let Some(state) = guard.take() {
-        let _ = state.cmd_tx.send(WorkerCmd::StopVideo);
-        let _ = state.cmd_tx.send(WorkerCmd::Shutdown);
-        let _ = state.stop.send(());
+    #[cfg(target_os = "linux")]
+    {
+        gstreamer_publisher::disconnect();
+        desktop_capture::stop();
+        Ok(())
     }
-    *guard = None;
-    // Clear the dedicated PCM sender so a stale sender can never outlive the
-    // room (a late `feed_pcm` would otherwise try_send into a closed channel
-    // and report a spurious error). Never blocks the audio path: this lock is
-    // independent of `LIVEKIT`.
-    if let Ok(mut sender_guard) = PCM_SENDER.lock() {
-        *sender_guard = None;
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        if let Some(state) = guard.take() {
+            let _ = state.cmd_tx.send(WorkerCmd::StopVideo);
+            let _ = state.cmd_tx.send(WorkerCmd::Shutdown);
+            let _ = state.stop.send(());
+        }
+        *guard = None;
+        // Clear the dedicated PCM sender so a stale sender can never outlive the
+        // room (a late `feed_pcm` would otherwise try_send into a closed channel
+        // and report a spurious error). Never blocks the audio path: this lock is
+        // independent of `LIVEKIT`.
+        if let Ok(mut sender_guard) = PCM_SENDER.lock() {
+            *sender_guard = None;
+        }
+        // Release the room lock before the capture teardown below: `feed_pcm`
+        // (the audio-callback path) and every room command block on `LIVEKIT`,
+        // and `desktop_capture::stop()` joins the capture thread (~100-300 ms).
+        // Holding the lock across that join stalled the audio callback for the
+        // whole teardown on every room recreate.
+        drop(guard);
+        desktop_capture::stop();
+        ROOM_CONNECTED.store(false, Ordering::SeqCst);
+        SPECTATOR_COUNT.store(0, Ordering::Relaxed);
+        VIDEO_ACTIVE.store(false, Ordering::SeqCst);
+        VIDEO_SOURCE.store(None);
+        Ok(())
     }
-    // Release the room lock before the capture teardown below: `feed_pcm`
-    // (the audio-callback path) and every room command block on `LIVEKIT`,
-    // and `desktop_capture::stop()` joins the capture thread (~100-300 ms).
-    // Holding the lock across that join stalled the audio callback for the
-    // whole teardown on every room recreate.
-    drop(guard);
-    desktop_capture::stop();
-    ROOM_CONNECTED.store(false, Ordering::SeqCst);
-    SPECTATOR_COUNT.store(0, Ordering::Relaxed);
-    VIDEO_ACTIVE.store(false, Ordering::SeqCst);
-    VIDEO_SOURCE.store(None);
-    Ok(())
 }
 
+#[must_use]
 pub fn is_livekit_room_connected() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        gstreamer_publisher::is_connected()
+    }
+
+    #[cfg(not(target_os = "linux"))]
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
 /// Resolves a codec string to a `VideoCodec`, defaulting to VP9 for anything
 /// unrecognized (including `None`).
+#[cfg(not(target_os = "linux"))]
+#[cfg(not(target_os = "linux"))]
 fn parse_video_codec(codec: Option<&str>) -> VideoCodec {
     match codec {
         Some("vp8") => VideoCodec::VP8,
@@ -315,6 +406,8 @@ fn parse_video_codec(codec: Option<&str>) -> VideoCodec {
 /// Drains full `samples_per_chunk`-sized chunks from the worker's buffer,
 /// leaving a partial tail queued for the next push. Off-by-one safe: a buffer
 /// with exactly `n * samples_per_chunk` samples produces exactly `n` chunks.
+#[cfg(not(target_os = "linux"))]
+#[cfg(not(target_os = "linux"))]
 fn drain_pcm_chunks(buffer: &mut VecDeque<i16>, samples_per_chunk: usize, out: &mut Vec<Vec<i16>>) {
     while buffer.len() >= samples_per_chunk {
         out.push(buffer.drain(..samples_per_chunk).collect());
@@ -329,25 +422,40 @@ fn drain_pcm_chunks(buffer: &mut VecDeque<i16>, samples_per_chunk: usize, out: &
 ///
 /// Returns an error if no room is connected or the worker's PCM channel is
 /// closed.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the non-Linux publisher transfers PCM ownership into its bounded worker channel"
+)]
 pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
-    // Read the sender out under the dedicated `PCM_SENDER` lock (never
-    // `LIVEKIT`): `connect_livekit_room` holds `LIVEKIT` for the whole
-    // worker-start + Room::connect + publish_track sequence, and this runs
-    // on the audio-ring worker. Blocking on `LIVEKIT` there stalls the ring
-    // and, via its join, the whole app — the original deadlock.
-    let sender = {
-        let guard = PCM_SENDER
-            .lock()
-            .map_err(|e| format!("PCM sender lock poisoned: {e}"))?;
-        let Some(sender) = guard.as_ref() else {
-            return Err("Room not connected".into());
+    #[cfg(target_os = "linux")]
+    {
+        gstreamer_publisher::feed_pcm(&pcm);
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Read the sender out under the dedicated `PCM_SENDER` lock (never
+        // `LIVEKIT`): `connect_livekit_room` holds `LIVEKIT` for the whole
+        // worker-start + Room::connect + publish_track sequence, and this runs
+        // on the audio-ring worker. Blocking on `LIVEKIT` there stalls the ring
+        // and, via its join, the whole app — the original deadlock.
+        let sender = {
+            let guard = PCM_SENDER
+                .lock()
+                .map_err(|e| format!("PCM sender lock poisoned: {e}"))?;
+            let Some(sender) = guard.as_ref() else {
+                return Err("Room not connected".into());
+            };
+            sender.clone()
         };
-        sender.clone()
-    };
-    // Channel full: WebRTC encoding is stalled, drop the newest chunk.
-    match sender.try_send(pcm) {
-        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err("PCM channel closed".into()),
+        // Channel full: WebRTC encoding is stalled, drop the newest chunk.
+        match sender.try_send(pcm) {
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err("PCM channel closed".into())
+            }
+        }
     }
 }
 
@@ -358,6 +466,13 @@ pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
 ///
 /// Returns an error if no room is connected or the worker channel is closed.
 pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        desktop_capture::set_scale_target(config.width, config.height, config.fps);
+        gstreamer_publisher::start_video(config)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     with_guard(|state| {
         state
             .cmd_tx
@@ -372,15 +487,35 @@ pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
 ///
 /// Returns an error if the room state lock is poisoned.
 pub fn stop_video_track() -> Result<(), String> {
-    let guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let Some(state) = guard.as_ref() else {
-        return Ok(());
-    };
-    let _ = state.cmd_tx.send(WorkerCmd::StopVideo);
-    Ok(())
+    #[cfg(target_os = "linux")]
+    {
+        desktop_capture::clear_scale_target();
+        if gstreamer_publisher::is_connected() {
+            gstreamer_publisher::stop_video()
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let guard = LIVEKIT.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let Some(state) = guard.as_ref() else {
+            return Ok(());
+        };
+        let _ = state.cmd_tx.send(WorkerCmd::StopVideo);
+        Ok(())
+    }
 }
 
+#[must_use]
 pub fn is_video_track_active() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        gstreamer_publisher::is_video_active()
+    }
+
+    #[cfg(not(target_os = "linux"))]
     VIDEO_ACTIVE.load(Ordering::Relaxed)
 }
 
@@ -488,35 +623,50 @@ pub fn clear_preview_viewport() {
     desktop_capture::clear_preview_viewport();
 }
 
+#[must_use]
 pub fn get_spectator_count() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        0
+    }
+
+    #[cfg(not(target_os = "linux"))]
     SPECTATOR_COUNT.load(Ordering::Relaxed)
 }
 
-/// Collects the latest libwebrtc stats for the local published tracks on the
-/// worker thread (stats queries must run on the tokio runtime) and returns the
-/// result over a bounded blocking channel. Falls back to an empty snapshot if
-/// the worker cannot answer within 500 ms.
+/// Collects the latest native publisher stats for the local tracks and falls
+/// back to an empty snapshot if the publisher cannot answer within 500 ms.
+#[must_use]
 pub fn get_native_telemetry() -> NativeTelemetry {
-    let Ok(guard) = LIVEKIT.lock() else {
-        return NativeTelemetry::default();
-    };
-    let Some(state) = guard.as_ref() else {
-        return NativeTelemetry::default();
-    };
-    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-    if state
-        .cmd_tx
-        .send(WorkerCmd::GetTelemetry { reply: reply_tx })
-        .is_err()
+    #[cfg(target_os = "linux")]
     {
-        return NativeTelemetry::default();
+        gstreamer_publisher::telemetry().unwrap_or_default()
     }
-    drop(guard);
-    reply_rx
-        .recv_timeout(Duration::from_millis(500))
-        .unwrap_or_default()
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(guard) = LIVEKIT.lock() else {
+            return NativeTelemetry::default();
+        };
+        let Some(state) = guard.as_ref() else {
+            return NativeTelemetry::default();
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if state
+            .cmd_tx
+            .send(WorkerCmd::GetTelemetry { reply: reply_tx })
+            .is_err()
+        {
+            return NativeTelemetry::default();
+        }
+        drop(guard);
+        reply_rx
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap_or_default()
+    }
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn collect_telemetry(room: &Room) -> NativeTelemetry {
     let mut telemetry = NativeTelemetry::default();
     for (_sid, publication) in room.local_participant().track_publications() {
@@ -537,6 +687,7 @@ async fn collect_telemetry(room: &Room) -> NativeTelemetry {
     clippy::cast_precision_loss,
     reason = "Byte counters and epoch-millisecond timestamps stay well below 2^53; f64 is exact in this range"
 )]
+#[cfg(not(target_os = "linux"))]
 fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
     let mut video_ssrc = None;
     let mut audio_ssrc = None;
@@ -594,6 +745,7 @@ fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn run_worker(
     url: String,
     token: String,
@@ -717,6 +869,7 @@ async fn run_worker(
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn handle_start_video(room: &Room, config: &CaptureConfig) {
     handle_stop_video(room).await;
 
@@ -784,6 +937,7 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
     VIDEO_ACTIVE.store(true, Ordering::SeqCst);
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn handle_stop_video(room: &Room) {
     desktop_capture::clear_scale_target();
     VIDEO_SOURCE.store(None);
@@ -803,7 +957,7 @@ async fn handle_stop_video(room: &Room) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
 mod tests {
     use super::*;
     use livekit::webrtc::stats::dictionaries as d;
