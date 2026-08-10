@@ -165,7 +165,8 @@ export const PresenterApp: React.FC = () => {
     handleSelectApp,
   } = useAudioCapture(captureStage === 'live');
 
-  const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } = useStreamTelemetry();
+  const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } =
+    useStreamTelemetry(spectatorCount);
 
   const activeVideoCodecRef = useRef<VideoCodec>(videoCodec);
   // The encoder config actually applied to the native track; share start seeds

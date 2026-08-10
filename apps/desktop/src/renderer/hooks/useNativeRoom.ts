@@ -4,6 +4,21 @@ import { notify, primeAudioContext } from '../lib/toast';
 
 const POLL_MS = 1000;
 
+async function fetchSpectatorCount(apiEndpoint: string, roomCode: string): Promise<number | null> {
+  try {
+    const response = await fetch(`${apiEndpoint}/api/rooms/${roomCode}/spectators`);
+    if (!response.ok) return null;
+
+    const body = (await response.json()) as { count?: unknown };
+    if (typeof body.count !== 'number') return null;
+
+    return body.count;
+  } catch (err) {
+    console.warn('Transient spectator count failure:', err);
+    return null;
+  }
+}
+
 export interface UseNativeRoomOptions {
   apiEndpoint: string;
   livekitUrl: string;
@@ -66,13 +81,14 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
         code: string;
         shareUrl: string;
         token: string;
+        identity: string;
         livekitUrl: string;
       };
       const resolvedLivekitUrl = room.livekitUrl || livekitUrl;
 
-      const connected = await desktopApi.connectNativeRoom(resolvedLivekitUrl, room.token);
-      if (!connected) {
-        throw new Error('Native LiveKit connection failed');
+      const connected = await desktopApi.connectNativeRoom(resolvedLivekitUrl, room.token, room.code, room.identity);
+      if (connected !== null) {
+        throw new Error(connected);
       }
 
       roomActiveRef.current = true;
@@ -94,10 +110,9 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
     if (!roomCode) return;
 
     const poll = async (): Promise<void> => {
-      const count = await desktopApi.getSpectatorCount();
-      if (typeof count === 'number') {
-        setSpectatorCount(count);
-      }
+      const nextSpectatorCount = await fetchSpectatorCount(apiEndpoint, roomCode);
+      if (nextSpectatorCount !== null) setSpectatorCount(nextSpectatorCount);
+
       const connected = await desktopApi.isNativeRoomConnected();
       if (connected === true) {
         sawConnectedRef.current = true;
@@ -115,7 +130,7 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
     void poll();
     const interval = setInterval(() => void poll(), POLL_MS);
     return () => clearInterval(interval);
-  }, [roomCode, onDisconnect]);
+  }, [apiEndpoint, roomCode, onDisconnect]);
 
   return {
     roomCode,

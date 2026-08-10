@@ -261,7 +261,7 @@ export interface UseStreamTelemetryReturn {
   resetStatsPrev: () => void;
 }
 
-export function useStreamTelemetry(): UseStreamTelemetryReturn {
+export function useStreamTelemetry(spectatorCount: number): UseStreamTelemetryReturn {
   const [telemetry, setTelemetry] = useState<StreamTelemetry>(idleTelemetry());
   const telemetryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const broadcastStartRef = useRef<number | null>(null);
@@ -276,6 +276,8 @@ export function useStreamTelemetry(): UseStreamTelemetryReturn {
   });
   const capturePrevRef = useRef({ dequeued: 0, at: 0, init: false });
   const bitrateHistoryRef = useRef<number[]>([]);
+  const spectatorCountRef = useRef(spectatorCount);
+  spectatorCountRef.current = spectatorCount;
 
   const resetStatsPrev = useCallback(() => {
     statsPrevRef.current = { vBytes: 0, vFrames: 0, vTs: 0, vInit: false, aBytes: 0, aTs: 0, aInit: false };
@@ -305,7 +307,7 @@ export function useStreamTelemetry(): UseStreamTelemetryReturn {
 
       const inputs = getInputs();
       const elapsedMs = broadcastStartRef.current ? performance.now() - broadcastStartRef.current : 0;
-      const spectatorCount = (await desktopApi.getSpectatorCount()) ?? 0;
+      const spectatorCount = spectatorCountRef.current;
 
       const t = await desktopApi.getNativeTelemetry();
       if (!t || (t.videoBytesSent == null && t.audioBytesSent == null)) {

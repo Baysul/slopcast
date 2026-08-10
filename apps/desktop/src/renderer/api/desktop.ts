@@ -55,6 +55,19 @@ async function invokeOk(cmd: string, args: Record<string, unknown> | undefined):
   }
 }
 
+// Unit-returning commands where the caller needs the real error: resolves to
+// `null` on success, or the backend's error string on rejection (a missing
+// command degrades to a generic message).
+async function invokeErr(cmd: string, args: Record<string, unknown> | undefined): Promise<string | null> {
+  try {
+    await invoke(cmd, args);
+    return null;
+  } catch (err) {
+    warnUnavailable(cmd, err);
+    return typeof err === 'string' && err.length > 0 ? err : `Command ${cmd} unavailable`;
+  }
+}
+
 async function subscribe<T>(event: string, callback: (payload: T) => void): Promise<UnlistenFn> {
   try {
     return await listen<T>(event, (e) => callback(e.payload));
@@ -91,8 +104,8 @@ export const desktopApi = {
     invokeOr('save_stream_settings', { settings }, false),
   getOnboardingCompleted: (): Promise<boolean> => invokeOr('get_onboarding_completed', undefined, false),
   setOnboardingCompleted: (): Promise<boolean> => invokeOr('set_onboarding_completed', undefined, false),
-  connectNativeRoom: (url: string, token: string): Promise<boolean> =>
-    invokeOk('connect_native_room', { args: { url, token } }),
+  connectNativeRoom: (url: string, token: string, roomName: string, identity: string): Promise<string | null> =>
+    invokeErr('connect_native_room', { args: { url, token, roomName, identity } }),
   disconnectNativeRoom: (): Promise<boolean> => invokeOk('disconnect_native_room', undefined),
   isNativeRoomConnected: (): Promise<boolean> => invokeOr('is_native_room_connected', undefined, false),
   startNativeCapture: (config: DesktopCaptureConfig, source?: CaptureSourceSelection): Promise<CaptureStartResult> =>
