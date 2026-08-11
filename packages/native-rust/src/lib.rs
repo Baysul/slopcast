@@ -384,9 +384,12 @@ pub fn reset_audio_ring_stats() {
     audio_ring::reset_audio_ring_stats();
 }
 
-/// Registers a callback that receives converted PCM audio data as 16-bit
-/// signed integer samples (48 kHz, 2 channel). The conversion from F32LE
-/// happens in Rust before the callback fires.
+/// Registers a callback that receives PCM audio data as 16-bit signed
+/// integer samples (48 kHz, 2 channel). The samples are produced from the
+/// packed S16LE bytes the ring carries — the native-format to S16LE
+/// conversion (e.g. F32LE → i16) is done by the platform capture code
+/// (`linux/capture.rs`, `windows/mod.rs`) *before* the bytes reach the ring;
+/// the ring performs no F32LE → i16 conversion itself.
 pub fn set_audio_data_callback(callback: Box<dyn Fn(Vec<i16>) + Send + Sync>) {
     audio_ring::set_audio_data_callback(callback);
 }
