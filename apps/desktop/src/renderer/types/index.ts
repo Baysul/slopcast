@@ -110,10 +110,23 @@ export interface NativeTelemetry {
   videoBytesSent: number | null;
   videoPacketsSent: number | null;
   videoPacketsLost: number | null;
-  /** outbound-rtp `framesEncoded` — m144 never populates `framesSent`. */
+  /** Encoded-frame count — on the Linux GStreamer branch measured after
+   * h264parse (the true encoder throughput); the renderer derives fps here. */
   videoFramesEncoded: number | null;
+  /** Linux GStreamer branch only: frames pushed into the video appsrc.
+   * Shortfall vs. `videoFramesEncoded` = backpressure drops (also visible
+   * in `videoAppsrcDropped`). */
+  videoFramesSubmitted: number | null;
   videoWidth: number | null;
   videoHeight: number | null;
+  /** Live video appsrc stats — `dropped` counts buffers the appsrc discarded
+   * (leaky downstream on a full queue), the stutter diagnostic. */
+  videoAppsrcInput: number | null;
+  videoAppsrcOutput: number | null;
+  videoAppsrcDropped: number | null;
+  videoAppsrcLevelBuffers: number | null;
+  videoAppsrcLevelBytes: number | null;
+  videoAppsrcLevelTime: number | null;
   audioCodec: string | null;
   audioBytesSent: number | null;
   audioPacketsSent: number | null;

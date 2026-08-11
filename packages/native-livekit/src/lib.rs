@@ -79,10 +79,26 @@ pub struct NativeTelemetry {
     pub video_packets_sent: Option<f64>,
     pub video_packets_lost: Option<f64>,
     /// `framesEncoded` from the outbound-rtp stat (m144's `framesSent`
-    /// never increments); the renderer derives fps from this.
+    /// never increments); the renderer derives fps from this. On the Linux
+    /// `GStreamer` branch this is the count of encoded H.264 access units
+    /// measured after `h264parse` — the true encoder-throughput counter.
     pub video_frames_encoded: Option<f64>,
+    /// On the Linux `GStreamer` branch: frames pushed into the video appsrc
+    /// (`push_frame` successes). Any shortfall vs. `video_frames_encoded`
+    /// is frames dropped by the leaky-appsrc / queue backpressure path
+    /// before they could be encoded; `video_appsrc_dropped` quantifies it.
+    pub video_frames_submitted: Option<u64>,
     pub video_width: Option<u32>,
     pub video_height: Option<u32>,
+    /// Live video appsrc statistics — `dropped` counts buffers the appsrc
+    /// discarded (leaky downstream on a full queue), the stutter diagnostic;
+    /// the levels show how close the appsrc is to its 2-buffer cap.
+    pub video_appsrc_input: Option<u64>,
+    pub video_appsrc_output: Option<u64>,
+    pub video_appsrc_dropped: Option<u64>,
+    pub video_appsrc_level_buffers: Option<u32>,
+    pub video_appsrc_level_bytes: Option<u32>,
+    pub video_appsrc_level_time: Option<u64>,
     pub audio_codec: Option<String>,
     pub audio_bytes_sent: Option<f64>,
     pub audio_packets_sent: Option<f64>,
