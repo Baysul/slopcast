@@ -1,4 +1,9 @@
 //! Linux H.264 branch attached to `livekitwebrtcsink`.
+//!
+//! Rate control is **VBR with the presenter's bitrate limit as a hard
+//! ceiling**: `vah264enc` derives the encoder's maximum bitrate from
+//! `bitrate × 100 / target-percentage`, so the ceiling is fed in as the
+//! maximum while the target sits below it (see `VBR_TARGET_PERCENTAGE`).
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -12,6 +17,17 @@ use crate::CaptureConfig;
 
 const APPSRC_MAX_BUFFERS: u64 = 2;
 const GOP_SECONDS: u32 = 1;
+
+/// VBR target as a percentage of the presenter's bitrate ceiling. With
+/// `rate-control = vbr`, `vah264enc` computes the encoder's **maximum**
+/// bitrate as `bitrate × 100 / target-percentage` (there is no max-bitrate
+/// property on the `va` plugin's encoder), so target 80% of the ceiling
+/// with percentage 80 pins the maximum exactly onto the ceiling while the
+/// average stays below it: static screens encode well under the ceiling and
+/// busy scenes may burst up to it — never past. A percentage of 100 would
+/// degenerate to CBR (the driver sets minimum = maximum), so it is never
+/// used here.
+const VBR_TARGET_PERCENTAGE: u32 = 80;
 
 /// Number of encoded H.264 access units that emerged from `h264parse`
 /// (i.e. actually encoded and pushed downstream), as opposed to
@@ -239,8 +255,12 @@ impl GstreamerEncoder {
         // anchored to the pipeline's running time at the first frame — no
         // do-timestamp, so push jitter never wobbles the stream clock.
         let convert = make_element("videoconvert")?;
-        let requested_rate = config.max_bitrate.unwrap_or(20_000_000.0);
-        let encoder_rate = bitrate_bps_to_kbps(requested_rate);
+        // VBR, ceiling-capped: the requested rate is the *ceiling*; the
+        // `bitrate` property gets the VBR target (a fraction of the ceiling,
+        // see VBR_TARGET_PERCENTAGE) and `target-percentage` makes the
+        // driver-side maximum land on the ceiling.
+        let ceiling_kbps = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
+        let encoder_rate = vbr_target_kbps(ceiling_kbps, VBR_TARGET_PERCENTAGE);
         let key_int_max = config.fps.saturating_mul(GOP_SECONDS).min(1024);
         let encoder = gst::ElementFactory::make("vah264enc")
             .property("b-frames", 0_u32)
@@ -248,8 +268,9 @@ impl GstreamerEncoder {
             .property("cabac", false)
             .property("key-int-max", key_int_max)
             .property("ref-frames", 1_u32)
+            .property("target-percentage", VBR_TARGET_PERCENTAGE)
             .property("target-usage", 7_u32)
-            .property_from_str("rate-control", "cbr")
+            .property_from_str("rate-control", "vbr")
             .build()
             .map_err(|error| format!("Failed to create GStreamer element vah264enc: {error}"))?;
         let parser = gst::ElementFactory::make("h264parse")
@@ -345,6 +366,19 @@ fn bitrate_bps_to_kbps(bitrate_bps: f64) -> u32 {
         .clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
+/// VBR target bitrate in kbps for a given ceiling: `ceiling × percentage /
+/// 100`, floored to whole kbps. Because `vah264enc` derives the maximum as
+/// `target × 100 / percentage`, the floor keeps the driver-side maximum at
+/// or below the ceiling (never above) for every ceiling value.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the u64 product of two u32s is clamped to u32::MAX before the lossless narrowing"
+)]
+fn vbr_target_kbps(ceiling_kbps: u32, percentage: u32) -> u32 {
+    (u64::from(ceiling_kbps) * u64::from(percentage) / 100).clamp(1, u64::from(u32::MAX)) as u32
+}
+
 fn frame_duration(fps: u32) -> gst::ClockTime {
     gst::ClockTime::from_nseconds(gst::ClockTime::SECOND.nseconds() / u64::from(fps.max(1)))
 }
@@ -405,5 +439,30 @@ mod tests {
         assert_eq!(bitrate_bps_to_kbps(8_000_499.0), 8_000);
         assert_eq!(bitrate_bps_to_kbps(8_000_500.0), 8_001);
         assert_eq!(bitrate_bps_to_kbps(f64::NAN), 1);
+    }
+
+    #[test]
+    fn vbr_target_is_a_fraction_of_the_ceiling() {
+        assert_eq!(vbr_target_kbps(20_000, 80), 16_000);
+        assert_eq!(vbr_target_kbps(8_000, 80), 6_400);
+        assert_eq!(vbr_target_kbps(1_000, 80), 800);
+    }
+
+    #[test]
+    fn vbr_driver_max_never_exceeds_the_ceiling() {
+        // vah264enc derives the encoder maximum as
+        // `target × 100 / target-percentage`; the floor in
+        // `vbr_target_kbps` must keep that maximum ≤ the ceiling.
+        for ceiling in [1_u32, 500, 1_000, 2_400, 8_000, 20_000, 50_000, u32::MAX] {
+            let target = vbr_target_kbps(ceiling, 80);
+            let driver_max = u64::from(target) * 100u64 / u64::from(VBR_TARGET_PERCENTAGE);
+            assert!(driver_max <= u64::from(ceiling), "ceiling {ceiling}");
+        }
+    }
+
+    #[test]
+    fn vbr_target_never_drops_below_one_kbps() {
+        assert_eq!(vbr_target_kbps(1, 80), 1);
+        assert_eq!(vbr_target_kbps(0, 80), 1);
     }
 }
