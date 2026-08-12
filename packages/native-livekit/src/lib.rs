@@ -57,7 +57,7 @@ pub const CHANNELS: u32 = 2;
 #[cfg(not(target_os = "linux"))]
 const MAX_AUDIO_BACKLOG_MS: usize = 100;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureConfig {
     pub width: u32,

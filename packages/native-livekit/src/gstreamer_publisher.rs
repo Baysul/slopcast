@@ -14,18 +14,56 @@ use gstreamer_app as gst_app;
 use livekit::webrtc::prelude::{I420Buffer, VideoFrame};
 
 use crate::gstreamer_encoder::{
-    GstreamerEncoder, VideoInput, encoded_frames, reset_encoded_frames,
+    GstreamerEncoder, VideoInput, bitrate_bps_to_kbps, encoded_frames, reset_encoded_frames,
 };
 use crate::{CHANNELS, CaptureConfig, NativeTelemetry, SAMPLE_RATE};
 
-const AUDIO_APPSRC_MAX_BUFFERS: u64 = 50;
+/// Audio appsrc queue depth in buffers (~20 ms of PCM per chunk): ~160 ms.
+/// Was 50 (~1 s of PCM) under a non-leaky queue — during congestion the
+/// audio chain buffered a full second of stale speech ahead of the video
+/// stream (AV-sync drift), then dropped nothing until the backlog overflow.
+/// Leaky-upstream bound at 160 ms (see `attach_audio`).
+const AUDIO_APPSRC_MAX_BUFFERS: u64 = 8;
 const AUDIO_DISCOVERY_SAMPLES: usize = 960;
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Command reply timeout. 30 s (was 10 s): a legitimate `StartVideo`
+/// rebuild can be slow when the SFU connection path stalls, and the worker
+/// processes commands serially — a timed-out caller must not race state
+/// that the worker will still settle (the worker's eventual `StopVideo`/
+/// `Shutdown` processing makes the settled state consistent either way).
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const INITIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
-const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+/// Reconnect retry backoff (exponential, capped): the first attempt after a
+/// drop waits one second, then 2, 4, 8… up to `RECONNECT_DELAY_MAX`. The
+/// SFU outage is usually transient, so retries never give up — but a
+/// sustained outage no longer rebuilds the pipeline every second forever.
+const RECONNECT_DELAY_BASE: Duration = Duration::from_secs(1);
+const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(15);
+/// Grace period for `disconnect()`'s bounded worker join: a healthy worker
+/// answers `Shutdown` within ~20 ms (its recv timeout); anything still
+/// running after the grace is reaped on a detached thread.
+const DISCONNECT_GRACE: Duration = Duration::from_secs(2);
 const OPUS_BITRATE: i32 = 128_000;
 const SINK_MAX_BITRATE: u32 = 200_000_000;
+
+// Congestion-controller tuning. One tick is one POLL_INTERVAL loop
+// iteration (~20 ms), so the observation cadence below is ~1 s.
+/// Observations between rate steps (~1 s).
+const RATE_ADAPT_TICKS: u32 = 50;
+/// Interval loss ratio ≥ this triggers a step down (3% of packets lost in
+/// one second is a decisive congestion signal; transient wifi single-packet
+/// loss stays below it).
+const RATE_LOSS_HIGH: f64 = 0.03;
+/// Interval loss ratio ≤ this counts as a clean interval (0.5%).
+const RATE_LOSS_LOW: f64 = 0.005;
+/// Clean intervals before stepping back up toward the configured ceiling
+/// (10 s of steady, low-loss sending).
+const RATE_RECOVER_TICKS: u32 = 10;
+const RATE_STEP_DOWN: f64 = 0.75;
+const RATE_STEP_UP: f64 = 1.15;
+/// Hard floor for the adapted ceiling: below this the encoder quality
+/// degrades faster than the congestion it is trying to escape.
+const RATE_FLOOR_KBPS: u32 = 500;
 
 static PUBLISHER: LazyLock<Mutex<Option<PublisherHandle>>> = LazyLock::new(|| Mutex::new(None));
 static AUDIO_INPUT: LazyLock<Mutex<Option<gst_app::AppSrc>>> = LazyLock::new(|| Mutex::new(None));
@@ -36,6 +74,16 @@ static VIDEO_FRAMES_SUBMITTED: AtomicU64 = AtomicU64::new(0);
 // Sample clock for the audio appsrc: PTS is derived from a monotonically
 // increasing PCM frame count (see push_pcm), never from the pipeline clock.
 static NEXT_AUDIO_FRAME: AtomicU64 = AtomicU64::new(0);
+/// Incremented on every `connect`. Workers snapshot it at startup and gate
+/// every write to the shared publish state (inputs, connection/video flags)
+/// on it: a stale worker that finishes late — reaped after `disconnect()`'s
+/// grace period — can never clear or overwrite the *next* worker's state.
+static WORKER_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Total PCM chunks dropped by the audio appsrc (for the rate-limited
+/// drop report in `feed_pcm`).
+static AUDIO_PCM_DROPS: AtomicU64 = AtomicU64::new(0);
+/// Wall-clock seconds of the last audio-drop warning (rate limiting).
+static LAST_AUDIO_DROP_WARN_AT: AtomicU64 = AtomicU64::new(0);
 
 struct PublisherHandle {
     command_sender: SyncSender<PublisherCommand>,
@@ -68,10 +116,139 @@ enum ConnectedOutcome {
     Shutdown,
 }
 
+/// Congestion controller for the video encoder: observes the remote-inbound
+/// loss ratio (packet deltas between ~1 s telemetry folds) and steps the
+/// `vah264enc` VBR ceiling down on sustained loss, back up toward the
+/// configured ceiling after clean intervals. Nothing else in the pipeline
+/// reacts to congestion — without this the sender keeps pumping at the
+/// configured ceiling and the bottleneck simply drops packets (loss +
+/// stutter on the spectator side). The adapted rate is re-applied to a
+/// freshly rebuilt pipeline after an auto-reconnect; `reset` (explicit
+/// stream-settings change) starts from the configured ceiling again.
+#[derive(Debug, Clone, Copy, Default)]
+struct RateController {
+    /// Configured ceiling from the stream settings (the cap `current_kbps`
+    /// never exceeds).
+    ceiling_kbps: u32,
+    /// The currently applied ceiling; starts at `ceiling_kbps` and is
+    /// stepped by `observe`.
+    current_kbps: u32,
+    /// Consecutive clean (~1 s) intervals without high loss.
+    clean_ticks: u32,
+    /// Packet counters of the previous observation (for interval deltas).
+    last_packets_sent: u64,
+    last_packets_lost: u64,
+    /// Whether the counters have been primed with a first observation.
+    primed: bool,
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "packet counters came from the stats fold as finite f64 (exact below 2^53); the loss ratio is clamped, and the stepped ceiling is bounded by [RATE_FLOOR_KBPS, ceiling] before the narrowing"
+)]
+impl RateController {
+    /// (Re)start from a fresh stream-settings ceiling. Called whenever a
+    /// `StartVideo` rebuild succeeds with a (possibly new) configuration.
+    fn reset(&mut self, config: &CaptureConfig) {
+        let ceiling = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
+        self.ceiling_kbps = ceiling;
+        self.current_kbps = ceiling;
+        self.clean_ticks = 0;
+        self.primed = false;
+    }
+
+    /// The currently applied ceiling (re-applied after an auto-reconnect
+    /// rebuilds the pipeline, which starts at the configured ceiling).
+    fn current_kbps(&self) -> u32 {
+        self.current_kbps
+    }
+
+    /// One ~1 s observation. Returns the new ceiling to apply, or `None` to
+    /// hold the current rate.
+    fn observe(&mut self, telemetry: &NativeTelemetry) -> Option<u32> {
+        let (Some(sent), Some(lost)) = (telemetry.video_packets_sent, telemetry.video_packets_lost)
+        else {
+            // No outbound or remote-inbound report yet (early session,
+            // mid-reconnect, or the SFU hasn't sent a receiver report):
+            // hold the current rate — a missing report says nothing.
+            return None;
+        };
+        let (sent, lost) = (sent as u64, lost as u64);
+        if !self.primed {
+            self.last_packets_sent = sent;
+            self.last_packets_lost = lost;
+            self.primed = true;
+            return None;
+        }
+        let delta_sent = sent.saturating_sub(self.last_packets_sent);
+        let delta_lost = lost.saturating_sub(self.last_packets_lost);
+        self.last_packets_sent = sent;
+        self.last_packets_lost = lost;
+        if delta_sent == 0 {
+            // Nothing was sent this interval (encoder idle); no signal.
+            return None;
+        }
+        let loss_ratio = (delta_lost as f64 / delta_sent as f64).min(1.0);
+
+        if loss_ratio >= RATE_LOSS_HIGH {
+            self.clean_ticks = 0;
+            let next = ((f64::from(self.current_kbps)) * RATE_STEP_DOWN).round() as u32;
+            let next = next.max(RATE_FLOOR_KBPS);
+            if next < self.current_kbps {
+                self.current_kbps = next;
+                return Some(next);
+            }
+            // Already at the floor.
+            return None;
+        }
+        if loss_ratio <= RATE_LOSS_LOW {
+            self.clean_ticks += 1;
+            if self.clean_ticks >= RATE_RECOVER_TICKS && self.current_kbps < self.ceiling_kbps {
+                self.clean_ticks = 0;
+                let next = ((f64::from(self.current_kbps)) * RATE_STEP_UP)
+                    .round()
+                    .clamp(f64::from(RATE_FLOOR_KBPS), f64::from(self.ceiling_kbps))
+                    as u32;
+                if next > self.current_kbps {
+                    self.current_kbps = next;
+                    return Some(next);
+                }
+            }
+            return None;
+        }
+        // Between thresholds: hold, and reset the clean streak — some loss
+        // happened, so it was not a clean interval.
+        self.clean_ticks = 0;
+        None
+    }
+}
+
+/// Clears the shared publish state, but only if this worker is still the
+/// current one. A stale worker that finishes late (reaped after
+/// `disconnect()`'s grace period) must never clear the *next* worker's
+/// inputs or connection/video flags.
+fn finish_if_current(generation: u64) {
+    if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
+        return;
+    }
+    clear_inputs();
+    ROOM_CONNECTED.store(false, Ordering::Relaxed);
+    VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+}
+
 struct PublisherPipeline {
     pipeline: gst::Pipeline,
     sink: gst::Element,
     video_config: Option<CaptureConfig>,
+    /// The active video encoder: the congestion controller re-targets its
+    /// VBR ceiling in place (`adapt_rate`) without rebuilding.
+    encoder: Option<GstreamerEncoder>,
+    /// Worker generation this pipeline belongs to; every write to the
+    /// shared publish state checks it so a stale pipeline (leftover of a
+    /// reaped worker) can never clobber the current worker's state.
+    generation: u64,
     is_shutdown: bool,
 }
 
@@ -115,9 +292,13 @@ pub(crate) fn connect(
     };
     let (command_sender, command_receiver) = mpsc::sync_channel(32);
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    // Bump the generation *after* `disconnect()` so any worker reaped
+    // beyond `disconnect()`'s grace period counts as stale: it will gate
+    // its teardown and cannot clear the state this new worker installs.
+    let generation = WORKER_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let join = thread::Builder::new()
         .name("slopcast-gstreamer-livekit".into())
-        .spawn(move || run_worker(&connection, &command_receiver, &ready_sender))
+        .spawn(move || run_worker(&connection, &command_receiver, &ready_sender, generation))
         .map_err(|error| format!("Failed to spawn GStreamer publisher worker: {error}"))?;
     match ready_receiver.recv_timeout(INITIAL_CONNECT_TIMEOUT) {
         Ok(Ok(())) => {
@@ -149,8 +330,35 @@ pub(crate) fn disconnect() {
         .ok()
         .and_then(|mut publisher| publisher.take());
     if let Some(handle) = handle {
-        let _ = handle.command_sender.send(PublisherCommand::Shutdown);
-        let _ = handle.join.join();
+        // Best-effort Shutdown: if the command queue is saturated (worker
+        // wedged in a GStreamer call for 32+ commands), the bounded wait
+        // below and the reaper still guarantee eventual reaping.
+        if let Err(error) = handle.command_sender.try_send(PublisherCommand::Shutdown) {
+            log::warn!("GStreamer publisher Shutdown send failed (queue full): {error}");
+        }
+        // Bounded wait: a healthy worker answers Shutdown within ~20 ms
+        // (its recv timeout), but a worker stuck in a GStreamer call
+        // (pathological plugin hang) must not block the Tauri command
+        // thread forever. Anything still running after the grace period is
+        // reaped on a detached thread (same pattern as the audio ring's
+        // worker reaper); the generation gate keeps the late-finishing
+        // worker from clearing the *next* worker's state.
+        let deadline = std::time::Instant::now() + DISCONNECT_GRACE;
+        while !handle.join.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if handle.join.is_finished() {
+            let _ = handle.join.join();
+        } else {
+            log::warn!(
+                "GStreamer publisher worker did not stop within {DISCONNECT_GRACE:?}; reaping asynchronously"
+            );
+            let _ = thread::Builder::new()
+                .name("slopcast-gstreamer-livekit-reaper".into())
+                .spawn(move || {
+                    let _ = handle.join.join();
+                });
+        }
     }
     clear_inputs();
     ROOM_CONNECTED.store(false, Ordering::Relaxed);
@@ -219,7 +427,20 @@ pub(crate) fn feed_pcm(samples: &[i16]) {
     }
 
     if let Err(error) = push_pcm(&input, samples) {
-        log::warn!("GStreamer audio input dropped PCM: {error}");
+        AUDIO_PCM_DROPS.fetch_add(1, Ordering::Relaxed);
+        // Rate-limit the warning: at ~50 Hz push cadence a sustained stall
+        // would otherwise flood the log with one line per dropped chunk.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(LAST_AUDIO_DROP_WARN_AT.load(Ordering::Relaxed)) >= 5 {
+            LAST_AUDIO_DROP_WARN_AT.store(now, Ordering::Relaxed);
+            log::warn!(
+                "GStreamer audio input dropping PCM: {error} ({} chunks dropped since last report)",
+                AUDIO_PCM_DROPS.load(Ordering::Relaxed),
+            );
+        }
     }
 }
 
@@ -248,9 +469,11 @@ fn run_worker(
     connection: &ConnectionConfig,
     command_receiver: &Receiver<PublisherCommand>,
     ready_sender: &SyncSender<Result<(), String>>,
+    generation: u64,
 ) {
     let mut pipeline = None;
     let mut video_config = None;
+    let mut rate_controller = RateController::default();
     // The room worker is deliberately dormant until Go Live. Constructing an
     // audio-only sink and putting it in PLAYING publishes audio before the
     // video pad exists; livekitwebrtcsink then keeps the negotiated topology
@@ -261,7 +484,15 @@ fn run_worker(
         let Some(active_pipeline) = pipeline.as_mut() else {
             match command_receiver.recv_timeout(POLL_INTERVAL) {
                 Ok(PublisherCommand::StartVideo { config, reply }) => {
-                    match PublisherPipeline::new(connection, Some(&config)) {
+                    if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
+                        // A late process from a reaped worker: do not build a
+                        // pipeline that would fight the current worker.
+                        let _ = reply.send(Err(
+                            "GStreamer publisher worker is stale; reconnecting refreshes it".into(),
+                        ));
+                        continue;
+                    }
+                    match PublisherPipeline::new(connection, Some(&config), generation) {
                         Ok(new_pipeline) => {
                             video_config = Some(config);
                             pipeline = Some(new_pipeline);
@@ -289,19 +520,24 @@ fn run_worker(
             connection,
             command_receiver,
             &mut video_config,
+            &mut rate_controller,
+            generation,
         ) {
             ConnectedOutcome::Idle => {
                 pipeline = None;
-                clear_inputs();
-                ROOM_CONNECTED.store(false, Ordering::Relaxed);
+                finish_if_current(generation);
             }
             ConnectedOutcome::Shutdown => break,
             ConnectedOutcome::Reconnect => {
-                ROOM_CONNECTED.store(false, Ordering::Relaxed);
-                clear_inputs();
+                finish_if_current(generation);
                 drop(pipeline.take());
-                match reconnect(connection, command_receiver, &mut video_config) {
-                    Some(reconnected) => {
+                match reconnect(connection, command_receiver, &mut video_config, generation) {
+                    Some(mut reconnected) => {
+                        // The new pipeline's encoder starts at the configured
+                        // ceiling; re-apply the rate the controller settled
+                        // on before the drop so congestion relief survives
+                        // the reconnect.
+                        reconnected.apply_rate(rate_controller.current_kbps());
                         pipeline = Some(reconnected);
                     }
                     None => break,
@@ -310,9 +546,7 @@ fn run_worker(
         }
     }
 
-    clear_inputs();
-    ROOM_CONNECTED.store(false, Ordering::Relaxed);
-    VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+    finish_if_current(generation);
 }
 
 fn run_connected(
@@ -320,11 +554,14 @@ fn run_connected(
     connection: &ConnectionConfig,
     command_receiver: &Receiver<PublisherCommand>,
     video_config: &mut Option<CaptureConfig>,
+    rate_controller: &mut RateController,
+    generation: u64,
 ) -> ConnectedOutcome {
+    let mut rate_ticks: u32 = 0;
     loop {
         match command_receiver.recv_timeout(POLL_INTERVAL) {
             Ok(PublisherCommand::StartVideo { config, reply }) => {
-                let result = pipeline.rebuild(connection, Some(&config));
+                let result = pipeline.rebuild(connection, Some(&config), generation);
                 let should_reconnect = result.is_err();
                 if result.is_ok() {
                     *video_config = Some(config);
@@ -332,6 +569,11 @@ fn run_connected(
                 let _ = reply.send(result);
                 if should_reconnect {
                     return ConnectedOutcome::Reconnect;
+                }
+                // Rebuild succeeded with (possibly new) settings: start the
+                // congestion controller from the configured ceiling again.
+                if let Some(config) = video_config.as_ref() {
+                    rate_controller.reset(config);
                 }
             }
             Ok(PublisherCommand::StopVideo { reply }) => {
@@ -354,6 +596,17 @@ fn run_connected(
             log::warn!("GStreamer LiveKit publisher will reconnect after error: {error}");
             return ConnectedOutcome::Reconnect;
         }
+
+        // ~1 s congestion-control cadence: step the encoder ceiling down on
+        // sustained remote-inbound loss, back up toward the configured
+        // ceiling after clean intervals.
+        rate_ticks += 1;
+        if rate_ticks >= RATE_ADAPT_TICKS {
+            rate_ticks = 0;
+            if pipeline.video_config.is_some() {
+                pipeline.adapt_rate(rate_controller);
+            }
+        }
     }
 }
 
@@ -361,30 +614,47 @@ fn reconnect(
     connection: &ConnectionConfig,
     command_receiver: &Receiver<PublisherCommand>,
     video_config: &mut Option<CaptureConfig>,
+    generation: u64,
 ) -> Option<PublisherPipeline> {
+    let mut delay = RECONNECT_DELAY_BASE;
     loop {
-        match command_receiver.recv_timeout(RECONNECT_DELAY) {
-            Ok(PublisherCommand::StartVideo { config, reply }) => {
-                *video_config = Some(config);
-                let _ = reply.send(Ok(()));
+        // Wait out the backoff, answering commands as they arrive (a
+        // StopVideo or Shutdown interrupts the wait promptly even at the
+        // deepest backoff).
+        let deadline = std::time::Instant::now() + delay;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
             }
-            Ok(PublisherCommand::StopVideo { reply }) => {
-                *video_config = None;
-                let _ = reply.send(Ok(()));
+            match command_receiver.recv_timeout(remaining) {
+                Ok(PublisherCommand::StartVideo { config, reply }) => {
+                    *video_config = Some(config);
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(PublisherCommand::StopVideo { reply }) => {
+                    *video_config = None;
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(PublisherCommand::GetTelemetry(reply)) => {
+                    let _ = reply.send(None);
+                }
+                Ok(PublisherCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                    return None;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
-            Ok(PublisherCommand::GetTelemetry(reply)) => {
-                let _ = reply.send(None);
-            }
-            Ok(PublisherCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => return None,
-            Err(RecvTimeoutError::Timeout) => {}
         }
 
-        match PublisherPipeline::new(connection, video_config.as_ref()) {
+        match PublisherPipeline::new(connection, video_config.as_ref(), generation) {
             Ok(pipeline) => {
                 log::info!("GStreamer LiveKit publisher reconnected");
                 return Some(pipeline);
             }
-            Err(error) => log::warn!("GStreamer LiveKit reconnect failed: {error}"),
+            Err(error) => {
+                log::warn!("GStreamer LiveKit reconnect failed: {error}");
+                delay = (delay * 2).min(RECONNECT_DELAY_MAX);
+            }
         }
     }
 }
@@ -393,6 +663,7 @@ impl PublisherPipeline {
     fn new(
         connection: &ConnectionConfig,
         video_config: Option<&CaptureConfig>,
+        generation: u64,
     ) -> Result<Self, String> {
         let audio_caps = gst::Caps::builder("audio/x-opus")
             .field(
@@ -414,7 +685,7 @@ impl PublisherPipeline {
             .property("max-bitrate", SINK_MAX_BITRATE)
             .build()
             .map_err(|error| format!("Failed to create livekitwebrtcsink: {error}"))?;
-        configure_signaller(&sink, connection);
+        configure_signaller(&sink, connection, generation);
         let pipeline = gst::Pipeline::new();
         pipeline
             .add(&sink)
@@ -424,17 +695,29 @@ impl PublisherPipeline {
             pipeline,
             sink,
             video_config: None,
+            encoder: None,
+            generation,
             is_shutdown: false,
         };
         if let Some(config) = video_config {
             publisher.attach_video(config.clone())?;
         }
-        publisher
-            .pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|error| format!("Failed to start GStreamer LiveKit pipeline: {error}"))?;
-        set_audio_input(Some(audio_input.clone()))?;
-        push_pcm(&audio_input, &[0; AUDIO_DISCOVERY_SAMPLES])?;
+        // Only the current worker may take its pipeline live: a stale
+        // pipeline (reaped worker still winding down) would otherwise
+        // publish a silent zombie track to the room.
+        if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
+            publisher
+                .pipeline
+                .set_state(gst::State::Playing)
+                .map_err(|error| format!("Failed to start GStreamer LiveKit pipeline: {error}"))?;
+        }
+        // Gate the shared audio-input install (and the discovery PCM push)
+        // on the generation: a stale pipeline must not steal the input a
+        // newer worker already installed.
+        if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
+            set_audio_input(Some(audio_input.clone()))?;
+            push_pcm(&audio_input, &[0; AUDIO_DISCOVERY_SAMPLES])?;
+        }
 
         Ok(publisher)
     }
@@ -443,9 +726,10 @@ impl PublisherPipeline {
         &mut self,
         connection: &ConnectionConfig,
         video_config: Option<&CaptureConfig>,
+        generation: u64,
     ) -> Result<(), String> {
         self.shutdown();
-        let replacement = Self::new(connection, video_config)?;
+        let replacement = Self::new(connection, video_config, generation)?;
         *self = replacement;
 
         Ok(())
@@ -453,13 +737,47 @@ impl PublisherPipeline {
 
     fn attach_video(&mut self, config: CaptureConfig) -> Result<(), String> {
         let encoder = GstreamerEncoder::attach(&self.pipeline, &self.sink, &config)?;
-        set_video_input(Some(encoder.input()))?;
+        // Gate the shared state install on the generation (see `new`): a
+        // stale worker's rebuild must never overwrite the current worker's
+        // `VIDEO_INPUT` — two live pipelines fighting over one input would
+        // interleave frames.
+        if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
+            set_video_input(Some(encoder.input()))?;
+            VIDEO_FRAMES_SUBMITTED.store(0, Ordering::Relaxed);
+            reset_encoded_frames();
+            VIDEO_ACTIVE.store(true, Ordering::Relaxed);
+        }
+        self.encoder = Some(encoder);
         self.video_config = Some(config);
-        VIDEO_FRAMES_SUBMITTED.store(0, Ordering::Relaxed);
-        reset_encoded_frames();
-        VIDEO_ACTIVE.store(true, Ordering::Relaxed);
 
         Ok(())
+    }
+
+    /// Re-applies an adapted encoder ceiling after a rebuild/reconnect (the
+    /// fresh encoder starts at the configured ceiling).
+    fn apply_rate(&mut self, ceiling_kbps: u32) {
+        if ceiling_kbps == 0 {
+            return;
+        }
+        if let Some(encoder) = self.encoder.as_mut() {
+            encoder.set_ceiling_kbps(ceiling_kbps);
+        }
+    }
+
+    /// One ~1 s congestion-control observation: fold the sink stats, step
+    /// the `RateController`, and re-target the encoder when it decides to
+    /// move.
+    fn adapt_rate(&mut self, rate_controller: &mut RateController) {
+        if self.video_config.is_none() {
+            return;
+        }
+        let telemetry = self.telemetry();
+        if let Some(ceiling_kbps) = rate_controller.observe(&telemetry) {
+            log::info!(
+                "GStreamer congestion controller: applying encoder ceiling {ceiling_kbps} kbps"
+            );
+            self.apply_rate(ceiling_kbps);
+        }
     }
 
     fn poll_error(&self) -> Option<String> {
@@ -499,9 +817,14 @@ impl PublisherPipeline {
             return;
         }
 
-        let _ = set_audio_input(None);
-        let _ = set_video_input(None);
-        VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+        // A stale pipeline (leftover of a reaped worker) still tears down
+        // its own pipeline, but must not clear the inputs the *current*
+        // worker installed.
+        if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
+            let _ = set_audio_input(None);
+            let _ = set_video_input(None);
+            VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+        }
         let _ = self.pipeline.set_state(gst::State::Null);
         self.is_shutdown = true;
     }
@@ -526,9 +849,14 @@ fn attach_audio(pipeline: &gst::Pipeline, sink: &gst::Element) -> Result<gst_app
         .is_live(true)
         .block(false)
         .max_buffers(AUDIO_APPSRC_MAX_BUFFERS)
-        // TEMPORARY (debug): non-leaky so dropped PCM surfaces as visible
-        // backpressure/pipeline stalls instead of silently vanishing; revert
-        // to leaky downstream once the pops are gone.
+        // Leaky-upstream with a small bound (~160 ms, see
+        // AUDIO_APPSRC_MAX_BUFFERS): during congestion the *oldest* PCM is
+        // dropped (freshest wins) instead of letting a second of stale
+        // speech queue up ahead of the video stream — a half-second
+        // AV-sync drift where the presenter's voice lags the screen. The
+        // `block(false)` push path never waits; drops are counted and
+        // rate-limited-logged in `feed_pcm`.
+        .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
     // PTS is sample-clocked in push_pcm, so the pipeline clock must not
     // stamp buffers (do-timestamp would drift against the sample count and
@@ -582,7 +910,7 @@ fn attach_audio(pipeline: &gst::Pipeline, sink: &gst::Element) -> Result<gst_app
     Ok(appsrc)
 }
 
-fn configure_signaller(sink: &gst::Element, config: &ConnectionConfig) {
+fn configure_signaller(sink: &gst::Element, config: &ConnectionConfig, generation: u64) {
     let signaller = sink.property::<gst::glib::Object>("signaller");
     signaller.set_property("ws-url", &config.url);
     signaller.set_property("auth-token", &config.token);
@@ -591,7 +919,9 @@ fn configure_signaller(sink: &gst::Element, config: &ConnectionConfig) {
     // LiveKit join state lives on the signaller's `connection-state`
     // property (`server-connected` and beyond once the join completes);
     // mirror it so is_native_room_connected reflects a real connection,
-    // not merely a pipeline that was built.
+    // not merely a pipeline that was built. The store is gated on the
+    // worker generation: a stale pipeline's signaller must not flick the
+    // flag while the current worker is connected.
     signaller.connect_notify(Some("connection-state"), move |obj, _| {
         let connected = obj
             .property_value("connection-state")
@@ -604,7 +934,9 @@ fn configure_signaller(sink: &gst::Element, config: &ConnectionConfig) {
                     "server-connected" | "publishing" | "published" | "subscribed"
                 )
             });
-        ROOM_CONNECTED.store(connected, Ordering::Relaxed);
+        if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
+            ROOM_CONNECTED.store(connected, Ordering::Relaxed);
+        }
     });
 }
 
@@ -1010,5 +1342,177 @@ mod tests {
 
         assert!(telemetry.video_bytes_sent.is_none());
         assert!(telemetry.audio_bytes_sent.is_none());
+    }
+
+    fn telemetry_with_loss(sent: f64, lost: f64) -> NativeTelemetry {
+        NativeTelemetry {
+            video_packets_sent: Some(sent),
+            video_packets_lost: Some(lost),
+            ..Default::default()
+        }
+    }
+
+    fn telemetry_without_remote_inbound() -> NativeTelemetry {
+        NativeTelemetry {
+            video_packets_sent: Some(1_000.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rate_controller_steps_down_on_sustained_loss() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert_eq!(controller.current_kbps(), 20_000);
+
+        // First observation primes the counters; the loss shows up in the
+        // second one.
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+        let next = controller.observe(&telemetry_with_loss(12_000.0, 600.0));
+        // 600/2000 = 30% interval loss ≥ 3%: step down 20_000 × 0.75.
+        assert_eq!(next, Some(15_000));
+        assert_eq!(controller.current_kbps(), 15_000);
+    }
+
+    #[test]
+    fn rate_controller_holds_between_thresholds() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+        // 2% interval loss: above the clean threshold, below the step-down
+        // threshold — hold, and it is not a clean interval.
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(12_000.0, 40.0))
+                .is_none()
+        );
+        assert_eq!(controller.current_kbps(), 20_000);
+        assert_eq!(controller.clean_ticks, 0);
+    }
+
+    #[test]
+    fn rate_controller_holds_without_remote_inbound_stats() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+
+        assert!(
+            controller
+                .observe(&telemetry_without_remote_inbound())
+                .is_none()
+        );
+        assert_eq!(controller.current_kbps(), 20_000);
+    }
+
+    #[test]
+    fn rate_controller_recovers_after_clean_intervals() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+        assert_eq!(
+            controller.observe(&telemetry_with_loss(12_000.0, 600.0)),
+            Some(15_000)
+        );
+
+        // 9 clean (~1 s) intervals hold; the 10th clean interval steps the
+        // rate back up toward the configured ceiling.
+        let mut sent = 12_000.0;
+        for _ in 0..(RATE_RECOVER_TICKS - 1) {
+            sent += 2_000.0;
+            assert!(
+                controller
+                    .observe(&telemetry_with_loss(sent, 0.0))
+                    .is_none()
+            );
+        }
+        let next = controller.observe(&telemetry_with_loss(sent + 2_000.0, 0.0));
+        assert_eq!(next, Some(17_250)); // 15_000 × 1.15
+        assert_eq!(controller.current_kbps(), 17_250);
+    }
+
+    #[test]
+    fn rate_controller_never_goes_below_the_floor_or_above_the_ceiling() {
+        let config = CaptureConfig {
+            max_bitrate: Some(500_000.0), // ceiling = 500 kbps = the floor
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+
+        // 100% interval loss: cannot step below the floor.
+        let next = controller.observe(&telemetry_with_loss(12_000.0, 2_000.0));
+        assert_eq!(next, None);
+        assert_eq!(controller.current_kbps(), 500);
+
+        // Clean intervals cannot push past the ceiling either.
+        let mut sent = 12_000.0;
+        for _ in 0..(RATE_RECOVER_TICKS * 2) {
+            sent += 2_000.0;
+            assert!(
+                controller
+                    .observe(&telemetry_with_loss(sent, 0.0))
+                    .is_none()
+            );
+        }
+        assert_eq!(controller.current_kbps(), 500);
+    }
+
+    #[test]
+    fn rate_controller_reset_starts_from_the_configured_ceiling_again() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+        assert_eq!(
+            controller.observe(&telemetry_with_loss(12_000.0, 600.0)),
+            Some(15_000)
+        );
+
+        // A stream-settings change resets the controller to the new ceiling.
+        let changed = CaptureConfig {
+            max_bitrate: Some(8_000_000.0),
+            ..Default::default()
+        };
+        controller.reset(&changed);
+        assert_eq!(controller.current_kbps(), 8_000);
     }
 }

@@ -4,6 +4,11 @@
 //! ceiling**: `vah264enc` derives the encoder's maximum bitrate from
 //! `bitrate × 100 / target-percentage`, so the ceiling is fed in as the
 //! maximum while the target sits below it (see `VBR_TARGET_PERCENTAGE`).
+//! The ceiling is not static: the publisher's congestion controller
+//! (`gstreamer_publisher::RateController`) re-targets it at runtime via
+//! `GstreamerEncoder::set_ceiling_kbps` when the remote-inbound loss/RTT
+//! signals congestion, and steps it back up toward the configured ceiling
+//! after sustained clean intervals.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -15,7 +20,19 @@ use std::sync::{Arc, Mutex};
 
 use crate::CaptureConfig;
 
-const APPSRC_MAX_BUFFERS: u64 = 2;
+/// Video appsrc queue depth in buffers. Two was too tight: any transient
+/// encoder hiccup (VA-API pipeline stall, driver swap) saturated it
+/// instantly and dropped frames continuously. Six buffers (~100 ms at
+/// 60 fps) absorbs short encoder jitter while keeping the queue's
+/// freshness bound well under a typical receiver jitter budget.
+const APPSRC_MAX_BUFFERS: u64 = 6;
+/// Size of the I420 input buffer pool (buffers in flight: the appsrc queue
+/// plus the synchronous convert/encode stages). Pool buffers are returned
+/// automatically when the pipeline releases them, so the steady state does
+/// zero per-frame input-buffer allocation — the previous
+/// `gst::Buffer::with_size` per frame was a 2.25 MB allocate+page-fault
+/// at 1080p (4× at 4K) on the hot delivery path.
+const VIDEO_BUFFER_POOL_SIZE: u32 = 8;
 const GOP_SECONDS: u32 = 1;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
@@ -91,6 +108,11 @@ pub(crate) struct VideoInput {
     /// jittery push time (do-timestamp). Shared via `Arc` so clones (the
     /// `VIDEO_INPUT` static and per-call clones) anchor exactly once.
     pts_anchor: Arc<Mutex<Option<(i64, u64)>>>,
+    /// Preallocated I420 input buffers (see `VIDEO_BUFFER_POOL_SIZE`):
+    /// `push_frame` acquires from the pool instead of allocating a fresh
+    /// full-frame buffer per frame. Pool buffers are returned to the pool
+    /// automatically when the pipeline releases them.
+    buffer_pool: gst::BufferPool,
 }
 
 impl VideoInput {
@@ -105,8 +127,20 @@ impl VideoInput {
             ));
         }
 
-        let mut buffer = gst::Buffer::with_size(self.input_info.size())
-            .map_err(|error| format!("Failed to allocate GStreamer input buffer: {error}"))?;
+        // Acquire from the preallocated input pool rather than allocating a
+        // fresh 2.25 MB (1080p) / 6.2 MB (4K) buffer + page faults per
+        // frame. DONTWAIT: when the encoder is stalled and every pool buffer
+        // is in flight, fail fast (the publish path counts the drop) instead
+        // of blocking the delivery loop.
+        let acquire_params =
+            gst::BufferPoolAcquireParams::with_flags(gst::BufferPoolAcquireFlags::DONTWAIT);
+        let mut buffer = self
+            .buffer_pool
+            .acquire_buffer(Some(&acquire_params))
+            .map_err(|_| {
+                "GStreamer video input buffer pool exhausted (encoder stalled; dropping frame)"
+                    .to_string()
+            })?;
         {
             let buffer_ref = buffer
                 .get_mut()
@@ -184,9 +218,10 @@ impl VideoInput {
         Ok(())
     }
 
-    /// Live appsrc statistics — `dropped` counts buffers the appsrc
-    /// discarded (leaky downstream on a full 2-buffer queue), the stutter
-    /// diagnostic for the encoder-side publish path.
+    /// Live appsrc statistics — `dropped` counts buffers the appsrc discarded
+    /// (leaky-upstream on a full 6-buffer queue), plus frames that never
+    /// reached the appsrc because the input buffer pool was exhausted: the
+    /// stutter diagnostic for the encoder-side publish path.
     pub(crate) fn appsrc_stats(&self) -> AppSrcStats {
         let element = self.appsrc.upcast_ref::<gst::Element>();
         AppSrcStats {
@@ -202,9 +237,38 @@ impl VideoInput {
 
 pub(crate) struct GstreamerEncoder {
     input: VideoInput,
+    /// The `vah264enc` element itself: the congestion controller re-targets
+    /// the VBR ceiling at runtime through this handle (`set_ceiling_kbps`)
+    /// without rebuilding the pipeline.
+    encoder: gst::Element,
+    /// The currently applied bitrate ceiling in kbps — starts at the value
+    /// derived from the stream settings and is stepped by the publisher's
+    /// `RateController` on congestion signals.
+    ceiling_kbps: u32,
 }
 
 impl GstreamerEncoder {
+    /// Re-targets the VBR ceiling at runtime: sets `bitrate` (the VBR
+    /// target, `ceiling × target-percentage / 100`) so the driver-side
+    /// maximum lands on the new ceiling. The VA-API rate controller picks
+    /// the new rate up on the next encoded frame — no pipeline rebuild,
+    /// so this is safe to call from the publisher's ~1 s congestion
+    /// control tick even mid-stream.
+    pub(crate) fn set_ceiling_kbps(&mut self, ceiling_kbps: u32) {
+        let ceiling_kbps = ceiling_kbps.clamp(1, u32::MAX);
+        if ceiling_kbps == self.ceiling_kbps {
+            return;
+        }
+        let target = vbr_target_kbps(ceiling_kbps, VBR_TARGET_PERCENTAGE);
+        // Infallible property set in gstreamer-rs 0.25; a rejected property
+        // would surface as a GLib warning on the element's bus, not here.
+        self.encoder.set_property("bitrate", target);
+        log::info!(
+            "[gstreamer-encoder] VBR ceiling {} kbps -> {ceiling_kbps} kbps (VBR target {target} kbps)",
+            self.ceiling_kbps,
+        );
+        self.ceiling_kbps = ceiling_kbps;
+    }
     #[allow(
         clippy::too_many_lines,
         reason = "linear GStreamer element construction and linking is clearest in one function"
@@ -249,11 +313,15 @@ impl GstreamerEncoder {
             .max_buffers(APPSRC_MAX_BUFFERS)
             .max_bytes(0)
             .max_time(gst::ClockTime::ZERO)
-            .leaky_type(gst_app::AppLeakyType::Downstream)
+            .leaky_type(gst_app::AppLeakyType::Upstream)
             .build();
         // PTS is stamped explicitly in `push_frame` from the capture clock
         // anchored to the pipeline's running time at the first frame — no
         // do-timestamp, so push jitter never wobbles the stream clock.
+        // Leaky-upstream drops the *oldest* buffered frame on a full queue:
+        // for live screen share stale frames are worthless, so freshness
+        // wins (the alternative, leaky-downstream, would keep the oldest
+        // frame queued and hand the encoder content that trails real time).
         let convert = make_element("videoconvert")?;
         // VBR, ceiling-capped: the requested rate is the *ceiling*; the
         // `bitrate` property gets the VBR target (a fraction of the ceiling,
@@ -284,7 +352,15 @@ impl GstreamerEncoder {
         let output_queue = gst::ElementFactory::make("queue")
             .property("max-size-buffers", 0_u32)
             .property("max-size-bytes", 0_u32)
-            .property("max-size-time", 200_000_000_u64) // 200 ms
+            // 120 ms of encoded data. This must stay non-leaky: dropping
+            // *encoded* access units here would create decode gaps
+            // (H.264 references the dropped frames), so a stalled sink
+            // propagates backpressure into the encoder instead — bounded
+            // by this window, after which the leaky appsrc drops raw
+            // frames. 120 ms (down from 200 ms) keeps the post-stall drain
+            // burst to ~7 frames at 60 fps instead of ~12, while still
+            // smoothing VBR keyframe jitter.
+            .property("max-size-time", 120_000_000_u64) // 120 ms
             .build()
             .map_err(|error| format!("Failed to create GStreamer video queue: {error}"))?;
         // Count encoded H.264 access units as they leave h264parse. This is
@@ -303,7 +379,7 @@ impl GstreamerEncoder {
         let elements = vec![
             appsrc.clone().upcast(),
             convert,
-            encoder,
+            encoder.clone(),
             parser,
             capsfilter,
             output_queue.clone(),
@@ -328,7 +404,32 @@ impl GstreamerEncoder {
                 .map_err(|error| format!("Failed to start GStreamer H.264 element: {error}"))?;
         }
 
+        // I420 input buffer pool: preallocate `VIDEO_BUFFER_POOL_SIZE`
+        // buffers of the input frame size at attach time. Steady-state
+        // `push_frame` then acquires from the pool (zero allocation); the
+        // pool is deactivated and freed when `VideoInput` is dropped
+        // (pipeline teardown).
+        let buffer_pool = gst::BufferPool::new();
+        {
+            let mut pool_config = buffer_pool.config();
+            pool_config.set_params(
+                Some(&input_caps),
+                u32::try_from(input_info.size())
+                    .map_err(|_| "GStreamer input buffer size exceeds u32")?,
+                0,
+                VIDEO_BUFFER_POOL_SIZE,
+            );
+            buffer_pool.set_config(pool_config).map_err(|error| {
+                format!("Failed to configure GStreamer input buffer pool: {error}")
+            })?;
+        }
+        buffer_pool
+            .set_active(true)
+            .map_err(|error| format!("Failed to activate GStreamer input buffer pool: {error}"))?;
+
         Ok(Self {
+            encoder,
+            ceiling_kbps,
             input: VideoInput {
                 appsrc,
                 input_info,
@@ -336,6 +437,7 @@ impl GstreamerEncoder {
                 height: config.height,
                 fps: config.fps,
                 pts_anchor: Arc::new(Mutex::new(None)),
+                buffer_pool,
             },
         })
     }
@@ -356,7 +458,7 @@ fn make_element(name: &str) -> Result<gst::Element, String> {
     clippy::cast_sign_loss,
     reason = "validated UI bitrate values are finite, positive, and far below u32::MAX kbps"
 )]
-fn bitrate_bps_to_kbps(bitrate_bps: f64) -> u32 {
+pub(crate) fn bitrate_bps_to_kbps(bitrate_bps: f64) -> u32 {
     if !bitrate_bps.is_finite() || bitrate_bps <= 0.0 {
         return 1;
     }
