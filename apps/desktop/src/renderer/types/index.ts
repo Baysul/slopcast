@@ -144,6 +144,9 @@ export interface DesktopCaptureStats {
   /// JPEG preview frames emitted via the preview callback (encoded
   /// natively by libjpeg-turbo).
   previewFramesSent: number;
+  keepaliveAttempted: number;
+  keepalivePushed: number;
+  keepaliveDropped: number;
   lastWidth: number;
   lastHeight: number;
 }

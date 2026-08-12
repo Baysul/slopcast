@@ -64,6 +64,9 @@ pub(crate) static STATS_DROPPED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STATS_ERRORS: AtomicU64 = AtomicU64::new(0);
 /// Preview frames handed to the preview callback.
 pub(crate) static STATS_PREVIEW_SENT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STATS_KEEPALIVE_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STATS_KEEPALIVE_PUSHED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STATS_KEEPALIVE_DROPPED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STATS_LAST_WIDTH: AtomicU32 = AtomicU32::new(0);
 pub(crate) static STATS_LAST_HEIGHT: AtomicU32 = AtomicU32::new(0);
 
@@ -73,6 +76,9 @@ pub(crate) fn reset_stats() {
     STATS_DROPPED.store(0, Ordering::Relaxed);
     STATS_ERRORS.store(0, Ordering::Relaxed);
     STATS_PREVIEW_SENT.store(0, Ordering::Relaxed);
+    STATS_KEEPALIVE_ATTEMPTED.store(0, Ordering::Relaxed);
+    STATS_KEEPALIVE_PUSHED.store(0, Ordering::Relaxed);
+    STATS_KEEPALIVE_DROPPED.store(0, Ordering::Relaxed);
     STATS_LAST_WIDTH.store(0, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(0, Ordering::Relaxed);
     CAPTURE_ENDED_EMITTED.store(false, Ordering::Relaxed);
@@ -591,6 +597,14 @@ impl KeepaliveRing {
             });
         }
         let slot = &mut self.slots[self.next];
+        if (slot.buffer.width(), slot.buffer.height()) != target {
+            *slot = VideoFrame {
+                rotation: VideoRotation::VideoRotation0,
+                timestamp_us: 0,
+                frame_metadata: None,
+                buffer: I420Buffer::new(target.0, target.1),
+            };
+        }
         self.next = (self.next + 1) % KEEPALIVE_RING_CAPACITY;
         slot
     }
@@ -654,9 +668,7 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
         // keepalive delivery arm too, which scales to the current
         // `SCALE_TARGET` at delivery time, so a client-side resolution
         // change is honored without a capture restart.
-        if PREVIEW_CALLBACK.load_full().is_some()
-            && let Ok(mut slot) = PREVIEW_I420.lock()
-        {
+        if let Ok(mut slot) = PREVIEW_I420.lock() {
             let ring = slot.get_or_insert_with(|| HistoryRing::new(HISTORY_RING_CAPACITY));
             let (plane_y, plane_u, plane_v) = frame.buffer.data();
             let lens = (plane_y.len(), plane_u.len(), plane_v.len());
@@ -1065,7 +1077,12 @@ fn run_capture(
                     if crate::is_video_track_active()
                         && let Some(frame) = keepalive_frame(&mut keepalive_ring)
                     {
-                        let _ = publish_video_frame(&frame);
+                        STATS_KEEPALIVE_ATTEMPTED.fetch_add(1, Ordering::Relaxed);
+                        if publish_video_frame(&frame) {
+                            STATS_KEEPALIVE_PUSHED.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            STATS_KEEPALIVE_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -1241,6 +1258,13 @@ pub(crate) fn stats() -> crate::DesktopCaptureStats {
         frames_dropped: STATS_DROPPED.load(Ordering::Relaxed).cast_signed(),
         capture_errors: STATS_ERRORS.load(Ordering::Relaxed).cast_signed(),
         preview_frames_sent: STATS_PREVIEW_SENT.load(Ordering::Relaxed).cast_signed(),
+        keepalive_attempted: STATS_KEEPALIVE_ATTEMPTED
+            .load(Ordering::Relaxed)
+            .cast_signed(),
+        keepalive_pushed: STATS_KEEPALIVE_PUSHED.load(Ordering::Relaxed).cast_signed(),
+        keepalive_dropped: STATS_KEEPALIVE_DROPPED
+            .load(Ordering::Relaxed)
+            .cast_signed(),
         last_width: i64::from(STATS_LAST_WIDTH.load(Ordering::Relaxed)),
         last_height: i64::from(STATS_LAST_HEIGHT.load(Ordering::Relaxed)),
     }

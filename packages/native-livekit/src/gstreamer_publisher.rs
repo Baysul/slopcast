@@ -63,6 +63,7 @@ enum PublisherCommand {
 }
 
 enum ConnectedOutcome {
+    Idle,
     Reconnect,
     Shutdown,
 }
@@ -248,34 +249,60 @@ fn run_worker(
     command_receiver: &Receiver<PublisherCommand>,
     ready_sender: &SyncSender<Result<(), String>>,
 ) {
+    let mut pipeline = None;
     let mut video_config = None;
-    let mut pipeline = match PublisherPipeline::new(connection, video_config.as_ref()) {
-        Ok(pipeline) => pipeline,
-        Err(error) => {
-            let _ = ready_sender.send(Err(error));
-            return;
-        }
-    };
-    // ROOM_CONNECTED is flipped true only once the LiveKit signaller reports
-    // `connection-state = server-connected` (see configure_signaller). The
-    // pipeline may be up long before the room join completes.
+    // The room worker is deliberately dormant until Go Live. Constructing an
+    // audio-only sink and putting it in PLAYING publishes audio before the
+    // video pad exists; livekitwebrtcsink then keeps the negotiated topology
+    // audio-only. The first pipeline is therefore created with both pads.
     let _ = ready_sender.send(Ok(()));
 
     loop {
+        let Some(active_pipeline) = pipeline.as_mut() else {
+            match command_receiver.recv_timeout(POLL_INTERVAL) {
+                Ok(PublisherCommand::StartVideo { config, reply }) => {
+                    match PublisherPipeline::new(connection, Some(&config)) {
+                        Ok(new_pipeline) => {
+                            video_config = Some(config);
+                            pipeline = Some(new_pipeline);
+                            let _ = reply.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
+                Ok(PublisherCommand::StopVideo { reply }) => {
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(PublisherCommand::GetTelemetry(reply)) => {
+                    let _ = reply.send(None);
+                }
+                Ok(PublisherCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            continue;
+        };
+
         match run_connected(
-            &mut pipeline,
+            active_pipeline,
             connection,
             command_receiver,
             &mut video_config,
         ) {
+            ConnectedOutcome::Idle => {
+                pipeline = None;
+                clear_inputs();
+                ROOM_CONNECTED.store(false, Ordering::Relaxed);
+            }
             ConnectedOutcome::Shutdown => break,
             ConnectedOutcome::Reconnect => {
                 ROOM_CONNECTED.store(false, Ordering::Relaxed);
                 clear_inputs();
-                drop(pipeline);
+                drop(pipeline.take());
                 match reconnect(connection, command_receiver, &mut video_config) {
                     Some(reconnected) => {
-                        pipeline = reconnected;
+                        pipeline = Some(reconnected);
                     }
                     None => break,
                 }
@@ -309,15 +336,10 @@ fn run_connected(
             }
             Ok(PublisherCommand::StopVideo { reply }) => {
                 *video_config = None;
-                let result = pipeline.rebuild(connection, None);
-                let should_reconnect = result.is_err();
-                if result.is_ok() {
-                    VIDEO_ACTIVE.store(false, Ordering::Relaxed);
-                }
-                let _ = reply.send(result);
-                if should_reconnect {
-                    return ConnectedOutcome::Reconnect;
-                }
+                pipeline.shutdown();
+                VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+                let _ = reply.send(Ok(()));
+                return ConnectedOutcome::Idle;
             }
             Ok(PublisherCommand::GetTelemetry(reply)) => {
                 let _ = reply.send(Some(pipeline.telemetry()));

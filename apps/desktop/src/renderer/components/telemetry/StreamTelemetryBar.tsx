@@ -174,11 +174,7 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = Reac
             <span className="text-xs font-semibold uppercase tracking-wider text-safelight">On Air</span>
           </div>
 
-          <TelemetryCell
-            label="Codec"
-            value={t.videoCodec ?? '—'}
-            sub={t.videoEncoder ? `· ${t.videoEncoder}` : undefined}
-          />
+          <TelemetryCell label="Codec" value={t.videoCodec ?? '—'} />
           <TelemetryCell label="Resolution" value={t.width && t.height ? `${t.width}×${t.height}` : '—'} />
           <TelemetryCell
             label="Frame Rate"

@@ -53,6 +53,35 @@ export const SpectatorTelemetryBar: React.FC<{ telemetry: SpectatorTelemetry }> 
         degrade={telemetry.quality === 'poor'}
       />
 
+      <div className="hidden md:block">
+        <TelemetryCell
+          label="Jitter"
+          value={telemetry.jitterMs != null ? `${telemetry.jitterMs.toFixed(1)} ms` : '\u2014'}
+          sub={
+            telemetry.jitterBufferDelayMs != null ? `buffer ${telemetry.jitterBufferDelayMs.toFixed(0)} ms` : undefined
+          }
+          degrade={telemetry.jitterMs != null && telemetry.jitterMs > 30}
+        />
+      </div>
+
+      <div className="hidden lg:block">
+        <TelemetryCell
+          label="Frame drops"
+          value={`${telemetry.framesDropped}`}
+          sub={telemetry.packetsDiscarded > 0 ? `discarded total ${telemetry.packetsDiscarded}` : undefined}
+          degrade={telemetry.framesDropped > 0}
+        />
+      </div>
+
+      <div className="hidden xl:block">
+        <TelemetryCell
+          label="Freeze / NACK"
+          value={`${telemetry.freezeCount}`}
+          sub={`NACK ${telemetry.nackCount}`}
+          degrade={telemetry.freezeCount > 0 || telemetry.nackCount > 0}
+        />
+      </div>
+
       <div className="hidden sm:block">
         <TelemetryCell label="Loss" value={fmtLoss(telemetry.packetLossPct)} degrade={lossDegrade} />
       </div>

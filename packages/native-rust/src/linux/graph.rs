@@ -53,8 +53,15 @@ impl TargetSpec {
     }
 
     fn matches(&self, node_id: u32, info: &AppNodeInfo) -> bool {
-        Some(node_id) == self.node_id
-            || self.client_id.is_some_and(|c| info.client_id == Some(c))
+        // An explicitly selected PipeWire node is authoritative. Do not widen
+        // it to every stream from the same browser/process: that can capture
+        // the spectator's playback and feed the published audio back into
+        // itself.
+        if let Some(target_node) = self.node_id {
+            return node_id == target_node;
+        }
+
+        self.client_id.is_some_and(|c| info.client_id == Some(c))
             // Exact PID match, or the audio stream's process is a descendant
             // of the target process (e.g. a browser window's audio utility
             // process). Descendant-only on purpose: siblings that merely
@@ -621,6 +628,26 @@ mod tests {
         };
         assert!(target.matches(7, &AppNodeInfo::default()));
         assert!(!target.matches(8, &AppNodeInfo::default()));
+    }
+
+    #[test]
+    fn node_target_does_not_match_other_streams_from_same_process() {
+        let target = TargetSpec {
+            node_id: Some(7),
+            pid: Some(1000),
+            binary: Some("firefox".into()),
+            app_name: Some("Firefox".into()),
+            ..TargetSpec::default()
+        };
+
+        assert!(target.matches(
+            7,
+            &app_node_info(Some(1000), Some("firefox"), None, Some("Firefox"))
+        ));
+        assert!(!target.matches(
+            8,
+            &app_node_info(Some(1000), Some("firefox"), None, Some("Firefox"))
+        ));
     }
 
     #[test]

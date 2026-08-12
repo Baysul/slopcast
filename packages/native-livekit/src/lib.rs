@@ -174,6 +174,9 @@ pub struct DesktopCaptureStats {
     pub frames_dropped: i64,
     pub capture_errors: i64,
     pub preview_frames_sent: i64,
+    pub keepalive_attempted: i64,
+    pub keepalive_pushed: i64,
+    pub keepalive_dropped: i64,
     pub last_width: i64,
     pub last_height: i64,
 }
@@ -484,8 +487,12 @@ pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
 pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        desktop_capture::set_scale_target(config.width, config.height, config.fps);
-        gstreamer_publisher::start_video(config)
+        let target = (config.width, config.height, config.fps);
+        let result = gstreamer_publisher::start_video(config);
+        if result.is_ok() {
+            desktop_capture::set_scale_target(target.0, target.1, target.2);
+        }
+        result
     }
 
     #[cfg(not(target_os = "linux"))]
