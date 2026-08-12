@@ -260,16 +260,20 @@ impl GstreamerEncoder {
         }
         let target = vbr_target_kbps(ceiling_kbps, VBR_TARGET_PERCENTAGE);
         // VA-API uses `bitrate` in kbps; software VPx/AV1 encoders use
-        // `target-bitrate` in bits per second. Both are updated in place so
-        // congestion control keeps the selected codec's ceiling effective.
+        // `target-bitrate` — VPx in bits/sec, av1enc in kilobits/sec (see
+        // configure_encoder). Both are updated in place so congestion
+        // control keeps the selected codec's ceiling effective.
         if self.encoder.find_property("bitrate").is_some() {
             self.encoder
                 .set_property_from_str("bitrate", &target.to_string());
         } else if self.encoder.find_property("target-bitrate").is_some() {
-            self.encoder.set_property_from_str(
-                "target-bitrate",
-                &target.saturating_mul(1000).min(i32::MAX as u32).to_string(),
-            );
+            let value = if target_bitrate_is_kbps(&self.encoder) {
+                target
+            } else {
+                target.saturating_mul(1000).min(i32::MAX as u32)
+            };
+            self.encoder
+                .set_property_from_str("target-bitrate", &value.to_string());
         } else {
             log::warn!("GStreamer encoder exposes no runtime bitrate property");
         }
@@ -474,6 +478,9 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
             "av1enc",
             "vaav1enc",
             "av1parse",
+            // `rtpav1pay` will accept only parsed OBU temporal units; a bare
+            // `video/x-av1` capsfilter still publishes RTP but Chromium sees
+            // packets without decodable frame boundaries.
             gst::Caps::builder("video/x-av1")
                 .field("parsed", true)
                 .field("stream-format", "obu-stream")
@@ -488,12 +495,8 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
         ),
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
-    let encoder = if !hardware.is_empty() && gst::ElementFactory::find(hardware).is_some() {
-        hardware
-    } else {
-        software
-    };
-    if gst::ElementFactory::find(encoder).is_none() {
+    let encoder = select_encoder(software, hardware);
+    if gst::ElementFactory::make(encoder).build().is_err() {
         return Err(format!(
             "GStreamer encoder unavailable for {codec}: {software} or {hardware}"
         ));
@@ -506,17 +509,37 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
     Ok((encoder, parser, caps))
 }
 
+fn select_encoder(software: &'static str, hardware: &'static str) -> &'static str {
+    if hardware.is_empty() {
+        return software;
+    }
+    if gst::ElementFactory::find(hardware).is_none() {
+        return software;
+    }
+    // Factory presence does not guarantee the element can actually be
+    // instantiated (missing VA display, driver without AV1 encode, etc.).
+    // Probe instantiation so AV1 does not get stuck on a non-functional
+    // `vaav1enc` when no AV1 hardware exists.
+    match gst::ElementFactory::make(hardware).build() {
+        Ok(_) => hardware,
+        Err(_) => software,
+    }
+}
+
 fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_max: u32) {
     if encoder.find_property("bitrate").is_some() {
         encoder.set_property_from_str("bitrate", &bitrate.to_string());
     } else if encoder.find_property("target-bitrate").is_some() {
-        encoder.set_property_from_str(
-            "target-bitrate",
-            &bitrate
-                .saturating_mul(1000)
-                .min(i32::MAX as u32)
-                .to_string(),
-        );
+        // `target-bitrate` units differ by plugin: VPx (vp8enc/vp9enc) take
+        // bits/sec, but av1enc takes *kilobits*/sec — scaling by 1000 for
+        // av1enc (8 Mbps ceiling -> 8,000,000 "kbps") makes libaom reject
+        // the input caps at set_format time (`not-negotiated`).
+        let value = if target_bitrate_is_kbps(encoder) {
+            bitrate
+        } else {
+            bitrate.saturating_mul(1000).min(i32::MAX as u32)
+        };
+        encoder.set_property_from_str("target-bitrate", &value.to_string());
     }
     if encoder.find_property("key-int-max").is_some() {
         encoder.set_property_from_str("key-int-max", &key_int_max.to_string());
@@ -553,6 +576,26 @@ fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_
         if encoder.find_property("lag-in-frames").is_some() {
             encoder.set_property_from_str("lag-in-frames", "0");
         }
+        if codec == "av1" {
+            // The libaom default is good-quality mode: at 1080p it can take
+            // tens of seconds to encode the first few screen frames, leaving
+            // the LiveKit video publication empty while audio continues.
+            // Realtime mode keeps the software AV1 path usable for live
+            // screensharing; row-mt and two tile columns provide parallelism
+            // without changing the negotiated bitstream format.
+            if encoder.find_property("usage-profile").is_some() {
+                encoder.set_property_from_str("usage-profile", "realtime");
+            }
+            if encoder.find_property("cpu-used").is_some() {
+                encoder.set_property_from_str("cpu-used", "8");
+            }
+            if encoder.find_property("row-mt").is_some() {
+                encoder.set_property("row-mt", true);
+            }
+            if encoder.find_property("tile-columns").is_some() {
+                encoder.set_property_from_str("tile-columns", "2");
+            }
+        }
     }
 }
 
@@ -560,6 +603,17 @@ fn make_element(name: &str) -> Result<gst::Element, String> {
     gst::ElementFactory::make(name)
         .build()
         .map_err(|error| format!("Failed to create GStreamer element {name}: {error}"))
+}
+
+/// Whether the encoder's `target-bitrate` property is in kilobits/sec.
+/// `av1enc` (libaom) documents kilobits/sec; `VPx` encoders document bits/sec.
+/// Reading the *property blurb* is fragile across versions, so discriminate
+/// on the element's factory name — the pipeline only ever instantiates
+/// `av1enc`, `vp8enc`, or `vp9enc` with this property.
+fn target_bitrate_is_kbps(encoder: &gst::Element) -> bool {
+    encoder
+        .factory()
+        .is_some_and(|factory| factory.name() == "av1enc")
 }
 
 #[allow(

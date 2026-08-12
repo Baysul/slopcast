@@ -1050,7 +1050,7 @@ pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
     let missing = required
         .iter()
         .copied()
-        .filter(|name| gst::ElementFactory::find(name).is_none())
+        .filter(|name| gst::ElementFactory::make(name).build().is_err())
         .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok(());
@@ -1074,10 +1074,18 @@ fn selected_encoder_name(codec: &str) -> &'static str {
         "av1" => "av1enc",
         _ => "vp8enc",
     };
-    if !hardware.is_empty() && gst::ElementFactory::find(hardware).is_some() {
-        hardware
-    } else {
-        software
+    if hardware.is_empty() {
+        return software;
+    }
+    if gst::ElementFactory::find(hardware).is_none() {
+        return software;
+    }
+    // Factory presence does not guarantee instantiation (missing VA display,
+    // driver without encode support). Probe so AV1 does not stick to a
+    // non-functional `vaav1enc` when no AV1 hardware exists.
+    match gst::ElementFactory::make(hardware).build() {
+        Ok(_) => hardware,
+        Err(_) => software,
     }
 }
 
@@ -1104,10 +1112,11 @@ pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)
         encoder_available && verify_codec_elements(codec).is_ok()
     })
     .map(|(codec, label, _software, hardware)| {
+        let selected_encoder = selected_encoder_name(codec);
         (
             codec,
             label,
-            !hardware.is_empty() && gst::ElementFactory::find(hardware).is_some(),
+            !hardware.is_empty() && selected_encoder == hardware,
         )
     })
     .collect()
