@@ -43,6 +43,7 @@ opencode.json
 # .impeccable/
 .mcp/
 .hermes/
+.obsidian/
 
 # Project documentation
 # AGENTS.md
