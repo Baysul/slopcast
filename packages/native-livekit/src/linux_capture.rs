@@ -128,8 +128,10 @@ impl LinuxDesktopCapture {
                     Err(CaptureError::Temporary) => {
                         // No new buffer since the last poll — expected while
                         // the portal picker is open and when the compositor
-                        // has nothing new to record.
-                        STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
+                        // has nothing new to record. NOT an error: counting
+                        // it in `capture_errors` made every normal session
+                        // start (picker open, pre-first-frame) read as
+                        // faulted in the telemetry and e2e diagnostics.
                     }
                     Err(CaptureError::Permanent) => {
                         STATS_ERRORS.fetch_add(1, Ordering::Relaxed);

@@ -337,27 +337,24 @@ impl HistoryRing {
         }
     }
 
-    /// Stores a capture-resolution I420 frame (copied under the caller's
-    /// lock). The length fields mirror the actual plane slice lengths.
-    fn push(
-        &mut self,
-        width: u32,
-        height: u32,
-        pts_us: i64,
-        planes: &[u8],
-        lens: (usize, usize, usize),
-    ) {
-        let (y_len, u_len, v_len) = lens;
+    /// Stores a capture-resolution I420 frame directly from the plane
+    /// slices. The length fields mirror the actual plane slice lengths;
+    /// packing the planes straight into the slot skips the intermediate
+    /// packed buffer — a ~2.25 MB allocation *and* a ~2.25 MB copy saved
+    /// on every capture frame (the capture callback's hot path).
+    fn push_planes(&mut self, width: u32, height: u32, pts_us: i64, y: &[u8], u: &[u8], v: &[u8]) {
         let idx = self.write_idx % self.slots.len();
         let slot = &mut self.slots[idx];
         slot.width = width;
         slot.height = height;
         slot.pts_us = pts_us;
-        slot.y_len = y_len;
-        slot.u_len = u_len;
-        slot.v_len = v_len;
+        slot.y_len = y.len();
+        slot.u_len = u.len();
+        slot.v_len = v.len();
         slot.planes.clear();
-        slot.planes.extend_from_slice(planes);
+        slot.planes.extend_from_slice(y);
+        slot.planes.extend_from_slice(u);
+        slot.planes.extend_from_slice(v);
         self.write_idx += 1;
         self.pushed += 1;
     }
@@ -671,13 +668,10 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
         if let Ok(mut slot) = PREVIEW_I420.lock() {
             let ring = slot.get_or_insert_with(|| HistoryRing::new(HISTORY_RING_CAPACITY));
             let (plane_y, plane_u, plane_v) = frame.buffer.data();
-            let lens = (plane_y.len(), plane_u.len(), plane_v.len());
-            let planes_len = lens.0 + lens.1 + lens.2;
-            let mut planes = Vec::with_capacity(planes_len);
-            planes.extend_from_slice(plane_y);
-            planes.extend_from_slice(plane_u);
-            planes.extend_from_slice(plane_v);
-            ring.push(width, height, monotonic_us(), &planes, lens);
+            // `push_planes` packs the planes straight into the ring slot —
+            // no intermediate Vec, so the stash costs one copy (not an
+            // allocation + a copy) on the capture thread's hot path.
+            ring.push_planes(width, height, monotonic_us(), plane_y, plane_u, plane_v);
         }
         pacer.push(frame);
     })
@@ -1810,11 +1804,10 @@ mod probe {
     #[test]
     fn history_ring_keeps_newest_at_capture_resolution() {
         let mut ring = HistoryRing::new(2);
-        let planes = |v: u8| vec![v; 4];
-        ring.push(1920, 1080, 1, &planes(1), (2, 1, 1));
-        ring.push(1280, 720, 2, &planes(2), (2, 1, 1));
+        ring.push_planes(1920, 1080, 1, &[1u8; 2], &[1u8; 1], &[1u8; 1]);
+        ring.push_planes(1280, 720, 2, &[2u8; 2], &[2u8; 1], &[2u8; 1]);
         // Overwrite the oldest (drop-oldest): the ring stays bounded at 2.
-        ring.push(2560, 1440, 3, &planes(3), (2, 1, 1));
+        ring.push_planes(2560, 1440, 3, &[3u8; 2], &[3u8; 1], &[3u8; 1]);
 
         let newest = ring
             .newest()
@@ -1823,7 +1816,7 @@ mod probe {
             (newest.width, newest.height, newest.pts_us),
             (2560, 1440, 3)
         );
-        assert_eq!(newest.planes, planes(3));
+        assert_eq!(newest.planes, vec![3u8; 4]);
         assert_eq!(ring.slots.len(), 2, "ring must stay bounded at capacity");
     }
 
@@ -1873,7 +1866,14 @@ mod probe {
         {
             let mut ring = HistoryRing::new(2);
             let planes = vec![0u8; 1280 * 720 + 640 * 360 + 640 * 360];
-            ring.push(1280, 720, 42, &planes, (1280 * 720, 640 * 360, 640 * 360));
+            ring.push_planes(
+                1280,
+                720,
+                42,
+                &planes[..1280 * 720],
+                &planes[1280 * 720..1280 * 720 + 640 * 360],
+                &planes[1280 * 720 + 640 * 360..],
+            );
             let Ok(mut slot) = PREVIEW_I420.lock() else {
                 panic!("PREVIEW_I420 lock poisoned");
             };
@@ -1922,7 +1922,14 @@ mod probe {
             // Chroma planes: flat, distinct from any luma row value.
             planes[1280 * 720..1280 * 720 + 640 * 360].fill(128);
             planes[1280 * 720 + 640 * 360..].fill(128);
-            ring.push(1280, 720, 7, &planes, (1280 * 720, 640 * 360, 640 * 360));
+            ring.push_planes(
+                1280,
+                720,
+                7,
+                &planes[..1280 * 720],
+                &planes[1280 * 720..1280 * 720 + 640 * 360],
+                &planes[1280 * 720 + 640 * 360..],
+            );
             let Ok(mut slot) = PREVIEW_I420.lock() else {
                 panic!("PREVIEW_I420 lock poisoned");
             };
