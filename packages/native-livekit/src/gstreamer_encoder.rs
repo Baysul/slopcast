@@ -496,7 +496,7 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
     let encoder = select_encoder(software, hardware);
-    if gst::ElementFactory::make(encoder).build().is_err() {
+    if !crate::gstreamer_publisher::can_initialize_element(encoder) {
         return Err(format!(
             "GStreamer encoder unavailable for {codec}: {software} or {hardware}"
         ));

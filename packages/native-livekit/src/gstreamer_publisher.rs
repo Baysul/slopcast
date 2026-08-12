@@ -8,6 +8,7 @@ use std::sync::{LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gst::glib::translate::{ToGlibPtr, from_glib_full};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -1039,6 +1040,35 @@ fn verify_required_elements() -> Result<(), String> {
     ))
 }
 
+/// Whether `GStreamer` can create and initialize an element without the Rust
+/// builder's panic path. Transitioning to `READY` also opens hardware device
+/// handles, catching unavailable VA displays and drivers before selection.
+pub(crate) fn can_initialize_element(name: &str) -> bool {
+    let Some(factory) = gst::ElementFactory::find(name) else {
+        return false;
+    };
+    let factory_ptr = factory.to_glib_none().0;
+    // SAFETY: `factory` owns a valid factory reference for the duration of the
+    // call, and a null name asks GStreamer to use the factory's default name.
+    // `from_glib_full` takes ownership of the returned element, if any.
+    let element: Option<gst::Element> = unsafe {
+        from_glib_full(gst::ffi::gst_element_factory_create(
+            factory_ptr,
+            std::ptr::null(),
+        ))
+    };
+    let Some(element) = element else {
+        return false;
+    };
+    let initialized = element.set_state(gst::State::Ready).is_ok()
+        && element
+            .state(Some(gst::ClockTime::from_seconds(1)))
+            .0
+            .is_ok();
+    let _ = element.set_state(gst::State::Null);
+    initialized
+}
+
 pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
     let parser = match codec {
         "h264" => "h264parse",
@@ -1050,7 +1080,7 @@ pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
     let missing = required
         .iter()
         .copied()
-        .filter(|name| gst::ElementFactory::make(name).build().is_err())
+        .filter(|name| !can_initialize_element(name))
         .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok(());
@@ -1077,15 +1107,13 @@ fn selected_encoder_name(codec: &str) -> &'static str {
     if hardware.is_empty() {
         return software;
     }
-    if gst::ElementFactory::find(hardware).is_none() {
-        return software;
-    }
     // Factory presence does not guarantee instantiation (missing VA display,
     // driver without encode support). Probe so AV1 does not stick to a
     // non-functional `vaav1enc` when no AV1 hardware exists.
-    match gst::ElementFactory::make(hardware).build() {
-        Ok(_) => hardware,
-        Err(_) => software,
+    if can_initialize_element(hardware) {
+        hardware
+    } else {
+        software
     }
 }
 
@@ -1324,6 +1352,13 @@ mod tests {
                 panic!("GStreamer must initialize in tests: {error}");
             }
         });
+    }
+
+    #[test]
+    fn element_initialization_probe_handles_present_and_missing_factories() {
+        init_gst();
+        assert!(can_initialize_element("identity"));
+        assert!(!can_initialize_element("slopcast-missing-element"));
     }
 
     fn codec(id: &str, clock_rate: u32) -> gst::Structure {
