@@ -47,8 +47,8 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninit
 use windows::core::HRESULT;
 
 use crate::desktop_capture::{
-    FrameCallback, STATS_DEQUEUED, STATS_DROPPED, STATS_ERRORS, capture_poll_fps,
-    fire_capture_ended_once, monotonic_us,
+    FrameCallback, STATS_DROPPED, STATS_ERRORS, capture_poll_fps, fire_capture_ended_once,
+    monotonic_us,
 };
 
 /// The thread was already initialized in a different COM apartment; the WGC
@@ -235,7 +235,6 @@ impl WgcCapture {
         let mut on_frame = on_frame;
         capturer.start_capture(Some(source), move |result| match result {
             Ok(frame) => {
-                STATS_DEQUEUED.fetch_add(1, Ordering::Relaxed);
                 let width = u32::try_from(frame.width()).unwrap_or(0);
                 let height = u32::try_from(frame.height()).unwrap_or(0);
                 if width == 0 || height == 0 {

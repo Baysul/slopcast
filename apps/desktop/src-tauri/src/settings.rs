@@ -14,6 +14,7 @@
 
 use std::path::PathBuf;
 
+use crate::AppHandle;
 use tauri::Manager;
 
 const STREAM_SETTINGS_FILE: &str = "stream-settings.json";
@@ -100,7 +101,7 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
     }
 }
 
-fn config_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map_err(|e| format!("failed to resolve app config dir: {e}"))
@@ -113,7 +114,7 @@ fn config_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 ///
 /// Returns an error if the app config dir cannot be resolved.
 #[tauri::command]
-pub fn get_stream_settings(app: tauri::AppHandle) -> Result<StreamSettings, String> {
+pub fn get_stream_settings(app: AppHandle) -> Result<StreamSettings, String> {
     let path = config_dir(&app)?.join(STREAM_SETTINGS_FILE);
     let parsed = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
@@ -136,7 +137,7 @@ pub fn get_stream_settings(app: tauri::AppHandle) -> Result<StreamSettings, Stri
 /// newline).
 #[must_use]
 #[tauri::command]
-pub fn save_stream_settings(app: tauri::AppHandle, settings: serde_json::Value) -> bool {
+pub fn save_stream_settings(app: AppHandle, settings: serde_json::Value) -> bool {
     let sanitized = sanitize_stream_settings(&settings);
     let Ok(path) = config_dir(&app) else {
         return false;
@@ -161,7 +162,7 @@ pub fn save_stream_settings(app: tauri::AppHandle, settings: serde_json::Value) 
 /// `completed === true`.
 #[must_use]
 #[tauri::command]
-pub fn get_onboarding_completed(app: tauri::AppHandle) -> bool {
+pub fn get_onboarding_completed(app: AppHandle) -> bool {
     let Ok(dir) = config_dir(&app) else {
         return false;
     };
@@ -177,7 +178,7 @@ pub fn get_onboarding_completed(app: tauri::AppHandle) -> bool {
 /// Mirrors `setOnboardingCompleted`: writes `{ "completed": true }`.
 #[must_use]
 #[tauri::command]
-pub fn set_onboarding_completed(app: tauri::AppHandle) -> bool {
+pub fn set_onboarding_completed(app: AppHandle) -> bool {
     let Ok(dir) = config_dir(&app) else {
         return false;
     };

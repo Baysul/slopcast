@@ -5,9 +5,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use native_livekit::{CaptureConfig, DesktopCaptureStats};
+use tauri::Emitter;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter};
 
+use crate::AppHandle;
 use crate::platform::video_capture_available;
 
 /// When set, the capture commands route to the synthetic test-pattern source

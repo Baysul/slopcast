@@ -9,6 +9,9 @@ pub mod platform;
 pub mod room;
 pub mod settings;
 
+pub type AppHandle = tauri::AppHandle<tauri::Cef>;
+pub type App = tauri::App<tauri::Cef>;
+
 #[cfg(feature = "e2e")]
 mod e2e;
 
@@ -29,7 +32,7 @@ const _FRONTEND_STAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/slopcas
 /// embedded frontend assets so the UI always loads, however the binary was
 /// launched.
 #[cfg(dev)]
-fn fallback_to_embedded_without_dev_server(app: &tauri::App) {
+fn fallback_to_embedded_without_dev_server(app: &App) {
     use std::net::ToSocketAddrs;
     let Some(dev_url) = app.config().build.dev_url.as_ref() else {
         return;
@@ -72,7 +75,7 @@ fn fallback_to_embedded_without_dev_server(app: &tauri::App) {
 /// in dev, embedded assets in release) so the window's devUrl page and its
 /// relative asset requests all resolve.
 #[cfg(dev)]
-fn serve_frontend(host: &str, port: u16, handle: &tauri::AppHandle) -> std::io::Result<()> {
+fn serve_frontend(host: &str, port: u16, handle: &AppHandle) -> std::io::Result<()> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -193,23 +196,6 @@ pub fn run() {
         .setup(|app| {
             #[cfg(dev)]
             fallback_to_embedded_without_dev_server(app);
-            // WebKitGTK ships with smooth scrolling disabled by default
-            // (Chromium always had it on), so
-            // wheel/trackpad scrolls jump in discrete steps instead of
-            // interpolating per compositor frame. The app reads as running
-            // at a low framerate for that reason; restore per-frame
-            // scrolling so the page tracks the display's refresh rate.
-            #[cfg(target_os = "linux")]
-            {
-                use webkit2gtk::{SettingsExt, WebViewExt};
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.with_webview(|webview| {
-                        if let Some(settings) = webview.inner().settings() {
-                            settings.set_enable_smooth_scrolling(true);
-                        }
-                    });
-                }
-            }
             // Arm libwebrtc's bundled PipeWire dlopen shims before any
             // native-rust PipeWire call. Our code no longer pulls them (the
             // in-house engine replaced `DesktopCapturer`), but the peer

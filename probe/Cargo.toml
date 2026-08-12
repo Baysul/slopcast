@@ -11,3 +11,4 @@ livekit = { version = "0.8", features = ["glib-main-loop", "rustls-tls-native-ro
 livekit-api = "0.6"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 env_logger = "0.11"
+gstreamer = "0.25"

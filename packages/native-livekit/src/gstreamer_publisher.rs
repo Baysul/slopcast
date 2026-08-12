@@ -675,10 +675,7 @@ impl PublisherPipeline {
                 i32::try_from(SAMPLE_RATE).map_err(|_| "Audio rate exceeds i32")?,
             )
             .build();
-        let video_caps = gst::Caps::builder("video/x-h264")
-            .field("stream-format", "avc")
-            .field("alignment", "au")
-            .build();
+        let video_caps = video_caps(video_config.and_then(|config| config.video_codec.as_deref()));
         let sink = gst::ElementFactory::make("livekitwebrtcsink")
             .property("audio-caps", &audio_caps)
             .property("video-caps", &video_caps)
@@ -1015,8 +1012,6 @@ fn verify_required_elements() -> Result<(), String> {
         "appsrc",
         "queue",
         "videoconvert",
-        "vah264enc",
-        "h264parse",
         "audioconvert",
         "audioresample",
         "opusenc",
@@ -1025,7 +1020,6 @@ fn verify_required_elements() -> Result<(), String> {
         "nicesrc",
         "nicesink",
         "rtpbin",
-        "rtph264pay",
         "rtpgccbwe",
         "livekitwebrtcsink",
     ];
@@ -1043,6 +1037,64 @@ fn verify_required_elements() -> Result<(), String> {
         "Required GStreamer elements are unavailable: {}",
         missing.join(", ")
     ))
+}
+
+fn selected_encoder_name(codec: &str) -> &'static str {
+    let hardware = match codec {
+        "h264" => "vah264enc",
+        "vp9" => "vavp9enc",
+        "av1" => "vaav1enc",
+        _ => "",
+    };
+    let software = match codec {
+        "h264" => "x264enc",
+        "vp9" => "vp9enc",
+        "av1" => "av1enc",
+        _ => "vp8enc",
+    };
+    if !hardware.is_empty() && gst::ElementFactory::find(hardware).is_some() {
+        hardware
+    } else {
+        software
+    }
+}
+
+fn video_caps(codec: Option<&str>) -> gst::Caps {
+    match codec.unwrap_or("h264") {
+        "vp8" => gst::Caps::builder("video/x-vp8").build(),
+        "vp9" => gst::Caps::builder("video/x-vp9").build(),
+        "av1" => gst::Caps::builder("video/x-av1")
+            .field("parsed", true)
+            .field("stream-format", "obu-stream")
+            .field("alignment", "tu")
+            .build(),
+        _ => gst::Caps::builder("video/x-h264")
+            .field("stream-format", "avc")
+            .field("alignment", "au")
+            .build(),
+    }
+}
+
+pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)> {
+    [
+        ("vp8", "VP8", "vp8enc", ""),
+        ("h264", "H.264", "x264enc", "vah264enc"),
+        ("vp9", "VP9", "vp9enc", "vavp9enc"),
+        ("av1", "AV1", "av1enc", "vaav1enc"),
+    ]
+    .into_iter()
+    .filter(|(_, _, software, hardware)| {
+        gst::ElementFactory::find(software).is_some()
+            || (!hardware.is_empty() && gst::ElementFactory::find(hardware).is_some())
+    })
+    .map(|(codec, label, _software, hardware)| {
+        (
+            codec,
+            label,
+            !hardware.is_empty() && gst::ElementFactory::find(hardware).is_some(),
+        )
+    })
+    .collect()
 }
 
 fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> NativeTelemetry {
@@ -1090,10 +1142,20 @@ fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> Nat
         telemetry.video_frames_submitted = Some(VIDEO_FRAMES_SUBMITTED.load(Ordering::Relaxed));
         telemetry.video_width = Some(config.width);
         telemetry.video_height = Some(config.height);
-        telemetry.encoder_implementation = Some("GStreamer vah264enc".into());
-        telemetry
-            .video_codec
-            .get_or_insert_with(|| "video/H264".into());
+        telemetry.encoder_implementation = Some(format!(
+            "GStreamer {}",
+            selected_encoder_name(config.video_codec.as_deref().unwrap_or("vp8"))
+        ));
+        telemetry.video_codec.get_or_insert_with(|| {
+            format!(
+                "video/{}",
+                config
+                    .video_codec
+                    .as_deref()
+                    .unwrap_or("vp8")
+                    .to_uppercase()
+            )
+        });
         // Live appsrc statistics — `dropped` is the stutter diagnostic
         // (buffers the leaky appsrc discarded when the queue was full).
         if let Ok(input) = VIDEO_INPUT.lock()

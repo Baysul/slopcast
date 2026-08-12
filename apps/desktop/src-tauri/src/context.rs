@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 
+use crate::AppHandle;
 use crate::dto::CaptureContextDto;
 
 /// Managed state: the last successful `PipeWire` video-graph introspection,
@@ -44,9 +45,7 @@ pub fn get_capture_context(
 ///
 /// Returns an error if `PipeWire` video node introspection fails.
 #[tauri::command]
-pub async fn inspect_capture_context(
-    app: tauri::AppHandle,
-) -> Result<Option<CaptureContextDto>, String> {
+pub async fn inspect_capture_context(app: AppHandle) -> Result<Option<CaptureContextDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let context = native_rust::get_capture_context()?;
         let dto = CaptureContextDto::from(&context);

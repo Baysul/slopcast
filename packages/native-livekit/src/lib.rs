@@ -144,11 +144,15 @@ pub const NATIVE_HW_CODEC: &str = "h264";
 pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
     #[cfg(target_os = "linux")]
     {
-        vec![NativeCodecInfo {
-            codec: "h264".into(),
-            label: "H.264".into(),
-            hardware: true,
-        }]
+        let _ = gstreamer::init();
+        gstreamer_publisher::available_video_codecs()
+            .into_iter()
+            .map(|(codec, label, hardware)| NativeCodecInfo {
+                codec: codec.into(),
+                label: label.into(),
+                hardware,
+            })
+            .collect()
     }
 
     #[cfg(not(target_os = "linux"))]

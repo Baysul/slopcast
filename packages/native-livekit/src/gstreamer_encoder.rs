@@ -237,9 +237,8 @@ impl VideoInput {
 
 pub(crate) struct GstreamerEncoder {
     input: VideoInput,
-    /// The `vah264enc` element itself: the congestion controller re-targets
-    /// the VBR ceiling at runtime through this handle (`set_ceiling_kbps`)
-    /// without rebuilding the pipeline.
+    /// The active codec encoder; the congestion controller re-targets its
+    /// bitrate at runtime through this handle without rebuilding the pipeline.
     encoder: gst::Element,
     /// The currently applied bitrate ceiling in kbps — starts at the value
     /// derived from the stream settings and is stepped by the publisher's
@@ -260,9 +259,20 @@ impl GstreamerEncoder {
             return;
         }
         let target = vbr_target_kbps(ceiling_kbps, VBR_TARGET_PERCENTAGE);
-        // Infallible property set in gstreamer-rs 0.25; a rejected property
-        // would surface as a GLib warning on the element's bus, not here.
-        self.encoder.set_property("bitrate", target);
+        // VA-API uses `bitrate` in kbps; software VPx/AV1 encoders use
+        // `target-bitrate` in bits per second. Both are updated in place so
+        // congestion control keeps the selected codec's ceiling effective.
+        if self.encoder.find_property("bitrate").is_some() {
+            self.encoder
+                .set_property_from_str("bitrate", &target.to_string());
+        } else if self.encoder.find_property("target-bitrate").is_some() {
+            self.encoder.set_property_from_str(
+                "target-bitrate",
+                &target.saturating_mul(1000).min(i32::MAX as u32).to_string(),
+            );
+        } else {
+            log::warn!("GStreamer encoder exposes no runtime bitrate property");
+        }
         log::info!(
             "[gstreamer-encoder] VBR ceiling {} kbps -> {ceiling_kbps} kbps (VBR target {target} kbps)",
             self.ceiling_kbps,
@@ -279,14 +289,15 @@ impl GstreamerEncoder {
         config: &CaptureConfig,
     ) -> Result<Self, String> {
         if config.width < 128 || config.height < 128 {
-            return Err("vah264enc requires a frame size of at least 128x128".into());
+            return Err(
+                "GStreamer hardware encoders require a frame size of at least 128x128".into(),
+            );
         }
         if config.fps == 0 {
             return Err("GStreamer encoder fps must be greater than zero".into());
         }
-        if config.video_codec.as_deref() != Some("h264") {
-            return Err("Linux GStreamer publishing currently supports only H.264".into());
-        }
+        let codec = config.video_codec.as_deref().unwrap_or("vp8");
+        let (encoder_name, parser_name, output_caps) = codec_pipeline(codec)?;
 
         let fps = i32::try_from(config.fps).map_err(|_| "GStreamer encoder fps exceeds i32")?;
         let input_info = gst_video::VideoInfo::builder(
@@ -300,11 +311,6 @@ impl GstreamerEncoder {
         let input_caps = input_info
             .to_caps()
             .map_err(|error| format!("Failed to build GStreamer I420 caps: {error}"))?;
-        let output_caps = gst::Caps::builder("video/x-h264")
-            .field("stream-format", "avc")
-            .field("alignment", "au")
-            .field("profile", "constrained-baseline")
-            .build();
         let appsrc = gst_app::AppSrc::builder()
             .caps(&input_caps)
             .format(gst::Format::Time)
@@ -330,25 +336,21 @@ impl GstreamerEncoder {
         let ceiling_kbps = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
         let encoder_rate = vbr_target_kbps(ceiling_kbps, VBR_TARGET_PERCENTAGE);
         let key_int_max = config.fps.saturating_mul(GOP_SECONDS).min(1024);
-        let encoder = gst::ElementFactory::make("vah264enc")
-            .property("b-frames", 0_u32)
-            .property("bitrate", encoder_rate)
-            .property("cabac", false)
-            .property("key-int-max", key_int_max)
-            .property("ref-frames", 1_u32)
-            .property("target-percentage", VBR_TARGET_PERCENTAGE)
-            .property("target-usage", 7_u32)
-            .property_from_str("rate-control", "vbr")
+        let encoder = gst::ElementFactory::make(encoder_name)
             .build()
-            .map_err(|error| format!("Failed to create GStreamer element vah264enc: {error}"))?;
-        let parser = gst::ElementFactory::make("h264parse")
-            .property("config-interval", -1_i32)
+            .map_err(|error| {
+                format!("Failed to create GStreamer element {encoder_name}: {error}")
+            })?;
+        configure_encoder(&encoder, codec, encoder_rate, key_int_max);
+        let parser = gst::ElementFactory::make(parser_name)
             .build()
-            .map_err(|error| format!("Failed to create GStreamer element h264parse: {error}"))?;
+            .map_err(|error| {
+                format!("Failed to create GStreamer element {parser_name}: {error}")
+            })?;
         let capsfilter = gst::ElementFactory::make("capsfilter")
             .property("caps", &output_caps)
             .build()
-            .map_err(|error| format!("Failed to create GStreamer H.264 capsfilter: {error}"))?;
+            .map_err(|error| format!("Failed to create GStreamer {codec} capsfilter: {error}"))?;
         let output_queue = gst::ElementFactory::make("queue")
             .property("max-size-buffers", 0_u32)
             .property("max-size-bytes", 0_u32)
@@ -444,6 +446,110 @@ impl GstreamerEncoder {
 
     pub(crate) fn input(&self) -> VideoInput {
         self.input.clone()
+    }
+}
+
+fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps), String> {
+    let (software, hardware, parser, caps) = match codec {
+        "h264" => (
+            "x264enc",
+            "vah264enc",
+            "h264parse",
+            gst::Caps::builder("video/x-h264")
+                .field("stream-format", "avc")
+                .field("alignment", "au")
+                .field("profile", "constrained-baseline")
+                .build(),
+        ),
+        "vp9" => (
+            "vp9enc",
+            "vavp9enc",
+            "identity",
+            gst::Caps::builder("video/x-vp9").build(),
+        ),
+        "av1" => (
+            "av1enc",
+            "vaav1enc",
+            "av1parse",
+            gst::Caps::builder("video/x-av1")
+                .field("parsed", true)
+                .field("stream-format", "obu-stream")
+                .field("alignment", "tu")
+                .build(),
+        ),
+        "vp8" => (
+            "vp8enc",
+            "",
+            "identity",
+            gst::Caps::builder("video/x-vp8").build(),
+        ),
+        other => return Err(format!("Unsupported GStreamer video codec: {other}")),
+    };
+    let encoder = if !hardware.is_empty() && gst::ElementFactory::find(hardware).is_some() {
+        hardware
+    } else {
+        software
+    };
+    if gst::ElementFactory::find(encoder).is_none() {
+        return Err(format!(
+            "GStreamer encoder unavailable for {codec}: {software} or {hardware}"
+        ));
+    }
+    if gst::ElementFactory::find(parser).is_none() {
+        return Err(format!(
+            "GStreamer parser unavailable for {codec}: {parser}"
+        ));
+    }
+    Ok((encoder, parser, caps))
+}
+
+fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_max: u32) {
+    if encoder.find_property("bitrate").is_some() {
+        encoder.set_property_from_str("bitrate", &bitrate.to_string());
+    } else if encoder.find_property("target-bitrate").is_some() {
+        encoder.set_property_from_str(
+            "target-bitrate",
+            &bitrate
+                .saturating_mul(1000)
+                .min(i32::MAX as u32)
+                .to_string(),
+        );
+    }
+    if encoder.find_property("key-int-max").is_some() {
+        encoder.set_property_from_str("key-int-max", &key_int_max.to_string());
+    }
+    if encoder.find_property("keyframe-max-dist").is_some() {
+        encoder.set_property_from_str("keyframe-max-dist", &key_int_max.to_string());
+    }
+    if codec == "h264" {
+        if encoder.find_property("target-percentage").is_some() {
+            encoder.set_property_from_str("target-percentage", &VBR_TARGET_PERCENTAGE.to_string());
+        }
+        if encoder.find_property("target-usage").is_some() {
+            encoder.set_property_from_str("target-usage", "7");
+        }
+        if encoder.find_property("ref-frames").is_some() {
+            encoder.set_property_from_str("ref-frames", "1");
+        }
+        if encoder.find_property("b-frames").is_some() {
+            encoder.set_property_from_str("b-frames", "0");
+        }
+        if encoder.find_property("cabac").is_some() {
+            encoder.set_property("cabac", false);
+        }
+        if encoder.find_property("rate-control").is_some() {
+            encoder.set_property_from_str("rate-control", "vbr");
+        }
+    } else {
+        if encoder.find_property("end-usage").is_some() {
+            encoder.set_property_from_str("end-usage", "vbr");
+        }
+        if encoder.find_property("deadline").is_some() {
+            encoder.set_property_from_str("deadline", "1");
+        }
+        if encoder.find_property("lag-in-frames").is_some() {
+            encoder.set_property_from_str("lag-in-frames", "0");
+        }
     }
 }
 

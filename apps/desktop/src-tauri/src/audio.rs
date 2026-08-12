@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 
+use crate::AppHandle;
 use crate::context::CaptureContextCache;
 use crate::dto::{AudioAppDto, AudioAppWaveDto, CaptureContextDto};
 
@@ -16,7 +17,7 @@ use crate::dto::{AudioAppDto, AudioAppWaveDto, CaptureContextDto};
 const WAVE_EPSILON: f64 = 0.002;
 
 /// Registers the PCM and waveform callbacks once at startup.
-pub fn register_audio_callbacks(app: &tauri::AppHandle) {
+pub fn register_audio_callbacks(app: &AppHandle) {
     native_rust::set_audio_data_callback(Box::new(|pcm| {
         let _ = native_livekit::feed_pcm(pcm);
     }));
@@ -163,7 +164,7 @@ pub async fn stop_audio_metering() -> Result<bool, String> {
 /// Returns an error if the native introspection fails outright.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn resolve_audio_source(
-    app: tauri::AppHandle,
+    app: AppHandle,
     name_hint: Option<String>,
 ) -> Result<Option<AudioAppDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
