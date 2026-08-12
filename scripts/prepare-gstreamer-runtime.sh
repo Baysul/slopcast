@@ -62,6 +62,12 @@ SYSTEM_ELEMENTS=(
   queue
   videoconvert
   videorate
+  x264enc
+  vp8enc
+  vp9enc
+  vp9parse
+  av1enc
+  av1parse
   vah264enc
   h264parse
   audioconvert
@@ -77,6 +83,9 @@ SYSTEM_ELEMENTS=(
   sctpdec
   watchdog
   rtpbin
+  rtpav1pay
+  rtpvp8pay
+  rtpvp9pay
   rtph264pay
 )
 

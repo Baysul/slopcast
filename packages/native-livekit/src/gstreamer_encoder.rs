@@ -297,6 +297,7 @@ impl GstreamerEncoder {
             return Err("GStreamer encoder fps must be greater than zero".into());
         }
         let codec = config.video_codec.as_deref().unwrap_or("vp8");
+        crate::gstreamer_publisher::verify_codec_elements(codec)?;
         let (encoder_name, parser_name, output_caps) = codec_pipeline(codec)?;
 
         let fps = i32::try_from(config.fps).map_err(|_| "GStreamer encoder fps exceeds i32")?;
@@ -347,6 +348,9 @@ impl GstreamerEncoder {
             .map_err(|error| {
                 format!("Failed to create GStreamer element {parser_name}: {error}")
             })?;
+        if codec == "h264" && parser.find_property("config-interval").is_some() {
+            parser.set_property_from_str("config-interval", "-1");
+        }
         let capsfilter = gst::ElementFactory::make("capsfilter")
             .property("caps", &output_caps)
             .build()
@@ -456,7 +460,6 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
             "vah264enc",
             "h264parse",
             gst::Caps::builder("video/x-h264")
-                .field("stream-format", "avc")
                 .field("alignment", "au")
                 .field("profile", "constrained-baseline")
                 .build(),

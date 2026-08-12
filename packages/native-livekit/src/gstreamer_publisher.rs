@@ -1039,6 +1039,28 @@ fn verify_required_elements() -> Result<(), String> {
     ))
 }
 
+pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
+    let parser = match codec {
+        "h264" => "h264parse",
+        "vp8" | "vp9" => "identity",
+        "av1" => "av1parse",
+        other => return Err(format!("Unsupported GStreamer video codec: {other}")),
+    };
+    let required = [parser, selected_encoder_name(codec)];
+    let missing = required
+        .iter()
+        .copied()
+        .filter(|name| gst::ElementFactory::find(name).is_none())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "GStreamer elements unavailable for {codec}: {}",
+        missing.join(", ")
+    ))
+}
+
 fn selected_encoder_name(codec: &str) -> &'static str {
     let hardware = match codec {
         "h264" => "vah264enc",
@@ -1063,15 +1085,8 @@ fn video_caps(codec: Option<&str>) -> gst::Caps {
     match codec.unwrap_or("h264") {
         "vp8" => gst::Caps::builder("video/x-vp8").build(),
         "vp9" => gst::Caps::builder("video/x-vp9").build(),
-        "av1" => gst::Caps::builder("video/x-av1")
-            .field("parsed", true)
-            .field("stream-format", "obu-stream")
-            .field("alignment", "tu")
-            .build(),
-        _ => gst::Caps::builder("video/x-h264")
-            .field("stream-format", "avc")
-            .field("alignment", "au")
-            .build(),
+        "av1" => gst::Caps::builder("video/x-av1").build(),
+        _ => gst::Caps::builder("video/x-h264").build(),
     }
 }
 
@@ -1083,9 +1098,10 @@ pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)
         ("av1", "AV1", "av1enc", "vaav1enc"),
     ]
     .into_iter()
-    .filter(|(_, _, software, hardware)| {
-        gst::ElementFactory::find(software).is_some()
-            || (!hardware.is_empty() && gst::ElementFactory::find(hardware).is_some())
+    .filter(|(codec, _, software, hardware)| {
+        let encoder_available = gst::ElementFactory::find(software).is_some()
+            || (!hardware.is_empty() && gst::ElementFactory::find(hardware).is_some());
+        encoder_available && verify_codec_elements(codec).is_ok()
     })
     .map(|(codec, label, _software, hardware)| {
         (

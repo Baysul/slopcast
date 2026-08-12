@@ -57,15 +57,15 @@ function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
   return { ptsUs, width, height, data: new Uint8Array(payload, 16) };
 }
 
-/** Fetch the latest preview frame from the `frame://` custom protocol
- * and render it if the pts changed. */
+/** Fetch the latest preview frame from the CEF custom protocol and render it
+ * if the pts changed. */
 async function fetchAndRender(
   lastPts: number,
   onNewFrame: (pts: number) => void,
   renderFrame: (frame: PreviewFrame) => void,
 ): Promise<void> {
   try {
-    const resp = await fetch(`frame://frame.bin?t=${Date.now()}`);
+    const resp = await fetch(`http://frame.localhost/frame.bin?t=${Date.now()}`);
     if (!resp.ok) return;
     const buf = await resp.arrayBuffer();
     if (buf.byteLength <= 16) return;
@@ -205,12 +205,10 @@ export const PresenterApp: React.FC = () => {
     if (window.__PREVIEW_BENCH__) {
       window.__PREVIEW_BENCH_DATA__ = [];
     }
-    // The preview frame pull: the backend keeps the latest raw BGRA frame
-    // and the `frame://` custom protocol serves it directly — no tauri IPC,
-    // no channel, no ordering (tauri's IPC raw-body delivery is ~4 s per
-    // 2 MB response on WebKitGTK). The renderer fetches at its own pace via
-    // requestAnimationFrame, dedupes by pts (drop-oldest), and self-heals
-    // on any fetch failure.
+    // The preview frame pull: CEF exposes the backend's custom `frame` handler
+    // at `http://frame.localhost` — no tauri IPC, no channel, no ordering.
+    // The renderer fetches at its own pace via requestAnimationFrame, dedupes
+    // by pts (drop-oldest), and self-heals on any fetch failure.
     const pollFrame = (): void => {
       let lastPts = 0;
       const poll = async (): Promise<void> => {

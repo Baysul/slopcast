@@ -150,11 +150,11 @@ export const desktopApi = {
   // platforms, where the portal picker or the platform gate applies).
   getCaptureSources: (): Promise<CaptureSourceInfo[]> => invokeOr('get_capture_sources', undefined, []),
   probeGpuInfo: (): Promise<GpuInfo | null> => invokeOr('probe_gpu_info', undefined, null),
-  // Preview transport: the backend keeps the latest raw BGRA frame and
-  // serves it directly via a `frame://` custom protocol (no tauri IPC
-  // needed — tauri's raw-body delivery is too slow on WebKitGTK). The
-  // renderer fetches it via `fetch('frame://...')` at its own pace.
-  getPreviewFrame: (): Promise<ArrayBuffer> => fetch(`frame://frame.bin?t=${Date.now()}`).then((r) => r.arrayBuffer()),
+  // Preview transport: CEF exposes Tauri custom protocols as
+  // `http://<scheme>.localhost`, so the `frame` handler is reached at
+  // `http://frame.localhost` rather than the Wry-style `frame://` URL.
+  getPreviewFrame: (): Promise<ArrayBuffer> =>
+    fetch(`http://frame.localhost/frame.bin?t=${Date.now()}`).then((r) => r.arrayBuffer()),
   // The renderer reports its preview card size (device pixels) so the backend
   // scales preview frames to fit the card (OBS-style) instead of shipping
   // full-resolution JPEGs through the channel.

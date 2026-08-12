@@ -124,7 +124,7 @@ fn serve_frontend(host: &str, port: u16, handle: &AppHandle) -> std::io::Result<
 /// tears down capture state.
 /// # Panics
 ///
-/// Panics if the `frame://` protocol handler builder fails (should never
+/// Panics if the `frame` protocol handler builder fails (should never
 /// happen with a valid header value).
 #[allow(
     clippy::too_many_lines,
@@ -162,7 +162,7 @@ pub fn run() {
         );
 
     // Custom URI scheme for the preview frames: the renderer fetches
-    // `frame://frame.bin?t=…` directly — no tauri IPC, no channel, no
+    // `http://frame.localhost/frame.bin?t=…` directly — no tauri IPC, no channel, no
     // ordering. The handler reads from a shared slot (updated by the
     // capture callback) and returns the bytes as-is.
     //

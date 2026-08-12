@@ -91,13 +91,10 @@ impl LinuxDesktopCapture {
             .with_thread_default(move || {
                 let mut capturer = DesktopCapturer::new(options)
                     .ok_or_else(|| "Desktop capturer unavailable (PipeWire portal)".to_string())?;
-                // Wayland: the `PipeWire` capturer reports no real source list;
-                // the placeholder (or `None`) selects the portal picker.
-                let source = capturer.get_source_list().into_iter().next();
                 // Scratch buffer to re-pack stride-padded rows into the packed-BGRA contract.
                 let mut packed: Vec<u8> = Vec::new();
                 let mut on_frame = on_frame;
-                capturer.start_capture(source, move |result| match result {
+                capturer.start_capture(None, move |result| match result {
                     Ok(frame) => {
                         let width = u32::try_from(frame.width()).unwrap_or(0);
                         let height = u32::try_from(frame.height()).unwrap_or(0);

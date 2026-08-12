@@ -113,7 +113,7 @@ fn start_real_capture(
     native_livekit::start_desktop_capture()
 }
 
-/// The most recent preview payload, kept for the `frame://` custom-protocol
+/// The most recent preview payload, kept for the `frame` custom-protocol
 /// handler. One slot, replaced per emission — bounded by construction.
 ///
 /// Why not `tauri::ipc::Channel` or a per-invoke `Response`? Both deliver
