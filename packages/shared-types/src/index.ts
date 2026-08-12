@@ -131,7 +131,11 @@ export function sanitizeStreamSettings(raw: unknown): StreamSettings {
   const resolution = (v: unknown): ResolutionPreset =>
     v === '480p' || v === '720p' || v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
   return {
-    fps: num(o.fps, 1, 240, d.fps),
+    // fps is capped at 60: the capture pacer (PREVIEW_MAX_FPS) and the
+    // preview emitter both clamp to 60 regardless, so higher values would
+    // silently run the stream at 60 fps with a 120 fps SDP claim. Mirrors
+    // `sanitize_stream_settings` in apps/desktop/src-tauri/src/settings.rs.
+    fps: num(o.fps, 1, 60, d.fps),
     bitrateLimit: num(o.bitrateLimit, 100_000, 200_000_000, d.bitrateLimit),
     videoCodec: codec(o.videoCodec),
     resolution: resolution(o.resolution),

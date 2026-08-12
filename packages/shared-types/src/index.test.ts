@@ -51,9 +51,12 @@ test('non-numeric and non-finite numbers fall back', () => {
   assert.equal(sanitizeStreamSettings({ fps: '60' }).fps, DEFAULT_STREAM_SETTINGS.fps);
   assert.equal(sanitizeStreamSettings({ fps: Number.NaN }).fps, DEFAULT_STREAM_SETTINGS.fps);
   assert.equal(sanitizeStreamSettings({ fps: Number.POSITIVE_INFINITY }).fps, DEFAULT_STREAM_SETTINGS.fps);
-  // Boundary values themselves are accepted.
+  // Boundary values themselves are accepted (fps is capped at 60 — the
+  // capture pacer and preview emitter clamp there regardless, and higher
+  // values would run 60 fps with a 120 fps SDP claim).
   assert.equal(sanitizeStreamSettings({ fps: 1 }).fps, 1);
-  assert.equal(sanitizeStreamSettings({ fps: 240 }).fps, 240);
+  assert.equal(sanitizeStreamSettings({ fps: 240 }).fps, 60);
+  assert.equal(sanitizeStreamSettings({ fps: 60 }).fps, 60);
 });
 
 test('unknown codec and resolution strings fall back', () => {

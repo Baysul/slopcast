@@ -83,7 +83,11 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
     };
 
     StreamSettings {
-        fps: num(o.get("fps"), 1.0, 240.0, defaults.fps),
+        // fps is capped at 60: the capture pacer (`PREVIEW_MAX_FPS`) and the
+        // preview emitter both clamp to 60 regardless, so higher values
+        // silently ran the stream at 60 fps with a 120 fps SDP claim (and a
+        // GOP key-int-max that assumed the configured framerate).
+        fps: num(o.get("fps"), 1.0, 60.0, defaults.fps),
         bitrate_limit: num(
             o.get("bitrateLimit"),
             100_000.0,
@@ -234,7 +238,10 @@ mod tests {
         let sanitize_fps = |fps: f64| sanitize_stream_settings(&json!({ "fps": fps })).fps;
         assert_eq!(sanitize_fps(0.0), 60.0); // below min
         assert_eq!(sanitize_fps(1.0), 1.0); // min edge
-        assert_eq!(sanitize_fps(240.0), 240.0); // max edge
+        // Max edge: fps is capped at 60 (the capture pacer and preview
+        // emitter clamp there regardless — see the sanitizer comment).
+        assert_eq!(sanitize_fps(60.0), 60.0);
+        assert_eq!(sanitize_fps(240.0), 60.0); // above max
         assert_eq!(sanitize_fps(241.0), 60.0); // above max
         assert_eq!(sanitize_fps(59.5), 59.5); // fractional kept (TS number)
         assert_eq!(sanitize_fps(f64::NAN), 60.0); // non-finite
