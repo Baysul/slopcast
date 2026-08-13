@@ -28,7 +28,8 @@
       "preset": "recommended",
       "suspicious": {
         "noExplicitAny": "error",
-        "noEmptyBlockStatements": "error"
+        "noEmptyBlockStatements": "error",
+        "noUnnecessaryConditions": "warn"
       },
       "style": {
         "noNonNullAssertion": "error",
@@ -48,8 +49,12 @@
         }
       },
       "correctness": {
+        "noNestedComponentDefinitions": "error",
+        "noReactPropAssignments": "error",
         "noUnusedVariables": "error",
-        "noUnusedImports": "error"
+        "noUnusedImports": "error",
+        "noUndeclaredDependencies": "error",
+        "useJsonImportAttributes": "error"
       }
     }
   },
@@ -82,6 +87,31 @@
         "rules": {
           "suspicious": {
             "noExplicitAny": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/server/src/**", "packages/shared-types/src/**"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "useImportExtensions": {
+              "level": "error",
+              "options": {
+                "forceJsExtensions": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/desktop/src/renderer/**", "apps/desktop/tests/**", "apps/web/src/**"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "useImportExtensions": "off"
           }
         }
       }
