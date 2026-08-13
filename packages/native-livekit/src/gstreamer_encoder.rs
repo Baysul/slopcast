@@ -662,6 +662,9 @@ fn configure_encoder(
         if encoder.find_property("cabac").is_some() {
             encoder.set_property("cabac", false);
         }
+        if encoder.find_property("dct8x8").is_some() {
+            encoder.set_property("dct8x8", false);
+        }
         if encoder.find_property("rate-control").is_some() {
             encoder.set_property_from_str("rate-control", "vbr");
         }
