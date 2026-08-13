@@ -27,7 +27,8 @@ export const HomePage: React.FC = () => {
 
     if (code.includes('/room/')) {
       const parts = code.split('/room/');
-      code = parts[parts.length - 1].split('?')[0];
+      const roomPath = parts.at(-1) ?? '';
+      code = roomPath.split('?').at(0) ?? '';
     }
 
     if (!ROOM_CODE_RE.test(code)) {

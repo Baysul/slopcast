@@ -42,7 +42,7 @@ test('grouped by name when bundle id is missing', () => {
   const apps = [app({ id: 1, name: 'Firefox', processId: 100 }), app({ id: 2, name: 'Firefox', processId: 200 })];
   const groups = groupAudioApps(apps);
   assert.equal(groups.length, 1);
-  assert.equal(groups[0]?.members.length, 2);
+  assert.equal(groups[0].members.length, 2);
 });
 
 test('grouping keys are case and whitespace insensitive', () => {
@@ -71,8 +71,8 @@ test('falls back to client id and then app id', () => {
   ];
   const groups = groupAudioApps(apps);
   assert.equal(groups.length, 2);
-  assert.equal(groups[0]?.members.length, 2);
-  assert.equal(groups[1]?.members.length, 1);
+  assert.equal(groups[0].members.length, 2);
+  assert.equal(groups[1].members.length, 1);
 });
 
 test('representative is promoted to the member with a media title', () => {

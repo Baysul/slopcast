@@ -353,7 +353,8 @@ export const PresenterApp: React.FC = () => {
 
     if (targetAudioId === null && !audioAppExplicitlySet) {
       await loadAudioApps();
-      targetAudioId = (await attemptAutoResolve())?.id ?? null;
+      const resolved = await attemptAutoResolve();
+      targetAudioId = resolved ? resolved.id : null;
     }
 
     if (targetAudioId !== null) {

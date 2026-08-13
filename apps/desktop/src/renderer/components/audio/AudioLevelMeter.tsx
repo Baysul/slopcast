@@ -141,11 +141,13 @@ const BAR_RELEASE_RATE = 3.5;
 function advanceEnvelope(peaks: number[], envelope: number[], dt: number): void {
   for (let b = 0; b < envelope.length; b++) {
     const target = peaks[b] ?? 0;
-    if (target > envelope[b]) {
+    const current = envelope[b] ?? 0;
+    if (target > current) {
       envelope[b] = target;
     } else {
-      envelope[b] *= Math.exp(-BAR_RELEASE_RATE * dt);
-      if (envelope[b] < 0.001) {
+      const released = current * Math.exp(-BAR_RELEASE_RATE * dt);
+      envelope[b] = released;
+      if (released < 0.001) {
         envelope[b] = 0;
       }
     }
@@ -165,7 +167,7 @@ function paintPeakBars(ctx: CanvasRenderingContext2D, envelope: number[], width:
   ctx.fillRect(0, center - 0.5, width, 1);
 
   for (let b = 0; b < bars; b++) {
-    const scaled = envelope[b];
+    const scaled = envelope[b] ?? 0;
     if (scaled <= 0.001) continue;
 
     const half = Math.max(1.0, scaled * maxHalf);
@@ -183,11 +185,12 @@ function unionColumns(merged: number[], columns: number[]): void {
   const pairs = Math.min(Math.floor(columns.length / 2), WAVE_COLUMN_COUNT);
   for (let i = 0; i < pairs * 2; i++) {
     const v = columns[i] ?? 0;
+    const current = merged[i] ?? 0;
     if (i % 2 === 0) {
-      if (v < merged[i]) {
+      if (v < current) {
         merged[i] = v;
       }
-    } else if (v > merged[i]) {
+    } else if (v > current) {
       merged[i] = v;
     }
   }

@@ -17,6 +17,10 @@ test('generated codes use letters for the letter groups', () => {
   for (let i = 0; i < 100; i++) {
     const code = generateRoomCode();
     const [a, b, c] = code.split('-');
+    if (a === undefined || b === undefined || c === undefined) {
+      throw new Error(`Unexpected room code format: ${code}`);
+    }
+
     assert.match(a, /^[a-z]{3}$/);
     assert.match(b, /^[0-9]{3}$/);
     assert.match(c, /^[a-z]{3}$/);

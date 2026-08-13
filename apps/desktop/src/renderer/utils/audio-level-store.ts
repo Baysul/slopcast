@@ -28,13 +28,17 @@ function waveChanged(prev: number[], next: number[]): boolean {
 function accumulateMax(target: number[], columns: number[]): void {
   const pairs = Math.min(Math.floor(columns.length / 2), WAVE_COLUMN_COUNT);
   for (let i = 0; i < pairs; i++) {
-    const min = columns[i * 2] ?? 0;
-    const max = columns[i * 2 + 1] ?? 0;
-    if (min < target[i * 2]) {
-      target[i * 2] = min;
+    const minIndex = i * 2;
+    const maxIndex = minIndex + 1;
+    const min = columns[minIndex] ?? 0;
+    const max = columns[maxIndex] ?? 0;
+    const targetMin = target[minIndex] ?? 0;
+    const targetMax = target[maxIndex] ?? 0;
+    if (min < targetMin) {
+      target[minIndex] = min;
     }
-    if (max > target[i * 2 + 1]) {
-      target[i * 2 + 1] = max;
+    if (max > targetMax) {
+      target[maxIndex] = max;
     }
   }
 }

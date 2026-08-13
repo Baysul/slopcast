@@ -7,7 +7,7 @@ export type { AppConfig };
 function findConfigFile(): string | null {
   let dir = path.resolve(process.cwd());
   const root = path.parse(dir).root;
-  while (true) {
+  for (;;) {
     const candidate = path.join(dir, 'slopcast.config.json');
     if (existsSync(candidate)) return candidate;
     if (dir === root) break;

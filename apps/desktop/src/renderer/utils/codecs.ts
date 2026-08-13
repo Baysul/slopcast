@@ -35,8 +35,9 @@ export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
 // Hoists the recommended choice: the shipped default codec (vp8 — see
 // DEFAULT_STREAM_SETTINGS; VA-API H264 collapses to ~1-3 fps on Linux).
 export const recommendCodec = (codecs: CodecInfo[]): CodecInfo[] => {
-  if (codecs.length === 0) return [];
-  const recommended = codecs.find((c) => c.codec === DEFAULT_STREAM_SETTINGS.videoCodec) ?? codecs[0];
+  const recommended = codecs.find((c) => c.codec === DEFAULT_STREAM_SETTINGS.videoCodec) ?? codecs.at(0);
+  if (!recommended) return [];
+
   return [{ ...recommended, recommended: true }, ...codecs.filter((c) => c.codec !== recommended.codec)];
 };
 

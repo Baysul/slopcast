@@ -152,7 +152,8 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
 
     return () => {
       window.removeEventListener(AUDIO_UNLOCK_EVENT, onUnlock);
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      // cancelAnimationFrame(0) is a no-op when the pipeline never started.
+      cancelAnimationFrame(frameRef.current);
       if (audioCtx && audioCtx.state !== 'closed') {
         audioCtx.close().catch((err) => {
           console.warn('[AudioVisualizer] AudioContext close failed:', err);

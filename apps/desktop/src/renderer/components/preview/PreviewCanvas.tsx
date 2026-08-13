@@ -308,10 +308,11 @@ function drawCanvas2d(ctx: CanvasRenderingContext2D, frame: PreviewFrame): void 
   const pixels = data;
   const out = image.data;
   for (let i = 0; i < pixels.length; i += 4) {
-    out[i] = pixels[i + 2]; // R
-    out[i + 1] = pixels[i + 1]; // G
-    out[i + 2] = pixels[i]; // B
-    out[i + 3] = pixels[i + 3]; // A
+    const [blue = 0, green = 0, red = 0, alpha = 0] = pixels.subarray(i, i + 4);
+    out[i] = red; // R
+    out[i + 1] = green; // G
+    out[i + 2] = blue; // B
+    out[i + 3] = alpha; // A
   }
   ctx.putImageData(image, 0, 0);
 }

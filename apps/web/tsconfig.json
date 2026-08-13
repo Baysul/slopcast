@@ -1,23 +1,24 @@
 {
   "compilerOptions": {
-    "target": "ES2024",
-    "useDefineForClassFields": true,
-    "lib": ["ES2024", "DOM"],
     "module": "ESNext",
-    "skipLibCheck": true,
-    "sourceMap": false,
-
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
 
     "strict": true,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
 
     "paths": {
       "@/*": ["./src/*"]

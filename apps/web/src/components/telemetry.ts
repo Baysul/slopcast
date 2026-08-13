@@ -298,8 +298,8 @@ export function createStatsPrev(stats: RTCStatsReport): StatsPrev | null {
         pliCount: report.pliCount ?? 0,
         firCount: report.firCount ?? 0,
         retransmittedPacketsReceived: report.retransmittedPacketsReceived ?? 0,
-        ssrc: report.ssrc,
-        rid: report.rid,
+        ssrc: report.ssrc ?? 0,
+        rid: report.rid ?? '',
         ts: report.timestamp ?? 0,
         init: true,
       };

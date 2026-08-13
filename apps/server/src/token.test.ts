@@ -67,6 +67,10 @@ test('tokens are signed so a tampered grant fails verification', async () => {
   const verifier = new TokenVerifier(API_KEY, API_SECRET);
   // Flipping the publish grant in the JWT payload must invalidate the signature.
   const [header, payload, signature] = token.split('.');
+  if (header === undefined || payload === undefined || signature === undefined) {
+    throw new Error('Unexpected JWT format');
+  }
+
   const tamperedPayload = Buffer.from(
     JSON.stringify({ ...JSON.parse(Buffer.from(payload, 'base64url').toString()), video: { canPublish: true } }),
   ).toString('base64url');

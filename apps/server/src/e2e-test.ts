@@ -310,7 +310,11 @@ function tcpCheck(host: string, port: number, timeoutMs = 2000): Promise<boolean
 function parseWsEndpoint(url: string): { host: string; port: number } | null {
   const m = url.match(/^wss?:\/\/([^/:]+)(?::(\d+))?/);
   if (!m) return null;
-  return { host: m[1], port: m[2] ? Number.parseInt(m[2], 10) : 80 };
+
+  const host = m[1];
+  if (!host) return null;
+
+  return { host, port: m[2] ? Number.parseInt(m[2], 10) : 80 };
 }
 
 function findOnPath(bin: string): boolean {
@@ -789,6 +793,21 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
     // ("ReferenceError: __name is not defined"). Only anonymous inline arrow
     // arguments survive — so the two frame-waits are inlined below.
     const frameCheck = await page.evaluate(async () => {
+      function measurePixelContent(data: Uint8ClampedArray): { nonBlack: number; varied: number } {
+        const [firstRed = 0, firstGreen = 0, firstBlue = 0] = data;
+        let nonBlack = 0;
+        let varied = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const [red = 0, green = 0, blue = 0] = data.subarray(i, i + 3);
+          const luma = 0.299 * red + 0.587 * green + 0.114 * blue;
+          if (luma > 16) nonBlack += 1;
+          if (red !== firstRed || green !== firstGreen || blue !== firstBlue) varied += 1;
+        }
+
+        const pixels = data.length / 4;
+        return { nonBlack: nonBlack / pixels, varied: varied / pixels };
+      }
+
       const video = [...document.querySelectorAll('video')].find((v) => v.videoWidth > 0);
       if (!video) {
         throw new Error('no video element with frames');
@@ -807,17 +826,10 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
       }
       ctx.drawImage(video, 0, 0, 64, 64);
       const data = ctx.getImageData(0, 0, 64, 64).data;
-      let nonBlack = 0;
-      let varied = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const luma = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        if (luma > 16) nonBlack += 1;
-        if (data[i] !== data[0] || data[i + 1] !== data[1] || data[i + 2] !== data[2]) varied += 1;
-      }
-      const pixels = data.length / 4;
+      const pixelContent = measurePixelContent(data);
       return {
-        nonBlack: nonBlack / pixels,
-        varied: varied / pixels,
+        nonBlack: pixelContent.nonBlack,
+        varied: pixelContent.varied,
         currentTime: video.currentTime,
       };
     });

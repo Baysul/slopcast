@@ -151,35 +151,36 @@ const usePlaybackControls = (mediaStream: MediaStream | null, fullBleed?: boolea
 
     const applyTracks = (): void => {
       const videoTracks = mediaStream?.getVideoTracks() ?? [];
-      setHasVideoTrack(videoTracks.length > 0 && videoTracks[0].enabled);
+      setHasVideoTrack(videoTracks.at(0)?.enabled === true);
     };
 
-    if (mediaStream) {
-      video.srcObject = mediaStream;
+    if (!mediaStream) {
+      video.srcObject = null;
       applyTracks();
       setNeedsUserGesture(false);
       setIsPlaying(false);
       setIsMuted(false);
-
-      playWithMuteFallback(video).then((needsGesture) => {
-        applyPlayResult(video, needsGesture, setIsPlaying, setIsMuted, setNeedsUserGesture, false);
-      });
-      // RoomPage mutates one stable stream identity in place (track
-      // subscribe/unsubscribe), so this effect never re-runs for a track
-      // change — listen on the stream itself to keep hasVideoTrack honest.
-      mediaStream.addEventListener('addtrack', applyTracks);
-      mediaStream.addEventListener('removetrack', applyTracks);
-      return () => {
-        mediaStream.removeEventListener('addtrack', applyTracks);
-        mediaStream.removeEventListener('removetrack', applyTracks);
-      };
+      return;
     }
 
-    video.srcObject = null;
+    video.srcObject = mediaStream;
     applyTracks();
     setNeedsUserGesture(false);
     setIsPlaying(false);
     setIsMuted(false);
+
+    playWithMuteFallback(video).then((needsGesture) => {
+      applyPlayResult(video, needsGesture, setIsPlaying, setIsMuted, setNeedsUserGesture, false);
+    });
+    // RoomPage mutates one stable stream identity in place (track
+    // subscribe/unsubscribe), so this effect never re-runs for a track
+    // change — listen on the stream itself to keep hasVideoTrack honest.
+    mediaStream.addEventListener('addtrack', applyTracks);
+    mediaStream.addEventListener('removetrack', applyTracks);
+    return () => {
+      mediaStream.removeEventListener('addtrack', applyTracks);
+      mediaStream.removeEventListener('removetrack', applyTracks);
+    };
   }, [mediaStream]);
 
   const handleUserGesture = () => {
@@ -265,7 +266,10 @@ const usePlaybackControls = (mediaStream: MediaStream | null, fullBleed?: boolea
   };
 };
 
-const WaitingOverlay: React.FC<{ statusText?: string; onResync?: () => void }> = ({ statusText, onResync }) => (
+const WaitingOverlay: React.FC<{ statusText: string | undefined; onResync: (() => void) | undefined }> = ({
+  statusText,
+  onResync,
+}) => (
   <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-10">
     <Radio className="w-8 h-8 text-white/20 mb-3" />
     <p className="text-sm text-white/40 max-w-xs">{statusText || 'Waiting for presenter...'}</p>
@@ -307,10 +311,10 @@ const GestureOverlay: React.FC<{
   );
 };
 
-const DecoderStallOverlay: React.FC<{ stalledCodec?: string | null; onResync?: () => void }> = ({
-  stalledCodec,
-  onResync,
-}) => {
+const DecoderStallOverlay: React.FC<{
+  stalledCodec: string | null | undefined;
+  onResync: (() => void) | undefined;
+}> = ({ stalledCodec, onResync }) => {
   const detail = stalledCodec
     ? `Receiving ${stalledCodec} packets but no frames are decoding. The stream may use an incompatible codec profile.`
     : 'Receiving video data but frames are not displaying.';
@@ -347,7 +351,7 @@ const MediaControls: React.FC<{
   onToggleMute: () => void;
   onVolumeChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onToggleFullscreen: () => void;
-  onResync?: () => void;
+  onResync: (() => void) | undefined;
   overlayClass: string;
 }> = ({
   telemetry,
