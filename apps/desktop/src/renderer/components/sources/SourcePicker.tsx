@@ -1,5 +1,5 @@
-import { Check, Copy } from 'lucide-react';
-import React from 'react';
+import { Check, Copy, X } from 'lucide-react';
+import React, { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -117,6 +117,9 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
     onGoLive,
     onStopShare,
   }) => {
+    const [kdeNoticeDismissed, setKdeNoticeDismissed] = useState(false);
+    const [kdeFailedNoticeDismissed, setKdeFailedNoticeDismissed] = useState(false);
+
     return (
       <Card>
         <CardHeader>
@@ -135,21 +138,37 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
             onCopyLink={onCopyLink}
           />
 
-          {captureContext?.de === 'kde' && !autoDetectFailed && (
-            <div className="space-y-2">
-              <p className="text-sm text-muted-foreground bg-secondary border border-border rounded-lg p-3 leading-relaxed">
+          {captureContext?.de === 'kde' && !autoDetectFailed && !kdeNoticeDismissed && (
+            <div className="relative bg-secondary border border-border rounded-lg p-3">
+              <p className="text-sm text-muted-foreground leading-relaxed pr-6">
                 KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection fails,
                 select an audio app manually.
               </p>
+              <button
+                type="button"
+                onClick={() => setKdeNoticeDismissed(true)}
+                className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
+                aria-label="Dismiss KDE Plasma notice"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
             </div>
           )}
 
-          {autoDetectFailed && captureContext?.de === 'kde' && (
-            <div className="bg-secondary border border-border rounded-lg p-3 space-y-1">
-              <p className="text-xs font-semibold text-foreground">KDE Audio Auto-Detection Failed</p>
-              <p className="text-sm text-muted-foreground leading-relaxed">
+          {autoDetectFailed && captureContext?.de === 'kde' && !kdeFailedNoticeDismissed && (
+            <div className="relative bg-secondary border border-border rounded-lg p-3 space-y-1">
+              <p className="text-xs font-semibold text-foreground pr-6">KDE Audio Auto-Detection Failed</p>
+              <p className="text-sm text-muted-foreground leading-relaxed pr-6">
                 Select an audio app from the panel above, then stop and restart the screenshare.
               </p>
+              <button
+                type="button"
+                onClick={() => setKdeFailedNoticeDismissed(true)}
+                className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
+                aria-label="Dismiss KDE auto-detection failure notice"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
             </div>
           )}
 
