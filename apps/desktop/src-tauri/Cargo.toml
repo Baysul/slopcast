@@ -49,10 +49,6 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# Same version tauri pins; needed to flip WebKitGTK's smooth-scrolling setting.
-webkit2gtk = "2.0"
-
 [features]
 # Embedded WebDriver plugins for the WebdriverIO e2e presenter phase (§12).
 # Production builds exclude them: the WebDriver server is an unauthenticated

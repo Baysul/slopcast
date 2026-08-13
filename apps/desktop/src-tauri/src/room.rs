@@ -70,7 +70,7 @@ pub async fn get_native_telemetry() -> NativeTelemetry {
 /// Returns the codecs the native encoder stack (bundled libwebrtc) can
 /// encode with. This is the authoritative list for the renderer's codec
 /// picker — the webview's `RTCRtpSender.getCapabilities` reflects the
-/// WebKitGTK/GStreamer stack, which is never used for encoding.
+/// browser's media stack, which is never used for encoding.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {

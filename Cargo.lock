@@ -6070,7 +6070,6 @@ dependencies = [
  "tauri-plugin-wdio",
  "tauri-plugin-wdio-webdriver",
  "tauri-plugin-window-state",
- "webkit2gtk",
 ]
 
 [[package]]

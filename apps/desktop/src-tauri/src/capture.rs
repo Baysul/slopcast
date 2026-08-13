@@ -118,7 +118,7 @@ fn start_real_capture(
 ///
 /// Why not `tauri::ipc::Channel` or a per-invoke `Response`? Both deliver
 /// raw bodies (>1 KB) through the same slow `__TAURI_CHANNEL__|fetch`
-/// machinery on `WebKitGTK` (~4 s per 2 MB response). A custom URI scheme
+/// machinery (~4 s per 2 MB response). A custom URI scheme
 /// serves bytes directly from the protocol handler — no IPC, no ordering,
 /// no queue — the renderer fetches at its own pace.
 pub static LATEST_FRAME: Mutex<Option<Vec<u8>>> = Mutex::new(None);

@@ -159,17 +159,39 @@ pub fn run() {
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
                 .build(),
-        );
+        )
+        // CEF/Chromium startup + resource tuning. These reach every child
+        // process (renderer/GPU/utility) via `on_before_command_line_processing`.
+        .command_line_args([
+            // No first-run / default-app / update chatter; nothing to update.
+            ("--no-first-run", None),
+            ("--no-default-browser-check", None),
+            ("--disable-default-apps", None),
+            ("--disable-component-update", None),
+            ("--disable-background-networking", None),
+            // No crash reporter in production; a crashed process is a hard
+            // failure our e2e diagnostics surface, not a telemetry event.
+            ("--disable-breakpad", None),
+            // Raster on the GPU process. The startup probe already rejects
+            // software rendering, so this is a no-op where it can't be honored.
+            ("--enable-gpu-rasterization", None),
+            // One window -> one renderer is enough; trims per-process overhead.
+            ("--renderer-process-limit", Some("1")),
+            // Bound the disk cache the runtime creates under ~/.cache.
+            ("--disk-cache-size", Some("67108864")), // 64 MiB
+            // CEF logs to ./debug.log from the CWD; keep it to errors only.
+            ("--log-level", Some("2")), // LOGSEVERITY_ERROR
+        ]);
 
     // Custom URI scheme for the preview frames: the renderer fetches
     // `http://frame.localhost/frame.bin?t=…` directly — no tauri IPC, no channel, no
     // ordering. The handler reads from a shared slot (updated by the
     // capture callback) and returns the bytes as-is.
     //
-    // The response must carry `Access-Control-Allow-Origin`: WebKitGTK
-    // enforces CORS on custom-scheme fetches from the `tauri://localhost`
-    // page, and every fetch fails with "Load failed" without it (verified
-    // on 2.52.5). Tauri's own `ipc://` responses set the same header
+    // The response must carry `Access-Control-Allow-Origin`: the frame
+    // scheme is cross-origin to the app page, so CORS applies and every
+    // fetch fails with "Load failed" without it. Tauri's own `ipc://`
+    // responses set the same header
     // (tauri/src/ipc/protocol.rs); only webview code can reach a custom
     // scheme, so `*` adds no exposure beyond what the page already has.
     let builder = builder.register_uri_scheme_protocol("frame", |_app, _request| {
