@@ -216,9 +216,10 @@ pub(crate) fn clear_preview_viewport() {
 
 /// OBS's `GetScaleAndCenterPos` (obs-studio `frontend/utility/display-helpers.hpp`):
 /// the size the source occupies inside the viewport when scaled to fit,
-/// preserving its aspect ratio. Returns `None` when the source already fits
-/// inside the viewport — previews are never upscaled past the source, the
-/// renderer's CSS does that.
+/// preserving its aspect ratio. Never upscales past the source — when the
+/// source already fits inside the viewport the source resolution is returned
+/// unchanged (the renderer's CSS does the upscale). `None` only on zero
+/// dimensions.
 #[cfg(target_os = "linux")]
 fn publish_video_frame(frame: &VideoFrame<I420Buffer>) -> bool {
     crate::gstreamer_publisher::push_video_frame(frame).is_ok()
@@ -258,7 +259,10 @@ fn fit_preview_size(
         (viewport_w, (f64::from(viewport_w) / base_aspect) as u32)
     };
     if fit_w >= base_w && fit_h >= base_h {
-        return None;
+        // The source already fits inside the viewport: no downscale needed,
+        // so emit at the source's own resolution (the renderer's CSS scales
+        // it up). `None` is reserved for invalid zero dimensions.
+        return Some((base_w, base_h));
     }
     Some((fit_w.max(1), fit_h.max(1)))
 }
@@ -1201,19 +1205,20 @@ fn start_with(source: CaptureSource) -> Result<bool, String> {
         }
         Ok(Err(reason)) => {
             stop.store(true, Ordering::Relaxed);
-            // Release the state lock before joining: the error-path join
-            // waits for the capture thread, which returns promptly once the
-            // engine start failed; `stop()`/`disconnect_livekit_room` block
-            // on this lock, so a hung engine would otherwise freeze them
-            // (and, via `LIVEKIT`, the audio callback) permanently.
+            // Release the state lock before reaping: `stop()` and
+            // `disconnect_livekit_room` block on this lock, so a hung engine
+            // would otherwise freeze them (and, via `LIVEKIT`, the audio
+            // callback) permanently. The worker is detached rather than
+            // joined for the same reason — a hung engine start must not block
+            // the caller indefinitely.
             drop(guard);
-            let _ = handle.join();
+            crate::reap_detached(handle, "desktop-capture-reaper");
             Err(reason)
         }
         Err(_) => {
             stop.store(true, Ordering::Relaxed);
             drop(guard);
-            let _ = handle.join();
+            crate::reap_detached(handle, "desktop-capture-reaper");
             Err("Timed out starting desktop capture".into())
         }
     }
@@ -1353,9 +1358,10 @@ mod probe {
     fn fit_preview_size_never_upscales_and_guards_zeroes() {
         // Same-aspect viewport smaller than the source: downscale to fit.
         assert_eq!(fit_preview_size(1920, 1080, 1280, 720), Some((1280, 720)));
-        // Source smaller than the viewport: no downscale needed.
-        assert_eq!(fit_preview_size(1280, 720, 1920, 1080), None);
-        assert_eq!(fit_preview_size(1280, 720, 4000, 3000), None);
+        // Source smaller than the viewport: no downscale needed, so the
+        // source resolution is returned unchanged (the renderer upscales).
+        assert_eq!(fit_preview_size(1280, 720, 1920, 1080), Some((1280, 720)));
+        assert_eq!(fit_preview_size(1280, 720, 4000, 3000), Some((1280, 720)));
         // Zero viewport or source dimensions are ignored.
         assert_eq!(fit_preview_size(0, 0, 1280, 720), None);
         assert_eq!(fit_preview_size(1920, 1080, 0, 720), None);

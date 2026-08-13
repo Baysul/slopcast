@@ -550,13 +550,13 @@ fn spawn_capture_session(target: TargetSpec) -> Result<CaptureSession, String> {
         Ok(Err(reason)) => {
             crate::audio_ring::stop_audio_ring();
             stop.store(true, Ordering::SeqCst);
-            let _ = join.join();
+            crate::reap_detached(join, "pw-capture-reaper");
             return Err(reason);
         }
         Err(_) => {
             crate::audio_ring::stop_audio_ring();
             stop.store(true, Ordering::SeqCst);
-            let _ = join.join();
+            crate::reap_detached(join, "pw-capture-reaper");
             return Err("Timed out waiting for PipeWire session".into());
         }
     }

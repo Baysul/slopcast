@@ -419,12 +419,12 @@ pub(crate) fn start_audio_metering() -> Result<bool, String> {
         Ok(Ok(())) => {}
         Ok(Err(reason)) => {
             stop.store(true, Ordering::SeqCst);
-            let _ = join.join();
+            crate::reap_detached(join, "pw-meter-reaper");
             return Err(reason);
         }
         Err(_) => {
             stop.store(true, Ordering::SeqCst);
-            let _ = join.join();
+            crate::reap_detached(join, "pw-meter-reaper");
             return Err("Timed out starting audio metering".into());
         }
     }

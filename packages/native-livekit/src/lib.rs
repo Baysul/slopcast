@@ -47,6 +47,24 @@ use std::collections::HashMap;
 #[cfg(not(target_os = "linux"))]
 use std::time::{Duration, Instant};
 
+/// Reaps a worker `JoinHandle` on a detached thread so a wedged worker can
+/// never block its caller indefinitely. Shared by the startup-timeout paths
+/// (a worker that ignores its stop flag is detached, not joined). The handle
+/// is dropped with the closure — the worker's OS thread is reclaimed whenever
+/// it finally unwinds.
+#[cfg(target_os = "linux")]
+pub(crate) fn reap_detached(join: std::thread::JoinHandle<()>, name: &'static str) {
+    if join.is_finished() {
+        let _ = join.join();
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _ = join.join();
+        });
+}
+
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
 

@@ -23,7 +23,7 @@ use crate::{CHANNELS, CaptureConfig, NativeTelemetry, SAMPLE_RATE};
 /// Was 50 (~1 s of PCM) under a non-leaky queue — during congestion the
 /// audio chain buffered a full second of stale speech ahead of the video
 /// stream (AV-sync drift), then dropped nothing until the backlog overflow.
-/// Leaky-upstream bound at 160 ms (see `attach_audio`).
+/// Leaky-downstream bound at 160 ms (see `attach_audio`).
 const AUDIO_APPSRC_MAX_BUFFERS: u64 = 8;
 const AUDIO_DISCOVERY_SAMPLES: usize = 960;
 /// Command reply timeout. 30 s (was 10 s): a legitimate `StartVideo`
@@ -176,7 +176,13 @@ impl RateController {
             return None;
         };
         let (sent, lost) = (sent as u64, lost as u64);
-        if !self.primed {
+        // Re-prime when the cumulative sent counter regresses: an
+        // auto-reconnect builds a fresh pipeline whose GStreamer stats start
+        // back near zero, so the previous baseline would read as zero deltas
+        // until the new cumulative count caught up (the controller frozen for
+        // that window). The lost counter resets together with sent on a
+        // rebuild, so the sent regression is the unambiguous signal.
+        if !self.primed || sent < self.last_packets_sent {
             self.last_packets_sent = sent;
             self.last_packets_lost = lost;
             self.primed = true;
@@ -311,12 +317,12 @@ pub(crate) fn connect(
             });
         }
         Ok(Err(error)) => {
-            let _ = join.join();
+            crate::reap_detached(join, "slopcast-gstreamer-livekit-reaper");
             return Err(error);
         }
         Err(error) => {
             let _ = command_sender.send(PublisherCommand::Shutdown);
-            let _ = join.join();
+            crate::reap_detached(join, "slopcast-gstreamer-livekit-reaper");
             return Err(format!("GStreamer publisher startup timed out: {error}"));
         }
     }
@@ -868,14 +874,14 @@ fn attach_audio(pipeline: &gst::Pipeline, sink: &gst::Element) -> Result<gst_app
         .is_live(true)
         .block(false)
         .max_buffers(AUDIO_APPSRC_MAX_BUFFERS)
-        // Leaky-upstream with a small bound (~160 ms, see
+        // Leaky-downstream with a small bound (~160 ms, see
         // AUDIO_APPSRC_MAX_BUFFERS): during congestion the *oldest* PCM is
         // dropped (freshest wins) instead of letting a second of stale
         // speech queue up ahead of the video stream — a half-second
         // AV-sync drift where the presenter's voice lags the screen. The
         // `block(false)` push path never waits; drops are counted and
         // rate-limited-logged in `feed_pcm`.
-        .leaky_type(gst_app::AppLeakyType::Upstream)
+        .leaky_type(gst_app::AppLeakyType::Downstream)
         .build();
     // PTS is sample-clocked in push_pcm, so the pipeline clock must not
     // stamp buffers (do-timestamp would drift against the sample count and
@@ -1705,5 +1711,35 @@ mod tests {
         };
         controller.reset(&changed);
         assert_eq!(controller.current_kbps(), 8_000);
+    }
+
+    #[test]
+    fn rate_controller_reprimes_after_counter_regression() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+
+        // An auto-reconnect rebuilds the pipeline: the fresh GStreamer stats
+        // start near zero, so the cumulative counters regress. The controller
+        // must re-prime instead of computing a bogus zero (or huge) delta.
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(50.0, 0.0))
+                .is_none()
+        );
+        // The re-primed baseline is now 50; the next observation measures
+        // against it normally.
+        assert_eq!(
+            controller.observe(&telemetry_with_loss(2_050.0, 60.0)),
+            Some(15_000) // 60/2000 = 3% → step down 20_000 × 0.75
+        );
     }
 }

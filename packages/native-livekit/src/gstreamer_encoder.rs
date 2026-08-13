@@ -114,6 +114,12 @@ pub(crate) struct VideoInput {
     /// jittery push time (do-timestamp). Shared via `Arc` so clones (the
     /// `VIDEO_INPUT` static and per-call clones) anchor exactly once.
     pts_anchor: Arc<Mutex<Option<(i64, u64)>>>,
+    /// Last emitted buffer PTS in nanoseconds. Keepalives re-deliver a static
+    /// screen's newest frame with its own capture timestamp, so consecutive
+    /// pushes can carry identical PTS; clamping each new PTS to
+    /// `max(capture_pts, last + frame_duration)` keeps the sink's RTP
+    /// timestamp chain strictly monotonic (see `push_frame`).
+    last_pts_ns: Arc<Mutex<Option<u64>>>,
     /// Preallocated I420 input buffers (see `VIDEO_BUFFER_POOL_SIZE`):
     /// `push_frame` acquires from the pool instead of allocating a fresh
     /// full-frame buffer per frame. Pool buffers are returned to the pool
@@ -211,6 +217,21 @@ impl VideoInput {
         // Capture anchors are i64; the anchor branch guarantees a
         // non-negative difference, so cast_unsigned is lossless.
         let pts_ns = p0_ns + (frame.timestamp_us - c0_us).cast_unsigned() * 1000;
+        // Keepalives re-deliver a static screen's newest frame with its own
+        // capture timestamp, so back-to-back pushes can carry an identical
+        // PTS. Clamp to at least `last + frame_duration` so the sink's RTP
+        // timestamp chain stays strictly monotonic — a duplicated PTS would
+        // make the receiver's jitter buffer treat the two frames as one.
+        let mut last_pts = self
+            .last_pts_ns
+            .lock()
+            .map_err(|_| "video PTS monotonicity lock poisoned".to_string())?;
+        let pts_ns = match *last_pts {
+            Some(previous) if pts_ns <= previous => previous + frame_duration(self.fps).nseconds(),
+            _ => pts_ns,
+        };
+        *last_pts = Some(pts_ns);
+        drop(last_pts);
         let buffer_ref = buffer
             .get_mut()
             .ok_or_else(|| "GStreamer input buffer is unexpectedly shared".to_string())?;
@@ -225,7 +246,7 @@ impl VideoInput {
     }
 
     /// Live appsrc statistics — `dropped` counts buffers the appsrc discarded
-    /// (leaky-upstream on a full 6-buffer queue), plus frames that never
+    /// (leaky-downstream on a full 6-buffer queue), plus frames that never
     /// reached the appsrc because the input buffer pool was exhausted: the
     /// stutter diagnostic for the encoder-side publish path.
     pub(crate) fn appsrc_stats(&self) -> AppSrcStats {
@@ -333,15 +354,15 @@ impl GstreamerEncoder {
             .max_buffers(APPSRC_MAX_BUFFERS)
             .max_bytes(0)
             .max_time(gst::ClockTime::ZERO)
-            .leaky_type(gst_app::AppLeakyType::Upstream)
+            .leaky_type(gst_app::AppLeakyType::Downstream)
             .build();
         // PTS is stamped explicitly in `push_frame` from the capture clock
         // anchored to the pipeline's running time at the first frame — no
         // do-timestamp, so push jitter never wobbles the stream clock.
-        // Leaky-upstream drops the *oldest* buffered frame on a full queue:
+        // Leaky-downstream drops the *oldest* buffered frame on a full queue:
         // for live screen share stale frames are worthless, so freshness
-        // wins (the alternative, leaky-downstream, would keep the oldest
-        // frame queued and hand the encoder content that trails real time).
+        // wins (leaky-upstream would instead keep the oldest frame queued
+        // and reject the newest, trailing real time).
         let convert = make_element("videoconvert")?;
         // VBR, ceiling-capped: the requested rate is the *ceiling*; the
         // `bitrate` property gets the VBR target (a fraction of the ceiling,
@@ -477,6 +498,7 @@ impl GstreamerEncoder {
                 height: config.height,
                 fps: config.fps,
                 pts_anchor: Arc::new(Mutex::new(None)),
+                last_pts_ns: Arc::new(Mutex::new(None)),
                 buffer_pool,
             },
         })

@@ -107,8 +107,26 @@ impl LinuxDesktopCapture {
                         let stride = usize::try_from(frame.stride()).unwrap_or(0);
                         let data = frame.data();
                         let bgra = if stride == row_bytes {
-                            &data[..row_bytes * frame_rows]
-                        } else {
+                            // Bound the checked slice: a corrupt/short FFI
+                            // buffer must surface as a dropped capture frame,
+                            // never as a panic inside the PipeWire process
+                            // callback (which cannot unwind).
+                            let required = row_bytes.saturating_mul(frame_rows);
+                            if data.len() < required {
+                                STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
+                            &data[..required]
+                        } else if stride >= row_bytes {
+                            // Each source row must hold a full destination
+                            // row, and there must be one full row per frame
+                            // row, else the copy below would read out of
+                            // bounds.
+                            let required = stride.saturating_mul(frame_rows);
+                            if data.len() < required {
+                                STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
                             packed.clear();
                             packed.resize(row_bytes * frame_rows, 0);
                             for (dst, src) in packed
@@ -118,6 +136,10 @@ impl LinuxDesktopCapture {
                                 dst.copy_from_slice(&src[..row_bytes]);
                             }
                             &packed
+                        } else {
+                            // stride < row_bytes cannot be packed safely.
+                            STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                            return;
                         };
                         on_frame(width, height, bgra, monotonic_us());
                     }
