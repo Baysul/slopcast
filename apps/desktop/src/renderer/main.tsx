@@ -1,7 +1,7 @@
 import type { VideoCodec } from '@slopcast/shared-types';
 import { codecLabel, RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
 import type React from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Toaster } from '@/components/ui/sonner';
 import { desktopApi } from './api/desktop';
@@ -14,11 +14,13 @@ import { StreamSettingsPanel } from './components/settings/StreamSettingsPanel';
 import { SourcePicker } from './components/sources/SourcePicker';
 import { idleTelemetry } from './components/telemetry/StreamTelemetryBar';
 import { useAudioCapture } from './hooks/useAudioCapture';
+import { useMotionDetection } from './hooks/useMotionDetection';
 import { useNativeRoom } from './hooks/useNativeRoom';
 import { useStreamSettings } from './hooks/useStreamSettings';
 import { useStreamTelemetry } from './hooks/useStreamTelemetry';
 import { notify, primeAudioContext } from './lib/toast';
 import type { CaptureSourceSelection, CaptureStage, DesktopCaptureConfig, PlatformInfo, PreviewFrame } from './types';
+import { recommendBitrateCap } from './utils/bitrate';
 import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
 import './index.css';
@@ -128,8 +130,11 @@ export const PresenterApp: React.FC = () => {
     setVideoCodec,
     resolution,
     setResolution,
+    autoBitrate,
+    setAutoBitrate,
+    motionMode,
+    setMotionMode,
     streamFpsRef,
-    bitrateLimitRef,
     resolutionRef,
   } = useStreamSettings();
 
@@ -161,6 +166,7 @@ export const PresenterApp: React.FC = () => {
     audioAppIdRef,
     loadAudioApps,
     startAudioCapture,
+    switchAudioCapture,
     attemptAutoResolve,
     handleSelectApp,
   } = useAudioCapture(captureStage === 'live');
@@ -168,21 +174,49 @@ export const PresenterApp: React.FC = () => {
   const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } =
     useStreamTelemetry(spectatorCount);
 
+  // Auto-detect content motion while live (keepalive-vs-real frame ratio).
+  // Lightweight: polls atomic capture counters every ~2 s, never contends
+  // with the encode path.
+  const { motionTier } = useMotionDetection(motionMode, captureStage === 'live');
+
   const activeVideoCodecRef = useRef<VideoCodec>(videoCodec);
+  const captureSessionRef = useRef(0);
   // The encoder config actually applied to the native track; share start seeds
   // it so the settings effect never restarts the track on mount.
   const lastVideoConfigKeyRef = useRef<string | null>(null);
+
+  // The bitrate actually sent to the encoder. In auto mode it is derived from
+  // the codec/resolution/fps/motion/hardware; in manual mode it is the user's
+  // selection. `bitrateLimit` stays the persisted/manual value either way.
+  const activeCodecHardware = availableCodecs.find((c) => c.codec === videoCodec)?.hardware ?? false;
+  const effectiveBitrate = useMemo(
+    () =>
+      autoBitrate
+        ? recommendBitrateCap({
+            codec: videoCodec,
+            resolution,
+            fps: streamFps,
+            hardware: activeCodecHardware,
+            motionTier,
+          })
+        : bitrateLimit,
+    [autoBitrate, videoCodec, resolution, streamFps, activeCodecHardware, motionTier, bitrateLimit],
+  );
+  const effectiveBitrateRef = useRef(effectiveBitrate);
+  useEffect(() => {
+    effectiveBitrateRef.current = effectiveBitrate;
+  }, [effectiveBitrate]);
 
   const videoConfigKey = useCallback((): string => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
     return JSON.stringify({
       fps: streamFpsRef.current,
-      bitrate: bitrateLimitRef.current,
+      bitrate: effectiveBitrateRef.current,
       codec: videoCodec,
       width: dims.width,
       height: dims.height,
     });
-  }, [videoCodec, resolutionRef, streamFpsRef, bitrateLimitRef]);
+  }, [videoCodec, resolutionRef, streamFpsRef]);
 
   const buildCaptureConfig = useCallback((): DesktopCaptureConfig => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
@@ -191,9 +225,9 @@ export const PresenterApp: React.FC = () => {
       width: dims.width,
       height: dims.height,
       videoCodec,
-      maxBitrate: bitrateLimitRef.current,
+      maxBitrate: effectiveBitrateRef.current,
     };
-  }, [resolutionRef, streamFpsRef, bitrateLimitRef, videoCodec]);
+  }, [resolutionRef, streamFpsRef, videoCodec]);
 
   useEffect(() => {
     (async () => {
@@ -244,7 +278,7 @@ export const PresenterApp: React.FC = () => {
     const dims = RESOLUTION_DIMENSIONS[resolution];
     const key = JSON.stringify({
       fps: streamFps,
-      bitrate: bitrateLimit,
+      bitrate: effectiveBitrate,
       codec: videoCodec,
       width: dims.width,
       height: dims.height,
@@ -252,22 +286,23 @@ export const PresenterApp: React.FC = () => {
     if (lastVideoConfigKeyRef.current === key) return;
 
     const prevCodec = activeVideoCodecRef.current;
+    const session = captureSessionRef.current;
     const timeout = setTimeout(() => {
-      lastVideoConfigKeyRef.current = key;
       void desktopApi
         .updateNativeVideo({
           fps: streamFps,
           width: dims.width,
           height: dims.height,
           videoCodec,
-          maxBitrate: bitrateLimit,
+          maxBitrate: effectiveBitrate,
         })
         .then((ok) => {
-          if (!ok) return;
+          if (!ok || captureSessionRef.current !== session) return;
+          lastVideoConfigKeyRef.current = key;
           resetStatsPrev();
           activeVideoCodecRef.current = videoCodec;
           console.log(
-            `[Presenter] Live encoder update: codec=${videoCodec} fps=${streamFps} bitrate=${(bitrateLimit / 1_000_000).toFixed(0)}Mbps`,
+            `[Presenter] Live encoder update: codec=${videoCodec} fps=${streamFps} bitrate=${(effectiveBitrate / 1_000_000).toFixed(0)}Mbps`,
           );
           if (prevCodec !== videoCodec) {
             notify(
@@ -279,7 +314,7 @@ export const PresenterApp: React.FC = () => {
         });
     }, 300);
     return () => clearTimeout(timeout);
-  }, [streamFps, bitrateLimit, videoCodec, resolution, captureStage, resetStatsPrev]);
+  }, [streamFps, effectiveBitrate, videoCodec, resolution, captureStage, resetStatsPrev]);
 
   const handleCreateRoom = useCallback(async () => {
     setAudioAppExplicitlySet(false);
@@ -291,12 +326,15 @@ export const PresenterApp: React.FC = () => {
   }, [setAudioAppExplicitlySet, setAutoDetectedApp, setSelectedAudioAppId, setAutoDetectFailed, createNativeRoom]);
 
   const handleStopShare = useCallback(async () => {
+    captureSessionRef.current += 1;
     lastVideoConfigKeyRef.current = null;
-    await desktopApi.stopNativeCapture();
-    await desktopApi.stopAudioCapture();
-    stopTelemetryPolling();
-    audioAppIdRef.current = null;
     setCaptureStage('idle');
+    stopTelemetryPolling();
+    const stopped = await desktopApi.stopNativeCapture();
+    if (!stopped) {
+      notify('error', 'Screenshare stop failed', 'The room remains open, but capture could not be stopped cleanly.');
+    }
+    audioAppIdRef.current = null;
     setPreviewFrame(null);
     if (!audioAppExplicitlySet) {
       setSelectedAudioAppId(null);
@@ -314,20 +352,35 @@ export const PresenterApp: React.FC = () => {
     setAutoDetectFailed,
   ]);
 
-  // Auto-end: the backend closes the portal ScreenCast session when the
-  // compositor stops the stream — e.g. the presenter closed the app/window
-  // being captured — and emits `capture-ended`. Tear the share down exactly
-  // like the Stop button, and tell the user why.
+  // A compositor-ended capture stops only the video publication. Audio and
+  // the room connection remain active until the presenter explicitly closes
+  // them.
   useEffect(() => {
-    if (captureStage === 'idle') return;
     const unlistenPromise = desktopApi.onCaptureEnded(() => {
       notify('info', 'Stream ended', 'The captured window was closed, so sharing stopped.');
-      void handleStopShare();
+      captureSessionRef.current += 1;
+      lastVideoConfigKeyRef.current = null;
+      setCaptureStage('idle');
+      stopTelemetryPolling();
+      setPreviewFrame(null);
+      audioAppIdRef.current = null;
+      setSelectedAudioAppId(null);
+      setAudioAppExplicitlySet(false);
+      setAutoDetectedApp(null);
+      void desktopApi.stopVideoCapture().then((stopped) => {
+        if (!stopped) {
+          notify(
+            'error',
+            'Video stop failed',
+            'The room remains open, but the video share could not be stopped cleanly.',
+          );
+        }
+      });
     });
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
     };
-  }, [captureStage, handleStopShare]);
+  }, [audioAppIdRef, setAudioAppExplicitlySet, setAutoDetectedApp, setSelectedAudioAppId, stopTelemetryPolling]);
 
   const resolveSystemAudioFallback = useCallback(async (): Promise<boolean> => {
     setAutoDetectFailed(true);
@@ -377,13 +430,17 @@ export const PresenterApp: React.FC = () => {
     async (targetAudioId: number | null): Promise<void> => {
       if (targetAudioId === null) return;
       try {
-        await startAudioCapture(targetAudioId);
+        if (audioAppIdRef.current === null) {
+          await startAudioCapture(targetAudioId);
+        } else if (audioAppIdRef.current !== targetAudioId) {
+          await switchAudioCapture(targetAudioId);
+        }
       } catch (err) {
         console.error('Audio capture failed (continuing video-only):', err);
         notify('info', 'Audio unavailable', 'Sharing video only — the selected audio source could not be captured.');
       }
     },
-    [startAudioCapture],
+    [audioAppIdRef, startAudioCapture, switchAudioCapture],
   );
 
   const cleanupFailedShare = useCallback(async (): Promise<void> => {
@@ -407,41 +464,49 @@ export const PresenterApp: React.FC = () => {
 
   // Shared tail of both go-live paths: resolve and start audio, mark the
   // applied encoder config, flip the stage to live and start telemetry.
-  const activateLive = useCallback(async (): Promise<void> => {
-    const targetAudioId = await resolveAudioTarget();
-    await captureAudioForTarget(targetAudioId);
-    activeVideoCodecRef.current = videoCodec;
-    lastVideoConfigKeyRef.current = videoConfigKey();
-    setCaptureStage('live');
-    setTelemetry({ ...idleTelemetry(), live: true });
-    startTelemetryPolling(getTelemetryInputs);
-    // Debug aid for auto-resolve misses: a full PipeWire enumeration +
-    // per-node JSON dump on every go-live. Dev and e2e builds only — in
-    // production this stalls the main thread and floods the console.
-    if (import.meta.env.DEV || import.meta.env.VITE_E2E === '1') {
-      void logLiveAudioSources();
-    }
-    void logSelectedApplication(null);
-  }, [
-    resolveAudioTarget,
-    captureAudioForTarget,
-    videoCodec,
-    videoConfigKey,
-    setTelemetry,
-    startTelemetryPolling,
-    getTelemetryInputs,
-  ]);
+  const activateLive = useCallback(
+    async (session: number): Promise<void> => {
+      if (captureSessionRef.current !== session) return;
+      const targetAudioId = await resolveAudioTarget();
+      if (captureSessionRef.current !== session) return;
+      await captureAudioForTarget(targetAudioId);
+      if (captureSessionRef.current !== session) return;
+      activeVideoCodecRef.current = videoCodec;
+      lastVideoConfigKeyRef.current = videoConfigKey();
+      setCaptureStage('live');
+      setTelemetry({ ...idleTelemetry(), live: true });
+      startTelemetryPolling(getTelemetryInputs);
+      // Debug aid for auto-resolve misses: a full PipeWire enumeration +
+      // per-node JSON dump on every go-live. Dev and e2e builds only — in
+      // production this stalls the main thread and floods the console.
+      if (import.meta.env.DEV || import.meta.env.VITE_E2E === '1') {
+        void logLiveAudioSources();
+      }
+      void logSelectedApplication(null);
+    },
+    [
+      resolveAudioTarget,
+      captureAudioForTarget,
+      videoCodec,
+      videoConfigKey,
+      setTelemetry,
+      startTelemetryPolling,
+      getTelemetryInputs,
+    ],
+  );
 
   // Combined start: publishes the track immediately. Used when the pre-roll
   // backend isn't available, matching the pre-migration behavior. On Windows
   // the picker's source selection rides along (required for real capture).
   const startCombinedShare = useCallback(
     async (source?: CaptureSourceSelection): Promise<void> => {
+      const session = captureSessionRef.current + 1;
+      captureSessionRef.current = session;
       const res = await desktopApi.startNativeCapture(buildCaptureConfig(), source);
       if (!res.ok) {
         throw new Error(res.error ?? 'Native capture failed to start');
       }
-      await activateLive();
+      await activateLive(session);
     },
     [buildCaptureConfig, activateLive],
   );
@@ -497,6 +562,8 @@ export const PresenterApp: React.FC = () => {
 
   const handleGoLive = useCallback(async () => {
     primeAudioContext();
+    const session = captureSessionRef.current + 1;
+    captureSessionRef.current = session;
     try {
       const config = buildCaptureConfig();
       const source = selectedCaptureSourceRef.current ?? undefined;
@@ -508,7 +575,7 @@ export const PresenterApp: React.FC = () => {
           throw new Error(res.error ?? 'Native capture failed to start');
         }
       }
-      await activateLive();
+      await activateLive(session);
     } catch (err: unknown) {
       console.error('Failed to go live:', err);
       const message = err instanceof Error ? err.message : 'Unknown capture error';
@@ -625,6 +692,11 @@ export const PresenterApp: React.FC = () => {
             setStreamFps={setStreamFps}
             bitrateLimit={bitrateLimit}
             setBitrateLimit={setBitrateLimit}
+            effectiveBitrate={effectiveBitrate}
+            autoBitrate={autoBitrate}
+            setAutoBitrate={setAutoBitrate}
+            motionMode={motionMode}
+            setMotionMode={setMotionMode}
             apiEndpoint={apiEndpoint}
             setApiEndpoint={setApiEndpoint}
           />

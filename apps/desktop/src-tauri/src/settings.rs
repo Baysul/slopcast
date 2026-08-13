@@ -31,6 +31,8 @@ pub struct StreamSettings {
     pub video_codec: String,
     pub resolution: String,
     pub api_endpoint: String,
+    pub auto_bitrate: bool,
+    pub motion_mode: String,
 }
 
 /// Defensive copy on every call (mirrors the TS spread of the shared default).
@@ -46,11 +48,14 @@ pub fn default_stream_settings() -> StreamSettings {
         video_codec: "vp8".into(),
         resolution: "1080p".into(),
         api_endpoint: "http://localhost:3001".into(),
+        auto_bitrate: true,
+        motion_mode: "auto".into(),
     }
 }
 
 const VALID_CODECS: [&str; 4] = ["vp8", "h264", "vp9", "av1"];
 const VALID_RESOLUTIONS: [&str; 5] = ["480p", "720p", "1080p", "1440p", "2160p"];
+const VALID_MOTION_MODES: [&str; 4] = ["auto", "static", "mixed", "dynamic"];
 
 /// Field-for-field port of `sanitizeStreamSettings` in shared-types: numbers
 /// must be finite and within `[min, max]`, codecs/resolutions must be
@@ -82,6 +87,14 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
         Some(v) if !v.trim().is_empty() => v.to_string(),
         _ => defaults.api_endpoint,
     };
+    let motion_mode = match o.get("motionMode").and_then(serde_json::Value::as_str) {
+        Some(v) if VALID_MOTION_MODES.contains(&v) => v.to_string(),
+        _ => defaults.motion_mode,
+    };
+    let auto_bitrate = match o.get("autoBitrate").and_then(serde_json::Value::as_bool) {
+        Some(v) => v,
+        _ => defaults.auto_bitrate,
+    };
 
     StreamSettings {
         // fps is capped at 60: the capture pacer (`PREVIEW_MAX_FPS`) and the
@@ -98,6 +111,8 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
         video_codec: codec,
         resolution,
         api_endpoint,
+        auto_bitrate,
+        motion_mode,
     }
 }
 
@@ -205,7 +220,8 @@ mod tests {
 
     // TS↔Rust sync rule: these values must match DEFAULT_STREAM_SETTINGS in
     // packages/shared-types/src/index.ts (fps 60, bitrateLimit 20_000_000,
-    // videoCodec 'vp8', resolution '1080p', apiEndpoint 'http://localhost:3001').
+    // videoCodec 'vp8', resolution '1080p', apiEndpoint 'http://localhost:3001',
+    // autoBitrate true, motionMode 'auto').
     #[test]
     fn defaults_match_ts_table() {
         let defaults = default_stream_settings();
@@ -214,6 +230,8 @@ mod tests {
         assert_eq!(defaults.video_codec, "vp8");
         assert_eq!(defaults.resolution, "1080p");
         assert_eq!(defaults.api_endpoint, "http://localhost:3001");
+        assert!(defaults.auto_bitrate);
+        assert_eq!(defaults.motion_mode, "auto");
     }
 
     #[test]
@@ -293,6 +311,28 @@ mod tests {
         assert_eq!(sanitize_endpoint(json!("")), "http://localhost:3001");
         assert_eq!(sanitize_endpoint(json!("   ")), "http://localhost:3001");
         assert_eq!(sanitize_endpoint(json!(42)), "http://localhost:3001");
+    }
+
+    #[test]
+    fn sanitize_validates_auto_bitrate() {
+        let sanitize_auto = |v: serde_json::Value| {
+            sanitize_stream_settings(&json!({ "autoBitrate": v })).auto_bitrate
+        };
+        assert!(!sanitize_auto(json!(false)));
+        assert!(sanitize_auto(json!(true)));
+        assert!(sanitize_auto(json!(null))); // absent/non-bool falls back to true
+        assert!(sanitize_auto(json!("false")));
+    }
+
+    #[test]
+    fn sanitize_validates_motion_mode() {
+        let sanitize_motion =
+            |v: &str| sanitize_stream_settings(&json!({ "motionMode": v })).motion_mode;
+        for valid in VALID_MOTION_MODES {
+            assert_eq!(sanitize_motion(valid), valid);
+        }
+        assert_eq!(sanitize_motion("gaming"), "auto");
+        assert_eq!(sanitize_motion(""), "auto");
     }
 
     #[test]

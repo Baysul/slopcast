@@ -1,4 +1,4 @@
-import type { ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
+import type { MotionMode, ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
 import { useEffect, useRef, useState } from 'react';
 import { desktopApi } from '../api/desktop';
@@ -13,7 +13,9 @@ const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
   a.bitrateLimit === b.bitrateLimit &&
   a.videoCodec === b.videoCodec &&
   a.resolution === b.resolution &&
-  a.apiEndpoint === b.apiEndpoint;
+  a.apiEndpoint === b.apiEndpoint &&
+  a.autoBitrate === b.autoBitrate &&
+  a.motionMode === b.motionMode;
 
 export interface UseStreamSettingsReturn {
   apiEndpoint: string;
@@ -32,6 +34,10 @@ export interface UseStreamSettingsReturn {
   setVideoCodec: React.Dispatch<React.SetStateAction<VideoCodec>>;
   resolution: ResolutionPreset;
   setResolution: React.Dispatch<React.SetStateAction<ResolutionPreset>>;
+  autoBitrate: boolean;
+  setAutoBitrate: React.Dispatch<React.SetStateAction<boolean>>;
+  motionMode: MotionMode;
+  setMotionMode: React.Dispatch<React.SetStateAction<MotionMode>>;
   streamFpsRef: React.RefObject<number>;
   bitrateLimitRef: React.RefObject<number>;
   resolutionRef: React.RefObject<ResolutionPreset>;
@@ -47,6 +53,8 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   const [availableCodecs, setAvailableCodecs] = useState<CodecInfo[]>([]);
   const [videoCodec, setVideoCodec] = useState<VideoCodec>(DEFAULT_STREAM_SETTINGS.videoCodec);
   const [resolution, setResolution] = useState<ResolutionPreset>(DEFAULT_STREAM_SETTINGS.resolution);
+  const [autoBitrate, setAutoBitrate] = useState<boolean>(DEFAULT_STREAM_SETTINGS.autoBitrate);
+  const [motionMode, setMotionMode] = useState<MotionMode>(DEFAULT_STREAM_SETTINGS.motionMode);
 
   const streamFpsRef = useRef(streamFps);
   const bitrateLimitRef = useRef(bitrateLimit);
@@ -82,15 +90,17 @@ export function useStreamSettings(): UseStreamSettingsReturn {
 
       // Persisted settings take precedence over config-file defaults.
       const saved = await desktopApi.getStreamSettings();
-      lastSavedSettingsRef.current = saved;
-      setStreamFps(saved.fps);
-      setBitrateLimit(saved.bitrateLimit);
       const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
       const bestCodec = codecs[0] ? codecs[0].codec : 'vp8';
       const hydratedCodec = savedOk ? saved.videoCodec : bestCodec;
+      lastSavedSettingsRef.current = saved;
+      setStreamFps(saved.fps);
+      setBitrateLimit(saved.bitrateLimit);
       setVideoCodec(hydratedCodec);
       setResolution(saved.resolution);
       setApiEndpoint(saved.apiEndpoint);
+      setAutoBitrate(saved.autoBitrate);
+      setMotionMode(saved.motionMode);
       settingsHydratedRef.current = true;
       setSettingsHydrated(true);
     })();
@@ -105,6 +115,8 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       videoCodec,
       resolution,
       apiEndpoint,
+      autoBitrate,
+      motionMode,
     };
     const last = lastSavedSettingsRef.current;
     if (last && streamSettingsEqual(last, current)) return;
@@ -125,7 +137,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint]);
+  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint, autoBitrate, motionMode]);
 
   return {
     apiEndpoint,
@@ -144,6 +156,10 @@ export function useStreamSettings(): UseStreamSettingsReturn {
     setVideoCodec,
     resolution,
     setResolution,
+    autoBitrate,
+    setAutoBitrate,
+    motionMode,
+    setMotionMode,
     streamFpsRef,
     bitrateLimitRef,
     resolutionRef,

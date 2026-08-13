@@ -51,6 +51,11 @@ export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['h264', 'vp8', 'vp9', 'av1'];
 
 export type ResolutionPreset = '480p' | '720p' | '1080p' | '1440p' | '2160p';
 
+// Content motion class. `auto` lets the renderer detect motion from the
+// capture engine's keepalive-vs-real-frame counters while streaming; the
+// concrete tiers force a fixed bitrate factor.
+export type MotionMode = 'auto' | 'static' | 'mixed' | 'dynamic';
+
 export const RESOLUTION_DIMENSIONS: Record<ResolutionPreset, { width: number; height: number }> = {
   '480p': { width: 854, height: 480 },
   '720p': { width: 1280, height: 720 },
@@ -67,6 +72,8 @@ export interface StreamSettings {
   videoCodec: VideoCodec;
   resolution: ResolutionPreset;
   apiEndpoint: string;
+  autoBitrate: boolean;
+  motionMode: MotionMode;
 }
 
 // TS↔Rust sync rule: `DEFAULT_STREAM_SETTINGS` and `sanitizeStreamSettings`
@@ -87,6 +94,8 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   videoCodec: 'vp8',
   resolution: '1080p',
   apiEndpoint: 'http://localhost:3001',
+  autoBitrate: true,
+  motionMode: 'auto',
 };
 
 export const VIDEO_CODEC_LABEL: Record<string, string> = {
@@ -130,6 +139,8 @@ export function sanitizeStreamSettings(raw: unknown): StreamSettings {
     v === 'h264' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
   const resolution = (v: unknown): ResolutionPreset =>
     v === '480p' || v === '720p' || v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
+  const motionMode = (v: unknown): MotionMode =>
+    v === 'auto' || v === 'static' || v === 'mixed' || v === 'dynamic' ? v : d.motionMode;
   return {
     // fps is capped at 60: the capture pacer (PREVIEW_MAX_FPS) and the
     // preview emitter both clamp to 60 regardless, so higher values would
@@ -140,5 +151,7 @@ export function sanitizeStreamSettings(raw: unknown): StreamSettings {
     videoCodec: codec(o.videoCodec),
     resolution: resolution(o.resolution),
     apiEndpoint: typeof o.apiEndpoint === 'string' && o.apiEndpoint.trim() !== '' ? o.apiEndpoint : d.apiEndpoint,
+    autoBitrate: typeof o.autoBitrate === 'boolean' ? o.autoBitrate : d.autoBitrate,
+    motionMode: motionMode(o.motionMode),
   };
 }

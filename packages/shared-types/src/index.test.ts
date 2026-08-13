@@ -32,6 +32,8 @@ test('valid fields pass through unchanged', () => {
     videoCodec: 'h264',
     resolution: '720p',
     apiEndpoint: 'https://srv.example.com',
+    autoBitrate: false,
+    motionMode: 'dynamic',
   };
   assert.deepEqual(sanitizeStreamSettings(raw), raw);
 });
@@ -64,6 +66,13 @@ test('unknown codec and resolution strings fall back', () => {
   assert.equal(sanitizeStreamSettings({ videoCodec: 'H264' }).videoCodec, 'vp8');
   assert.equal(sanitizeStreamSettings({ resolution: '4k' }).resolution, '1080p');
   assert.equal(sanitizeStreamSettings({ resolution: '720P' }).resolution, '1080p');
+});
+
+test('autoBitrate and motionMode fall back on invalid values', () => {
+  assert.equal(sanitizeStreamSettings({ autoBitrate: 'yes' }).autoBitrate, true);
+  assert.equal(sanitizeStreamSettings({ autoBitrate: false }).autoBitrate, false);
+  assert.equal(sanitizeStreamSettings({ motionMode: 'gaming' }).motionMode, 'auto');
+  assert.equal(sanitizeStreamSettings({ motionMode: 'dynamic' }).motionMode, 'dynamic');
 });
 
 test('empty or non-string apiEndpoint falls back', () => {

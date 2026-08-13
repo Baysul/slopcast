@@ -1,4 +1,5 @@
-import type { ResolutionPreset, VideoCodec } from '@slopcast/shared-types';
+import type { MotionMode, ResolutionPreset, VideoCodec } from '@slopcast/shared-types';
+import { fmtBitrate } from '@slopcast/shared-types';
 import { ChevronDown } from 'lucide-react';
 import type React from 'react';
 import { memo } from 'react';
@@ -13,6 +14,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import { manualBitrateOptions } from '@/utils/bitrate';
 import type { CodecInfo } from '@/utils/codecs';
 import { groupCodecsByHardware } from '@/utils/codecs';
 
@@ -29,6 +32,11 @@ export interface StreamSettingsPanelProps {
   setStreamFps: (fps: number) => void;
   bitrateLimit: number;
   setBitrateLimit: (bitrate: number) => void;
+  effectiveBitrate: number;
+  autoBitrate: boolean;
+  setAutoBitrate: (auto: boolean) => void;
+  motionMode: MotionMode;
+  setMotionMode: (mode: MotionMode) => void;
   apiEndpoint?: string;
   setApiEndpoint?: (endpoint: string) => void;
 }
@@ -47,12 +55,18 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
     setStreamFps,
     bitrateLimit,
     setBitrateLimit,
+    effectiveBitrate,
+    autoBitrate,
+    setAutoBitrate,
+    motionMode,
+    setMotionMode,
     apiEndpoint,
     setApiEndpoint,
   }) => {
     const openClass = streamSettingsOpen ? 'rotate-0' : '-rotate-90';
-    const containerClass = streamSettingsOpen ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden';
+    const containerClass = streamSettingsOpen ? 'max-h-[800px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden';
     const { hardware: hardwareCodecs, software: softwareCodecs } = groupCodecsByHardware(availableCodecs);
+    const bitrateOptions = manualBitrateOptions(videoCodec);
 
     return (
       <Card className="border-border/60 bg-card/60 backdrop-blur-sm shadow-xl">
@@ -166,20 +180,64 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 >
                   Bitrate Limit
                 </label>
-                <Select value={String(bitrateLimit)} onValueChange={(v) => setBitrateLimit(Number(v))}>
+                <Select
+                  value={String(bitrateLimit)}
+                  onValueChange={(v) => setBitrateLimit(Number(v))}
+                  disabled={autoBitrate}
+                >
                   <SelectTrigger id="select-bitrate">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="1000000">1 Mbps</SelectItem>
-                    <SelectItem value="2000000">2 Mbps</SelectItem>
-                    <SelectItem value="4000000">4 Mbps</SelectItem>
-                    <SelectItem value="6000000">6 Mbps</SelectItem>
-                    <SelectItem value="10000000">10 Mbps</SelectItem>
-                    <SelectItem value="20000000">20 Mbps</SelectItem>
-                    <SelectItem value="30000000">30 Mbps</SelectItem>
-                    <SelectItem value="50000000">50 Mbps</SelectItem>
-                    <SelectItem value="80000000">80 Mbps</SelectItem>
+                    {bitrateOptions.map((bps) => (
+                      <SelectItem key={bps} value={String(bps)}>
+                        {fmtBitrate(bps)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {autoBitrate ? `Auto: ${fmtBitrate(effectiveBitrate)}` : 'Manual bitrate selected.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3 pt-1">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <label
+                    htmlFor="auto-bitrate"
+                    className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+                  >
+                    Automatic Bitrate
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    Derive the bitrate from codec, resolution, framerate and content motion.
+                  </p>
+                </div>
+                <Switch id="auto-bitrate" checked={autoBitrate} onCheckedChange={setAutoBitrate} />
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="select-motion"
+                  className="text-xs font-semibold uppercase tracking-wider text-muted-foreground block"
+                >
+                  Content Motion
+                </label>
+                <Select
+                  value={motionMode}
+                  onValueChange={(v) => setMotionMode(v as MotionMode)}
+                  disabled={!autoBitrate}
+                >
+                  <SelectTrigger id="select-motion">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto-detect</SelectItem>
+                    <SelectItem value="static">Static (documents, slides)</SelectItem>
+                    <SelectItem value="mixed">Mixed (browsing, demos)</SelectItem>
+                    <SelectItem value="dynamic">Dynamic (gaming, video)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
