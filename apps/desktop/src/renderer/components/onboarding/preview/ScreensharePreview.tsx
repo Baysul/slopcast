@@ -1,9 +1,9 @@
 import { ScreenShare } from 'lucide-react';
 import React, { useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
-import { desktopApi } from '../../api/desktop';
-import type { CaptureStage, PreviewFrame } from '../../types';
-import { type StreamTelemetry, StreamTelemetryBar } from '../telemetry/StreamTelemetryBar';
+import { desktopApi } from '../../../api/desktop';
+import type { CaptureStage, PreviewFrame } from '../../../types';
+import { type StreamTelemetry, StreamTelemetryBar } from '../../telemetry/StreamTelemetryBar';
 import { PreviewCanvas } from './PreviewCanvas';
 
 export interface ScreensharePreviewProps {

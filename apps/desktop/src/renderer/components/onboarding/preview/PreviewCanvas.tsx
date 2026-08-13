@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { PreviewFrame } from '../../types';
+import type { PreviewFrame } from '../../../types';
 
 // Live preview renderer: raw BGRA frames (tightly packed, native DMA-BUF
 // readback byte order) are uploaded into a persistent GPU texture and drawn
