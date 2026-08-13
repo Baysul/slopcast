@@ -41,11 +41,11 @@ const GOP_SECONDS: u32 = 1;
 /// degenerate to CBR (the driver sets minimum = maximum), so it is never
 /// used here.
 const VBR_TARGET_PERCENTAGE: u32 = 80;
-/// SVT-AV1 exposes a true `max-bitrate` hard cap, so its VBR target is a
-/// conventional 75% of the ceiling (the encoder's rate controller aims at
-/// the target and bursts up to — never past — the cap). 75% matches the
-/// validated AV1 screenshare sweet spots (6 Mbps target on an 8 Mbps
-/// ceiling at 1080p60).
+/// SVT-AV1 VBR target as a percentage of the presenter's bitrate ceiling.
+/// SVT-AV1 4.x rejects `max-bitrate` in VBR mode (it is CRF-only), so the
+/// target sits below the ceiling to leave headroom instead of relying on a
+/// hard cap. 75% matches the validated AV1 screenshare sweet spots (6 Mbps
+/// target on an 8 Mbps ceiling at 1080p60).
 const AV1_TARGET_PERCENTAGE: u32 = 75;
 /// SVT-AV1 quality floor for rate control (QP never exceeds this, so
 /// high-entropy frames stay legible instead of decaying to mush). 52 is a
@@ -268,11 +268,9 @@ impl GstreamerEncoder {
         }
         let target = encoder_target_kbps(&self.encoder, ceiling_kbps);
         // VA-API uses `bitrate` in kbps; software VPx/AV1 encoders use
-        // `target-bitrate` — VPx in bits/sec, av1enc/svtav1enc in kilobits/sec
-        // (see configure_encoder). SVT-AV1 additionally takes a `max-bitrate`
-        // hard cap (changeable mid-stream), which carries the new ceiling.
-        // All are updated in place so congestion control keeps the selected
-        // codec's ceiling effective without a pipeline rebuild.
+        // `target-bitrate` — VPx in bits/sec, svtav1enc in kilobits/sec (see
+        // configure_encoder). Updated in place so congestion control keeps
+        // the selected codec's target effective without a pipeline rebuild.
         if self.encoder.find_property("bitrate").is_some() {
             self.encoder
                 .set_property_from_str("bitrate", &target.to_string());
@@ -284,10 +282,6 @@ impl GstreamerEncoder {
             };
             self.encoder
                 .set_property_from_str("target-bitrate", &value.to_string());
-            if self.encoder.find_property("max-bitrate").is_some() {
-                self.encoder
-                    .set_property_from_str("max-bitrate", &ceiling_kbps.to_string());
-            }
         } else {
             log::warn!("GStreamer encoder exposes no runtime bitrate property");
         }
@@ -360,14 +354,7 @@ impl GstreamerEncoder {
                 format!("Failed to create GStreamer element {encoder_name}: {error}")
             })?;
         let encoder_rate = encoder_target_kbps(&encoder, ceiling_kbps);
-        configure_encoder(
-            &encoder,
-            codec,
-            encoder_rate,
-            ceiling_kbps,
-            config.height,
-            key_int_max,
-        );
+        configure_encoder(&encoder, codec, encoder_rate, config.height, key_int_max);
         let parser = gst::ElementFactory::make(parser_name)
             .build()
             .map_err(|error| {
@@ -614,7 +601,6 @@ fn configure_encoder(
     encoder: &gst::Element,
     codec: &str,
     bitrate: u32,
-    ceiling_kbps: u32,
     height: u32,
     key_int_max: u32,
 ) {
@@ -631,12 +617,6 @@ fn configure_encoder(
             bitrate.saturating_mul(1000).min(i32::MAX as u32)
         };
         encoder.set_property_from_str("target-bitrate", &value.to_string());
-        // SVT-AV1 exposes a `max-bitrate` hard cap (in kbps, same units as
-        // its `target-bitrate`): this is the ceiling the VBR target is derived
-        // from, so the encoder's bursts are pinned to the presenter's limit.
-        if encoder.find_property("max-bitrate").is_some() {
-            encoder.set_property_from_str("max-bitrate", &ceiling_kbps.to_string());
-        }
     }
     if encoder.find_property("key-int-max").is_some() {
         encoder.set_property_from_str("key-int-max", &key_int_max.to_string());
@@ -687,10 +667,10 @@ fn configure_encoder(
                 encoder.set_property_from_str("static-threshold", "100");
             }
         } else if codec == "av1" {
-            // SVT-AV1 (svtav1enc): the shared path above sets `target-bitrate`
-            // and the `max-bitrate` hard cap. Here we pin the quality floor and
-            // the speed/quality preset, and set the keyframe interval in frames
-            // (SVT uses `intra-period-length` instead of `keyframe-max-dist`).
+            // SVT-AV1 (svtav1enc): the shared path above sets `target-bitrate`.
+            // Here we pin the quality floor and the speed/quality preset, and
+            // set the keyframe interval in frames (SVT uses
+            // `intra-period-length` instead of `keyframe-max-dist`).
             if encoder.find_property("max-qp-allowed").is_some() {
                 encoder.set_property_from_str("max-qp-allowed", &AV1_MAX_QP_ALLOWED.to_string());
             }
@@ -905,11 +885,10 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let ceiling_kbps = 8_000;
         let target_kbps = encoder_target_kbps(&encoder, ceiling_kbps);
-        configure_encoder(&encoder, "av1", target_kbps, ceiling_kbps, 1080, 60);
+        configure_encoder(&encoder, "av1", target_kbps, 1080, 60);
 
         assert_eq!(target_kbps, 6_000);
         assert_eq!(encoder.property::<u32>("target-bitrate"), 6_000);
-        assert_eq!(encoder.property::<u32>("max-bitrate"), 8_000);
         assert_eq!(
             encoder.property::<u32>("max-qp-allowed"),
             AV1_MAX_QP_ALLOWED
@@ -928,14 +907,14 @@ mod tests {
             .build()
             .map_err(|error| error.to_string())?;
         let target_kbps = encoder_target_kbps(&encoder, 12_000);
-        configure_encoder(&encoder, "av1", target_kbps, 12_000, 1440, 60);
+        configure_encoder(&encoder, "av1", target_kbps, 1440, 60);
         assert_eq!(encoder.property::<u32>("preset"), 11);
 
         let encoder = gst::ElementFactory::make("svtav1enc")
             .build()
             .map_err(|error| error.to_string())?;
         let target_kbps = encoder_target_kbps(&encoder, 20_000);
-        configure_encoder(&encoder, "av1", target_kbps, 20_000, 2160, 60);
+        configure_encoder(&encoder, "av1", target_kbps, 2160, 60);
         assert_eq!(encoder.property::<u32>("preset"), 12);
 
         Ok(())
