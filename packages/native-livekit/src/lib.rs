@@ -517,11 +517,7 @@ pub fn stop_video_track() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         desktop_capture::clear_scale_target();
-        if gstreamer_publisher::is_connected() {
-            gstreamer_publisher::stop_video()
-        } else {
-            Ok(())
-        }
+        gstreamer_publisher::stop_video()
     }
 
     #[cfg(not(target_os = "linux"))]

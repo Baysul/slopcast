@@ -67,14 +67,33 @@ fn main() {
     });
     poll("audio-only", 8);
 
+    let codec = std::env::var("PROBE_CODEC").unwrap_or_else(|_| "h264".to_string());
+    let width: u32 = std::env::var("PROBE_WIDTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1280);
+    let height: u32 = std::env::var("PROBE_HEIGHT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(720);
+    let fps: u32 = std::env::var("PROBE_FPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let bitrate: f64 = std::env::var("PROBE_BITRATE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8_000_000.0);
     let config = CaptureConfig {
-        width: 1280,
-        height: 720,
-        fps: 30,
-        video_codec: Some("h264".into()),
-        max_bitrate: Some(8_000_000.0),
+        width,
+        height,
+        fps,
+        video_codec: Some(codec.clone()),
+        max_bitrate: Some(bitrate),
     };
-    println!("[probe] starting synthetic capture + video track");
+    println!(
+        "[probe] starting synthetic capture + video track (codec={codec} {width}x{height}@{fps} bitrate={bitrate})"
+    );
     match start_synthetic_capture(&config) {
         Ok(true) => println!("[probe] synthetic capture started"),
         Ok(false) => println!("[probe] synthetic capture returned false"),

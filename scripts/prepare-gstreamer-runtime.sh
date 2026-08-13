@@ -66,8 +66,8 @@ SYSTEM_ELEMENTS=(
   vp8enc
   vp9enc
   vp9parse
-  av1enc
   av1parse
+  svtav1enc
   vah264enc
   h264parse
   audioconvert

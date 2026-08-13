@@ -112,7 +112,6 @@ enum PublisherCommand {
 }
 
 enum ConnectedOutcome {
-    Idle,
     Reconnect,
     Shutdown,
 }
@@ -387,7 +386,14 @@ pub(crate) fn start_video(config: CaptureConfig) -> Result<(), String> {
 }
 
 pub(crate) fn stop_video() -> Result<(), String> {
-    let command_sender = command_sender()?;
+    let command_sender = PUBLISHER
+        .lock()
+        .map_err(|_| "GStreamer publisher lock poisoned")?
+        .as_ref()
+        .map(|publisher| publisher.command_sender.clone());
+    let Some(command_sender) = command_sender else {
+        return Ok(());
+    };
     let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
 
     command_sender
@@ -475,10 +481,10 @@ fn run_worker(
     let mut pipeline = None;
     let mut video_config = None;
     let mut rate_controller = RateController::default();
-    // The room worker is deliberately dormant until Go Live. Constructing an
-    // audio-only sink and putting it in PLAYING publishes audio before the
-    // video pad exists; livekitwebrtcsink then keeps the negotiated topology
-    // audio-only. The first pipeline is therefore created with both pads.
+    // Keep the worker dormant until Go Live so the initial offer contains both
+    // tracks. After that, the bundled 1.28-era sink renegotiates request-pad
+    // additions and removals, allowing video to restart without leaving the
+    // room or rebuilding its audio branch.
     let _ = ready_sender.send(Ok(()));
 
     loop {
@@ -495,6 +501,7 @@ fn run_worker(
                     }
                     match PublisherPipeline::new(connection, Some(&config), generation) {
                         Ok(new_pipeline) => {
+                            rate_controller.reset(&config);
                             video_config = Some(config);
                             pipeline = Some(new_pipeline);
                             let _ = reply.send(Ok(()));
@@ -505,6 +512,7 @@ fn run_worker(
                     }
                 }
                 Ok(PublisherCommand::StopVideo { reply }) => {
+                    video_config = None;
                     let _ = reply.send(Ok(()));
                 }
                 Ok(PublisherCommand::GetTelemetry(reply)) => {
@@ -518,26 +526,22 @@ fn run_worker(
 
         match run_connected(
             active_pipeline,
-            connection,
             command_receiver,
             &mut video_config,
             &mut rate_controller,
-            generation,
         ) {
-            ConnectedOutcome::Idle => {
-                pipeline = None;
-                finish_if_current(generation);
-            }
             ConnectedOutcome::Shutdown => break,
             ConnectedOutcome::Reconnect => {
                 finish_if_current(generation);
                 drop(pipeline.take());
-                match reconnect(connection, command_receiver, &mut video_config, generation) {
+                match reconnect(
+                    connection,
+                    command_receiver,
+                    &mut video_config,
+                    &mut rate_controller,
+                    generation,
+                ) {
                     Some(mut reconnected) => {
-                        // The new pipeline's encoder starts at the configured
-                        // ceiling; re-apply the rate the controller settled
-                        // on before the drop so congestion relief survives
-                        // the reconnect.
                         reconnected.apply_rate(rate_controller.current_kbps());
                         pipeline = Some(reconnected);
                     }
@@ -552,26 +556,22 @@ fn run_worker(
 
 fn run_connected(
     pipeline: &mut PublisherPipeline,
-    connection: &ConnectionConfig,
     command_receiver: &Receiver<PublisherCommand>,
     video_config: &mut Option<CaptureConfig>,
     rate_controller: &mut RateController,
-    generation: u64,
 ) -> ConnectedOutcome {
     let mut rate_ticks: u32 = 0;
     loop {
         match command_receiver.recv_timeout(POLL_INTERVAL) {
             Ok(PublisherCommand::StartVideo { config, reply }) => {
-                let result = pipeline.rebuild(connection, Some(&config), generation);
-                let should_reconnect = result.is_err();
+                let result = pipeline.replace_video(config.clone());
                 if result.is_ok() {
                     *video_config = Some(config);
+                } else {
+                    *video_config = pipeline.video_config.clone();
                 }
                 let _ = reply.send(result);
-                if should_reconnect {
-                    return ConnectedOutcome::Reconnect;
-                }
-                // Rebuild succeeded with (possibly new) settings: start the
+                // Replacement succeeded with (possibly new) settings: start the
                 // congestion controller from the configured ceiling again.
                 if let Some(config) = video_config.as_ref() {
                     rate_controller.reset(config);
@@ -579,10 +579,7 @@ fn run_connected(
             }
             Ok(PublisherCommand::StopVideo { reply }) => {
                 *video_config = None;
-                pipeline.shutdown();
-                VIDEO_ACTIVE.store(false, Ordering::Relaxed);
-                let _ = reply.send(Ok(()));
-                return ConnectedOutcome::Idle;
+                let _ = reply.send(pipeline.detach_video());
             }
             Ok(PublisherCommand::GetTelemetry(reply)) => {
                 let _ = reply.send(Some(pipeline.telemetry()));
@@ -615,6 +612,7 @@ fn reconnect(
     connection: &ConnectionConfig,
     command_receiver: &Receiver<PublisherCommand>,
     video_config: &mut Option<CaptureConfig>,
+    rate_controller: &mut RateController,
     generation: u64,
 ) -> Option<PublisherPipeline> {
     let mut delay = RECONNECT_DELAY_BASE;
@@ -630,6 +628,7 @@ fn reconnect(
             }
             match command_receiver.recv_timeout(remaining) {
                 Ok(PublisherCommand::StartVideo { config, reply }) => {
+                    rate_controller.reset(&config);
                     *video_config = Some(config);
                     let _ = reply.send(Ok(()));
                 }
@@ -676,13 +675,13 @@ impl PublisherPipeline {
                 i32::try_from(SAMPLE_RATE).map_err(|_| "Audio rate exceeds i32")?,
             )
             .build();
-        let video_caps = video_caps(video_config.and_then(|config| config.video_codec.as_deref()));
         let sink = gst::ElementFactory::make("livekitwebrtcsink")
             .property("audio-caps", &audio_caps)
-            .property("video-caps", &video_caps)
+            .property("video-caps", supported_video_caps())
             .property("max-bitrate", SINK_MAX_BITRATE)
             .build()
             .map_err(|error| format!("Failed to create livekitwebrtcsink: {error}"))?;
+        connect_payloader_setup(&sink);
         configure_signaller(&sink, connection, generation);
         let pipeline = gst::Pipeline::new();
         pipeline
@@ -720,19 +719,6 @@ impl PublisherPipeline {
         Ok(publisher)
     }
 
-    fn rebuild(
-        &mut self,
-        connection: &ConnectionConfig,
-        video_config: Option<&CaptureConfig>,
-        generation: u64,
-    ) -> Result<(), String> {
-        self.shutdown();
-        let replacement = Self::new(connection, video_config, generation)?;
-        *self = replacement;
-
-        Ok(())
-    }
-
     fn attach_video(&mut self, config: CaptureConfig) -> Result<(), String> {
         let encoder = GstreamerEncoder::attach(&self.pipeline, &self.sink, &config)?;
         // Gate the shared state install on the generation (see `new`): a
@@ -747,6 +733,41 @@ impl PublisherPipeline {
         }
         self.encoder = Some(encoder);
         self.video_config = Some(config);
+
+        Ok(())
+    }
+
+    fn replace_video(&mut self, config: CaptureConfig) -> Result<(), String> {
+        let previous_config = self.video_config.clone();
+        self.detach_video()?;
+
+        let Err(error) = self.attach_video(config) else {
+            return Ok(());
+        };
+        let Some(previous_config) = previous_config else {
+            return Err(error);
+        };
+        if let Err(restore_error) = self.attach_video(previous_config) {
+            return Err(format!(
+                "{error}; restoring the previous video publication also failed: {restore_error}"
+            ));
+        }
+
+        Err(error)
+    }
+
+    fn detach_video(&mut self) -> Result<(), String> {
+        if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
+            set_video_input(None)?;
+            VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+        }
+        self.video_config = None;
+        let Some(encoder) = self.encoder.as_ref() else {
+            return Ok(());
+        };
+
+        encoder.detach(&self.pipeline, &self.sink)?;
+        self.encoder = None;
 
         Ok(())
     }
@@ -1072,7 +1093,8 @@ pub(crate) fn can_initialize_element(name: &str) -> bool {
 pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
     let parser = match codec {
         "h264" => "h264parse",
-        "vp8" | "vp9" => "identity",
+        "vp8" => "identity",
+        "vp9" => "vp9parse",
         "av1" => "av1parse",
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
@@ -1091,25 +1113,48 @@ pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
     ))
 }
 
-fn selected_encoder_name(codec: &str) -> &'static str {
+fn connect_payloader_setup(sink: &gst::Element) {
+    sink.connect("payloader-setup", false, |values| {
+        let Ok(payloader) = values[3].get::<gst::Element>() else {
+            return Some(false.to_value());
+        };
+        let factory_name = payloader.factory().map(|factory| factory.name());
+        if factory_name.is_some_and(|name| name.starts_with("rtpvp9pay"))
+            && payloader.find_property("picture-id-mode").is_some()
+        {
+            // Stock webrtcsink configures the classic rtpvp9pay factory but
+            // not rtpvp9pay2, which has equal rank in the bundled runtime.
+            payloader.set_property_from_str("picture-id-mode", "15-bit");
+        }
+
+        // Preserve webrtcsink's default MTU and header-extension setup.
+        Some(false.to_value())
+    });
+}
+
+pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
+    if codec == "vp9" {
+        return "vp9enc";
+    }
+    if codec == "av1" {
+        return "svtav1enc";
+    }
+
     let hardware = match codec {
         "h264" => "vah264enc",
-        "vp9" => "vavp9enc",
-        "av1" => "vaav1enc",
         _ => "",
     };
     let software = match codec {
         "h264" => "x264enc",
         "vp9" => "vp9enc",
-        "av1" => "av1enc",
+        "av1" => "svtav1enc",
         _ => "vp8enc",
     };
     if hardware.is_empty() {
         return software;
     }
-    // Factory presence does not guarantee instantiation (missing VA display,
-    // driver without encode support). Probe so AV1 does not stick to a
-    // non-functional `vaav1enc` when no AV1 hardware exists.
+    // Factory presence does not guarantee instantiation (missing VA display
+    // or driver encode support), so probe before selecting H.264 hardware.
     if can_initialize_element(hardware) {
         hardware
     } else {
@@ -1117,13 +1162,13 @@ fn selected_encoder_name(codec: &str) -> &'static str {
     }
 }
 
-fn video_caps(codec: Option<&str>) -> gst::Caps {
-    match codec.unwrap_or("h264") {
-        "vp8" => gst::Caps::builder("video/x-vp8").build(),
-        "vp9" => gst::Caps::builder("video/x-vp9").build(),
-        "av1" => gst::Caps::builder("video/x-av1").build(),
-        _ => gst::Caps::builder("video/x-h264").build(),
-    }
+fn supported_video_caps() -> gst::Caps {
+    gst::Caps::builder_full()
+        .structure(gst::Structure::builder("video/x-h264").build())
+        .structure(gst::Structure::builder("video/x-vp8").build())
+        .structure(gst::Structure::builder("video/x-vp9").build())
+        .structure(gst::Structure::builder("video/x-av1").build())
+        .build()
 }
 
 pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)> {
@@ -1131,7 +1176,7 @@ pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)
         ("vp8", "VP8", "vp8enc", ""),
         ("h264", "H.264", "x264enc", "vah264enc"),
         ("vp9", "VP9", "vp9enc", "vavp9enc"),
-        ("av1", "AV1", "av1enc", "vaav1enc"),
+        ("av1", "AV1", "svtav1enc", "vaav1enc"),
     ]
     .into_iter()
     .filter(|(codec, _, software, hardware)| {
@@ -1288,8 +1333,8 @@ fn fold_outbound(
     let bytes = structure.get::<u64>("bytes-sent").ok().map(stat_as_f64);
     let packets = structure.get::<u64>("packets-sent").ok().map(stat_as_f64);
     if is_video {
-        telemetry.video_bytes_sent = bytes;
-        telemetry.video_packets_sent = packets;
+        telemetry.video_bytes_sent = sum_optional_stat(telemetry.video_bytes_sent, bytes);
+        telemetry.video_packets_sent = sum_optional_stat(telemetry.video_packets_sent, packets);
     } else {
         telemetry.audio_bytes_sent = bytes;
         telemetry.audio_packets_sent = packets;
@@ -1298,6 +1343,14 @@ fn fold_outbound(
         telemetry
             .audio_codec
             .get_or_insert_with(|| "audio/OPUS".into());
+    }
+}
+
+fn sum_optional_stat(current: Option<f64>, next: Option<f64>) -> Option<f64> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(current + next),
+        (Some(current), None) => Some(current),
+        (None, next) => next,
     }
 }
 
@@ -1402,6 +1455,22 @@ mod tests {
         assert_eq!(telemetry.audio_bytes_sent, Some(13.0));
         assert_eq!(telemetry.audio_packets_sent, Some(3.0));
         assert_eq!(telemetry.audio_codec.as_deref(), Some("audio/OPUS"));
+    }
+
+    #[test]
+    fn telemetry_sums_primary_and_retransmitted_video_streams() {
+        init_gst();
+        let stats = gst::Structure::builder("application/x-webrtcsink-stats")
+            .field("video-codec", codec("codec-stats-src_0", 90_000))
+            .field("rtx-codec", codec("codec-stats-src_1", 90_000))
+            .field("video", outbound("codec-stats-src_0", 1000, 42, 7))
+            .field("rtx", outbound("codec-stats-src_1", 1001, 13, 3))
+            .build();
+
+        let telemetry = fold_telemetry(&stats, None);
+
+        assert_eq!(telemetry.video_bytes_sent, Some(55.0));
+        assert_eq!(telemetry.video_packets_sent, Some(10.0));
     }
 
     #[test]

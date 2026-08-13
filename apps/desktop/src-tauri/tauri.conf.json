@@ -43,6 +43,7 @@
           "gstreamer1.0-plugins-bad",
           "gstreamer1.0-va",
           "gstreamer1.0-nice",
+          "libsvtav1enc1",
           "libopus0"
         ]
       },

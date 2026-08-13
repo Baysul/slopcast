@@ -1,14 +1,10 @@
-//! Linux H.264 branch attached to `livekitwebrtcsink`.
+//! Linux video encoder branch attached to `livekitwebrtcsink`.
 //!
-//! Rate control is **VBR with the presenter's bitrate limit as a hard
-//! ceiling**: `vah264enc` derives the encoder's maximum bitrate from
-//! `bitrate × 100 / target-percentage`, so the ceiling is fed in as the
-//! maximum while the target sits below it (see `VBR_TARGET_PERCENTAGE`).
-//! The ceiling is not static: the publisher's congestion controller
-//! (`gstreamer_publisher::RateController`) re-targets it at runtime via
-//! `GstreamerEncoder::set_ceiling_kbps` when the remote-inbound loss/RTT
-//! signals congestion, and steps it back up toward the configured ceiling
-//! after sustained clean intervals.
+//! `vah264enc` provides a hard VBR ceiling through `target-percentage`.
+//! Software VPx/AV1 encoders expose only target bitrate controls, so their
+//! output can vary around the requested rate. The publisher's congestion
+//! controller re-targets each encoder at runtime through
+//! `GstreamerEncoder::set_ceiling_kbps`.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -45,6 +41,16 @@ const GOP_SECONDS: u32 = 1;
 /// degenerate to CBR (the driver sets minimum = maximum), so it is never
 /// used here.
 const VBR_TARGET_PERCENTAGE: u32 = 80;
+/// SVT-AV1 exposes a true `max-bitrate` hard cap, so its VBR target is a
+/// conventional 75% of the ceiling (the encoder's rate controller aims at
+/// the target and bursts up to — never past — the cap). 75% matches the
+/// validated AV1 screenshare sweet spots (6 Mbps target on an 8 Mbps
+/// ceiling at 1080p60).
+const AV1_TARGET_PERCENTAGE: u32 = 75;
+/// SVT-AV1 quality floor for rate control (QP never exceeds this, so
+/// high-entropy frames stay legible instead of decaying to mush). 52 is a
+/// balance between the encoder's 63 default and over-soft screenshare text.
+const AV1_MAX_QP_ALLOWED: u32 = 52;
 
 /// Number of encoded H.264 access units that emerged from `h264parse`
 /// (i.e. actually encoded and pushed downstream), as opposed to
@@ -244,6 +250,8 @@ pub(crate) struct GstreamerEncoder {
     /// derived from the stream settings and is stepped by the publisher's
     /// `RateController` on congestion signals.
     ceiling_kbps: u32,
+    elements: Vec<gst::Element>,
+    sink_pad: gst::Pad,
 }
 
 impl GstreamerEncoder {
@@ -258,11 +266,13 @@ impl GstreamerEncoder {
         if ceiling_kbps == self.ceiling_kbps {
             return;
         }
-        let target = vbr_target_kbps(ceiling_kbps, VBR_TARGET_PERCENTAGE);
+        let target = encoder_target_kbps(&self.encoder, ceiling_kbps);
         // VA-API uses `bitrate` in kbps; software VPx/AV1 encoders use
-        // `target-bitrate` — VPx in bits/sec, av1enc in kilobits/sec (see
-        // configure_encoder). Both are updated in place so congestion
-        // control keeps the selected codec's ceiling effective.
+        // `target-bitrate` — VPx in bits/sec, av1enc/svtav1enc in kilobits/sec
+        // (see configure_encoder). SVT-AV1 additionally takes a `max-bitrate`
+        // hard cap (changeable mid-stream), which carries the new ceiling.
+        // All are updated in place so congestion control keeps the selected
+        // codec's ceiling effective without a pipeline rebuild.
         if self.encoder.find_property("bitrate").is_some() {
             self.encoder
                 .set_property_from_str("bitrate", &target.to_string());
@@ -274,6 +284,10 @@ impl GstreamerEncoder {
             };
             self.encoder
                 .set_property_from_str("target-bitrate", &value.to_string());
+            if self.encoder.find_property("max-bitrate").is_some() {
+                self.encoder
+                    .set_property_from_str("max-bitrate", &ceiling_kbps.to_string());
+            }
         } else {
             log::warn!("GStreamer encoder exposes no runtime bitrate property");
         }
@@ -301,6 +315,7 @@ impl GstreamerEncoder {
             return Err("GStreamer encoder fps must be greater than zero".into());
         }
         let codec = config.video_codec.as_deref().unwrap_or("vp8");
+        let ceiling_kbps = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
         crate::gstreamer_publisher::verify_codec_elements(codec)?;
         let (encoder_name, parser_name, output_caps) = codec_pipeline(codec)?;
 
@@ -338,15 +353,21 @@ impl GstreamerEncoder {
         // `bitrate` property gets the VBR target (a fraction of the ceiling,
         // see VBR_TARGET_PERCENTAGE) and `target-percentage` makes the
         // driver-side maximum land on the ceiling.
-        let ceiling_kbps = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
-        let encoder_rate = vbr_target_kbps(ceiling_kbps, VBR_TARGET_PERCENTAGE);
         let key_int_max = config.fps.saturating_mul(GOP_SECONDS).min(1024);
         let encoder = gst::ElementFactory::make(encoder_name)
             .build()
             .map_err(|error| {
                 format!("Failed to create GStreamer element {encoder_name}: {error}")
             })?;
-        configure_encoder(&encoder, codec, encoder_rate, key_int_max);
+        let encoder_rate = encoder_target_kbps(&encoder, ceiling_kbps);
+        configure_encoder(
+            &encoder,
+            codec,
+            encoder_rate,
+            ceiling_kbps,
+            config.height,
+            key_int_max,
+        );
         let parser = gst::ElementFactory::make(parser_name)
             .build()
             .map_err(|error| {
@@ -395,25 +416,6 @@ impl GstreamerEncoder {
             output_queue.clone(),
         ];
 
-        pipeline
-            .add_many(elements.iter())
-            .map_err(|error| format!("Failed to add GStreamer H.264 elements: {error}"))?;
-        gst::Element::link_many(elements.iter())
-            .map_err(|error| format!("Failed to link GStreamer H.264 pipeline: {error}"))?;
-        let sink_pad = sink
-            .request_pad_simple("video_%u")
-            .ok_or_else(|| "livekitwebrtcsink refused a video pad".to_string())?;
-        output_queue
-            .static_pad("src")
-            .ok_or_else(|| "GStreamer video queue has no src pad".to_string())?
-            .link(&sink_pad)
-            .map_err(|error| format!("Failed to link H.264 into livekitwebrtcsink: {error}"))?;
-        for element in &elements {
-            element
-                .sync_state_with_parent()
-                .map_err(|error| format!("Failed to start GStreamer H.264 element: {error}"))?;
-        }
-
         // I420 input buffer pool: preallocate `VIDEO_BUFFER_POOL_SIZE`
         // buffers of the input frame size at attach time. Steady-state
         // `push_frame` then acquires from the pool (zero allocation); the
@@ -437,9 +439,50 @@ impl GstreamerEncoder {
             .set_active(true)
             .map_err(|error| format!("Failed to activate GStreamer input buffer pool: {error}"))?;
 
+        pipeline
+            .add_many(elements.iter())
+            .map_err(|error| format!("Failed to add GStreamer video elements: {error}"))?;
+        let attach_result = (|| {
+            gst::Element::link_many(elements.iter())
+                .map_err(|error| format!("Failed to link GStreamer video pipeline: {error}"))?;
+            let sink_pad = sink
+                .request_pad_simple("video_%u")
+                .ok_or_else(|| "livekitwebrtcsink refused a video pad".to_string())?;
+            let output_pad = output_queue
+                .static_pad("src")
+                .ok_or_else(|| "GStreamer video queue has no src pad".to_string())?;
+            if let Err(error) = output_pad.link(&sink_pad) {
+                sink.release_request_pad(&sink_pad);
+                return Err(format!(
+                    "Failed to link video into livekitwebrtcsink: {error}"
+                ));
+            }
+            for element in &elements {
+                if let Err(error) = element.sync_state_with_parent() {
+                    let _ = output_pad.unlink(&sink_pad);
+                    sink.release_request_pad(&sink_pad);
+                    return Err(format!("Failed to start GStreamer video element: {error}"));
+                }
+            }
+
+            Ok(sink_pad)
+        })();
+        let sink_pad = match attach_result {
+            Ok(sink_pad) => sink_pad,
+            Err(error) => {
+                for element in &elements {
+                    let _ = element.set_state(gst::State::Null);
+                }
+                let _ = pipeline.remove_many(elements.iter());
+                return Err(error);
+            }
+        };
+
         Ok(Self {
             encoder,
             ceiling_kbps,
+            elements,
+            sink_pad,
             input: VideoInput {
                 appsrc,
                 input_info,
@@ -454,6 +497,53 @@ impl GstreamerEncoder {
 
     pub(crate) fn input(&self) -> VideoInput {
         self.input.clone()
+    }
+
+    pub(crate) fn detach(
+        &self,
+        pipeline: &gst::Pipeline,
+        sink: &gst::Element,
+    ) -> Result<(), String> {
+        let output_pad = self
+            .elements
+            .last()
+            .and_then(|element| element.static_pad("src"))
+            .ok_or_else(|| "GStreamer video queue has no src pad".to_string())?;
+        let (blocked_sender, blocked_receiver) = std::sync::mpsc::sync_channel(1);
+        let probe_id = output_pad
+            .add_probe(gst::PadProbeType::IDLE, move |_, _| {
+                let _ = blocked_sender.try_send(());
+                gst::PadProbeReturn::Ok
+            })
+            .ok_or_else(|| "Failed to block GStreamer video branch".to_string())?;
+        if let Err(error) = blocked_receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+            output_pad.remove_probe(probe_id);
+            return Err(format!(
+                "Timed out blocking GStreamer video branch: {error}"
+            ));
+        }
+
+        let mut failure = None;
+        for element in &self.elements {
+            if let Err(error) = element.set_state(gst::State::Null) {
+                failure.get_or_insert_with(|| {
+                    format!("Failed to stop GStreamer video element: {error}")
+                });
+            }
+        }
+        if let Err(error) = output_pad.unlink(&self.sink_pad) {
+            failure
+                .get_or_insert_with(|| format!("Failed to unlink GStreamer video branch: {error}"));
+        }
+        if let Err(error) = pipeline.remove_many(self.elements.iter()) {
+            failure.get_or_insert_with(|| {
+                format!("Failed to remove GStreamer video elements: {error}")
+            });
+        }
+        sink.release_request_pad(&self.sink_pad);
+        output_pad.remove_probe(probe_id);
+
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -471,11 +561,22 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
         "vp9" => (
             "vp9enc",
             "vavp9enc",
-            "identity",
-            gst::Caps::builder("video/x-vp9").build(),
+            "vp9parse",
+            // Both VP9 RTP payloaders assume one frame per input buffer. The
+            // parser otherwise negotiates super-frame alignment, which makes
+            // the SFU forward packets Chromium cannot assemble into frames.
+            gst::Caps::builder("video/x-vp9")
+                .field("profile", "0")
+                .field("chroma-format", "4:2:0")
+                .field("bit-depth-luma", 8_u32)
+                .field("bit-depth-chroma", 8_u32)
+                .field("codec-alpha", false)
+                .field("parsed", true)
+                .field("alignment", "frame")
+                .build(),
         ),
         "av1" => (
-            "av1enc",
+            "svtav1enc",
             "vaav1enc",
             "av1parse",
             // `rtpav1pay` will accept only parsed OBU temporal units; a bare
@@ -495,7 +596,7 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
         ),
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
-    let encoder = select_encoder(software, hardware);
+    let encoder = crate::gstreamer_publisher::selected_encoder_name(codec);
     if !crate::gstreamer_publisher::can_initialize_element(encoder) {
         return Err(format!(
             "GStreamer encoder unavailable for {codec}: {software} or {hardware}"
@@ -509,37 +610,33 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
     Ok((encoder, parser, caps))
 }
 
-fn select_encoder(software: &'static str, hardware: &'static str) -> &'static str {
-    if hardware.is_empty() {
-        return software;
-    }
-    if gst::ElementFactory::find(hardware).is_none() {
-        return software;
-    }
-    // Factory presence does not guarantee the element can actually be
-    // instantiated (missing VA display, driver without AV1 encode, etc.).
-    // Probe instantiation so AV1 does not get stuck on a non-functional
-    // `vaav1enc` when no AV1 hardware exists.
-    match gst::ElementFactory::make(hardware).build() {
-        Ok(_) => hardware,
-        Err(_) => software,
-    }
-}
-
-fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_max: u32) {
+fn configure_encoder(
+    encoder: &gst::Element,
+    codec: &str,
+    bitrate: u32,
+    ceiling_kbps: u32,
+    height: u32,
+    key_int_max: u32,
+) {
     if encoder.find_property("bitrate").is_some() {
         encoder.set_property_from_str("bitrate", &bitrate.to_string());
     } else if encoder.find_property("target-bitrate").is_some() {
         // `target-bitrate` units differ by plugin: VPx (vp8enc/vp9enc) take
-        // bits/sec, but av1enc takes *kilobits*/sec — scaling by 1000 for
-        // av1enc (8 Mbps ceiling -> 8,000,000 "kbps") makes libaom reject
-        // the input caps at set_format time (`not-negotiated`).
+        // bits/sec, but av1enc/svtav1enc take *kilobits*/sec — scaling by
+        // 1000 for those (8 Mbps ceiling -> 8,000,000 "kbps") makes the
+        // encoder reject the input caps at set_format time (`not-negotiated`).
         let value = if target_bitrate_is_kbps(encoder) {
             bitrate
         } else {
             bitrate.saturating_mul(1000).min(i32::MAX as u32)
         };
         encoder.set_property_from_str("target-bitrate", &value.to_string());
+        // SVT-AV1 exposes a `max-bitrate` hard cap (in kbps, same units as
+        // its `target-bitrate`): this is the ceiling the VBR target is derived
+        // from, so the encoder's bursts are pinned to the presenter's limit.
+        if encoder.find_property("max-bitrate").is_some() {
+            encoder.set_property_from_str("max-bitrate", &ceiling_kbps.to_string());
+        }
     }
     if encoder.find_property("key-int-max").is_some() {
         encoder.set_property_from_str("key-int-max", &key_int_max.to_string());
@@ -576,16 +673,7 @@ fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_
         if encoder.find_property("lag-in-frames").is_some() {
             encoder.set_property_from_str("lag-in-frames", "0");
         }
-        if codec == "av1" {
-            // The libaom default is good-quality mode: at 1080p it can take
-            // tens of seconds to encode the first few screen frames, leaving
-            // the LiveKit video publication empty while audio continues.
-            // Realtime mode keeps the software AV1 path usable for live
-            // screensharing; row-mt and two tile columns provide parallelism
-            // without changing the negotiated bitstream format.
-            if encoder.find_property("usage-profile").is_some() {
-                encoder.set_property_from_str("usage-profile", "realtime");
-            }
+        if codec == "vp9" {
             if encoder.find_property("cpu-used").is_some() {
                 encoder.set_property_from_str("cpu-used", "8");
             }
@@ -595,8 +683,43 @@ fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_
             if encoder.find_property("tile-columns").is_some() {
                 encoder.set_property_from_str("tile-columns", "2");
             }
+            if encoder.find_property("static-threshold").is_some() {
+                encoder.set_property_from_str("static-threshold", "100");
+            }
+        } else if codec == "av1" {
+            // SVT-AV1 (svtav1enc): the shared path above sets `target-bitrate`
+            // and the `max-bitrate` hard cap. Here we pin the quality floor and
+            // the speed/quality preset, and set the keyframe interval in frames
+            // (SVT uses `intra-period-length` instead of `keyframe-max-dist`).
+            if encoder.find_property("max-qp-allowed").is_some() {
+                encoder.set_property_from_str("max-qp-allowed", &AV1_MAX_QP_ALLOWED.to_string());
+            }
+            if encoder.find_property("preset").is_some() {
+                // Preset scales with resolution: higher resolutions need more
+                // encode parallelism to stay realtime (10 at 1080p, 11 at
+                // 1440p, 12 at 4K).
+                encoder.set_property_from_str("preset", &svt_preset_for(height).to_string());
+            }
+            if encoder.find_property("intra-period-length").is_some() {
+                encoder.set_property_from_str("intra-period-length", &key_int_max.to_string());
+            }
         }
     }
+}
+
+/// SVT-AV1 speed/quality preset for a frame height. Real-time screenshare
+/// sits in the live band (10–12): preset 10 sustains 1080p60 on modest
+/// hardware, while larger frames need the extra throughput of 11 (1440p) and
+/// 12 (4K). Below 1080p reuses preset 10 — it is comfortably real-time.
+fn svt_preset_for(height: u32) -> u32 {
+    if height >= 2160 {
+        return 12;
+    }
+    if height >= 1440 {
+        return 11;
+    }
+
+    10
 }
 
 fn make_element(name: &str) -> Result<gst::Element, String> {
@@ -606,14 +729,24 @@ fn make_element(name: &str) -> Result<gst::Element, String> {
 }
 
 /// Whether the encoder's `target-bitrate` property is in kilobits/sec.
-/// `av1enc` (libaom) documents kilobits/sec; `VPx` encoders document bits/sec.
-/// Reading the *property blurb* is fragile across versions, so discriminate
-/// on the element's factory name — the pipeline only ever instantiates
-/// `av1enc`, `vp8enc`, or `vp9enc` with this property.
+/// `av1enc` (libaom) and `svtav1enc` (SVT-AV1) document kilobits/sec; `VPx`
+/// encoders document bits/sec. Reading the *property blurb* is fragile across
+/// versions, so discriminate on the element's factory name — the pipeline only
+/// ever instantiates `svtav1enc`, `vp8enc`, or `vp9enc` with this property.
 fn target_bitrate_is_kbps(encoder: &gst::Element) -> bool {
     encoder
         .factory()
-        .is_some_and(|factory| factory.name() == "av1enc")
+        .is_some_and(|factory| factory.name() == "svtav1enc")
+}
+
+fn encoder_target_kbps(encoder: &gst::Element, ceiling_kbps: u32) -> u32 {
+    let percentage = if target_bitrate_is_kbps(encoder) {
+        AV1_TARGET_PERCENTAGE
+    } else {
+        VBR_TARGET_PERCENTAGE
+    };
+
+    vbr_target_kbps(ceiling_kbps, percentage)
 }
 
 #[allow(
@@ -729,5 +862,82 @@ mod tests {
     fn vbr_target_never_drops_below_one_kbps() {
         assert_eq!(vbr_target_kbps(1, 80), 1);
         assert_eq!(vbr_target_kbps(0, 80), 1);
+    }
+
+    #[test]
+    fn vp9_and_av1_use_software_encoders() {
+        assert_eq!(
+            crate::gstreamer_publisher::selected_encoder_name("vp9"),
+            "vp9enc"
+        );
+        assert_eq!(
+            crate::gstreamer_publisher::selected_encoder_name("av1"),
+            "svtav1enc"
+        );
+    }
+
+    #[test]
+    fn vp9_output_is_parsed_and_frame_aligned() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let (_encoder, parser, caps) = codec_pipeline("vp9")?;
+        let structure = caps
+            .structure(0)
+            .ok_or_else(|| "VP9 output caps have no structure".to_string())?;
+
+        assert_eq!(parser, "vp9parse");
+        assert_eq!(structure.get::<&str>("profile"), Ok("0"));
+        assert_eq!(structure.get::<&str>("chroma-format"), Ok("4:2:0"));
+        assert_eq!(structure.get::<u32>("bit-depth-luma"), Ok(8));
+        assert_eq!(structure.get::<u32>("bit-depth-chroma"), Ok(8));
+        assert_eq!(structure.get::<bool>("parsed"), Ok(true));
+        assert_eq!(structure.get::<&str>("alignment"), Ok("frame"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn av1_target_is_a_fraction_of_the_ceiling() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("svtav1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let ceiling_kbps = 8_000;
+        let target_kbps = encoder_target_kbps(&encoder, ceiling_kbps);
+        configure_encoder(&encoder, "av1", target_kbps, ceiling_kbps, 1080, 60);
+
+        assert_eq!(target_kbps, 6_000);
+        assert_eq!(encoder.property::<u32>("target-bitrate"), 6_000);
+        assert_eq!(encoder.property::<u32>("max-bitrate"), 8_000);
+        assert_eq!(
+            encoder.property::<u32>("max-qp-allowed"),
+            AV1_MAX_QP_ALLOWED
+        );
+        assert_eq!(encoder.property::<u32>("preset"), 10);
+        assert_eq!(encoder.property::<i32>("intra-period-length"), 60);
+
+        Ok(())
+    }
+
+    #[test]
+    fn av1_preset_scales_with_resolution() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("svtav1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let target_kbps = encoder_target_kbps(&encoder, 12_000);
+        configure_encoder(&encoder, "av1", target_kbps, 12_000, 1440, 60);
+        assert_eq!(encoder.property::<u32>("preset"), 11);
+
+        let encoder = gst::ElementFactory::make("svtav1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let target_kbps = encoder_target_kbps(&encoder, 20_000);
+        configure_encoder(&encoder, "av1", target_kbps, 20_000, 2160, 60);
+        assert_eq!(encoder.property::<u32>("preset"), 12);
+
+        Ok(())
     }
 }
