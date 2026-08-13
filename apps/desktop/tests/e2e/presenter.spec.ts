@@ -68,6 +68,7 @@ interface NativeTelemetry {
   videoBytesSent?: number;
   videoCodec?: string | null;
   encoderImplementation?: string | null;
+  timestampMs?: number;
 }
 
 interface CaptureStats {
@@ -96,6 +97,10 @@ interface PhaseResult {
   telemetryFlowing: boolean;
   /** Measured published-frame rate over the telemetry sampling window. */
   telemetryFps: number;
+  /** Measured RTP bitrate after the spectator subscribes. */
+  senderBitrateBps: number;
+  senderBitrateSampleMs: number;
+  postSubscriptionTelemetryReady: boolean;
   errors: string[];
 }
 
@@ -107,6 +112,8 @@ const spectatorReadyFlagPath = process.env.E2E_SPECTATOR_READY_FLAG;
 const websiteUrl = process.env.E2E_WEBSITE_URL;
 const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
 const codec = process.env.E2E_CODEC ?? 'h264';
+const expectedFps = Number(process.env.E2E_EXPECTED_FPS ?? 60);
+const expectedBitrate = Number(process.env.E2E_EXPECTED_BITRATE ?? 20_000_000);
 if (!phaseJsonPath || !releaseFlagPath || !websiteUrl) {
   throw new Error('E2E_PHASE_JSON, E2E_RELEASE_FLAG and E2E_WEBSITE_URL must be set');
 }
@@ -133,6 +140,9 @@ const phase: PhaseResult = {
   captureFramesPushed: 0,
   telemetryFlowing: false,
   telemetryFps: 0,
+  senderBitrateBps: 0,
+  senderBitrateSampleMs: 0,
+  postSubscriptionTelemetryReady: false,
   errors: [],
 };
 
@@ -320,11 +330,38 @@ async function stopShareForSpectatorCheck(): Promise<void> {
 }
 
 async function verifyPostSubscriptionTelemetry(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, TELEMETRY_SAMPLE_GAP_MS));
-  const snapshot = await snapshotPresenterTelemetry();
-  phase.videoBytesSent = snapshot.telemetry.videoBytesSent ?? 0;
-  writePhase();
+  const start = await snapshotPresenterTelemetry();
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+  const end = await snapshotPresenterTelemetry();
+  const startBytes = start.telemetry.videoBytesSent ?? 0;
+  const endBytes = end.telemetry.videoBytesSent ?? 0;
+  const startTimestamp = start.telemetry.timestampMs ?? 0;
+  const endTimestamp = end.telemetry.timestampMs ?? 0;
+  const bytesDelta = endBytes - startBytes;
+  const sampleMs = endTimestamp - startTimestamp;
+
+  phase.videoBytesSent = endBytes;
+  phase.senderBitrateSampleMs = sampleMs;
+  if (bytesDelta > 0 && sampleMs > 0) {
+    phase.senderBitrateBps = (bytesDelta * 8 * 1000) / sampleMs;
+  }
   assert(phase.videoBytesSent > 0, 'Presenter RTP bytes stayed at zero after the spectator subscribed');
+  assert(
+    phase.senderBitrateBps > 0,
+    `Presenter RTP bitrate could not be measured (bytesDelta=${bytesDelta}, sampleMs=${sampleMs})`,
+  );
+  // The configured value is a VBR ceiling, and `videoBytesSent` now sums the
+  // primary and RTX outbound streams. On a loss-free localhost run RTX stays
+  // ~0, so the 25% tolerance absorbs ordinary VBR bursts while still catching
+  // the pathological multi-megabyte-frame overshoot this check exists for.
+  // The harness only writes the stop flag after `postSubscriptionTelemetryReady`
+  // flips, so this 5 s window can never straddle the stop round-trip.
+  const maximumMeasuredBitrate = expectedBitrate * 1.25;
+  assert(
+    phase.senderBitrateBps <= maximumMeasuredBitrate,
+    `Presenter RTP bitrate ${(phase.senderBitrateBps / 1_000_000).toFixed(2)} Mbps exceeded the configured ` +
+      `${(expectedBitrate / 1_000_000).toFixed(2)} Mbps limit plus 25% VBR tolerance`,
+  );
 
   let uiBitrate = '—';
   for (let attempt = 0; attempt < 12; attempt++) {
@@ -340,8 +377,12 @@ async function verifyPostSubscriptionTelemetry(): Promise<void> {
     Number.parseFloat(uiBitrate) > 0,
     `Telemetry bar never showed live video bitrate after subscription (stuck at "${uiBitrate}")`,
   );
+  phase.postSubscriptionTelemetryReady = true;
   writePhase();
-  console.log(`[e2e] post-subscription telemetry: bytesSent=${phase.videoBytesSent}, bitrate="${uiBitrate}"`);
+  console.log(
+    `[e2e] post-subscription telemetry: bytesSent=${phase.videoBytesSent}, ` +
+      `measuredBitrate=${(phase.senderBitrateBps / 1_000_000).toFixed(2)}Mbps, uiBitrate="${uiBitrate}"`,
+  );
 }
 
 describe('Slopcast presenter phase (Tauri)', () => {
@@ -449,9 +490,10 @@ describe('Slopcast presenter phase (Tauri)', () => {
     );
 
     assert(phase.telemetryFlowing, 'Presenter video telemetry did not advance (frames/capture stalled)');
+    const minimumFps = Math.floor(expectedFps * 0.8);
     assert(
-      phase.telemetryFps >= 15,
-      `Presenter stream ran at ${phase.telemetryFps} fps — encoder collapsed or crippled layer (need >= 15)`,
+      phase.telemetryFps >= minimumFps,
+      `Presenter stream ran at ${phase.telemetryFps} fps, expected at least ${minimumFps} fps for a configured ${expectedFps} fps stream`,
     );
     assert(phase.previewFramesSent > 0, 'No preview frames were emitted (previewFramesSent stayed at 0)');
 

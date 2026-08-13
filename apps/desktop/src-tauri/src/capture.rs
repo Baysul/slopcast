@@ -212,7 +212,11 @@ pub async fn start_native_capture(
         if let Err(e) = native_livekit::start_video_track(config.clone()) {
             return CaptureStartResult::failed(e);
         }
-        start_capture(&config, source)
+        let result = start_capture(&config, source);
+        if !result.ok {
+            let _ = native_livekit::stop_video_track();
+        }
+        result
     })
     .await
     .unwrap_or_else(|e| CaptureStartResult::failed(format!("start capture task failed: {e}")))
@@ -239,19 +243,43 @@ pub async fn update_native_video(config: CaptureConfig) -> Result<bool, String> 
 }
 
 /// Stops the video track, desktop capture and audio capture.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error when any active capture component cannot be stopped.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn stop_native_capture() -> bool {
-    let _ = native_livekit::stop_video_track();
-    let _ = native_livekit::stop_desktop_capture();
-    native_rust::stop_audio_capture().unwrap_or(false)
+pub async fn stop_native_capture() -> Result<(), String> {
+    let video_result = native_livekit::stop_video_track();
+    let capture_stopped = native_livekit::stop_desktop_capture();
+    let audio_result = native_rust::stop_audio_capture();
+    video_result?;
+    if !capture_stopped {
+        return Err("Failed to stop desktop capture".into());
+    }
+    if !audio_result? {
+        return Err("Failed to stop audio capture".into());
+    }
+
+    Ok(())
 }
 
-/// Stops only the desktop capture session.
-#[must_use]
+/// Stops and unpublishes only the video share, preserving room audio and the
+/// `LiveKit` connection.
+///
+/// # Errors
+///
+/// Returns an error when the video publication or desktop capturer cannot be
+/// stopped.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn stop_video_capture() -> bool {
-    native_livekit::stop_desktop_capture()
+pub async fn stop_video_capture() -> Result<(), String> {
+    let track_result = native_livekit::stop_video_track();
+    let capture_stopped = native_livekit::stop_desktop_capture();
+    track_result?;
+    if !capture_stopped {
+        return Err("Failed to stop desktop capture".into());
+    }
+
+    Ok(())
 }
 
 /// Returns `true` while the published video track is active.
@@ -383,10 +411,14 @@ pub async fn go_live(
             return native_livekit::start_video_track(config);
         }
         native_livekit::start_video_track(config.clone())?;
-        if e2e_capture_mode() {
-            native_livekit::start_synthetic_capture(&config)?;
+        let capture_result = if e2e_capture_mode() {
+            native_livekit::start_synthetic_capture(&config).map(|_| ())
         } else {
-            start_real_capture(&config, source)?;
+            start_real_capture(&config, source).map(|_| ())
+        };
+        if let Err(error) = capture_result {
+            let _ = native_livekit::stop_video_track();
+            return Err(error);
         }
         Ok(())
     })

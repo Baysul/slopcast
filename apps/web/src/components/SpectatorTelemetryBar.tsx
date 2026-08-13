@@ -48,8 +48,14 @@ export const SpectatorTelemetryBar: React.FC<{ telemetry: SpectatorTelemetry }> 
 
       <TelemetryCell
         label="FPS"
-        value={telemetry.frameRate != null ? `${Math.round(telemetry.frameRate)}` : '\u2014'}
-        sub={telemetry.videoCodec ?? undefined}
+        value={
+          <span data-testid="spectator-telemetry-fps">
+            {telemetry.frameRate != null ? `${Math.round(telemetry.frameRate)}` : '\u2014'}
+          </span>
+        }
+        sub={
+          telemetry.videoCodec ? <span data-testid="spectator-telemetry-codec">{telemetry.videoCodec}</span> : undefined
+        }
         degrade={telemetry.quality === 'poor'}
       />
 

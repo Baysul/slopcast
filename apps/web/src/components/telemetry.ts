@@ -44,6 +44,7 @@ interface RTCStatLike {
   frameHeight?: number;
   mimeType?: string;
   implementation?: string;
+  decoderImplementation?: string;
   freezeCount?: number;
   totalFreezesDuration?: number;
   pauseCount?: number;
@@ -234,11 +235,8 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
       video.hasVideo = true;
       foldInboundVideo(video, report, stats, prev);
-    }
-
-    if (report.type === 'codec' && report.mimeType?.toUpperCase()?.includes('VIDEO')) {
-      if (report.implementation) {
-        decoderImplementation = report.implementation;
+      if (report.decoderImplementation) {
+        decoderImplementation = report.decoderImplementation;
       }
     }
   }

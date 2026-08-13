@@ -31,12 +31,18 @@ import { RoomServiceClient } from 'livekit-server-sdk';
 
 import type { Browser, Page } from 'playwright';
 
-// Optional overrides to reproduce a specific presenter config in synthetic
-// mode (e.g. E2E_FPS=60 E2E_BITRATE_LIMIT=80000000 E2E_RESOLUTION=1080p);
-// defaults keep the standard 720p@30, 8 Mbps passes.
-const passFps = Number(process.env.E2E_FPS ?? 30);
-const passBitrate = Number(process.env.E2E_BITRATE_LIMIT ?? 8_000_000);
-const passResolution = (process.env.E2E_RESOLUTION ?? '720p') as keyof typeof RESOLUTION_DIMENSIONS;
+// Optional overrides reproduce a specific presenter config in synthetic mode;
+// the baseline stays at the product's 1080p60, 20 Mbps defaults so codec tests
+// cannot pass only at a less demanding resolution or cadence.
+const passFps = Number(process.env.E2E_FPS ?? 60);
+const passBitrate = Number(process.env.E2E_BITRATE_LIMIT ?? 20_000_000);
+const passResolution = (process.env.E2E_RESOLUTION ?? '1080p') as keyof typeof RESOLUTION_DIMENSIONS;
+
+// AV1 sustains 1080p60 at a much lower ceiling than H.264/VPx (the codec is
+// ~2x more efficient). A 20 Mbps AV1 pass would never be the product's real
+// profile, so the AV1 pass pins its own ceiling — the software-AV1 sweet spot
+// the auto-bitrate algorithm derives — instead of the shared default.
+const passBitrateFor = (codec: string): number => (codec === 'av1' ? 8_000_000 : passBitrate);
 
 /// GPU probe output (D5): dlopen'd EGL probe report from `probe_gpu_info`.
 interface GpuInfo {
@@ -91,6 +97,9 @@ interface PresenterPhase {
   telemetryFlowing: boolean;
   /** Measured published-frame rate over the telemetry sampling window. */
   telemetryFps: number;
+  senderBitrateBps: number;
+  senderBitrateSampleMs: number;
+  postSubscriptionTelemetryReady: boolean;
   errors: string[];
 }
 
@@ -111,6 +120,9 @@ interface TestResult {
   spectatorVideoPlaying: boolean;
   spectatorVideoWidth: number;
   spectatorVideoHeight: number;
+  spectatorCodec: string | null;
+  /** Median receiver `framesDecoded` rate across settled telemetry windows. */
+  spectatorDecodedFps: number;
   /** Continuous-frame check: two distinct requestVideoFrameCallback frames. */
   spectatorFramesFlowing: boolean;
   /** Pixel check: the decoded frame is not uniformly black. */
@@ -124,6 +136,7 @@ interface TestResult {
   presenterVideoBytesSent: number;
   /** Measured published-frame rate over the telemetry sampling window. */
   presenterTelemetryFps: number;
+  presenterBitrateBps: number;
   captureFramesPushed: number;
   /** §9.1 preview emitter counter — proves JPEG preview frames flowed. */
   previewFramesSent: number;
@@ -140,6 +153,12 @@ interface TestResult {
       errors: string[];
       encoderImplementation: string | null;
       videoCodecReported: string | null;
+      presenterBitrateBps: number;
+      presenterTelemetryFps: number;
+      spectatorDecodedFps: number;
+      spectatorVideoWidth: number;
+      spectatorVideoHeight: number;
+      spectatorCodec: string | null;
     }
   >;
   durationMs: number;
@@ -521,10 +540,13 @@ function writePresenterRelease(): void {
 }
 
 async function waitForProcessExit(proc: ChildProcess, timeoutMs: number): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  const outputClosed = [proc.stdout, proc.stderr].every(
+    (stream) => stream == null || stream.readableEnded || stream.destroyed,
+  );
+  if ((proc.exitCode !== null || proc.signalCode !== null) && outputClosed) return;
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => resolve(), timeoutMs);
-    proc.once('exit', () => {
+    proc.once('close', () => {
       clearTimeout(timer);
       resolve();
     });
@@ -564,6 +586,7 @@ async function runPresenterPhase(
   result: TestResult,
   codec: string,
   captureMode: string,
+  ownProcess: (process: ChildProcess) => void,
 ): Promise<PresenterPhaseResult> {
   log('TEST', `=== Step 2: Presenter Automation (WebdriverIO + Tauri, codec=${codec}) ===`);
 
@@ -607,11 +630,14 @@ async function runPresenterPhase(
       E2E_SPECTATOR_READY_FLAG: PRESENTER_SPECTATOR_READY_FLAG,
       E2E_WEBSITE_URL: config.websiteUrl,
       E2E_CODEC: codec,
+      E2E_EXPECTED_FPS: String(passFps),
+      E2E_EXPECTED_BITRATE: String(passBitrateFor(codec)),
       E2E_CAPTURE: captureMode,
       SLOPCAST_E2E_CAPTURE: captureMode === 'portal' ? '' : 'synthetic',
       FORCE_COLOR: '0',
     },
   });
+  ownProcess(wdioProc);
 
   // The wdio output carries the tauri-service's forwarded backend logs and
   // the spec's own diagnostics — the renderer console is not forwarded by
@@ -701,6 +727,7 @@ async function waitForSpectatorConnection(page: Page, result: TestResult): Promi
         }
         return false;
       },
+      undefined,
       { timeout: SPECTATOR_CONNECT_TIMEOUT_MS },
     );
     log('SPECTATOR', 'Connection status badge visible');
@@ -711,7 +738,12 @@ async function waitForSpectatorConnection(page: Page, result: TestResult): Promi
   }
 }
 
-async function waitForSpectatorVideo(page: Page, result: TestResult, captureMode: string): Promise<void> {
+async function waitForSpectatorVideo(
+  page: Page,
+  result: TestResult,
+  codec: string,
+  captureMode: string,
+): Promise<void> {
   try {
     await page.waitForSelector('video', { state: 'attached', timeout: STREAM_TIMEOUT_MS });
 
@@ -726,6 +758,7 @@ async function waitForSpectatorVideo(page: Page, result: TestResult, captureMode
         }
         return false;
       },
+      undefined,
       { timeout: STREAM_TIMEOUT_MS },
     );
 
@@ -773,6 +806,7 @@ async function waitForSpectatorVideo(page: Page, result: TestResult, captureMode
     }
 
     await checkSpectatorFrameFlow(page, result);
+    await checkSpectatorDecodedFps(page, result, codec);
   } catch (err) {
     log('SPECTATOR', `Video element never appeared: ${err}`);
     result.errors.push('Spectator video element never appeared');
@@ -814,8 +848,14 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
       }
       // Two consecutive decoded frames: the first could be a lone keepalive,
       // so a second callback proves the stream keeps flowing.
-      await new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve()));
-      await new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve()));
+      await Promise.race([
+        new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve())),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('first video frame timed out')), 5000)),
+      ]);
+      await Promise.race([
+        new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve())),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('second video frame timed out')), 5000)),
+      ]);
 
       const canvas = document.createElement('canvas');
       canvas.width = 64;
@@ -847,6 +887,61 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
     log('SPECTATOR', `Frame flow check failed: ${err}`);
     result.errors.push(`Spectator frame flow check failed: ${String(err)}`);
   }
+}
+
+async function checkSpectatorDecodedFps(page: Page, result: TestResult, codec: string): Promise<void> {
+  try {
+    const fpsValue = page.locator('[data-testid="spectator-telemetry-fps"]');
+    await page.waitForFunction(
+      () => {
+        const text = document.querySelector('[data-testid="spectator-telemetry-fps"]')?.textContent;
+        return text != null && Number.parseFloat(text) > 0;
+      },
+      undefined,
+      { timeout: 8000 },
+    );
+    const spectatorCodec = (await page.locator('[data-testid="spectator-telemetry-codec"]').textContent())?.trim();
+    const expectedCodec = codecLabelForTest(codec);
+    result.spectatorCodec = spectatorCodec || null;
+    if (!spectatorCodec || spectatorCodec.toUpperCase() !== expectedCodec.toUpperCase()) {
+      result.errors.push(
+        `Spectator codec mismatch: requested ${expectedCodec}, receiver reported ${spectatorCodec || 'none'}`,
+      );
+    }
+
+    const samples: number[] = [];
+    for (let sampleIndex = 0; sampleIndex < 3; sampleIndex++) {
+      if (sampleIndex > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2200));
+      }
+      const fps = Number.parseFloat((await fpsValue.textContent()) ?? '');
+      if (Number.isFinite(fps) && fps > 0) samples.push(fps);
+    }
+    if (samples.length !== 3) {
+      throw new Error(`received only ${samples.length} valid decoded-FPS telemetry sample(s)`);
+    }
+
+    samples.sort((left, right) => left - right);
+    result.spectatorDecodedFps = samples[1] ?? 0;
+    const minimumFps = Math.floor(passFps * 0.8);
+    if (result.spectatorDecodedFps < minimumFps) {
+      result.errors.push(
+        `Spectator decoded ${result.spectatorDecodedFps.toFixed(1)} fps, expected at least ${minimumFps} fps for a configured ${passFps} fps stream`,
+      );
+    }
+    log(
+      'SPECTATOR',
+      `Decoded FPS samples=${samples.join(',')} median=${result.spectatorDecodedFps.toFixed(1)} ` +
+        `minimum=${minimumFps}`,
+    );
+  } catch (err) {
+    log('SPECTATOR', `Decoded FPS check failed: ${err}`);
+    result.errors.push(`Spectator decoded FPS check failed: ${String(err)}`);
+  }
+}
+
+function codecLabelForTest(codec: string): string {
+  return codec.replace(/^H264$/i, 'H.264');
 }
 
 async function checkDecoderStall(page: Page, result: TestResult): Promise<void> {
@@ -905,6 +1000,7 @@ async function runPresenterStopRoundTrip(page: Page, result: TestResult): Promis
         }
         return false;
       },
+      undefined,
       { timeout: STREAM_END_TIMEOUT_MS },
     );
     result.spectatorNotifiedOfStop = true;
@@ -915,7 +1011,12 @@ async function runPresenterStopRoundTrip(page: Page, result: TestResult): Promis
   }
 }
 
-async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, captureMode: string): Promise<Browser> {
+async function runSpectatorPhase(
+  logEntries: LogEntry[],
+  result: TestResult,
+  codec: string,
+  captureMode: string,
+): Promise<Browser> {
   log('TEST', '=== Step 3: Spectator Automation (Chromium) ===');
 
   const { chromium } = await import('playwright');
@@ -929,84 +1030,96 @@ async function runSpectatorPhase(logEntries: LogEntry[], result: TestResult, cap
       '--disable-setuid-sandbox',
     ],
   });
+  let shouldCloseBrowser = true;
 
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 },
-  });
-  const spectatorPage = await context.newPage();
-
-  spectatorPage.on('console', (msg) => {
-    logEntries.push({
-      source: 'spectator',
-      message: `[${msg.type()}] ${msg.text()}`,
-      timestamp: Date.now(),
+  try {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
     });
-  });
+    const spectatorPage = await context.newPage();
 
-  spectatorPage.on('pageerror', (err) => {
-    logEntries.push({
-      source: 'spectator',
-      message: `UNCAUGHT: ${err.message}`,
-      timestamp: Date.now(),
+    spectatorPage.on('console', (msg) => {
+      logEntries.push({
+        source: 'spectator',
+        message: `[${msg.type()}] ${msg.text()}`,
+        timestamp: Date.now(),
+      });
     });
-  });
 
-  log('SPECTATOR', `Navigating to ${result.shareUrl}`);
-  // `networkidle` never settles with an active LiveKit WebSocket; wait for
-  // the document and then poll for the connection state explicitly.
-  await spectatorPage.goto(result.shareUrl, { waitUntil: 'domcontentloaded', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
+    spectatorPage.on('pageerror', (err) => {
+      logEntries.push({
+        source: 'spectator',
+        message: `UNCAUGHT: ${err.message}`,
+        timestamp: Date.now(),
+      });
+    });
 
-  await waitForSpectatorConnection(spectatorPage, result);
-  await waitForSpectatorVideo(spectatorPage, result, captureMode);
+    log('SPECTATOR', `Navigating to ${result.shareUrl}`);
+    // `networkidle` never settles with an active LiveKit WebSocket; wait for
+    // the document and then poll for the connection state explicitly.
+    await spectatorPage.goto(result.shareUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: SPECTATOR_CONNECT_TIMEOUT_MS,
+    });
 
-  // Additional stability wait to let stream settle.
-  await new Promise((r) => setTimeout(r, 3000));
+    await waitForSpectatorConnection(spectatorPage, result);
+    await waitForSpectatorVideo(spectatorPage, result, codec, captureMode);
 
-  await checkDecoderStall(spectatorPage, result);
+    // Additional stability wait to let stream settle.
+    await new Promise((r) => setTimeout(r, 3000));
 
-  writeFileSync(PRESENTER_SPECTATOR_READY_FLAG, 'ready');
-  const telemetryDeadline = Date.now() + 20_000;
-  while (Date.now() < telemetryDeadline) {
-    let phase: PresenterPhase;
-    try {
-      phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
-    } catch {
-      // The presenter rewrites this file in place; retry a partial read.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      continue;
+    await checkDecoderStall(spectatorPage, result);
+
+    writeFileSync(PRESENTER_SPECTATOR_READY_FLAG, 'ready');
+    const telemetryDeadline = Date.now() + 20_000;
+    while (Date.now() < telemetryDeadline) {
+      let phase: PresenterPhase;
+      try {
+        phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
+      } catch {
+        // The presenter rewrites this file in place; retry a partial read.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
+      }
+      if (phase.errors.length > 0) {
+        result.errors.push(...phase.errors.map((error) => `Presenter post-subscription telemetry: ${error}`));
+        break;
+      }
+      if (phase.postSubscriptionTelemetryReady) {
+        result.presenterVideoBytesSent = phase.videoBytesSent;
+        result.presenterBitrateBps = phase.senderBitrateBps;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    if (phase.errors.length > 0) {
-      result.errors.push(...phase.errors.map((error) => `Presenter post-subscription telemetry: ${error}`));
-      break;
+    if (result.presenterVideoBytesSent <= 0) {
+      result.errors.push('Presenter telemetry reported no RTP bytes after the spectator subscribed');
     }
-    if (phase.videoBytesSent > 0) {
-      result.presenterVideoBytesSent = phase.videoBytesSent;
-      break;
+
+    await runPresenterStopRoundTrip(spectatorPage, result);
+
+    shouldCloseBrowser = false;
+    return browser;
+  } finally {
+    if (shouldCloseBrowser) {
+      await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  if (result.presenterVideoBytesSent <= 0) {
-    result.errors.push('Presenter telemetry reported no RTP bytes after the spectator subscribed');
-  }
-
-  await runPresenterStopRoundTrip(spectatorPage, result);
-
-  return browser;
 }
 
-function validateDiagnostics(result: TestResult, logEntries: LogEntry[]): void {
+function validateDiagnostics(result: TestResult, passLogEntries: LogEntry[]): void {
   log('TEST', '=== Step 4: Diagnostic Validation ===');
 
   // Validate desktop logs.
-  const desktopLogs = logEntries.filter((e) => e.source === 'desktop-main' || e.source === 'desktop-renderer');
+  const desktopLogs = passLogEntries.filter((e) => e.source === 'desktop-main' || e.source === 'desktop-renderer');
   const desktopErrors = validateLogs(desktopLogs, 'Desktop');
-  result.consoleErrors = desktopErrors;
+  result.consoleErrors.push(...desktopErrors);
   if (desktopErrors.length > 0) {
     result.errors.push(`${desktopErrors.length} suspicious desktop console log entry(s)`);
   }
 
   // Validate spectator logs.
-  const spectatorLogs = logEntries.filter((e) => e.source === 'spectator');
+  const spectatorLogs = passLogEntries.filter((e) => e.source === 'spectator');
   const spectatorErrors = validateLogs(spectatorLogs, 'Spectator');
   result.consoleErrors.push(...spectatorErrors);
   if (spectatorErrors.length > 0) {
@@ -1100,6 +1213,8 @@ async function runTest(): Promise<TestResult> {
     spectatorVideoPlaying: false,
     spectatorVideoWidth: 0,
     spectatorVideoHeight: 0,
+    spectatorCodec: null,
+    spectatorDecodedFps: 0,
     spectatorFramesFlowing: false,
     spectatorFrameHasContent: false,
     spectatorNotifiedOfStop: false,
@@ -1107,6 +1222,7 @@ async function runTest(): Promise<TestResult> {
     presenterVideoFramesEncoded: 0,
     presenterVideoBytesSent: 0,
     presenterTelemetryFps: 0,
+    presenterBitrateBps: 0,
     captureFramesPushed: 0,
     previewFramesSent: 0,
     videoCodecReported: null,
@@ -1133,8 +1249,7 @@ async function runTest(): Promise<TestResult> {
   // requirement — the app feeds a test pattern through the real publish path.
   // Portal mode keeps the manual picker flow for humans.
   const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
-  let defaultCodecs = 'h264,vp8,vp9,av1';
-  if (process.platform === 'linux') defaultCodecs = 'h264';
+  const defaultCodecs = 'h264,vp8,vp9,av1';
   const codecs = (process.env.E2E_CODECS ?? defaultCodecs)
     .split(',')
     .map((c) => c.trim())
@@ -1149,16 +1264,19 @@ async function runTest(): Promise<TestResult> {
   const streamSettingsPath = path.join(OUTPUT_DIR, 'e2e-userdata', 'slopcast', 'stream-settings.json');
   const writeStreamSettingsForPass = (codec: string): void => {
     if (captureMode === 'portal') return;
+    const bitrateLimit = passBitrateFor(codec);
     mkdirSync(path.dirname(streamSettingsPath), { recursive: true });
     writeFileSync(
       streamSettingsPath,
       JSON.stringify(
         {
           fps: passFps,
-          bitrateLimit: passBitrate,
+          bitrateLimit,
           videoCodec: codec,
           resolution: passResolution,
           apiEndpoint: 'http://localhost:3001',
+          autoBitrate: false,
+          motionMode: 'static',
         },
         null,
         2,
@@ -1166,7 +1284,7 @@ async function runTest(): Promise<TestResult> {
     );
     log(
       'CONFIG',
-      `Wrote stream settings for codec ${codec}: ${passResolution}@${passFps}, ${Math.round(passBitrate / 1_000_000)} Mbps`,
+      `Wrote stream settings for codec ${codec}: ${passResolution}@${passFps}, ${Math.round(bitrateLimit / 1_000_000)} Mbps`,
     );
   };
 
@@ -1199,38 +1317,66 @@ async function runTest(): Promise<TestResult> {
   /// the remaining codecs still run.
   const runCodecPass = async (codec: string): Promise<void> => {
     const errorsBefore = result.errors.length;
+    const logsBefore = logEntries.length;
+    result.roomCode = '';
+    result.shareUrl = '';
+    result.gpuReport = null;
+    result.spectatorConnected = false;
+    result.spectatorVideoReceived = false;
+    result.spectatorVideoPlaying = false;
+    result.spectatorFramesFlowing = false;
+    result.spectatorFrameHasContent = false;
+    result.spectatorNotifiedOfStop = false;
+    result.presenterVideoFlowing = false;
+    result.presenterVideoFramesEncoded = 0;
+    result.presenterVideoBytesSent = 0;
+    result.presenterBitrateBps = 0;
+    result.presenterTelemetryFps = 0;
+    result.captureFramesPushed = 0;
+    result.previewFramesSent = 0;
+    result.videoCodecReported = null;
+    result.encoderImplementation = null;
+    result.decoderStallDetected = false;
+    result.spectatorDecodedFps = 0;
+    result.spectatorVideoWidth = 0;
+    result.spectatorVideoHeight = 0;
+    result.spectatorCodec = null;
     writeStreamSettingsForPass(codec);
     log('TEST', `=== Pass: codec=${codec} (${captureMode} capture) ===`);
+    let fatalError: string | null = null;
     try {
-      const presenter = await runPresenterPhase(config, logEntries, result, codec, captureMode);
-      wdioProc = presenter.wdioProc;
+      await runPresenterPhase(config, logEntries, result, codec, captureMode, (process) => {
+        wdioProc = process;
+      });
 
       await logRoomPublications(config, result.roomCode);
 
-      browser = await runSpectatorPhase(logEntries, result, captureMode);
-
-      validateDiagnostics(result, logEntries);
-
-      const passErrors = result.errors.slice(errorsBefore);
-      result.codecResults[codec] = {
-        passed: passErrors.length === 0,
-        errors: passErrors,
-        encoderImplementation: result.encoderImplementation ?? null,
-        videoCodecReported: result.videoCodecReported ?? null,
-      };
-      log('TEST', `Pass codec=${codec}: ${passErrors.length === 0 ? 'PASSED' : 'FAILED'}`);
+      browser = await runSpectatorPhase(logEntries, result, codec, captureMode);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log('TEST', `Pass codec=${codec}: FATAL ${message}`);
-      result.errors.push(`[${codec}] ${message}`);
-      result.codecResults[codec] = {
-        passed: false,
-        errors: [message],
-        encoderImplementation: null,
-        videoCodecReported: null,
-      };
+      fatalError = err instanceof Error ? err.message : String(err);
+      log('TEST', `Pass codec=${codec}: FATAL ${fatalError}`);
+      result.errors.push(`[${codec}] ${fatalError}`);
+    } finally {
+      await releasePresenterSession();
     }
-    await releasePresenterSession();
+
+    if (fatalError == null) {
+      validateDiagnostics(result, logEntries.slice(logsBefore));
+    }
+    const passErrors = result.errors.slice(errorsBefore);
+    result.codecResults[codec] = {
+      passed: passErrors.length === 0,
+      errors: passErrors,
+      encoderImplementation: result.encoderImplementation ?? null,
+      videoCodecReported: result.videoCodecReported ?? null,
+      presenterBitrateBps: result.presenterBitrateBps,
+      presenterTelemetryFps: result.presenterTelemetryFps,
+      spectatorDecodedFps: result.spectatorDecodedFps,
+      spectatorVideoWidth: result.spectatorVideoWidth,
+      spectatorVideoHeight: result.spectatorVideoHeight,
+      spectatorCodec: result.spectatorCodec,
+    };
+    log('TEST', `Pass codec=${codec}: ${fatalError == null && passErrors.length === 0 ? 'PASSED' : 'FAILED'}`);
   };
 
   try {
@@ -1323,7 +1469,9 @@ function printSummary(result: TestResult): void {
   log('SUMMARY', `Video Playing:   ${result.spectatorVideoPlaying}`);
   log('SUMMARY', `Stop Notified:   ${result.spectatorNotifiedOfStop}`);
   log('SUMMARY', `Video Size:      ${result.spectatorVideoWidth}x${result.spectatorVideoHeight}`);
+  log('SUMMARY', `Spectator FPS:   ${result.spectatorDecodedFps.toFixed(1)}`);
   log('SUMMARY', `Presenter FPS:   ${result.presenterTelemetryFps}`);
+  log('SUMMARY', `Presenter Mbps:  ${(result.presenterBitrateBps / 1_000_000).toFixed(2)}`);
   log('SUMMARY', `Decoder Stall:   ${result.decoderStallDetected}`);
   log('SUMMARY', `GPU:             ${result.gpuReport ? 'Probed' : 'Missing'}`);
   log('SUMMARY', `Preview Frames:  ${result.previewFramesSent}`);

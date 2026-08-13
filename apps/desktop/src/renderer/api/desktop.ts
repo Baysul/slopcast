@@ -121,8 +121,8 @@ export const desktopApi = {
   getNativeSupportedCodecs: (): Promise<NativeCodecInfo[]> => invokeOr('get_native_supported_codecs', undefined, []),
   updateNativeVideo: (config: DesktopCaptureConfig): Promise<boolean> =>
     invokeOr('update_native_video', { config }, false),
-  stopNativeCapture: (): Promise<boolean> => invokeOr('stop_native_capture', undefined, false),
-  stopVideoCapture: (): Promise<boolean> => invokeOr('stop_video_capture', undefined, false),
+  stopNativeCapture: (): Promise<boolean> => invokeOk('stop_native_capture', undefined),
+  stopVideoCapture: (): Promise<boolean> => invokeOk('stop_video_capture', undefined),
   isNativeCaptureActive: (): Promise<boolean> => invokeOr('is_native_capture_active', undefined, false),
   getSpectatorCount: (): Promise<number> => invokeOr('get_spectator_count', undefined, 0),
   getNativeTelemetry: (): Promise<NativeTelemetry | null> => invokeOr('get_native_telemetry', undefined, null),
@@ -163,8 +163,7 @@ export const desktopApi = {
   clearPreviewViewport: (): Promise<boolean> => invokeOk('clear_preview_viewport', undefined),
   onAudioWave: (callback: (waves: AudioAppWave[]) => void): Promise<UnlistenFn> =>
     subscribe<AudioAppWave[]>('audio-wave-update', callback),
-  // Fired when the portal closes the ScreenCast session — the presenter
-  // closed the captured window/app, so the backend ended the share. The
-  // renderer tears the UI down (same path as the Stop button).
+  // Fired when the portal closes the ScreenCast session. The renderer stops
+  // only video so room signaling and room-lifetime audio remain connected.
   onCaptureEnded: (callback: () => void): Promise<UnlistenFn> => subscribe<null>('capture-ended', () => callback()),
 };

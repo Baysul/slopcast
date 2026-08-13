@@ -117,11 +117,6 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
           <div className="flex items-center justify-between">
             <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
               Window Audio Capture
-              {autoDetectedApp && (
-                <span className="text-xs font-normal text-safelight bg-safelight-glow px-2 py-1 rounded-full border border-safelight/30">
-                  Auto ✓
-                </span>
-              )}
             </CardTitle>
             {onRefresh && (
               <Button

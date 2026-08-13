@@ -136,20 +136,31 @@ const attachExistingTracks = (
 };
 
 const firstVideoReceiver = (room: Room): RTCRtpReceiver | undefined => {
-  const videoPub = room.remoteParticipants.values().next().value?.videoTrackPublications?.values().next().value;
-  const videoTrack = videoPub?.track;
-  return (videoTrack as { receiver?: RTCRtpReceiver } | undefined)?.receiver;
+  for (const participant of room.remoteParticipants.values()) {
+    for (const publication of participant.videoTrackPublications.values()) {
+      const receiver = (publication.track as { receiver?: RTCRtpReceiver } | undefined)?.receiver;
+      if (receiver) return receiver;
+    }
+  }
+  return undefined;
 };
 
 interface VideoStatSnapshot {
   packetsReceived: number;
+  framesReceived: number;
   framesDecoded: number;
   codecMime: string | null;
   decoderImpl: string | null;
 }
 
 const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapshot> => {
-  const empty: VideoStatSnapshot = { packetsReceived: 0, framesDecoded: 0, codecMime: null, decoderImpl: null };
+  const empty: VideoStatSnapshot = {
+    packetsReceived: 0,
+    framesReceived: 0,
+    framesDecoded: 0,
+    codecMime: null,
+    decoderImpl: null,
+  };
   let stats: RTCStatsReport;
   try {
     stats = await receiver.getStats();
@@ -163,18 +174,21 @@ const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapsh
     const report = reportRaw as {
       type: string;
       kind?: string;
+      codecId?: string;
       packetsReceived?: number;
+      framesReceived?: number;
       framesDecoded?: number;
-      mimeType?: string;
-      implementation?: string;
+      decoderImplementation?: string;
     };
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
       snapshot.packetsReceived = report.packetsReceived ?? 0;
+      snapshot.framesReceived = report.framesReceived ?? 0;
       snapshot.framesDecoded = report.framesDecoded ?? 0;
-    }
-    if (report.type === 'codec' && report.mimeType?.toUpperCase()?.includes('VIDEO')) {
-      snapshot.codecMime = report.mimeType ?? null;
-      snapshot.decoderImpl = report.implementation ?? null;
+      snapshot.decoderImpl = report.decoderImplementation ?? null;
+      if (report.codecId) {
+        const codec = stats.get(report.codecId) as { mimeType?: string } | undefined;
+        snapshot.codecMime = codec?.mimeType ?? null;
+      }
     }
   }
   return snapshot;
@@ -191,7 +205,8 @@ const evaluateStall = (
     if (stallStartRef.current === 0) {
       stallStartRef.current = Date.now();
       console.warn(
-        `[Room] Decoder stall suspected: packets=${stats.packetsReceived} framesDecoded=${stats.framesDecoded} codec=${stats.codecMime} impl=${stats.decoderImpl}`,
+        `[Room] Decoder stall suspected: packets=${stats.packetsReceived} framesReceived=${stats.framesReceived} ` +
+          `framesDecoded=${stats.framesDecoded} codec=${stats.codecMime} impl=${stats.decoderImpl}`,
       );
     }
 
@@ -202,7 +217,8 @@ const evaluateStall = (
       }
       console.error(
         `[Room] Decoder stall confirmed after ${DECODER_STALL_THRESHOLD_MS}ms: ` +
-          `packets=${stats.packetsReceived} framesDecoded=${stats.framesDecoded} codec=${stats.codecMime} impl=${stats.decoderImpl}`,
+          `packets=${stats.packetsReceived} framesReceived=${stats.framesReceived} ` +
+          `framesDecoded=${stats.framesDecoded} codec=${stats.codecMime} impl=${stats.decoderImpl}`,
       );
     }
     return;
@@ -343,7 +359,10 @@ export const RoomPage: React.FC = () => {
       roomRef.current = null;
     }
 
-    const room = new Room({ adaptiveStream: true });
+    // VideoPlayer attaches the underlying MediaStreamTrack rather than using
+    // RemoteVideoTrack.attach(), so LiveKit cannot receive the visibility and
+    // dimensions required by adaptive streaming.
+    const room = new Room({ adaptiveStream: false });
     roomRef.current = room;
 
     room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
@@ -590,8 +609,7 @@ export const RoomPage: React.FC = () => {
   const getStatsFn = useCallback(async (): Promise<RTCStatsReport | null> => {
     const room = roomRef.current;
     if (!room) return null;
-    const videoPub = room.remoteParticipants.values().next().value?.videoTrackPublications?.values().next().value;
-    const receiver = (videoPub?.track as { receiver?: RTCRtpReceiver } | undefined)?.receiver;
+    const receiver = firstVideoReceiver(room);
     if (!receiver) return null;
     try {
       return await receiver.getStats();
