@@ -7,7 +7,8 @@ import { windowControls } from '@/api/windowControls';
 // minimize/maximize/close controls. `data-tauri-drag-region` is applied only
 // to the bar and the branding block — the control buttons deliberately omit it
 // so they receive clicks, and the OS native drag path gives double-click
-// maximize for free.
+// maximize for free. The branding block uses `deep` so its icon and label
+// children (which would otherwise swallow the mousedown) stay draggable.
 export const TitleBar: React.FC = React.memo(() => {
   const [maximized, setMaximized] = useState(false);
 
@@ -36,7 +37,7 @@ export const TitleBar: React.FC = React.memo(() => {
       data-tauri-drag-region
       className="h-10 shrink-0 flex items-stretch border-b border-border bg-background select-none"
     >
-      <div data-tauri-drag-region className="flex items-center gap-2.5 pl-4 pr-3">
+      <div data-tauri-drag-region="deep" className="flex items-center gap-2.5 pl-4 pr-3">
         <span className="p-1.5 bg-safelight/10 rounded-lg text-safelight">
           <ScreenShare className="w-4 h-4" aria-hidden="true" />
         </span>
