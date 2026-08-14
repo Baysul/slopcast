@@ -28,7 +28,15 @@ const APPSRC_MAX_BUFFERS: u64 = 6;
 /// zero per-frame input-buffer allocation — the previous
 /// `gst::Buffer::with_size` per frame was a 2.25 MB allocate+page-fault
 /// at 1080p (4× at 4K) on the hot delivery path.
-const VIDEO_BUFFER_POOL_SIZE: u32 = 8;
+///
+/// Sized well above `APPSRC_MAX_BUFFERS` (6) so the leaky-appsrc queue can
+/// fill while the encoder's 120 ms output window retains frames without
+/// exhausting the pool — pool acquisition fails *before* `push_buffer`, so a
+/// too-small pool shows up as silent frame drops that `appsrc.dropped` never
+/// counts (see `VIDEO_POOL_EXHAUSTED`). 24 buffers is a deliberate, generous
+/// headroom for the diagnostic: it is not a cure for encoder latency, but it
+/// disambiguates pool exhaustion from genuine downstream backpressure.
+const VIDEO_BUFFER_POOL_SIZE: u32 = 24;
 const GOP_SECONDS: u32 = 1;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
@@ -60,12 +68,24 @@ const AV1_MAX_QP_ALLOWED: u32 = 52;
 /// 200 ms time-bounded queue) before they could be encoded.
 static VIDEO_FRAMES_ENCODED: AtomicU64 = AtomicU64::new(0);
 
+/// Frames dropped because the input buffer pool was exhausted when
+/// `push_frame` acquired with `DONTWAIT`. This happens *before* the frame
+/// reaches the appsrc, so it is invisible to `appsrc.dropped` — a dedicated
+/// counter is the only way to distinguish "encoder retained every buffer"
+/// from "the leaky appsrc discarded a buffered frame".
+static VIDEO_POOL_EXHAUSTED: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) fn reset_encoded_frames() {
     VIDEO_FRAMES_ENCODED.store(0, Ordering::Relaxed);
+    VIDEO_POOL_EXHAUSTED.store(0, Ordering::Relaxed);
 }
 
 pub(crate) fn encoded_frames() -> u64 {
     VIDEO_FRAMES_ENCODED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn pool_exhausted_frames() -> u64 {
+    VIDEO_POOL_EXHAUSTED.load(Ordering::Relaxed)
 }
 
 /// Live GstBaseSrc/AppSrc statistics (all present on the appsrc element
@@ -150,6 +170,7 @@ impl VideoInput {
             .buffer_pool
             .acquire_buffer(Some(&acquire_params))
             .map_err(|_| {
+                VIDEO_POOL_EXHAUSTED.fetch_add(1, Ordering::Relaxed);
                 "GStreamer video input buffer pool exhausted (encoder stalled; dropping frame)"
                     .to_string()
             })?;
@@ -246,9 +267,9 @@ impl VideoInput {
     }
 
     /// Live appsrc statistics — `dropped` counts buffers the appsrc discarded
-    /// (leaky-downstream on a full 6-buffer queue), plus frames that never
-    /// reached the appsrc because the input buffer pool was exhausted: the
-    /// stutter diagnostic for the encoder-side publish path.
+    /// (leaky-downstream on a full 6-buffer queue). Frames that never reached
+    /// the appsrc because the input buffer pool was exhausted are counted
+    /// separately in `VIDEO_POOL_EXHAUSTED` (see `push_frame`).
     pub(crate) fn appsrc_stats(&self) -> AppSrcStats {
         let element = self.appsrc.upcast_ref::<gst::Element>();
         AppSrcStats {
@@ -574,11 +595,15 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
             // Both VP9 RTP payloaders assume one frame per input buffer. The
             // parser otherwise negotiates super-frame alignment, which makes
             // the SFU forward packets Chromium cannot assemble into frames.
+            //
+            // Note the fields deliberately omitted here: `profile` and
+            // `bit-depth-luma`/`bit-depth-chroma` are *not* declared on the
+            // parser's src template, so a capsfilter carrying them forces a
+            // `not-negotiated` (the parser cannot promise a profile/bit-depth
+            // before it has parsed the first frame). `chroma-format` and
+            // `codec-alpha` are the safe structural pins.
             gst::Caps::builder("video/x-vp9")
-                .field("profile", "0")
                 .field("chroma-format", "4:2:0")
-                .field("bit-depth-luma", 8_u32)
-                .field("bit-depth-chroma", 8_u32)
                 .field("codec-alpha", false)
                 .field("parsed", true)
                 .field("alignment", "frame")
@@ -667,6 +692,27 @@ fn configure_encoder(
         }
         if encoder.find_property("rate-control").is_some() {
             encoder.set_property_from_str("rate-control", "vbr");
+        }
+        // The x264enc fallback (no VA display) disables B-frames above but
+        // otherwise keeps its lookahead default, whose buffering can stall a
+        // pipeline that contains queues. Pin it to zerolatency so the software
+        // path behaves like the low-latency VA path instead of holding frames.
+        if encoder
+            .factory()
+            .is_some_and(|factory| factory.name() == "x264enc")
+        {
+            if encoder.find_property("tune").is_some() {
+                encoder.set_property_from_str("tune", "zerolatency");
+            }
+            if encoder.find_property("speed-preset").is_some() {
+                encoder.set_property_from_str("speed-preset", "veryfast");
+            }
+            if encoder.find_property("rc-lookahead").is_some() {
+                encoder.set_property("rc-lookahead", 0_u32);
+            }
+            if encoder.find_property("sync-lookahead").is_some() {
+                encoder.set_property("sync-lookahead", 0_i32);
+            }
         }
     } else {
         if encoder.find_property("end-usage").is_some() {
@@ -891,12 +937,15 @@ mod tests {
             .ok_or_else(|| "VP9 output caps have no structure".to_string())?;
 
         assert_eq!(parser, "vp9parse");
-        assert_eq!(structure.get::<&str>("profile"), Ok("0"));
         assert_eq!(structure.get::<&str>("chroma-format"), Ok("4:2:0"));
-        assert_eq!(structure.get::<u32>("bit-depth-luma"), Ok(8));
-        assert_eq!(structure.get::<u32>("bit-depth-chroma"), Ok(8));
         assert_eq!(structure.get::<bool>("parsed"), Ok(true));
         assert_eq!(structure.get::<&str>("alignment"), Ok("frame"));
+        // `profile` and the bit-depth fields must be absent: the parser cannot
+        // promise them before the first frame, so pinning them on the output
+        // capsfilter causes `not-negotiated`.
+        assert!(structure.get::<&str>("profile").is_err());
+        assert!(structure.get::<u32>("bit-depth-luma").is_err());
+        assert!(structure.get::<u32>("bit-depth-chroma").is_err());
 
         Ok(())
     }

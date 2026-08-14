@@ -198,7 +198,17 @@ impl LinuxDesktopCapture {
             }
             capturer.capture_frame();
         });
-        let interval_ms = u64::from(1000 / capture_poll_fps().max(1));
-        self.next_poll_at = now + Duration::from_millis(interval_ms);
+        // Advance a *fixed* deadline and skip any intervals the synchronous
+        // capture_frame callback (BGRA→I420 convert + pacer queue) already
+        // consumed. Scheduling from `now + interval` after that serial work
+        // would put the next deadline in the past for any frame slower than
+        // the interval — a catch-up/tight-loop that degrades pacing instead
+        // of backing off.
+        let interval = Duration::from_millis(u64::from(1000 / capture_poll_fps().max(1)));
+        self.next_poll_at += interval;
+        let after = Instant::now();
+        if self.next_poll_at <= after {
+            self.next_poll_at = after + interval;
+        }
     }
 }

@@ -576,6 +576,11 @@ struct KeepaliveRing {
     slots: Vec<VideoFrame<I420Buffer>>,
     /// Next slot to fill; wraps every `KEEPALIVE_RING_CAPACITY` submissions.
     next: usize,
+    /// Reusable snapshot buffer: `keepalive_frame` copies the newest Ring-A
+    /// planes here before packing them into a slot. Reused across ticks, so a
+    /// static screen never allocates a fresh full-frame Vec (up to ~12 MB at
+    /// 4K) per keepalive submission.
+    scratch: Vec<u8>,
 }
 
 impl KeepaliveRing {
@@ -583,12 +588,16 @@ impl KeepaliveRing {
         Self {
             slots: Vec::with_capacity(KEEPALIVE_RING_CAPACITY),
             next: 0,
+            scratch: Vec::new(),
         }
     }
 
-    /// Returns the slot to pack this tick, growing the ring lazily (the
-    /// first `KEEPALIVE_RING_CAPACITY` ticks allocate one buffer each).
-    fn next_slot(&mut self, target: (u32, u32)) -> &mut VideoFrame<I420Buffer> {
+    /// Returns the index of the slot to pack this tick, growing the ring
+    /// lazily (the first `KEEPALIVE_RING_CAPACITY` ticks allocate one buffer
+    /// each). Exposed as an index rather than a reference so the caller can
+    /// copy from `scratch` (a disjoint field) without fighting the borrow
+    /// checker.
+    fn next_slot(&mut self, target: (u32, u32)) -> usize {
         if self.slots.len() < KEEPALIVE_RING_CAPACITY {
             self.slots.push(VideoFrame {
                 rotation: VideoRotation::VideoRotation0,
@@ -606,8 +615,9 @@ impl KeepaliveRing {
                 buffer: I420Buffer::new(target.0, target.1),
             };
         }
+        let idx = self.next;
         self.next = (self.next + 1) % KEEPALIVE_RING_CAPACITY;
-        slot
+        idx
     }
 }
 
@@ -621,7 +631,7 @@ pub(crate) type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 /// value, `VideoStreamEncoder` encodes on the encoder thread), so a
 /// reused buffer would be torn or duplicated mid-read — blocky smearing
 /// during motion, independent of codec.
-fn convert_frame(width: u32, height: u32, bgra: &[u8]) -> VideoFrame<I420Buffer> {
+fn convert_frame(width: u32, height: u32, bgra: &[u8], pts_us: i64) -> VideoFrame<I420Buffer> {
     let mut out = I420Buffer::new(width, height);
     let (stride_y, stride_u, stride_v) = out.strides();
     let (plane_y, plane_u, plane_v) = out.data_mut();
@@ -643,7 +653,11 @@ fn convert_frame(width: u32, height: u32, bgra: &[u8]) -> VideoFrame<I420Buffer>
     STATS_LAST_HEIGHT.store(height, Ordering::Relaxed);
     VideoFrame {
         rotation: VideoRotation::VideoRotation0,
-        timestamp_us: monotonic_us(),
+        // Preserve the capture timestamp the callback supplied (measured at
+        // callback entry, before the stride re-pack) rather than re-measuring
+        // now: variable BGRA→I420 conversion time would otherwise leak into
+        // the source-timestamp jitter the encoder's `TimestampAligner` sees.
+        timestamp_us: pts_us,
         frame_metadata: None,
         buffer: out,
     }
@@ -653,13 +667,13 @@ fn convert_frame(width: u32, height: u32, bgra: &[u8]) -> VideoFrame<I420Buffer>
 /// and the synthetic generator: counts the frame, converts it to I420 and
 /// queues it for the paced delivery loop.
 fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
-    Box::new(move |width, height, bgra, _pts_us| {
+    Box::new(move |width, height, bgra, pts_us| {
         STATS_DEQUEUED.fetch_add(1, Ordering::Relaxed);
         if width == 0 || height == 0 {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let frame = convert_frame(width, height, bgra);
+        let frame = convert_frame(width, height, bgra, pts_us);
         // Stash the newest frame's I420 planes for the preview thread
         // (skipped when no preview is subscribed — 1080p planes are
         // ~2.25 MB, a third of the old BGRA copy). The stash write is a
@@ -674,8 +688,10 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
             let (plane_y, plane_u, plane_v) = frame.buffer.data();
             // `push_planes` packs the planes straight into the ring slot —
             // no intermediate Vec, so the stash costs one copy (not an
-            // allocation + a copy) on the capture thread's hot path.
-            ring.push_planes(width, height, monotonic_us(), plane_y, plane_u, plane_v);
+            // allocation + a copy) on the capture thread's hot path. The
+            // ring stores the *capture* timestamp, so the keepalive arm can
+            // stamp re-deliveries with the source frame's clock.
+            ring.push_planes(width, height, pts_us, plane_y, plane_u, plane_v);
         }
         pacer.push(frame);
     })
@@ -697,16 +713,16 @@ fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
     // resolution when no track is live (the keepalive arm only runs with a
     // live `VIDEO_SOURCE`, so `SCALE_TARGET` is normally set).
     let target = SCALE_TARGET.load_full().map(|t| (t.width, t.height));
-    let (src_w, src_h, y_len, u_len, v_len, pts_us, planes) = {
+    let (src_w, src_h, y_len, u_len, v_len, pts_us) = {
         let Ok(guard) = PREVIEW_I420.lock() else {
             return None;
         };
-        let ring = guard.as_ref()?;
-        let entry = ring.newest()?;
-        // Copy the newest snapshot's planes out under the brief lock; the
-        // scale and pack below run outside it.
-        let mut planes = Vec::with_capacity(entry.y_len + entry.u_len + entry.v_len);
-        planes.extend_from_slice(&entry.planes);
+        let history = guard.as_ref()?;
+        let entry = history.newest()?;
+        // Copy the newest snapshot's planes into the reusable scratch buffer
+        // under the brief lock; the scale and pack below run outside it.
+        ring.scratch.clear();
+        ring.scratch.extend_from_slice(&entry.planes);
         (
             entry.width,
             entry.height,
@@ -714,7 +730,6 @@ fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
             entry.u_len,
             entry.v_len,
             entry.pts_us,
-            planes,
         )
     };
     let (out_w, out_h) = target.unwrap_or((src_w, src_h));
@@ -728,18 +743,19 @@ fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
     // when src ≠ out, and the subsequent `.scale()` would then scale garbage
     // that already claims the target size. The preview path does the same
     // (allocate at source, then scale) for the same reason.
-    let slot = ring.next_slot((src_w, src_h));
+    let slot_idx = ring.next_slot((src_w, src_h));
     {
+        let slot = &mut ring.slots[slot_idx];
         let (plane_y, plane_u, plane_v) = slot.buffer.data_mut();
         let n = plane_y.len().min(y_len);
-        plane_y[..n].copy_from_slice(&planes[..n]);
+        plane_y[..n].copy_from_slice(&ring.scratch[..n]);
         let n = plane_u.len().min(u_len);
-        plane_u[..n].copy_from_slice(&planes[y_len..y_len + n]);
+        plane_u[..n].copy_from_slice(&ring.scratch[y_len..y_len + n]);
         let n = plane_v.len().min(v_len);
-        plane_v[..n].copy_from_slice(&planes[y_len + u_len..y_len + u_len + n]);
+        plane_v[..n].copy_from_slice(&ring.scratch[y_len + u_len..y_len + u_len + n]);
     }
     if (src_w, src_h) != (out_w, out_h) {
-        slot.buffer = slot.buffer.scale(
+        ring.slots[slot_idx].buffer = ring.slots[slot_idx].buffer.scale(
             i32::try_from(out_w).unwrap_or(0),
             i32::try_from(out_h).unwrap_or(0),
         );
@@ -754,13 +770,13 @@ fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
     // H.264 ping-pong). Re-sending the same content with its own capture
     // timestamp keeps the capturer clock stable; the aligner clips to
     // prev+1ms and the encoder compresses the duplicate to near-nothing.
-    slot.timestamp_us = pts_us;
+    ring.slots[slot_idx].timestamp_us = pts_us;
     // Hand the packed slot buffer out; the ring slot is re-packed on its next
     // rotation, so the submitted frame's buffer instance stays unique within
     // the retention window. The fresh buffer is at the *source* size — that's
     // what `next_slot` packs into on the next rotation.
     let slot = std::mem::replace(
-        slot,
+        &mut ring.slots[slot_idx],
         VideoFrame {
             rotation: VideoRotation::VideoRotation0,
             timestamp_us: 0,
@@ -869,7 +885,7 @@ fn run_capture(
     let on_frame = make_on_frame(Arc::clone(&pacer));
 
     #[cfg(target_os = "linux")]
-    let mut desktop: Option<crate::linux_capture::LinuxDesktopCapture> = None;
+    let mut desktop_poller: Option<thread::JoinHandle<()>> = None;
     #[cfg(target_os = "windows")]
     let mut wgc: Option<crate::wgc_capture::WgcCapture> = None;
     let mut generator = None;
@@ -877,14 +893,39 @@ fn run_capture(
     match source {
         #[cfg(target_os = "linux")]
         CaptureSource::Desktop => {
-            match crate::linux_capture::LinuxDesktopCapture::start(on_frame) {
-                Ok(engine) => {
-                    CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
-                    let _ = ready_tx.send(Ok(()));
-                    desktop = Some(engine);
-                }
+            // The Linux `PipeWire` engine's `capture_frame()` runs BGRA→I420
+            // conversion + pacer push *synchronously* inside its poll. Running
+            // that poll on the delivery thread serializes capture → convert →
+            // scale → GStreamer push on one timing-critical thread, so a slow
+            // encoder stalls the very poll that feeds it (and vice versa). The
+            // portal engine owns its own poller thread here: capture + convert
+            // run there, and the delivery loop below only pops the pacer and
+            // publishes — real separation instead of the "source thread"
+            // fiction. The engine's `poll()` self-paces, so the extra sleep
+            // only bounds stop-flag latency.
+            let poller_stop = Arc::clone(stop);
+            let poller_ready = ready_tx.clone();
+            let handle = thread::Builder::new()
+                .name("linux-capture-poll".into())
+                .spawn(
+                    move || match crate::linux_capture::LinuxDesktopCapture::start(on_frame) {
+                        Ok(mut engine) => {
+                            CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+                            let _ = poller_ready.send(Ok(()));
+                            while !poller_stop.load(Ordering::Relaxed) {
+                                engine.poll();
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = poller_ready.send(Err(e));
+                        }
+                    },
+                );
+            match handle {
+                Ok(handle) => desktop_poller = Some(handle),
                 Err(e) => {
-                    let _ = ready_tx.send(Err(e));
+                    let _ = ready_tx.send(Err(format!("Thread spawn: {e}")));
                     return;
                 }
             }
@@ -999,12 +1040,18 @@ fn run_capture(
         // same tick — they self-pace inside, so extra polls are no-ops.
         let now = Instant::now();
         if now >= next_delivery_at {
+            // Compute the interval up front: it belongs to *this* tick's
+            // cadence, not one re-read after the serial capture→convert→
+            // scale→push work below has already consumed an unknown slice of
+            // the window.
+            let fps = SCALE_TARGET
+                .load_full()
+                .map_or(PREVIEW_FALLBACK_FPS, |target| {
+                    target.fps.clamp(1, PREVIEW_MAX_FPS)
+                });
+            let interval = Duration::from_micros(1_000_000 / u64::from(fps));
             #[cfg(target_os = "windows")]
             if let Some(engine) = wgc.as_mut() {
-                engine.poll();
-            }
-            #[cfg(target_os = "linux")]
-            if let Some(engine) = desktop.as_mut() {
                 engine.poll();
             }
             match pacer.pop() {
@@ -1084,19 +1131,19 @@ fn run_capture(
                     }
                 }
             }
-            let fps = SCALE_TARGET
-                .load_full()
-                .map_or(PREVIEW_FALLBACK_FPS, |target| {
-                    target.fps.clamp(1, PREVIEW_MAX_FPS)
-                });
-            let interval = Duration::from_micros(1_000_000 / u64::from(fps));
-            // Deliveries are spaced exactly one interval apart. After a
-            // stall the next deadline is a full interval after the frame
-            // just delivered — never `now`, which would pop a second
-            // frame immediately: the encoder stamps both with
-            // near-identical RTP times and the receiver sees a frame
-            // pair flash, then a gap (the rubberbanding pattern).
-            next_delivery_at = now + interval;
+            // Advance a *fixed* deadline and skip any intervals already
+            // missed. Pinning `now + interval` here would measure from after
+            // the serial capture→convert→scale→push work, so a slow frame
+            // (> interval) would schedule the next deadline in the past and
+            // the loop would immediately deliver again — a catch-up/tight-loop
+            // that degrades pacing instead of backing off. Advancing the fixed
+            // deadline both keeps the cadence even in steady state and
+            // explicitly skips (rather than re-triggers) a missed interval.
+            next_delivery_at += interval;
+            let after = Instant::now();
+            if next_delivery_at <= after {
+                next_delivery_at = after + interval;
+            }
         }
         // Sleep until the next delivery deadline (capped so the portal
         // session check and the stop flag stay responsive).
@@ -1104,7 +1151,9 @@ fn run_capture(
         thread::sleep(wake.saturating_duration_since(Instant::now()));
     }
     #[cfg(target_os = "linux")]
-    drop(desktop);
+    if let Some(handle) = desktop_poller {
+        let _ = handle.join();
+    }
     if let Some(handle) = generator {
         let _ = handle.join();
     }
@@ -1844,7 +1893,8 @@ mod probe {
         for i in 0..(KEEPALIVE_RING_CAPACITY + 2) {
             // The slot instance (address) is what gets packed and submitted;
             // it must not repeat within the retention window.
-            let frame = ring.next_slot((1280, 720));
+            let idx = ring.next_slot((1280, 720));
+            let frame = &ring.slots[idx];
             let ptr = std::ptr::addr_of!(*frame) as usize;
             if i < KEEPALIVE_RING_CAPACITY {
                 // The first full rotation: every slot instance is distinct.

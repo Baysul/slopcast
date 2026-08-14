@@ -15,7 +15,8 @@ use gstreamer_app as gst_app;
 use livekit::webrtc::prelude::{I420Buffer, VideoFrame};
 
 use crate::gstreamer_encoder::{
-    GstreamerEncoder, VideoInput, bitrate_bps_to_kbps, encoded_frames, reset_encoded_frames,
+    GstreamerEncoder, VideoInput, bitrate_bps_to_kbps, encoded_frames, pool_exhausted_frames,
+    reset_encoded_frames,
 };
 use crate::{CHANNELS, CaptureConfig, NativeTelemetry, SAMPLE_RATE};
 
@@ -45,7 +46,6 @@ const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(15);
 /// running after the grace is reaped on a detached thread.
 const DISCONNECT_GRACE: Duration = Duration::from_secs(2);
 const OPUS_BITRATE: i32 = 128_000;
-const SINK_MAX_BITRATE: u32 = 200_000_000;
 
 // Congestion-controller tuning. One tick is one POLL_INTERVAL loop
 // iteration (~20 ms), so the observation cadence below is ~1 s.
@@ -684,9 +684,18 @@ impl PublisherPipeline {
         let sink = gst::ElementFactory::make("livekitwebrtcsink")
             .property("audio-caps", &audio_caps)
             .property("video-caps", supported_video_caps())
-            .property("max-bitrate", SINK_MAX_BITRATE)
             .build()
             .map_err(|error| format!("Failed to create livekitwebrtcsink: {error}"))?;
+        // We hand the sink an already-encoded stream and drive its bitrate
+        // ourselves through the encoder + `RateController`. The sink's own
+        // GCC congestion controller would fight that (it holds the encoder
+        // bitrate hostage on TWCC feedback), and its FEC bloat/burst
+        // bandwidth on top of the presenter's configured ceiling — disable
+        // both for diagnostic isolation. NACK/RTX retransmission stays on so
+        // a lost packet is repaired rather than always surfacing as stutter.
+        sink.set_property_from_str("congestion-control", "disabled");
+        sink.set_property("do-fec", false);
+        sink.set_property("do-retransmission", true);
         connect_payloader_setup(&sink);
         configure_signaller(&sink, connection, generation);
         let pipeline = gst::Pipeline::new();
@@ -1244,6 +1253,7 @@ fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> Nat
         // The gap between them is backpressure drops.
         telemetry.video_frames_encoded = Some(stat_as_f64(encoded_frames()));
         telemetry.video_frames_submitted = Some(VIDEO_FRAMES_SUBMITTED.load(Ordering::Relaxed));
+        telemetry.video_pool_exhausted = Some(pool_exhausted_frames());
         telemetry.video_width = Some(config.width);
         telemetry.video_height = Some(config.height);
         telemetry.encoder_implementation = Some(format!(
