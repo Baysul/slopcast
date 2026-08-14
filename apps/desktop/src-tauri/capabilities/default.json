@@ -5,7 +5,6 @@
   "permissions": [
     "core:default",
     "clipboard-manager:allow-write-text",
-    "window-state:default",
     "opener:default",
     "log:default",
     "core:window:allow-close",
