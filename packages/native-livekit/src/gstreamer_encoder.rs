@@ -33,10 +33,12 @@ const APPSRC_MAX_BUFFERS: u64 = 6;
 /// fill while the encoder's 120 ms output window retains frames without
 /// exhausting the pool — pool acquisition fails *before* `push_buffer`, so a
 /// too-small pool shows up as silent frame drops that `appsrc.dropped` never
-/// counts (see `VIDEO_POOL_EXHAUSTED`). 24 buffers is a deliberate, generous
-/// headroom for the diagnostic: it is not a cure for encoder latency, but it
-/// disambiguates pool exhaustion from genuine downstream backpressure.
-const VIDEO_BUFFER_POOL_SIZE: u32 = 24;
+/// counts (see `VIDEO_POOL_EXHAUSTED`). SVT-AV1 (preset 10) additionally
+/// buffers its temporal-filter lookahead — ~58 frames before its *first*
+/// emitted frame — so the pool must absorb that too, or AV1 deadlocks with a
+/// full pool and zero encoded frames. 128 buffers (64 at 60 fps ≈ 1 s of
+/// in-flight headroom) covers the AV1 lookahead without unbounded growth.
+const VIDEO_BUFFER_POOL_SIZE: u32 = 128;
 const GOP_SECONDS: u32 = 1;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
@@ -353,7 +355,7 @@ impl GstreamerEncoder {
         let codec = config.video_codec.as_deref().unwrap_or("vp8");
         let ceiling_kbps = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
         crate::gstreamer_publisher::verify_codec_elements(codec)?;
-        let (encoder_name, parser_name, output_caps) = codec_pipeline(codec)?;
+        let encoder_name = codec_pipeline(codec)?;
 
         let fps = i32::try_from(config.fps).map_err(|_| "GStreamer encoder fps exceeds i32")?;
         let input_info = gst_video::VideoInfo::builder(
@@ -397,18 +399,17 @@ impl GstreamerEncoder {
             })?;
         let encoder_rate = encoder_target_kbps(&encoder, ceiling_kbps);
         configure_encoder(&encoder, codec, encoder_rate, config.height, key_int_max);
-        let parser = gst::ElementFactory::make(parser_name)
-            .build()
-            .map_err(|error| {
-                format!("Failed to create GStreamer element {parser_name}: {error}")
-            })?;
-        if codec == "h264" && parser.find_property("config-interval").is_some() {
-            parser.set_property_from_str("config-interval", "-1");
-        }
-        let capsfilter = gst::ElementFactory::make("capsfilter")
-            .property("caps", &output_caps)
-            .build()
-            .map_err(|error| format!("Failed to create GStreamer {codec} capsfilter: {error}"))?;
+        // The bundled livekitwebrtcsink (gst-plugin-webrtc 0.15.3) inserts its
+        // own codec parser (h264parse/vp9parse/av1parse) inside the sink before
+        // its payloader, and rejects any caps renegotiation on its input pad.
+        // A second parser here is therefore not just redundant but harmful:
+        // VP9/AV1 parsers emit caps that *evolve* after the first frame
+        // (chroma-format/bit-depth appear once known), which the sink reads as
+        // an unsupported renegotiation and kills with `not-negotiated`, while
+        // H.264's pre-parsed AVCC access units are mis-parsed by the sink's
+        // own h264parse as broken NALs ("waiting for a keyframe" forever). Feed
+        // the encoder's raw output straight to the sink and let its internal
+        // parser produce the caps the payloader wants.
         let output_queue = gst::ElementFactory::make("queue")
             .property("max-size-buffers", 0_u32)
             .property("max-size-bytes", 0_u32)
@@ -423,16 +424,16 @@ impl GstreamerEncoder {
             .property("max-size-time", 120_000_000_u64) // 120 ms
             .build()
             .map_err(|error| format!("Failed to create GStreamer video queue: {error}"))?;
-        // Count encoded H.264 access units as they leave h264parse. This is
-        // the real encoder-throughput signal (`VIDEO_FRAMES_ENCODED`); it
-        // only advances for frames that were actually encoded, so any shortfall
+        // Count encoded access units as they leave the encoder. This is the
+        // real encoder-throughput signal (`VIDEO_FRAMES_ENCODED`); it only
+        // advances for frames that were actually encoded, so any shortfall
         // vs. `VIDEO_FRAMES_SUBMITTED` reveals the leaky-appsrc / queue
         // backpressure drops. The counter must be monotonic per capture
         // session, so it is reset on every `attach_video`/capture start.
-        let parser_src = parser
+        let encoder_src = encoder
             .static_pad("src")
-            .ok_or_else(|| "GStreamer h264parse has no src pad".to_string())?;
-        parser_src.add_probe(gst::PadProbeType::BUFFER, |_, _| {
+            .ok_or_else(|| "GStreamer encoder has no src pad".to_string())?;
+        encoder_src.add_probe(gst::PadProbeType::BUFFER, |_, _| {
             VIDEO_FRAMES_ENCODED.fetch_add(1, Ordering::Relaxed);
             gst::PadProbeReturn::Ok
         });
@@ -440,10 +441,23 @@ impl GstreamerEncoder {
             appsrc.clone().upcast(),
             convert,
             encoder.clone(),
-            parser,
-            capsfilter,
             output_queue.clone(),
         ];
+
+        // Diagnostic: attribute a `not-negotiated` to the stage where
+        // downstream CAPS negotiation stopped.
+        if let Some(pad) = appsrc.static_pad("src") {
+            log_caps_events(&pad, "appsrc -> videoconvert");
+        }
+        if let Some(pad) = elements[1].static_pad("src") {
+            log_caps_events(&pad, "videoconvert -> encoder");
+        }
+        if let Some(pad) = encoder.static_pad("src") {
+            log_caps_events(&pad, "encoder -> queue");
+        }
+        if let Some(pad) = elements[2].static_pad("src") {
+            log_caps_events(&pad, "queue -> sink");
+        }
 
         // I420 input buffer pool: preallocate `VIDEO_BUFFER_POOL_SIZE`
         // buffers of the input frame size at attach time. Steady-state
@@ -577,57 +591,12 @@ impl GstreamerEncoder {
     }
 }
 
-fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps), String> {
-    let (software, hardware, parser, caps) = match codec {
-        "h264" => (
-            "x264enc",
-            "vah264enc",
-            "h264parse",
-            gst::Caps::builder("video/x-h264")
-                .field("alignment", "au")
-                .field("profile", "constrained-baseline")
-                .build(),
-        ),
-        "vp9" => (
-            "vp9enc",
-            "vavp9enc",
-            "vp9parse",
-            // Both VP9 RTP payloaders assume one frame per input buffer. The
-            // parser otherwise negotiates super-frame alignment, which makes
-            // the SFU forward packets Chromium cannot assemble into frames.
-            //
-            // Note the fields deliberately omitted here: `profile` and
-            // `bit-depth-luma`/`bit-depth-chroma` are *not* declared on the
-            // parser's src template, so a capsfilter carrying them forces a
-            // `not-negotiated` (the parser cannot promise a profile/bit-depth
-            // before it has parsed the first frame). `chroma-format` and
-            // `codec-alpha` are the safe structural pins.
-            gst::Caps::builder("video/x-vp9")
-                .field("chroma-format", "4:2:0")
-                .field("codec-alpha", false)
-                .field("parsed", true)
-                .field("alignment", "frame")
-                .build(),
-        ),
-        "av1" => (
-            "svtav1enc",
-            "vaav1enc",
-            "av1parse",
-            // `rtpav1pay` will accept only parsed OBU temporal units; a bare
-            // `video/x-av1` capsfilter still publishes RTP but Chromium sees
-            // packets without decodable frame boundaries.
-            gst::Caps::builder("video/x-av1")
-                .field("parsed", true)
-                .field("stream-format", "obu-stream")
-                .field("alignment", "tu")
-                .build(),
-        ),
-        "vp8" => (
-            "vp8enc",
-            "",
-            "identity",
-            gst::Caps::builder("video/x-vp8").build(),
-        ),
+fn codec_pipeline(codec: &str) -> Result<&'static str, String> {
+    let (software, hardware) = match codec {
+        "h264" => ("x264enc", "vah264enc"),
+        "vp9" => ("vp9enc", "vavp9enc"),
+        "av1" => ("svtav1enc", "vaav1enc"),
+        "vp8" => ("vp8enc", ""),
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
     let encoder = crate::gstreamer_publisher::selected_encoder_name(codec);
@@ -636,12 +605,7 @@ fn codec_pipeline(codec: &str) -> Result<(&'static str, &'static str, gst::Caps)
             "GStreamer encoder unavailable for {codec}: {software} or {hardware}"
         ));
     }
-    if gst::ElementFactory::find(parser).is_none() {
-        return Err(format!(
-            "GStreamer parser unavailable for {codec}: {parser}"
-        ));
-    }
-    Ok((encoder, parser, caps))
+    Ok(encoder)
 }
 
 fn configure_encoder(
@@ -777,6 +741,20 @@ fn make_element(name: &str) -> Result<gst::Element, String> {
     gst::ElementFactory::make(name)
         .build()
         .map_err(|error| format!("Failed to create GStreamer element {name}: {error}"))
+}
+
+/// Logs every downstream CAPS event crossing a pad so a `not-negotiated`
+/// failure can be attributed to the exact stage where negotiation stopped.
+fn log_caps_events(pad: &gst::Pad, label: &'static str) {
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+        if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref()
+            && let gst::EventView::Caps(caps) = event.view()
+        {
+            log::info!("[caps] {label}: {}", caps.caps());
+        }
+
+        gst::PadProbeReturn::Ok
+    });
 }
 
 /// Whether the encoder's `target-bitrate` property is in kilobits/sec.
@@ -928,24 +906,10 @@ mod tests {
     }
 
     #[test]
-    fn vp9_output_is_parsed_and_frame_aligned() -> Result<(), String> {
+    fn vp9_selects_software_encoder() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
-        let (_encoder, parser, caps) = codec_pipeline("vp9")?;
-        let structure = caps
-            .structure(0)
-            .ok_or_else(|| "VP9 output caps have no structure".to_string())?;
-
-        assert_eq!(parser, "vp9parse");
-        assert_eq!(structure.get::<&str>("chroma-format"), Ok("4:2:0"));
-        assert_eq!(structure.get::<bool>("parsed"), Ok(true));
-        assert_eq!(structure.get::<&str>("alignment"), Ok("frame"));
-        // `profile` and the bit-depth fields must be absent: the parser cannot
-        // promise them before the first frame, so pinning them on the output
-        // capsfilter causes `not-negotiated`.
-        assert!(structure.get::<&str>("profile").is_err());
-        assert!(structure.get::<u32>("bit-depth-luma").is_err());
-        assert!(structure.get::<u32>("bit-depth-chroma").is_err());
+        assert_eq!(codec_pipeline("vp9")?, "vp9enc");
 
         Ok(())
     }

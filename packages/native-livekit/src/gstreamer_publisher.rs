@@ -113,6 +113,12 @@ enum PublisherCommand {
 
 enum ConnectedOutcome {
     Reconnect,
+    /// A video settings change arrived that requires a full pipeline rebuild
+    /// (the sink's `video-caps` is only changeable in NULL/READY state).
+    Rebuild {
+        config: CaptureConfig,
+        reply: SyncSender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -537,6 +543,39 @@ fn run_worker(
             &mut rate_controller,
         ) {
             ConnectedOutcome::Shutdown => break,
+            ConnectedOutcome::Rebuild { config, reply } => {
+                finish_if_current(generation);
+                drop(pipeline.take());
+                match rebuild(
+                    connection,
+                    &config,
+                    generation,
+                    rate_controller.current_kbps(),
+                ) {
+                    Ok(fresh) => {
+                        rate_controller.reset(&config);
+                        video_config = Some(config);
+                        pipeline = Some(fresh);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        match reconnect(
+                            connection,
+                            command_receiver,
+                            &mut video_config,
+                            &mut rate_controller,
+                            generation,
+                        ) {
+                            Some(mut reconnected) => {
+                                reconnected.apply_rate(rate_controller.current_kbps());
+                                pipeline = Some(reconnected);
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
             ConnectedOutcome::Reconnect => {
                 finish_if_current(generation);
                 drop(pipeline.take());
@@ -570,17 +609,17 @@ fn run_connected(
     loop {
         match command_receiver.recv_timeout(POLL_INTERVAL) {
             Ok(PublisherCommand::StartVideo { config, reply }) => {
-                let result = pipeline.replace_video(config.clone());
-                if result.is_ok() {
-                    *video_config = Some(config);
+                // `livekitwebrtcsink`'s `video-caps` is only changeable in
+                // NULL or READY state, and the 0.15.3 sink does not reliably
+                // renegotiate an in-place request-pad rebuild — so an encoder
+                // settings change must rebuild the whole pipeline (the same
+                // path a reconnect takes), not just the video branch. The
+                // codec is fixed for a session, so this only fires on explicit
+                // resolution/fps/manual-bitrate changes from the presenter.
+                if Some(&config) == pipeline.video_config.as_ref() {
+                    let _ = reply.send(Ok(()));
                 } else {
-                    *video_config = pipeline.video_config.clone();
-                }
-                let _ = reply.send(result);
-                // Replacement succeeded with (possibly new) settings: start the
-                // congestion controller from the configured ceiling again.
-                if let Some(config) = video_config.as_ref() {
-                    rate_controller.reset(config);
+                    return ConnectedOutcome::Rebuild { config, reply };
                 }
             }
             Ok(PublisherCommand::StopVideo { reply }) => {
@@ -665,6 +704,21 @@ fn reconnect(
     }
 }
 
+/// Builds a fresh pipeline for a changed video configuration, re-applying the
+/// congestion controller's current ceiling so the new encoder starts where the
+/// old one left off instead of re-bursting to the configured ceiling.
+fn rebuild(
+    connection: &ConnectionConfig,
+    config: &CaptureConfig,
+    generation: u64,
+    current_kbps: u32,
+) -> Result<PublisherPipeline, String> {
+    let mut pipeline = PublisherPipeline::new(connection, Some(config), generation)?;
+    pipeline.apply_rate(current_kbps);
+    log::info!("GStreamer LiveKit publisher rebuilt for video settings change");
+    Ok(pipeline)
+}
+
 impl PublisherPipeline {
     fn new(
         connection: &ConnectionConfig,
@@ -683,7 +737,13 @@ impl PublisherPipeline {
             .build();
         let sink = gst::ElementFactory::make("livekitwebrtcsink")
             .property("audio-caps", &audio_caps)
-            .property("video-caps", supported_video_caps())
+            .property(
+                "video-caps",
+                video_config
+                    .map(|c| sink_video_caps(c.video_codec.as_deref().unwrap_or("vp8")))
+                    .transpose()?
+                    .unwrap_or_else(supported_video_caps),
+            )
             .build()
             .map_err(|error| format!("Failed to create livekitwebrtcsink: {error}"))?;
         // We hand the sink an already-encoded stream and drive its bitrate
@@ -750,25 +810,6 @@ impl PublisherPipeline {
         self.video_config = Some(config);
 
         Ok(())
-    }
-
-    fn replace_video(&mut self, config: CaptureConfig) -> Result<(), String> {
-        let previous_config = self.video_config.clone();
-        self.detach_video()?;
-
-        let Err(error) = self.attach_video(config) else {
-            return Ok(());
-        };
-        let Some(previous_config) = previous_config else {
-            return Err(error);
-        };
-        if let Err(restore_error) = self.attach_video(previous_config) {
-            return Err(format!(
-                "{error}; restoring the previous video publication also failed: {restore_error}"
-            ));
-        }
-
-        Err(error)
     }
 
     fn detach_video(&mut self) -> Result<(), String> {
@@ -1106,25 +1147,19 @@ pub(crate) fn can_initialize_element(name: &str) -> bool {
 }
 
 pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
-    let parser = match codec {
-        "h264" => "h264parse",
-        "vp8" => "identity",
-        "vp9" => "vp9parse",
-        "av1" => "av1parse",
+    // The bundled livekitwebrtcsink inserts its own parser internally, so only
+    // the encoder itself must be present and initializable here. The parser
+    // factories are not required in our branch anymore (see
+    // `gstreamer_encoder::codec_pipeline`).
+    let encoder = match codec {
+        "h264" | "vp8" | "vp9" | "av1" => selected_encoder_name(codec),
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
-    let required = [parser, selected_encoder_name(codec)];
-    let missing = required
-        .iter()
-        .copied()
-        .filter(|name| !can_initialize_element(name))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
+    if can_initialize_element(encoder) {
         return Ok(());
     }
     Err(format!(
-        "GStreamer elements unavailable for {codec}: {}",
-        missing.join(", ")
+        "GStreamer encoder unavailable for {codec}: {encoder}"
     ))
 }
 
@@ -1184,6 +1219,18 @@ fn supported_video_caps() -> gst::Caps {
         .structure(gst::Structure::builder("video/x-vp9").build())
         .structure(gst::Structure::builder("video/x-av1").build())
         .build()
+}
+
+fn sink_video_caps(codec: &str) -> Result<gst::Caps, String> {
+    let media_type = match codec {
+        "vp8" => "video/x-vp8",
+        "vp9" => "video/x-vp9",
+        "h264" => "video/x-h264",
+        "av1" => "video/x-av1",
+        other => return Err(format!("Unsupported codec: {other}")),
+    };
+
+    Ok(gst::Caps::builder(media_type).build())
 }
 
 pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)> {

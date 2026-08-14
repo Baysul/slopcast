@@ -14,7 +14,6 @@ import { StreamSettingsPanel } from './components/settings/StreamSettingsPanel';
 import { SourcePicker } from './components/sources/SourcePicker';
 import { idleTelemetry } from './components/telemetry/StreamTelemetryBar';
 import { useAudioCapture } from './hooks/useAudioCapture';
-import { useMotionDetection } from './hooks/useMotionDetection';
 import { useNativeRoom } from './hooks/useNativeRoom';
 import { useStreamSettings } from './hooks/useStreamSettings';
 import { useStreamTelemetry } from './hooks/useStreamTelemetry';
@@ -174,11 +173,6 @@ export const PresenterApp: React.FC = () => {
   const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } =
     useStreamTelemetry(spectatorCount);
 
-  // Auto-detect content motion while live (keepalive-vs-real frame ratio).
-  // Lightweight: polls atomic capture counters every ~2 s, never contends
-  // with the encode path.
-  const { motionTier } = useMotionDetection(motionMode, captureStage === 'live');
-
   const activeVideoCodecRef = useRef<VideoCodec>(videoCodec);
   const captureSessionRef = useRef(0);
   // The encoder config actually applied to the native track; share start seeds
@@ -186,8 +180,16 @@ export const PresenterApp: React.FC = () => {
   const lastVideoConfigKeyRef = useRef<string | null>(null);
 
   // The bitrate actually sent to the encoder. In auto mode it is derived from
-  // the codec/resolution/fps/motion/hardware; in manual mode it is the user's
+  // the codec/resolution/fps/hardware; in manual mode it is the user's
   // selection. `bitrateLimit` stays the persisted/manual value either way.
+  //
+  // Content motion is deliberately NOT part of this ceiling: the native
+  // publisher's loss-driven `RateController` already adapts the encoder rate
+  // to live congestion (~1 s cadence). Folding motion in here would recompute
+  // this value every time the 2 s motion poll reclassifies the tier, which
+  // restarts the video track mid-stream and breaks negotiation with the
+  // livekitwebrtcsink — freezing the video while audio keeps flowing. The
+  // ceiling therefore changes only on codec/resolution/fps/hardware changes.
   const activeCodecHardware = availableCodecs.find((c) => c.codec === videoCodec)?.hardware ?? false;
   const effectiveBitrate = useMemo(
     () =>
@@ -197,10 +199,10 @@ export const PresenterApp: React.FC = () => {
             resolution,
             fps: streamFps,
             hardware: activeCodecHardware,
-            motionTier,
+            motionTier: 'static',
           })
         : bitrateLimit,
-    [autoBitrate, videoCodec, resolution, streamFps, activeCodecHardware, motionTier, bitrateLimit],
+    [autoBitrate, videoCodec, resolution, streamFps, activeCodecHardware, bitrateLimit],
   );
   const effectiveBitrateRef = useRef(effectiveBitrate);
   useEffect(() => {

@@ -25,11 +25,13 @@ fn poll(label: &str, seconds: u64) {
         std::thread::sleep(Duration::from_millis(500));
         let telemetry = get_native_telemetry();
         println!(
-            "[{label} {i:02}] connected={} video_bytes_sent={:?} audio_bytes_sent={:?} frames_encoded={:?} rtt_ms={:?}",
+            "[{label} {i:02}] connected={} video_bytes_sent={:?} audio_bytes_sent={:?} frames_encoded={:?} frames_submitted={:?} pool_exhausted={:?} rtt_ms={:?}",
             is_livekit_room_connected(),
             telemetry.video_bytes_sent,
             telemetry.audio_bytes_sent,
             telemetry.video_frames_encoded,
+            telemetry.video_frames_submitted,
+            telemetry.video_pool_exhausted,
             telemetry.rtt_ms,
         );
     }
