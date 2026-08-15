@@ -82,7 +82,15 @@ pub struct CaptureConfig {
     pub height: u32,
     pub fps: u32,
     pub video_codec: Option<String>,
+    /// The configured bitrate ceiling in bits/sec (`None` or a non-positive
+    /// value falls back to `DEFAULT_VIDEO_BITRATE_BPS` in the publisher).
     pub max_bitrate: Option<f64>,
+    /// Whether the publisher's loss-driven `RateController` may step the
+    /// encoder below `max_bitrate`. `false` pins the encoder at the
+    /// configured ceiling. Missing values deserialize as `false` (manual)
+    /// for backwards compatibility with older callers.
+    #[serde(default)]
+    pub auto_bitrate: bool,
 }
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]

@@ -135,6 +135,7 @@ export const PresenterApp: React.FC = () => {
     setMotionMode,
     streamFpsRef,
     resolutionRef,
+    autoBitrateRef,
   } = useStreamSettings();
 
   const {
@@ -214,11 +215,12 @@ export const PresenterApp: React.FC = () => {
     return JSON.stringify({
       fps: streamFpsRef.current,
       bitrate: effectiveBitrateRef.current,
+      auto: autoBitrateRef.current,
       codec: videoCodec,
       width: dims.width,
       height: dims.height,
     });
-  }, [videoCodec, resolutionRef, streamFpsRef]);
+  }, [videoCodec, resolutionRef, streamFpsRef, autoBitrateRef]);
 
   const buildCaptureConfig = useCallback((): DesktopCaptureConfig => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
@@ -228,8 +230,9 @@ export const PresenterApp: React.FC = () => {
       height: dims.height,
       videoCodec,
       maxBitrate: effectiveBitrateRef.current,
+      autoBitrate: autoBitrateRef.current,
     };
-  }, [resolutionRef, streamFpsRef, videoCodec]);
+  }, [resolutionRef, streamFpsRef, videoCodec, autoBitrateRef]);
 
   useEffect(() => {
     (async () => {
@@ -281,6 +284,7 @@ export const PresenterApp: React.FC = () => {
     const key = JSON.stringify({
       fps: streamFps,
       bitrate: effectiveBitrate,
+      auto: autoBitrate,
       codec: videoCodec,
       width: dims.width,
       height: dims.height,
@@ -297,6 +301,7 @@ export const PresenterApp: React.FC = () => {
           height: dims.height,
           videoCodec,
           maxBitrate: effectiveBitrate,
+          autoBitrate,
         })
         .then((ok) => {
           if (!ok || captureSessionRef.current !== session) return;
@@ -316,7 +321,7 @@ export const PresenterApp: React.FC = () => {
         });
     }, 300);
     return () => clearTimeout(timeout);
-  }, [streamFps, effectiveBitrate, videoCodec, resolution, captureStage, resetStatsPrev]);
+  }, [streamFps, effectiveBitrate, videoCodec, resolution, autoBitrate, captureStage, resetStatsPrev]);
 
   const handleCreateRoom = useCallback(async () => {
     setAudioAppExplicitlySet(false);

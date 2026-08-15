@@ -1647,6 +1647,7 @@ mod probe {
             fps: 30,
             video_codec: None,
             max_bitrate: None,
+            auto_bitrate: false,
         };
         // The stash write and the emission are gated on a registered
         // preview callback (the Tauri backend registers one in the app; a

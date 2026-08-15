@@ -72,6 +72,10 @@ export interface DesktopCaptureConfig {
   height: number;
   videoCodec?: string;
   maxBitrate?: number;
+  /** Whether the native publisher's loss-driven rate controller may step
+   * the encoder below `maxBitrate`. `false` (manual) pins it at the
+   * configured ceiling. */
+  autoBitrate?: boolean;
 }
 
 /// One preview frame shipped over the preview channel: tightly packed BGRA

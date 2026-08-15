@@ -41,6 +41,7 @@ export interface UseStreamSettingsReturn {
   streamFpsRef: React.RefObject<number>;
   bitrateLimitRef: React.RefObject<number>;
   resolutionRef: React.RefObject<ResolutionPreset>;
+  autoBitrateRef: React.RefObject<boolean>;
   settingsHydrated: boolean;
 }
 
@@ -59,6 +60,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   const streamFpsRef = useRef(streamFps);
   const bitrateLimitRef = useRef(bitrateLimit);
   const resolutionRef = useRef(resolution);
+  const autoBitrateRef = useRef(autoBitrate);
 
   const settingsHydratedRef = useRef(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
@@ -75,6 +77,10 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   useEffect(() => {
     resolutionRef.current = resolution;
   }, [resolution]);
+
+  useEffect(() => {
+    autoBitrateRef.current = autoBitrate;
+  }, [autoBitrate]);
 
   // Initial config and settings load
   useEffect(() => {
@@ -163,6 +169,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
     streamFpsRef,
     bitrateLimitRef,
     resolutionRef,
+    autoBitrateRef,
     settingsHydrated,
   };
 }

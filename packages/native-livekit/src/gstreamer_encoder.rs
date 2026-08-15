@@ -35,12 +35,17 @@ const APPSRC_MAX_BUFFERS: u64 = 6;
 /// fill while the encoder's 120 ms output window retains frames without
 /// exhausting the pool — pool acquisition fails *before* `push_buffer`, so a
 /// too-small pool shows up as silent frame drops that `appsrc.dropped` never
-/// counts (see `VIDEO_POOL_EXHAUSTED`). SVT-AV1 (preset 10) additionally
-/// buffers its temporal-filter lookahead — ~58 frames before its *first*
-/// emitted frame — so the pool must absorb that too, or AV1 deadlocks with a
-/// full pool and zero encoded frames. 128 buffers (64 at 60 fps ≈ 1 s of
-/// in-flight headroom) covers the AV1 lookahead without unbounded growth.
-const VIDEO_BUFFER_POOL_SIZE: u32 = 128;
+/// counts (see `VIDEO_POOL_EXHAUSTED`). This is the pool's *maximum*; the
+/// minimum is 0 (see `attach`), so buffers are allocated lazily up to the
+/// cap, not eagerly. SVT-AV1 (preset 10) additionally buffers its
+/// temporal-filter lookahead — ~58 frames before its *first* emitted frame —
+/// so AV1 uses `AV1_BUFFER_POOL_SIZE` instead, or the pool starves with a
+/// full pool and zero encoded frames.
+const VIDEO_BUFFER_POOL_SIZE: u32 = 24;
+/// Pool cap for AV1 (see `VIDEO_BUFFER_POOL_SIZE`): 80 in-flight I420
+/// buffers cover the measured ~58-frame SVT startup retention (~1.3 s at
+/// 60 fps) with margin, without handing every codec a huge cap.
+const AV1_BUFFER_POOL_SIZE: u32 = 80;
 const GOP_SECONDS: u32 = 1;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
@@ -141,10 +146,11 @@ pub(crate) struct VideoInput {
     /// `max(capture_pts, last + frame_duration)` keeps the sink's RTP
     /// timestamp chain strictly monotonic (see `push_frame`).
     last_pts_ns: Arc<Mutex<Option<u64>>>,
-    /// Preallocated I420 input buffers (see `VIDEO_BUFFER_POOL_SIZE`):
-    /// `push_frame` acquires from the pool instead of allocating a fresh
-    /// full-frame buffer per frame. Pool buffers are returned to the pool
-    /// automatically when the pipeline releases them.
+    /// Pool of I420 input buffers capped at `VIDEO_BUFFER_POOL_SIZE` (or
+    /// `AV1_BUFFER_POOL_SIZE` for AV1, see `attach`): `push_frame` acquires
+    /// from the pool instead of allocating a fresh full-frame buffer per
+    /// frame. Pool buffers are returned to the pool automatically when the
+    /// pipeline releases them.
     buffer_pool: gst::BufferPool,
 }
 
@@ -303,38 +309,31 @@ impl GstreamerEncoder {
     /// `target-bitrate`. SVT-AV1's rate path is capped-CRF — the ceiling is
     /// applied through the `mbr` cap in its `parameters-string`, and the
     /// plugin rejects mid-stream `parameters-string` changes, so it reports
-    /// the new ceiling for logging but cannot apply it without a rebuild.
-    /// The VA-API and `VPx` rate controllers pick the new rate up on the next
-    /// encoded frame — no pipeline rebuild, so this is safe to call from the
-    /// publisher's ~1 s congestion control tick even mid-stream.
-    pub(crate) fn set_ceiling_kbps(&mut self, ceiling_kbps: u32) {
+    /// `false` and leaves `ceiling_kbps` untouched (the encoder keeps its
+    /// configured cap; a `true`/`false` return keeps the caller's state from
+    /// pretending the change landed). The VA-API and `VPx` rate controllers
+    /// pick the new rate up on the next encoded frame — no pipeline rebuild,
+    /// so this is safe to call from the publisher's ~1 s congestion control
+    /// tick even mid-stream.
+    ///
+    /// Returns `true` when the new ceiling was actually applied (or was
+    /// already in effect), `false` when the encoder cannot change it live.
+    pub(crate) fn set_ceiling_kbps(&mut self, ceiling_kbps: u32) -> bool {
         let ceiling_kbps = ceiling_kbps.clamp(1, u32::MAX);
         if ceiling_kbps == self.ceiling_kbps {
-            return;
+            return true;
         }
-        let target = encoder_target_kbps(&self.encoder, ceiling_kbps);
-        if is_svt_av1(&self.encoder) {
-            // SVT-AV1 (capped-CRF): the ceiling is applied through the `mbr`
-            // cap in `parameters-string`, which the plugin rejects changing
-            // mid-stream. Report the new ceiling for logging only.
-            log::warn!("GStreamer SVT-AV1 encoder cannot change its bitrate cap mid-stream");
-        } else if self.encoder.find_property("bitrate").is_some() {
-            self.encoder
-                .set_property_from_str("bitrate", &target.to_string());
-        } else if self.encoder.find_property("target-bitrate").is_some() {
-            // VPx `target-bitrate` is in bits/sec, unlike `bitrate` (kbps).
-            self.encoder.set_property_from_str(
-                "target-bitrate",
-                &target.saturating_mul(1000).min(i32::MAX as u32).to_string(),
-            );
-        } else {
-            log::warn!("GStreamer encoder exposes no runtime bitrate property");
+        if !apply_encoder_ceiling(&self.encoder, ceiling_kbps) {
+            // The encoder cannot change its ceiling live; leave `ceiling_kbps`
+            // untouched so our bookkeeping never lies about the real cap.
+            return false;
         }
         log::info!(
             "[gstreamer-encoder] ceiling {} kbps -> {ceiling_kbps} kbps",
             self.ceiling_kbps,
         );
         self.ceiling_kbps = ceiling_kbps;
+        true
     }
     #[allow(
         clippy::too_many_lines,
@@ -354,7 +353,7 @@ impl GstreamerEncoder {
             return Err("GStreamer encoder fps must be greater than zero".into());
         }
         let codec = config.video_codec.as_deref().unwrap_or("vp8");
-        let ceiling_kbps = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
+        let ceiling_kbps = crate::gstreamer_publisher::configured_ceiling_kbps(config);
         crate::gstreamer_publisher::verify_codec_elements(codec)?;
         let encoder_name = codec_pipeline(codec)?;
 
@@ -400,17 +399,17 @@ impl GstreamerEncoder {
             })?;
         let encoder_rate = encoder_target_kbps(&encoder, ceiling_kbps);
         configure_encoder(&encoder, codec, encoder_rate, config.height, key_int_max);
-        // The bundled livekitwebrtcsink (gst-plugin-webrtc 0.15.3) inserts its
-        // own codec parser (h264parse/vp9parse/av1parse) inside the sink before
-        // its payloader, and rejects any caps renegotiation on its input pad.
-        // A second parser here is therefore not just redundant but harmful:
-        // VP9/AV1 parsers emit caps that *evolve* after the first frame
-        // (chroma-format/bit-depth appear once known), which the sink reads as
-        // an unsupported renegotiation and kills with `not-negotiated`, while
-        // H.264's pre-parsed AVCC access units are mis-parsed by the sink's
-        // own h264parse as broken NALs ("waiting for a keyframe" forever). Feed
-        // the encoder's raw output straight to the sink and let its internal
-        // parser produce the caps the payloader wants.
+        // On the bundled livekitwebrtcsink (gst-plugin-webrtc 0.15.3) we
+        // observed the sink inserting its own codec parser (vp9parse/av1parse)
+        // internally before its payloader and rejecting caps renegotiation on
+        // its input pad; a second external parser caused `not-negotiated`
+        // failures there (VP9/AV1 parser caps evolve after the first frame).
+        // H.264 behavior on this exact build was less clear-cut, so the
+        // external parsers are removed based on what we observed rather than
+        // a claim that every bundled parser definitely exists and that AVCC
+        // was definitely mis-parsed. Feed the encoder's raw output straight
+        // to the sink and let its internal parser produce the caps the
+        // payloader wants.
         let output_queue = gst::ElementFactory::make("queue")
             .property("max-size-buffers", 0_u32)
             .property("max-size-bytes", 0_u32)
@@ -456,15 +455,22 @@ impl GstreamerEncoder {
         if let Some(pad) = encoder.static_pad("src") {
             log_caps_events(&pad, "encoder -> queue");
         }
-        if let Some(pad) = elements[2].static_pad("src") {
+        if let Some(pad) = output_queue.static_pad("src") {
             log_caps_events(&pad, "queue -> sink");
         }
 
-        // I420 input buffer pool: preallocate `VIDEO_BUFFER_POOL_SIZE`
-        // buffers of the input frame size at attach time. Steady-state
-        // `push_frame` then acquires from the pool (zero allocation); the
-        // pool is deactivated and freed when `VideoInput` is dropped
-        // (pipeline teardown).
+        // I420 input buffer pool: cap at `VIDEO_BUFFER_POOL_SIZE` (AV1 gets
+        // the larger `AV1_BUFFER_POOL_SIZE` for its SVT startup retention)
+        // buffers of the input frame size. The minimum is 0, so buffers are
+        // allocated lazily up to the cap — this is headroom, not a 24/80-buffer
+        // eager allocation. Steady-state `push_frame` then acquires from the
+        // pool (zero allocation); the pool is deactivated and freed when
+        // `VideoInput` is dropped (pipeline teardown).
+        let pool_max = if codec == "av1" {
+            AV1_BUFFER_POOL_SIZE
+        } else {
+            VIDEO_BUFFER_POOL_SIZE
+        };
         let buffer_pool = gst::BufferPool::new();
         {
             let mut pool_config = buffer_pool.config();
@@ -473,7 +479,7 @@ impl GstreamerEncoder {
                 u32::try_from(input_info.size())
                     .map_err(|_| "GStreamer input buffer size exceeds u32")?,
                 0,
-                VIDEO_BUFFER_POOL_SIZE,
+                pool_max,
             );
             buffer_pool.set_config(pool_config).map_err(|error| {
                 format!("Failed to configure GStreamer input buffer pool: {error}")
@@ -787,6 +793,33 @@ fn is_svt_av1(encoder: &gst::Element) -> bool {
         .is_some_and(|factory| factory.name() == "svtav1enc")
 }
 
+/// Applies `ceiling_kbps` to `encoder`'s runtime rate knob. Returns `false`
+/// when the encoder cannot change its ceiling live: SVT-AV1's capped-CRF cap
+/// (the `mbr` in `parameters-string`) rejects mid-stream changes, and a
+/// codec exposing neither `bitrate` nor `target-bitrate` has no runtime knob
+/// at all. The caller must treat `false` as "the encoder kept its old cap"
+/// and must not record the requested value.
+fn apply_encoder_ceiling(encoder: &gst::Element, ceiling_kbps: u32) -> bool {
+    if is_svt_av1(encoder) {
+        log::warn!("GStreamer SVT-AV1 encoder cannot change its bitrate cap mid-stream");
+        return false;
+    }
+    let target = encoder_target_kbps(encoder, ceiling_kbps);
+    if encoder.find_property("bitrate").is_some() {
+        encoder.set_property_from_str("bitrate", &target.to_string());
+    } else if encoder.find_property("target-bitrate").is_some() {
+        // VPx `target-bitrate` is in bits/sec, unlike `bitrate` (kbps).
+        encoder.set_property_from_str(
+            "target-bitrate",
+            &target.saturating_mul(1000).min(i32::MAX as u32).to_string(),
+        );
+    } else {
+        log::warn!("GStreamer encoder exposes no runtime bitrate property");
+        return false;
+    }
+    true
+}
+
 fn encoder_target_kbps(encoder: &gst::Element, ceiling_kbps: u32) -> u32 {
     if is_svt_av1(encoder) {
         // SVT-AV1 encodes in capped-CRF: the ceiling is applied in full as
@@ -984,6 +1017,44 @@ mod tests {
         let target_kbps = encoder_target_kbps(&encoder, 20_000);
         configure_encoder(&encoder, "av1", target_kbps, 2160, 60);
         assert_eq!(encoder.property::<u32>("preset"), 12);
+
+        Ok(())
+    }
+
+    #[test]
+    fn svt_av1_rejects_live_ceiling_changes() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("svtav1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let target_kbps = encoder_target_kbps(&encoder, 8_000);
+        configure_encoder(&encoder, "av1", target_kbps, 1080, 60);
+        let parameters_before = encoder.property::<String>("parameters-string");
+
+        // The capped-CRF cap cannot move mid-stream: the caller must not
+        // record the requested ceiling as applied.
+        assert!(!apply_encoder_ceiling(&encoder, 6_000));
+        assert_eq!(
+            encoder.property::<String>("parameters-string"),
+            parameters_before
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn mutable_encoder_applies_a_live_ceiling_change() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("vp9enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(&encoder, "vp9", 6_400, 720, 60);
+
+        assert!(apply_encoder_ceiling(&encoder, 10_000));
+        // VPx `target-bitrate` is bits/sec of the VBR target (80% of 10 Mbps).
+        assert_eq!(encoder.property::<i32>("target-bitrate"), 8_000_000);
 
         Ok(())
     }

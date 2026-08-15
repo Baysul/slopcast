@@ -346,6 +346,7 @@ pub async fn start_capture_preview(
                 fps,
                 video_codec: None,
                 max_bitrate: None,
+                auto_bitrate: false,
             };
             native_livekit::start_synthetic_capture(&config)?;
         } else {
@@ -358,6 +359,7 @@ pub async fn start_capture_preview(
                 fps: 30,
                 video_codec: None,
                 max_bitrate: None,
+                auto_bitrate: false,
             };
             start_real_capture(&config, source)?;
         }

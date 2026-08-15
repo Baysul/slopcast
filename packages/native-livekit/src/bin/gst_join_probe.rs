@@ -92,6 +92,7 @@ fn main() {
         fps,
         video_codec: Some(codec.clone()),
         max_bitrate: Some(bitrate),
+        auto_bitrate: false,
     };
     println!(
         "[probe] starting synthetic capture + video track (codec={codec} {width}x{height}@{fps} bitrate={bitrate})"

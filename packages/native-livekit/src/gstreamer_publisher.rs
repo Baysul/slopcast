@@ -65,6 +65,10 @@ const RATE_STEP_UP: f64 = 1.15;
 /// Hard floor for the adapted ceiling: below this the encoder quality
 /// degrades faster than the congestion it is trying to escape.
 const RATE_FLOOR_KBPS: u32 = 500;
+/// Ceiling used when the stream settings carry no usable `max_bitrate`
+/// (missing, zero, or non-finite): the "automatic" start point the
+/// controller adapts around.
+const DEFAULT_VIDEO_BITRATE_BPS: f64 = 20_000_000.0;
 
 static PUBLISHER: LazyLock<Mutex<Option<PublisherHandle>>> = LazyLock::new(|| Mutex::new(None));
 static AUDIO_INPUT: LazyLock<Mutex<Option<gst_app::AppSrc>>> = LazyLock::new(|| Mutex::new(None));
@@ -133,6 +137,11 @@ enum ConnectedOutcome {
 /// stream-settings change) starts from the configured ceiling again.
 #[derive(Debug, Clone, Copy, Default)]
 struct RateController {
+    /// Whether the controller may step the encoder ceiling at all. `false`
+    /// (manual bitrate) pins the encoder at the configured ceiling; the
+    /// caller must still gate `observe` on this so a manual session never
+    /// adapts.
+    enabled: bool,
     /// Configured ceiling from the stream settings (the cap `current_kbps`
     /// never exceeds).
     ceiling_kbps: u32,
@@ -158,7 +167,8 @@ impl RateController {
     /// (Re)start from a fresh stream-settings ceiling. Called whenever a
     /// `StartVideo` rebuild succeeds with a (possibly new) configuration.
     fn reset(&mut self, config: &CaptureConfig) {
-        let ceiling = bitrate_bps_to_kbps(config.max_bitrate.unwrap_or(20_000_000.0));
+        self.enabled = config.auto_bitrate;
+        let ceiling = configured_ceiling_kbps(config);
         self.ceiling_kbps = ceiling;
         self.current_kbps = ceiling;
         self.clean_ticks = 0;
@@ -172,8 +182,13 @@ impl RateController {
     }
 
     /// One ~1 s observation. Returns the new ceiling to apply, or `None` to
-    /// hold the current rate.
+    /// hold the current rate. Always holds when disabled (manual bitrate):
+    /// a fixed ceiling must never be adapted, regardless of which caller
+    /// invokes this.
     fn observe(&mut self, telemetry: &NativeTelemetry) -> Option<u32> {
+        if !self.enabled {
+            return None;
+        }
         let (Some(sent), Some(lost)) = (telemetry.video_packets_sent, telemetry.video_packets_lost)
         else {
             // No outbound or remote-inbound report yet (early session,
@@ -235,6 +250,29 @@ impl RateController {
         self.clean_ticks = 0;
         None
     }
+}
+
+/// The configured ceiling in kbps from the stream settings. The low-level
+/// `bitrate_bps_to_kbps` conversion stays strict; this helper owns the
+/// *config* semantics: a missing, zero, or non-finite `max_bitrate` is not a
+/// 1 kbps stream, it is "no usable ceiling" — fall back to the automatic
+/// default so an automatic/`None` session can never become a 1 kbps encode.
+/// Shared with `gstreamer_encoder::attach` so the encoder's initial ceiling
+/// always agrees with the controller's.
+pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
+    let bps = config
+        .max_bitrate
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(DEFAULT_VIDEO_BITRATE_BPS);
+    bitrate_bps_to_kbps(bps)
+}
+
+/// Whether the active codec supports in-place ceiling changes. VPx/VA rate
+/// knobs change mid-stream; SVT-AV1's capped-CRF cap (`mbr` in its
+/// `parameters-string`) cannot, so AV1 is pinned to its configured ceiling
+/// for now. The default codec (no `video_codec`) is VP8, which can adapt.
+fn can_adapt(codec: Option<&str>) -> bool {
+    !matches!(codec.unwrap_or("vp8"), "av1")
 }
 
 /// Clears the shared publish state, but only if this worker is still the
@@ -545,20 +583,24 @@ fn run_worker(
             ConnectedOutcome::Shutdown => break,
             ConnectedOutcome::Rebuild { config, reply } => {
                 finish_if_current(generation);
+                // Snapshot the controller before tearing down the pipeline: a
+                // failed settings-change rebuild must resume the old settings
+                // with the *adapted* ceiling it had reached, not a reset one
+                // (an 11.25 Mbps adaptation must not snap back to 20 Mbps).
+                let previous_controller = rate_controller;
                 drop(pipeline.take());
-                match rebuild(
-                    connection,
-                    &config,
-                    generation,
-                    rate_controller.current_kbps(),
-                ) {
+                match rebuild(connection, &config, generation) {
                     Ok(fresh) => {
+                        // Settings changed: the fresh encoder starts at the
+                        // NEW configured ceiling and the controller resets to
+                        // match — never the old adapted rate.
                         rate_controller.reset(&config);
                         video_config = Some(config);
                         pipeline = Some(fresh);
                         let _ = reply.send(Ok(()));
                     }
                     Err(error) => {
+                        rate_controller = previous_controller;
                         let _ = reply.send(Err(error));
                         match reconnect(
                             connection,
@@ -642,11 +684,20 @@ fn run_connected(
 
         // ~1 s congestion-control cadence: step the encoder ceiling down on
         // sustained remote-inbound loss, back up toward the configured
-        // ceiling after clean intervals.
+        // ceiling after clean intervals. Only in automatic mode (manual
+        // bitrate is pinned) and only for codecs that accept in-place
+        // ceiling changes (SVT-AV1's capped-CRF cap cannot).
         rate_ticks += 1;
         if rate_ticks >= RATE_ADAPT_TICKS {
             rate_ticks = 0;
-            if pipeline.video_config.is_some() {
+            if rate_controller.enabled
+                && can_adapt(
+                    pipeline
+                        .video_config
+                        .as_ref()
+                        .and_then(|config| config.video_codec.as_deref()),
+                )
+            {
                 pipeline.adapt_rate(rate_controller);
             }
         }
@@ -704,17 +755,16 @@ fn reconnect(
     }
 }
 
-/// Builds a fresh pipeline for a changed video configuration, re-applying the
-/// congestion controller's current ceiling so the new encoder starts where the
-/// old one left off instead of re-bursting to the configured ceiling.
+/// Builds a fresh pipeline for a changed video configuration. The new
+/// encoder starts at the *new* configured ceiling — unlike `reconnect`,
+/// which re-applies the controller's currently adapted rate because the
+/// configuration is unchanged.
 fn rebuild(
     connection: &ConnectionConfig,
     config: &CaptureConfig,
     generation: u64,
-    current_kbps: u32,
 ) -> Result<PublisherPipeline, String> {
-    let mut pipeline = PublisherPipeline::new(connection, Some(config), generation)?;
-    pipeline.apply_rate(current_kbps);
+    let pipeline = PublisherPipeline::new(connection, Some(config), generation)?;
     log::info!("GStreamer LiveKit publisher rebuilt for video settings change");
     Ok(pipeline)
 }
@@ -829,21 +879,24 @@ impl PublisherPipeline {
     }
 
     /// Re-applies an adapted encoder ceiling after a rebuild/reconnect (the
-    /// fresh encoder starts at the configured ceiling).
-    fn apply_rate(&mut self, ceiling_kbps: u32) {
-        if ceiling_kbps == 0 {
-            return;
-        }
-        if let Some(encoder) = self.encoder.as_mut() {
-            encoder.set_ceiling_kbps(ceiling_kbps);
-        }
+    /// fresh encoder starts at the configured ceiling). Returns whether the
+    /// encoder actually changed rate (false for SVT-AV1, whose capped-CRF
+    /// cap cannot move mid-stream).
+    fn apply_rate(&mut self, ceiling_kbps: u32) -> bool {
+        let Some(encoder) = self.encoder.as_mut() else {
+            return true;
+        };
+        encoder.set_ceiling_kbps(ceiling_kbps)
     }
 
     /// One ~1 s congestion-control observation: fold the sink stats, step
     /// the `RateController`, and re-target the encoder when it decides to
     /// move.
     fn adapt_rate(&mut self, rate_controller: &mut RateController) {
-        if self.video_config.is_none() {
+        let Some(config) = self.video_config.as_ref() else {
+            return;
+        };
+        if !can_adapt(config.video_codec.as_deref()) {
             return;
         }
         let telemetry = self.telemetry();
@@ -851,7 +904,7 @@ impl PublisherPipeline {
             log::info!(
                 "GStreamer congestion controller: applying encoder ceiling {ceiling_kbps} kbps"
             );
-            self.apply_rate(ceiling_kbps);
+            let _ = self.apply_rate(ceiling_kbps);
         }
     }
 
@@ -1147,10 +1200,11 @@ pub(crate) fn can_initialize_element(name: &str) -> bool {
 }
 
 pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
-    // The bundled livekitwebrtcsink inserts its own parser internally, so only
-    // the encoder itself must be present and initializable here. The parser
-    // factories are not required in our branch anymore (see
-    // `gstreamer_encoder::codec_pipeline`).
+    // Only the encoder itself must be present and initializable here. On the
+    // bundled livekitwebrtcsink we observed an internal parser being inserted
+    // after the encoder (see `gstreamer_encoder::attach`), so no external
+    // parser factories are required in our branch — but that observation is
+    // specific to the bundled 0.15.3 build, not asserted for every runtime.
     let encoder = match codec {
         "h264" | "vp8" | "vp9" | "av1" => selected_encoder_name(codec),
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
@@ -1617,6 +1671,7 @@ mod tests {
     fn rate_controller_steps_down_on_sustained_loss() {
         let config = CaptureConfig {
             max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
             ..Default::default()
         };
         let mut controller = RateController::default();
@@ -1640,6 +1695,7 @@ mod tests {
     fn rate_controller_holds_between_thresholds() {
         let config = CaptureConfig {
             max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
             ..Default::default()
         };
         let mut controller = RateController::default();
@@ -1664,6 +1720,7 @@ mod tests {
     fn rate_controller_holds_without_remote_inbound_stats() {
         let config = CaptureConfig {
             max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
             ..Default::default()
         };
         let mut controller = RateController::default();
@@ -1681,6 +1738,7 @@ mod tests {
     fn rate_controller_recovers_after_clean_intervals() {
         let config = CaptureConfig {
             max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
             ..Default::default()
         };
         let mut controller = RateController::default();
@@ -1715,6 +1773,7 @@ mod tests {
     fn rate_controller_never_goes_below_the_floor_or_above_the_ceiling() {
         let config = CaptureConfig {
             max_bitrate: Some(500_000.0), // ceiling = 500 kbps = the floor
+            auto_bitrate: true,
             ..Default::default()
         };
         let mut controller = RateController::default();
@@ -1747,6 +1806,7 @@ mod tests {
     fn rate_controller_reset_starts_from_the_configured_ceiling_again() {
         let config = CaptureConfig {
             max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
             ..Default::default()
         };
         let mut controller = RateController::default();
@@ -1764,6 +1824,7 @@ mod tests {
         // A stream-settings change resets the controller to the new ceiling.
         let changed = CaptureConfig {
             max_bitrate: Some(8_000_000.0),
+            auto_bitrate: true,
             ..Default::default()
         };
         controller.reset(&changed);
@@ -1774,6 +1835,7 @@ mod tests {
     fn rate_controller_reprimes_after_counter_regression() {
         let config = CaptureConfig {
             max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
             ..Default::default()
         };
         let mut controller = RateController::default();
@@ -1798,5 +1860,129 @@ mod tests {
             controller.observe(&telemetry_with_loss(2_050.0, 60.0)),
             Some(15_000) // 60/2000 = 3% → step down 20_000 × 0.75
         );
+    }
+
+    #[test]
+    fn rate_controller_manual_never_adapts() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            auto_bitrate: false,
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(!controller.enabled);
+        assert_eq!(controller.current_kbps(), 20_000);
+
+        // Even 100% interval loss must not move a manual ceiling.
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(12_000.0, 2_000.0))
+                .is_none()
+        );
+        assert_eq!(controller.current_kbps(), 20_000);
+    }
+
+    #[test]
+    fn rate_controller_automatic_steps_down_on_loss() {
+        let config = CaptureConfig {
+            max_bitrate: Some(10_000_000.0),
+            auto_bitrate: true,
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(controller.enabled);
+        assert_eq!(controller.current_kbps(), 10_000);
+
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+        assert_eq!(
+            controller.observe(&telemetry_with_loss(12_000.0, 600.0)),
+            Some(7_500) // 30% loss → 10_000 × 0.75
+        );
+        assert_eq!(controller.current_kbps(), 7_500);
+    }
+
+    #[test]
+    fn rate_controller_snapshot_restore_preserves_adapted_rate() {
+        // The worker's failed settings-rebuild path snapshots the controller
+        // before the pipeline teardown and restores it on failure, so the old
+        // configuration resumes at its *adapted* ceiling, not a reset one.
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+        assert_eq!(
+            controller.observe(&telemetry_with_loss(12_000.0, 600.0)),
+            Some(15_000)
+        );
+
+        let snapshot = controller;
+        let changed = CaptureConfig {
+            max_bitrate: Some(6_000_000.0),
+            auto_bitrate: true,
+            ..Default::default()
+        };
+        controller.reset(&changed);
+        assert_eq!(controller.current_kbps(), 6_000);
+
+        controller = snapshot;
+        assert_eq!(controller.current_kbps(), 15_000);
+    }
+
+    #[test]
+    fn configured_ceiling_kbps_never_yields_one_kbps_from_invalid_input() {
+        // The "automatic gives one frame" failure class: a missing/zero/
+        // non-finite ceiling must normalize to the automatic default, never
+        // to a 1 kbps encode.
+        assert_eq!(
+            configured_ceiling_kbps(&CaptureConfig {
+                max_bitrate: Some(0.0),
+                ..Default::default()
+            }),
+            20_000
+        );
+        assert_eq!(
+            configured_ceiling_kbps(&CaptureConfig {
+                max_bitrate: Some(f64::NAN),
+                ..Default::default()
+            }),
+            20_000
+        );
+        assert_eq!(
+            configured_ceiling_kbps(&CaptureConfig {
+                max_bitrate: None,
+                ..Default::default()
+            }),
+            20_000
+        );
+        assert_eq!(
+            configured_ceiling_kbps(&CaptureConfig {
+                max_bitrate: Some(20_000_000.0),
+                ..Default::default()
+            }),
+            20_000
+        );
+    }
+
+    #[test]
+    fn can_adapt_allows_every_codec_except_av1() {
+        assert!(!can_adapt(Some("av1")));
+        assert!(can_adapt(Some("h264")));
+        assert!(can_adapt(Some("vp8")));
+        assert!(can_adapt(Some("vp9")));
+        assert!(can_adapt(None));
     }
 }
