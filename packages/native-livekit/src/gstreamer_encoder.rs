@@ -421,10 +421,13 @@ impl GstreamerEncoder {
             VIDEO_FRAMES_ENCODED.fetch_add(1, Ordering::Relaxed);
             gst::PadProbeReturn::Ok
         });
-        // `keyframe-mode=disabled` relies on on-demand keyframe requests from
-        // `livekitwebrtcsink`; verify they actually reach the AV1 encoder.
+        // `keyframe-max-dist` bounds the automatic keyframe interval; verify
+        // on-demand keyframe requests from `livekitwebrtcsink` also reach the
+        // AV1 encoder, and audit whether each request actually produces a
+        // keyframe.
         if codec == "av1" {
             log_force_key_unit_events(&encoder_src, "av1enc");
+            log_av1_encode_diagnostics(&encoder_src, "av1enc");
         }
         let elements = vec![
             appsrc.clone().upcast(),
@@ -617,9 +620,7 @@ fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_
     if encoder.find_property("key-int-max").is_some() {
         encoder.set_property_from_str("key-int-max", &key_int_max.to_string());
     }
-    // libaom `av1enc` disables automatic keyframe placement in
-    // `configure_libaom_av1`, so `keyframe-max-dist` would be dead config.
-    if codec != "av1" && encoder.find_property("keyframe-max-dist").is_some() {
+    if encoder.find_property("keyframe-max-dist").is_some() {
         encoder.set_property_from_str("keyframe-max-dist", &key_int_max.to_string());
     }
     if codec == "h264" {
@@ -706,10 +707,21 @@ fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_
 /// WebRTC's libaom AV1 RTC path (its `rc_buf_sz`/`rc_buf_optimal_sz` of
 /// 1000/600 ms and 50/50 undershoot/overshoot): av1enc's defaults are a
 /// 6000 ms buffer tuned for offline encodes, which would let a burst ride
-/// for seconds before CBR reacts. `keyframe-mode=disabled` stops the encoder
-/// from forcing an intra frame every `keyframe-max-dist` frames — keyframes
-/// are then produced only on demand via upstream `GstForceKeyUnit` events
-/// from `livekitwebrtcsink`.
+/// for seconds before CBR reacts.
+///
+/// The quantizer range must mirror WebRTC's wrapper too (`rc_min_quantizer`
+/// 10, `rc_max_quantizer`/`qpMax` 56), because `GStreamer`'s `av1enc` defaults
+/// `min-quantizer`/`max-quantizer` to **0/0** — the extreme high-quality end
+/// of libaom's 0–63 Q range. With no Q headroom the rate controller cannot
+/// shed quality when scene complexity spikes, so a busy scene pins the encoder
+/// at ~max quality and the output blows far past the ceiling (measured ~40
+/// Mbps from a 8 Mbps target during gameplay). These two properties are the
+/// regression guard: `configure_libaom_av1` must never drop them, and the
+/// test below asserts the exact values.
+///
+/// Keyframe placement follows the shared `keyframe-max-dist` interval
+/// (`configure_encoder`); on-demand `GstForceKeyUnit` events from
+/// `livekitwebrtcsink` still trigger intra frames early.
 fn configure_libaom_av1(encoder: &gst::Element, bitrate: u32) {
     if encoder.find_property("target-bitrate").is_some() {
         encoder.set_property_from_str("target-bitrate", &bitrate.to_string());
@@ -747,8 +759,17 @@ fn configure_libaom_av1(encoder: &gst::Element, bitrate: u32) {
     if encoder.find_property("overshoot-pct").is_some() {
         encoder.set_property("overshoot-pct", 50_u32);
     }
-    if encoder.find_property("keyframe-mode").is_some() {
-        encoder.set_property_from_str("keyframe-mode", "disabled");
+    // av1enc defaults min/max quantizer to 0 — the extreme high-quality end
+    // of libaom's 0–63 Q range, giving the CBR controller no headroom to
+    // shed quality when scene complexity spikes. Without a usable Q range a
+    // busy scene pins the encoder at ~max quality and the output blows far
+    // past the ceiling (observed ~40 Mbps on a 8 Mbps target during
+    // gameplay). Mirror WebRTC's libaom AV1 wrapper: min Q 10, max Q 56.
+    if encoder.find_property("min-quantizer").is_some() {
+        encoder.set_property("min-quantizer", 10_u32);
+    }
+    if encoder.find_property("max-quantizer").is_some() {
+        encoder.set_property("max-quantizer", 56_u32);
     }
 }
 
@@ -772,17 +793,104 @@ fn log_caps_events(pad: &gst::Pad, label: &'static str) {
     });
 }
 
-/// Logs `GstForceKeyUnit` events reaching the encoder, so a
-/// `keyframe-mode=disabled` libaom `av1enc` can be verified to still receive
-/// on-demand keyframe requests from `livekitwebrtcsink` (the only remaining
-/// way it can produce an intra frame).
+/// Logs `GstForceKeyUnit` events on the encoder source pad so a libaom
+/// `av1enc` keyframe-control path can be audited end to end. The upstream
+/// event is the request travelling back from `livekitwebrtcsink`; the
+/// downstream event is the notification the encoder pushes ahead of the
+/// keyframe it actually produced — so a "HANDLED" with no following "KEYFRAME
+/// OUTPUT" (see `log_av1_encode_diagnostics`) means the encoder acknowledged
+/// the request but did not emit an intra frame.
 fn log_force_key_unit_events(pad: &gst::Pad, label: &'static str) {
-    pad.add_probe(gst::PadProbeType::EVENT_BOTH, move |_, info| {
+    pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, move |_, info| {
         if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref()
             && event.has_name("GstForceKeyUnit")
         {
-            log::info!("[force-key-unit] {label}: keyframe requested");
+            log::info!("[force-key-unit] {label}: KEYFRAME REQUEST");
         }
+
+        gst::PadProbeReturn::Ok
+    });
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+        if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref()
+            && event.has_name("GstForceKeyUnit")
+        {
+            log::info!("[force-key-unit] {label}: KEYFRAME HANDLED");
+        }
+
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// Encoder telemetry accumulated between 1 s log ticks: encoded buffers, bytes
+/// encoded, the largest single encoded frame, and the longest wall-clock gap
+/// between consecutive buffers crossing the probe (a stall in the
+/// encode/output path).
+#[derive(Debug)]
+struct EncodeTelemetry {
+    window_start: std::time::Instant,
+    frames: u64,
+    bytes: u64,
+    max_frame_bytes: u64,
+    max_gap_ms: u64,
+    last_seen_at: Option<std::time::Instant>,
+}
+
+impl Default for EncodeTelemetry {
+    fn default() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            frames: 0,
+            bytes: 0,
+            max_frame_bytes: 0,
+            max_gap_ms: 0,
+            last_seen_at: None,
+        }
+    }
+}
+
+/// Logs AV1 keyframe output and per-second encode telemetry. A buffer without
+/// `DELTA_UNIT` is the encoder's own keyframe (decodable standalone); its byte
+/// size plus the `KEYFRAME REQUEST`/`KEYFRAME HANDLED` events above answer
+/// whether libaom actually produces a keyframe for every PLI it receives.
+fn log_av1_encode_diagnostics(pad: &gst::Pad, label: &'static str) {
+    let telemetry = Arc::new(Mutex::new(EncodeTelemetry::default()));
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let frame_bytes = u64::try_from(buffer.size()).unwrap_or(u64::MAX);
+        if !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT) {
+            log::info!("[av1-encode] {label}: KEYFRAME OUTPUT size={frame_bytes}");
+        }
+
+        let now = std::time::Instant::now();
+        let Ok(mut telemetry) = telemetry.lock() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        telemetry.frames += 1;
+        telemetry.bytes = telemetry.bytes.saturating_add(frame_bytes);
+        telemetry.max_frame_bytes = telemetry.max_frame_bytes.max(frame_bytes);
+        if let Some(last_seen_at) = telemetry.last_seen_at {
+            let gap_ms = u64::try_from(now.duration_since(last_seen_at).as_millis())
+                .unwrap_or(u64::MAX);
+            telemetry.max_gap_ms = telemetry.max_gap_ms.max(gap_ms);
+        }
+        telemetry.last_seen_at = Some(now);
+
+        let elapsed_ms = now.duration_since(telemetry.window_start).as_millis();
+        if elapsed_ms < 1000 {
+            return gst::PadProbeReturn::Ok;
+        }
+        let elapsed_ms = u64::try_from(elapsed_ms).unwrap_or(u64::MAX).max(1);
+        log::info!(
+            "[av1-encode] {label}: 1s window frames={} fps={} bytes/s={} max_frame={} max_gap_ms={}",
+            telemetry.frames,
+            telemetry.frames.saturating_mul(1000) / elapsed_ms,
+            telemetry.bytes,
+            telemetry.max_frame_bytes,
+            telemetry.max_gap_ms,
+        );
+        *telemetry = EncodeTelemetry::default();
 
         gst::PadProbeReturn::Ok
     });
@@ -1011,16 +1119,36 @@ mod tests {
         assert_eq!(encoder.property::<u32>("buf-optimal-sz"), 600);
         assert_eq!(encoder.property::<u32>("undershoot-pct"), 50);
         assert_eq!(encoder.property::<u32>("overshoot-pct"), 50);
-        // No periodic intra frames: keyframes come only from upstream
-        // `GstForceKeyUnit` requests.
-        assert_eq!(
-            encoder
-                .property_value("keyframe-mode")
-                .get::<&gst::glib::EnumValue>()
-                .map_err(|error| error.to_string())?
-                .nick(),
-            "disabled"
-        );
+        // Quantizer range is asserted in `av1_quantizer_range_guards_realtime_cbr`.
+        // Periodic intra frames follow the shared `keyframe-max-dist`
+        // interval, matching the other codecs' `key-int-max`.
+        assert_eq!(encoder.property::<i32>("keyframe-max-dist"), 60);
+
+        Ok(())
+    }
+
+    #[test]
+    fn av1_quantizer_range_guards_realtime_cbr() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("av1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        // GStreamer's av1enc ships min/max quantizer at 0/0 — the extreme
+        // high-quality end of libaom's 0–63 range. With no Q headroom the CBR
+        // controller cannot shed quality on busy scenes, so the output blows
+        // far past the ceiling (measured ~40 Mbps from a 8 Mbps target during
+        // gameplay). Pin the unsuitable default so a future change cannot
+        // silently "simplify" the override away.
+        assert_eq!(encoder.property::<u32>("min-quantizer"), 0);
+        assert_eq!(encoder.property::<u32>("max-quantizer"), 0);
+
+        let target_kbps = encoder_target_kbps(&encoder, 8_000);
+        configure_encoder(&encoder, "av1", target_kbps, 60);
+
+        // WebRTC's libaom AV1 wrapper: rc_min_quantizer 10, qpMax 56.
+        assert_eq!(encoder.property::<u32>("min-quantizer"), 10);
+        assert_eq!(encoder.property::<u32>("max-quantizer"), 56);
 
         Ok(())
     }
