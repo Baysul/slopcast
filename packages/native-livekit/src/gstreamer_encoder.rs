@@ -421,6 +421,11 @@ impl GstreamerEncoder {
             VIDEO_FRAMES_ENCODED.fetch_add(1, Ordering::Relaxed);
             gst::PadProbeReturn::Ok
         });
+        // `keyframe-mode=disabled` relies on on-demand keyframe requests from
+        // `livekitwebrtcsink`; verify they actually reach the AV1 encoder.
+        if codec == "av1" {
+            log_force_key_unit_events(&encoder_src, "av1enc");
+        }
         let elements = vec![
             appsrc.clone().upcast(),
             convert,
@@ -612,7 +617,9 @@ fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_
     if encoder.find_property("key-int-max").is_some() {
         encoder.set_property_from_str("key-int-max", &key_int_max.to_string());
     }
-    if encoder.find_property("keyframe-max-dist").is_some() {
+    // libaom `av1enc` disables automatic keyframe placement in
+    // `configure_libaom_av1`, so `keyframe-max-dist` would be dead config.
+    if codec != "av1" && encoder.find_property("keyframe-max-dist").is_some() {
         encoder.set_property_from_str("keyframe-max-dist", &key_int_max.to_string());
     }
     if codec == "h264" {
@@ -694,6 +701,15 @@ fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_
 /// target, and `lag-in-frames=0` disables lookahead so no frames buffer before
 /// encode. `cpu-used` and the row/tile parallelism keep the software encoder
 /// realtime at screenshare resolutions.
+///
+/// The rate-control buffer sizing and undershoot/overshoot targets mirror
+/// WebRTC's libaom AV1 RTC path (its `rc_buf_sz`/`rc_buf_optimal_sz` of
+/// 1000/600 ms and 50/50 undershoot/overshoot): av1enc's defaults are a
+/// 6000 ms buffer tuned for offline encodes, which would let a burst ride
+/// for seconds before CBR reacts. `keyframe-mode=disabled` stops the encoder
+/// from forcing an intra frame every `keyframe-max-dist` frames — keyframes
+/// are then produced only on demand via upstream `GstForceKeyUnit` events
+/// from `livekitwebrtcsink`.
 fn configure_libaom_av1(encoder: &gst::Element, bitrate: u32) {
     if encoder.find_property("target-bitrate").is_some() {
         encoder.set_property_from_str("target-bitrate", &bitrate.to_string());
@@ -716,6 +732,24 @@ fn configure_libaom_av1(encoder: &gst::Element, bitrate: u32) {
     if encoder.find_property("tile-columns").is_some() {
         encoder.set_property_from_str("tile-columns", "2");
     }
+    if encoder.find_property("buf-sz").is_some() {
+        encoder.set_property("buf-sz", 1000_u32);
+    }
+    if encoder.find_property("buf-initial-sz").is_some() {
+        encoder.set_property("buf-initial-sz", 600_u32);
+    }
+    if encoder.find_property("buf-optimal-sz").is_some() {
+        encoder.set_property("buf-optimal-sz", 600_u32);
+    }
+    if encoder.find_property("undershoot-pct").is_some() {
+        encoder.set_property("undershoot-pct", 50_u32);
+    }
+    if encoder.find_property("overshoot-pct").is_some() {
+        encoder.set_property("overshoot-pct", 50_u32);
+    }
+    if encoder.find_property("keyframe-mode").is_some() {
+        encoder.set_property_from_str("keyframe-mode", "disabled");
+    }
 }
 
 fn make_element(name: &str) -> Result<gst::Element, String> {
@@ -732,6 +766,22 @@ fn log_caps_events(pad: &gst::Pad, label: &'static str) {
             && let gst::EventView::Caps(caps) = event.view()
         {
             log::info!("[caps] {label}: {}", caps.caps());
+        }
+
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// Logs `GstForceKeyUnit` events reaching the encoder, so a
+/// `keyframe-mode=disabled` libaom `av1enc` can be verified to still receive
+/// on-demand keyframe requests from `livekitwebrtcsink` (the only remaining
+/// way it can produce an intra frame).
+fn log_force_key_unit_events(pad: &gst::Pad, label: &'static str) {
+    pad.add_probe(gst::PadProbeType::EVENT_BOTH, move |_, info| {
+        if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref()
+            && event.has_name("GstForceKeyUnit")
+        {
+            log::info!("[force-key-unit] {label}: keyframe requested");
         }
 
         gst::PadProbeReturn::Ok
@@ -954,7 +1004,23 @@ mod tests {
         assert!(encoder.property::<bool>("row-mt"));
         assert_eq!(encoder.property::<u32>("tile-columns"), 2);
         assert_eq!(encoder.property::<u32>("lag-in-frames"), 0);
-        assert_eq!(encoder.property::<i32>("keyframe-max-dist"), 60);
+        // RTC rate-control buffer and undershoot/overshoot targets matching
+        // WebRTC's libaom AV1 path, not av1enc's offline 6000 ms defaults.
+        assert_eq!(encoder.property::<u32>("buf-sz"), 1_000);
+        assert_eq!(encoder.property::<u32>("buf-initial-sz"), 600);
+        assert_eq!(encoder.property::<u32>("buf-optimal-sz"), 600);
+        assert_eq!(encoder.property::<u32>("undershoot-pct"), 50);
+        assert_eq!(encoder.property::<u32>("overshoot-pct"), 50);
+        // No periodic intra frames: keyframes come only from upstream
+        // `GstForceKeyUnit` requests.
+        assert_eq!(
+            encoder
+                .property_value("keyframe-mode")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "disabled"
+        );
 
         Ok(())
     }
