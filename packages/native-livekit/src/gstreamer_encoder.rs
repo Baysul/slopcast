@@ -2,10 +2,9 @@
 //!
 //! `vah264enc` provides a hard VBR ceiling through `target-percentage`; `VPx`
 //! encoders expose only a target bitrate, so their output can vary around the
-//! requested rate. SVT-AV1 uses capped-CRF (`AV1_CRF` quality with the
-//! presenter's ceiling as a hard `max-bitrate` cap), because SVT-AV1's VBR
-//! mode has no usable hard cap on this build. The publisher's congestion
-//! controller re-targets each encoder at runtime through
+//! requested rate. libaom `av1enc` runs CBR at the presenter's ceiling
+//! (`target-bitrate`, in kbps). The publisher's congestion controller
+//! re-targets each encoder at runtime through
 //! `GstreamerEncoder::set_ceiling_kbps`.
 
 use gstreamer as gst;
@@ -37,15 +36,8 @@ const APPSRC_MAX_BUFFERS: u64 = 6;
 /// too-small pool shows up as silent frame drops that `appsrc.dropped` never
 /// counts (see `VIDEO_POOL_EXHAUSTED`). This is the pool's *maximum*; the
 /// minimum is 0 (see `attach`), so buffers are allocated lazily up to the
-/// cap, not eagerly. SVT-AV1 (preset 10) additionally buffers its
-/// temporal-filter lookahead — ~58 frames before its *first* emitted frame —
-/// so AV1 uses `AV1_BUFFER_POOL_SIZE` instead, or the pool starves with a
-/// full pool and zero encoded frames.
+/// cap, not eagerly.
 const VIDEO_BUFFER_POOL_SIZE: u32 = 24;
-/// Pool cap for AV1 (see `VIDEO_BUFFER_POOL_SIZE`): 80 in-flight I420
-/// buffers cover the measured ~58-frame SVT startup retention (~1.3 s at
-/// 60 fps) with margin, without handing every codec a huge cap.
-const AV1_BUFFER_POOL_SIZE: u32 = 80;
 const GOP_SECONDS: u32 = 1;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
@@ -58,13 +50,6 @@ const GOP_SECONDS: u32 = 1;
 /// degenerate to CBR (the driver sets minimum = maximum), so it is never
 /// used here.
 const VBR_TARGET_PERCENTAGE: u32 = 80;
-/// SVT-AV1 quality target for capped-CRF mode. Unlike the VBR target it is a
-/// quality constant, not a rate: it holds the frame QP near this value while
-/// the `max-bitrate` cap bounds how many bits any frame may spend. Lower =
-/// higher quality/higher rate on high-entropy content. 32 (of 63) matches the
-/// visual quality SVT-AV1's ~6 Mbps VBR target produced at 1080p60, so the
-/// switch is rate-neutral for typical screenshare content.
-const AV1_CRF: u32 = 32;
 
 /// Number of encoded H.264 access units that emerged from `h264parse`
 /// (i.e. actually encoded and pushed downstream), as opposed to
@@ -306,9 +291,8 @@ pub(crate) struct GstreamerEncoder {
 impl GstreamerEncoder {
     /// Re-targets the encoder at runtime: VA-API takes `bitrate` (the VBR
     /// target, `ceiling × target-percentage / 100`) and `VPx` takes
-    /// `target-bitrate`. SVT-AV1's rate path is capped-CRF — the ceiling is
-    /// applied through the `mbr` cap in its `parameters-string`, and the
-    /// plugin rejects mid-stream `parameters-string` changes, so it reports
+    /// `target-bitrate`. libaom `av1enc`'s CBR rate path is not verified to
+    /// accept mid-stream `target-bitrate` reconfiguration, so it reports
     /// `false` and leaves `ceiling_kbps` untouched (the encoder keeps its
     /// configured cap; a `true`/`false` return keeps the caller's state from
     /// pretending the change landed). The VA-API and `VPx` rate controllers
@@ -398,7 +382,7 @@ impl GstreamerEncoder {
                 format!("Failed to create GStreamer element {encoder_name}: {error}")
             })?;
         let encoder_rate = encoder_target_kbps(&encoder, ceiling_kbps);
-        configure_encoder(&encoder, codec, encoder_rate, config.height, key_int_max);
+        configure_encoder(&encoder, codec, encoder_rate, key_int_max);
         // On the bundled livekitwebrtcsink (gst-plugin-webrtc 0.15.3) we
         // observed the sink inserting its own codec parser (vp9parse/av1parse)
         // internally before its payloader and rejecting caps renegotiation on
@@ -459,18 +443,12 @@ impl GstreamerEncoder {
             log_caps_events(&pad, "queue -> sink");
         }
 
-        // I420 input buffer pool: cap at `VIDEO_BUFFER_POOL_SIZE` (AV1 gets
-        // the larger `AV1_BUFFER_POOL_SIZE` for its SVT startup retention)
-        // buffers of the input frame size. The minimum is 0, so buffers are
-        // allocated lazily up to the cap — this is headroom, not a 24/80-buffer
-        // eager allocation. Steady-state `push_frame` then acquires from the
-        // pool (zero allocation); the pool is deactivated and freed when
+        // I420 input buffer pool: cap at `VIDEO_BUFFER_POOL_SIZE` buffers of
+        // the input frame size. The minimum is 0, so buffers are allocated
+        // lazily up to the cap — this is headroom, not a 24-buffer eager
+        // allocation. Steady-state `push_frame` then acquires from the pool
+        // (zero allocation); the pool is deactivated and freed when
         // `VideoInput` is dropped (pipeline teardown).
-        let pool_max = if codec == "av1" {
-            AV1_BUFFER_POOL_SIZE
-        } else {
-            VIDEO_BUFFER_POOL_SIZE
-        };
         let buffer_pool = gst::BufferPool::new();
         {
             let mut pool_config = buffer_pool.config();
@@ -479,7 +457,7 @@ impl GstreamerEncoder {
                 u32::try_from(input_info.size())
                     .map_err(|_| "GStreamer input buffer size exceeds u32")?,
                 0,
-                pool_max,
+                VIDEO_BUFFER_POOL_SIZE,
             );
             buffer_pool.set_config(pool_config).map_err(|error| {
                 format!("Failed to configure GStreamer input buffer pool: {error}")
@@ -602,7 +580,7 @@ fn codec_pipeline(codec: &str) -> Result<&'static str, String> {
     let (software, hardware) = match codec {
         "h264" => ("x264enc", "vah264enc"),
         "vp9" => ("vp9enc", "vavp9enc"),
-        "av1" => ("svtav1enc", "vaav1enc"),
+        "av1" => ("av1enc", "vaav1enc"),
         "vp8" => ("vp8enc", ""),
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
@@ -615,33 +593,14 @@ fn codec_pipeline(codec: &str) -> Result<&'static str, String> {
     Ok(encoder)
 }
 
-fn configure_encoder(
-    encoder: &gst::Element,
-    codec: &str,
-    bitrate: u32,
-    height: u32,
-    key_int_max: u32,
-) {
+fn configure_encoder(encoder: &gst::Element, codec: &str, bitrate: u32, key_int_max: u32) {
     if codec == "av1" {
-        // SVT-AV1 encodes in capped-CRF, not VBR: `crf` sets the quality
-        // target and `max-bitrate` bounds how many bits any frame may spend.
-        // The caps are passed through `parameters-string` because the
-        // plugin's own `max-bitrate` property is ignored in its CRF branch.
-        // `mbr-overshoot-pct=0` pins the cap exactly (the default allows a
-        // +50% burst over it). `aq-mode=2` (CRF) is the library default and
-        // is required — `max_bit_rate` is silently zeroed when `aq_mode==0`.
-        if encoder.find_property("crf").is_some() {
-            encoder.set_property_from_str("crf", &AV1_CRF.to_string());
-        }
-        if encoder.find_property("parameters-string").is_some() {
-            encoder.set_property_from_str("parameters-string", &av1_parameters_string(bitrate));
-        }
+        configure_libaom_av1(encoder, bitrate);
     } else if encoder.find_property("bitrate").is_some() {
         encoder.set_property_from_str("bitrate", &bitrate.to_string());
     } else if encoder.find_property("target-bitrate").is_some() {
         // `target-bitrate` units differ by plugin: VPx (vp8enc/vp9enc) take
-        // bits/sec; the pipeline never instantiates `av1enc`/`svtav1enc` with
-        // this property (see the AV1 branch above).
+        // bits/sec, unlike `bitrate` (kbps).
         encoder.set_property_from_str(
             "target-bitrate",
             &bitrate
@@ -699,7 +658,9 @@ fn configure_encoder(
                 encoder.set_property("sync-lookahead", 0_i32);
             }
         }
-    } else {
+    } else if codec != "av1" {
+        // VP8/VP9 rate knobs; AV1 is fully configured in
+        // `configure_libaom_av1`, so it must not pick these up.
         if encoder.find_property("end-usage").is_some() {
             encoder.set_property_from_str("end-usage", "vbr");
         }
@@ -722,38 +683,39 @@ fn configure_encoder(
             if encoder.find_property("static-threshold").is_some() {
                 encoder.set_property_from_str("static-threshold", "100");
             }
-        } else if codec == "av1" {
-            // SVT-AV1 (svtav1enc): quality/cap handled by the capped-CRF branch
-            // above. Here we set the speed/quality preset and the keyframe
-            // interval in frames (SVT uses `intra-period-length` instead of
-            // `keyframe-max-dist`). `max-qp-allowed` is a VBR/CBR-only knob and
-            // is ignored in capped-CRF, so it is not set.
-            if encoder.find_property("preset").is_some() {
-                // Preset scales with resolution: higher resolutions need more
-                // encode parallelism to stay realtime (10 at 1080p, 11 at
-                // 1440p, 12 at 4K).
-                encoder.set_property_from_str("preset", &svt_preset_for(height).to_string());
-            }
-            if encoder.find_property("intra-period-length").is_some() {
-                encoder.set_property_from_str("intra-period-length", &key_int_max.to_string());
-            }
         }
     }
 }
 
-/// SVT-AV1 speed/quality preset for a frame height. Real-time screenshare
-/// sits in the live band (10–12): preset 10 sustains 1080p60 on modest
-/// hardware, while larger frames need the extra throughput of 11 (1440p) and
-/// 12 (4K). Below 1080p reuses preset 10 — it is comfortably real-time.
-fn svt_preset_for(height: u32) -> u32 {
-    if height >= 2160 {
-        return 12;
+/// Applies the libaom `av1enc` realtime CBR configuration. The presenter's
+/// ceiling is the `target-bitrate` itself — unlike `VPx` (bits/sec), av1enc's
+/// is in kilobits/sec, so it is applied verbatim, never ×1000. `usage-profile`
+/// picks the low-latency encoder path, `end-usage=cbr` holds the rate at the
+/// target, and `lag-in-frames=0` disables lookahead so no frames buffer before
+/// encode. `cpu-used` and the row/tile parallelism keep the software encoder
+/// realtime at screenshare resolutions.
+fn configure_libaom_av1(encoder: &gst::Element, bitrate: u32) {
+    if encoder.find_property("target-bitrate").is_some() {
+        encoder.set_property_from_str("target-bitrate", &bitrate.to_string());
     }
-    if height >= 1440 {
-        return 11;
+    if encoder.find_property("usage-profile").is_some() {
+        encoder.set_property_from_str("usage-profile", "realtime");
     }
-
-    10
+    if encoder.find_property("end-usage").is_some() {
+        encoder.set_property_from_str("end-usage", "cbr");
+    }
+    if encoder.find_property("lag-in-frames").is_some() {
+        encoder.set_property_from_str("lag-in-frames", "0");
+    }
+    if encoder.find_property("cpu-used").is_some() {
+        encoder.set_property_from_str("cpu-used", "10");
+    }
+    if encoder.find_property("row-mt").is_some() {
+        encoder.set_property("row-mt", true);
+    }
+    if encoder.find_property("tile-columns").is_some() {
+        encoder.set_property_from_str("tile-columns", "2");
+    }
 }
 
 fn make_element(name: &str) -> Result<gst::Element, String> {
@@ -776,32 +738,23 @@ fn log_caps_events(pad: &gst::Pad, label: &'static str) {
     });
 }
 
-/// SVT-AV1 `parameters-string` for capped-CRF mode. The presenter's bitrate
-/// ceiling is applied as a hard `mbr` (max-bitrate) cap in kilobits/sec, with
-/// `mbr-overshoot-pct=0` pinning it exactly (the default allows a +50% burst
-/// over the cap). `aq-mode=2` (CRF) is the library default and must stay —
-/// SVT-AV1 silently zeroes `max_bit_rate` when `aq_mode == 0`.
-fn av1_parameters_string(ceiling_kbps: u32) -> String {
-    format!("mbr={ceiling_kbps}:mbr-overshoot-pct=0:aq-mode=2")
-}
-
-/// Whether `encoder` is the SVT-AV1 encoder, which uses capped-CRF rather than
-/// a mutable target-bitrate knob (see `av1_parameters_string`).
-fn is_svt_av1(encoder: &gst::Element) -> bool {
+/// Whether `encoder` is the libaom `av1enc` (software AV1), whose CBR rate
+/// path is not verified to accept mid-stream `target-bitrate` reconfiguration.
+fn is_libaom_av1(encoder: &gst::Element) -> bool {
     encoder
         .factory()
-        .is_some_and(|factory| factory.name() == "svtav1enc")
+        .is_some_and(|factory| factory.name() == "av1enc")
 }
 
 /// Applies `ceiling_kbps` to `encoder`'s runtime rate knob. Returns `false`
-/// when the encoder cannot change its ceiling live: SVT-AV1's capped-CRF cap
-/// (the `mbr` in `parameters-string`) rejects mid-stream changes, and a
-/// codec exposing neither `bitrate` nor `target-bitrate` has no runtime knob
-/// at all. The caller must treat `false` as "the encoder kept its old cap"
-/// and must not record the requested value.
+/// when the encoder cannot change its ceiling live: libaom `av1enc`'s CBR
+/// `target-bitrate` reconfiguration mid-stream is unverified, and a codec
+/// exposing neither `bitrate` nor `target-bitrate` has no runtime knob at
+/// all. The caller must treat `false` as "the encoder kept its old cap" and
+/// must not record the requested value.
 fn apply_encoder_ceiling(encoder: &gst::Element, ceiling_kbps: u32) -> bool {
-    if is_svt_av1(encoder) {
-        log::warn!("GStreamer SVT-AV1 encoder cannot change its bitrate cap mid-stream");
+    if is_libaom_av1(encoder) {
+        log::warn!("GStreamer libaom av1enc cannot change its bitrate mid-stream");
         return false;
     }
     let target = encoder_target_kbps(encoder, ceiling_kbps);
@@ -821,9 +774,9 @@ fn apply_encoder_ceiling(encoder: &gst::Element, ceiling_kbps: u32) -> bool {
 }
 
 fn encoder_target_kbps(encoder: &gst::Element, ceiling_kbps: u32) -> u32 {
-    if is_svt_av1(encoder) {
-        // SVT-AV1 encodes in capped-CRF: the ceiling is applied in full as
-        // the `mbr` cap (see `av1_parameters_string`), not as a VBR target.
+    if is_libaom_av1(encoder) {
+        // libaom av1enc runs CBR: the ceiling is applied in full as the
+        // `target-bitrate`, not discounted to a VBR target.
         return ceiling_kbps;
     }
 
@@ -953,7 +906,7 @@ mod tests {
         );
         assert_eq!(
             crate::gstreamer_publisher::selected_encoder_name("av1"),
-            "svtav1enc"
+            "av1enc"
         );
     }
 
@@ -967,78 +920,60 @@ mod tests {
     }
 
     #[test]
-    fn av1_uses_capped_crf_with_the_ceiling_as_max_bitrate() -> Result<(), String> {
+    fn av1_runs_libaom_cbr_at_the_ceiling() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
-        let encoder = gst::ElementFactory::make("svtav1enc")
+        let encoder = gst::ElementFactory::make("av1enc")
             .build()
             .map_err(|error| error.to_string())?;
         let ceiling_kbps = 8_000;
         let target_kbps = encoder_target_kbps(&encoder, ceiling_kbps);
-        configure_encoder(&encoder, "av1", target_kbps, 1080, 60);
+        configure_encoder(&encoder, "av1", target_kbps, 60);
 
         assert_eq!(target_kbps, 8_000);
+        // av1enc `target-bitrate` is kilobits/sec: the ceiling is applied
+        // verbatim, never ×1000.
+        assert_eq!(encoder.property::<u32>("target-bitrate"), 8_000);
         assert_eq!(
-            encoder.property::<i32>("crf"),
-            i32::try_from(AV1_CRF).map_err(|error| error.to_string())?
+            encoder
+                .property_value("end-usage")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "cbr"
         );
         assert_eq!(
-            encoder.property::<String>("parameters-string"),
-            av1_parameters_string(ceiling_kbps)
+            encoder
+                .property_value("usage-profile")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "realtime"
         );
-        assert_eq!(encoder.property::<u32>("preset"), 10);
-        assert_eq!(encoder.property::<i32>("intra-period-length"), 60);
+        assert_eq!(encoder.property::<i32>("cpu-used"), 10);
+        assert!(encoder.property::<bool>("row-mt"));
+        assert_eq!(encoder.property::<u32>("tile-columns"), 2);
+        assert_eq!(encoder.property::<u32>("lag-in-frames"), 0);
+        assert_eq!(encoder.property::<i32>("keyframe-max-dist"), 60);
 
         Ok(())
     }
 
     #[test]
-    fn av1_parameters_string_caps_at_the_ceiling() {
-        assert_eq!(
-            av1_parameters_string(8_000),
-            "mbr=8000:mbr-overshoot-pct=0:aq-mode=2"
-        );
-    }
-
-    #[test]
-    fn av1_preset_scales_with_resolution() -> Result<(), String> {
+    fn libaom_av1_rejects_live_ceiling_changes() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
-        let encoder = gst::ElementFactory::make("svtav1enc")
-            .build()
-            .map_err(|error| error.to_string())?;
-        let target_kbps = encoder_target_kbps(&encoder, 12_000);
-        configure_encoder(&encoder, "av1", target_kbps, 1440, 60);
-        assert_eq!(encoder.property::<u32>("preset"), 11);
-
-        let encoder = gst::ElementFactory::make("svtav1enc")
-            .build()
-            .map_err(|error| error.to_string())?;
-        let target_kbps = encoder_target_kbps(&encoder, 20_000);
-        configure_encoder(&encoder, "av1", target_kbps, 2160, 60);
-        assert_eq!(encoder.property::<u32>("preset"), 12);
-
-        Ok(())
-    }
-
-    #[test]
-    fn svt_av1_rejects_live_ceiling_changes() -> Result<(), String> {
-        gst::init().map_err(|error| error.to_string())?;
-
-        let encoder = gst::ElementFactory::make("svtav1enc")
+        let encoder = gst::ElementFactory::make("av1enc")
             .build()
             .map_err(|error| error.to_string())?;
         let target_kbps = encoder_target_kbps(&encoder, 8_000);
-        configure_encoder(&encoder, "av1", target_kbps, 1080, 60);
-        let parameters_before = encoder.property::<String>("parameters-string");
+        configure_encoder(&encoder, "av1", target_kbps, 60);
+        let target_before = encoder.property::<u32>("target-bitrate");
 
-        // The capped-CRF cap cannot move mid-stream: the caller must not
-        // record the requested ceiling as applied.
+        // The CBR rate path is not verified to accept mid-stream changes:
+        // the caller must not record the requested ceiling as applied.
         assert!(!apply_encoder_ceiling(&encoder, 6_000));
-        assert_eq!(
-            encoder.property::<String>("parameters-string"),
-            parameters_before
-        );
+        assert_eq!(encoder.property::<u32>("target-bitrate"), target_before);
 
         Ok(())
     }
@@ -1050,7 +985,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("vp9enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "vp9", 6_400, 720, 60);
+        configure_encoder(&encoder, "vp9", 6_400, 60);
 
         assert!(apply_encoder_ceiling(&encoder, 10_000));
         // VPx `target-bitrate` is bits/sec of the VBR target (80% of 10 Mbps).

@@ -11,9 +11,9 @@ export type MotionMode = 'auto' | 'static' | 'mixed' | 'dynamic';
 export type MotionTier = Exclude<MotionMode, 'auto'>;
 
 // Validated software-AV1 ceilings (bits/sec) at 60 fps for static desktop
-// content. These are the "sweet spots" the SVT-AV1 capped-CRF tuning targets:
-// SVT-AV1 encodes at a fixed quality (crf 32) bounded by the ceiling as a
-// hard max-bitrate cap, so 1080p60 sits at 8 Mbps and 1440p60 at 12 Mbps.
+// content. These are the "sweet spots" the libaom CBR tuning targets:
+// av1enc runs constant-bitrate with the ceiling as `target-bitrate`, so
+// 1080p60 sits at 8 Mbps and 1440p60 at 12 Mbps.
 const AV1_SOFTWARE_CEILING_BPS: Record<ResolutionPreset, number> = {
   '480p': 2_000_000,
   '720p': 4_000_000,
