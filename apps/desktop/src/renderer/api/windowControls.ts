@@ -59,6 +59,17 @@ export const windowControls = {
       return false;
     }
   },
+  startDragging: async (): Promise<boolean> => {
+    const win = currentWindow();
+    if (!win) return false;
+    try {
+      await win.startDragging();
+      return true;
+    } catch (err) {
+      warnUnavailable('startDragging', err);
+      return false;
+    }
+  },
   isMaximized: async (): Promise<boolean> => {
     const win = currentWindow();
     if (!win) return false;

@@ -4,13 +4,25 @@ import { windowControls } from '@/api/windowControls';
 
 // Custom window chrome (Tauri window-customization guide): the native titlebar
 // is disabled (`decorations: false`), so this bar owns the drag region and the
-// minimize/maximize/close controls. `data-tauri-drag-region` is applied only
-// to the bar and the branding block — the control buttons deliberately omit it
-// so they receive clicks, and the OS native drag path gives double-click
-// maximize for free. The branding block uses `deep` so its icon and label
-// children (which would otherwise swallow the mousedown) stay draggable.
+// minimize/maximize/close controls. Dragging is wired manually with
+// `windowControls.startDragging()` (the guide's manual-implementation path)
+// instead of the `data-tauri-drag-region` attribute: that attribute only
+// drags on direct click targets, so the header's covered surface would be
+// dead, and the injected drag-region script is unreliable in the CEF runtime.
+// Control-button targets are excluded so the buttons keep receiving clicks,
+// and double-click on the bar maximizes (mirroring the native drag path).
 export const TitleBar: React.FC = React.memo(() => {
   const [maximized, setMaximized] = useState(false);
+
+  const handleMouseDown = (event: React.MouseEvent<HTMLElement>): void => {
+    if (event.button !== 0) return;
+    if ((event.target as Element).closest('button')) return;
+    if (event.detail === 2) {
+      void windowControls.toggleMaximize();
+    } else {
+      void windowControls.startDragging();
+    }
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -33,11 +45,12 @@ export const TitleBar: React.FC = React.memo(() => {
   }, []);
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: window drag region is a pointer-only interaction; keyboard users use the window's native controls.
     <header
-      data-tauri-drag-region
+      onMouseDown={handleMouseDown}
       className="h-10 shrink-0 flex items-stretch border-b border-border bg-background select-none"
     >
-      <div data-tauri-drag-region="deep" className="flex items-center gap-2.5 pl-4 pr-3">
+      <div className="flex items-center gap-2.5 pl-4 pr-3">
         <span className="p-1.5 bg-safelight/10 rounded-lg text-safelight">
           <ScreenShare className="w-4 h-4" aria-hidden="true" />
         </span>
