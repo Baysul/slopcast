@@ -21,8 +21,10 @@ use crate::CaptureConfig;
 /// encoder hiccup (VA-API pipeline stall, driver swap) saturated it
 /// instantly and dropped frames continuously. Six buffers (~100 ms at
 /// 60 fps) absorbs short encoder jitter while keeping the queue's
-/// freshness bound well under a typical receiver jitter budget.
-const APPSRC_MAX_BUFFERS: u64 = 6;
+/// freshness bound well under a typical receiver jitter budget. The
+/// publisher's congestion controller reads this as the "queue is full"
+/// threshold for its local backpressure signal.
+pub(crate) const APPSRC_MAX_BUFFERS: u64 = 6;
 /// Size of the I420 input buffer pool (buffers in flight: the appsrc queue
 /// plus the synchronous convert/encode stages). Pool buffers are returned
 /// automatically when the pipeline releases them, so the steady state does

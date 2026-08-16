@@ -85,10 +85,10 @@ pub struct CaptureConfig {
     /// The configured bitrate ceiling in bits/sec (`None` or a non-positive
     /// value falls back to `DEFAULT_VIDEO_BITRATE_BPS` in the publisher).
     pub max_bitrate: Option<f64>,
-    /// Whether the publisher's loss-driven `RateController` may step the
-    /// encoder below `max_bitrate`. `false` pins the encoder at the
-    /// configured ceiling. Missing values deserialize as `false` (manual)
-    /// for backwards compatibility with older callers.
+    /// Whether the publisher's congestion controller (local backpressure +
+    /// receiver loss) may step the encoder below `max_bitrate`. `false` pins
+    /// the encoder at the configured ceiling. Missing values deserialize as
+    /// `false` (manual) for backwards compatibility with older callers.
     #[serde(default)]
     pub auto_bitrate: bool,
 }
@@ -118,7 +118,7 @@ pub struct NativeTelemetry {
     pub video_height: Option<u32>,
     /// Live video appsrc statistics — `dropped` counts buffers the appsrc
     /// discarded (leaky downstream on a full queue), the stutter diagnostic;
-    /// the levels show how close the appsrc is to its 2-buffer cap.
+    /// the levels show how close the appsrc is to its 6-buffer cap.
     pub video_appsrc_input: Option<u64>,
     pub video_appsrc_output: Option<u64>,
     pub video_appsrc_dropped: Option<u64>,
