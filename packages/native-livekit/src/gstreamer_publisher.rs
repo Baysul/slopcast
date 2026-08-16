@@ -79,6 +79,12 @@ const RATE_STEP_BACKPRESSURE: f64 = 0.85;
 /// drop; three windows (~600 ms) of sustained fullness means the encoder
 /// cannot keep up.
 const RATE_QUEUE_FULL_TICKS: u32 = 3;
+/// Fast ticks after a fullness-only rate step before the queue level alone
+/// may drive another one (~2 s at the 200 ms backpressure cadence). A
+/// still-full queue after a step cannot keep compounding the weakest
+/// congestion signal; drops and pool exhaustion (stronger signals) still
+/// fire immediately during the cooldown.
+const RATE_QUEUE_FULL_COOLDOWN_TICKS: u32 = 10;
 /// Hard floor for the adapted ceiling: below this the encoder quality
 /// degrades faster than the congestion it is trying to escape.
 const RATE_FLOOR_KBPS: u32 = 500;
@@ -184,8 +190,16 @@ struct RateController {
     /// Consecutive fast ticks the appsrc queue sat at full depth (persistent
     /// encoder underrun; distinct from the drop counters).
     queue_full_ticks: u32,
-    /// Whether the counters have been primed with a first observation.
-    primed: bool,
+    /// Fast ticks after a fullness-only step before the queue level may
+    /// drive another one; suppresses the weakest signal while the encoder
+    /// digests the new rate (drops and pool exhaustion still fire).
+    fullness_cooldown_ticks: u32,
+    /// Whether the receiver-loss packet counters have been primed with a
+    /// first observation.
+    loss_primed: bool,
+    /// Whether the backpressure counters (appsrc drops / pool exhaustion)
+    /// have been primed with a first observation.
+    backpressure_primed: bool,
 }
 
 #[allow(
@@ -203,10 +217,12 @@ impl RateController {
         self.ceiling_kbps = ceiling;
         self.current_kbps = ceiling;
         self.clean_ticks = 0;
-        self.primed = false;
+        self.loss_primed = false;
+        self.backpressure_primed = false;
         self.last_appsrc_dropped = 0;
         self.last_pool_exhausted = 0;
         self.queue_full_ticks = 0;
+        self.fullness_cooldown_ticks = 0;
     }
 
     /// The currently applied ceiling (re-applied after an auto-reconnect
@@ -237,10 +253,10 @@ impl RateController {
         // until the new cumulative count caught up (the controller frozen for
         // that window). The lost counter resets together with sent on a
         // rebuild, so the sent regression is the unambiguous signal.
-        if !self.primed || sent < self.last_packets_sent {
+        if !self.loss_primed || sent < self.last_packets_sent {
             self.last_packets_sent = sent;
             self.last_packets_lost = lost;
-            self.primed = true;
+            self.loss_primed = true;
             return None;
         }
         let delta_sent = sent.saturating_sub(self.last_packets_sent);
@@ -301,14 +317,15 @@ impl RateController {
         // A settings rebuild / reconnect installs a fresh appsrc and resets
         // the pool counter: re-prime on regression instead of reading a
         // bogus (or negative) delta.
-        if !self.primed
+        if !self.backpressure_primed
             || dropped < self.last_appsrc_dropped
             || pool_exhausted < self.last_pool_exhausted
         {
             self.last_appsrc_dropped = dropped;
             self.last_pool_exhausted = pool_exhausted;
             self.queue_full_ticks = 0;
-            self.primed = true;
+            self.fullness_cooldown_ticks = 0;
+            self.backpressure_primed = true;
             return None;
         }
         let dropped_delta = dropped - self.last_appsrc_dropped;
@@ -318,16 +335,28 @@ impl RateController {
         let queue_full = telemetry
             .video_appsrc_level_buffers
             .is_some_and(|level| u64::from(level) >= APPSRC_MAX_BUFFERS);
-        if queue_full {
+        // The queue level is the weakest signal: a full queue from a
+        // keyframe/warmup burst must persist for several windows to count,
+        // and a fullness-only step resets the accumulation and starts a
+        // cooldown, so a still-full queue cannot keep stepping every window.
+        if queue_full && self.fullness_cooldown_ticks == 0 {
             self.queue_full_ticks += 1;
         } else {
             self.queue_full_ticks = 0;
         }
-        if dropped_delta == 0 && pool_delta == 0 && self.queue_full_ticks < RATE_QUEUE_FULL_TICKS {
+        if self.fullness_cooldown_ticks > 0 {
+            self.fullness_cooldown_ticks -= 1;
+        }
+        let fullness_only = dropped_delta == 0 && pool_delta == 0;
+        if fullness_only && self.queue_full_ticks < RATE_QUEUE_FULL_TICKS {
             // No drop, no pool exhaustion, and the queue either drained or
             // only filled transiently (keyframe/warmup burst): not
             // backpressure yet.
             return None;
+        }
+        if fullness_only {
+            self.queue_full_ticks = 0;
+            self.fullness_cooldown_ticks = RATE_QUEUE_FULL_COOLDOWN_TICKS;
         }
         // Backpressure is congestion: recovery must wait for clean intervals
         // again, like the loss path.
@@ -360,9 +389,8 @@ pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
 }
 
 /// Whether the active codec supports in-place ceiling changes. VPx/VA rate
-/// knobs change mid-stream; `svtav1enc`'s CBR `target-bitrate` is not
-/// mutable in PLAYING state (and reconfiguring `max-bitrate` alone would
-/// flip it into VBR), so AV1 is pinned to its configured ceiling for now.
+/// knobs change mid-stream; `svtav1enc`'s `target-bitrate` is not mutable
+/// in PLAYING state, so AV1 is pinned to its configured ceiling for now.
 /// The default codec (no `video_codec`) is VP8, which can adapt.
 fn can_adapt(codec: Option<&str>) -> bool {
     !matches!(codec.unwrap_or("vp8"), "av1")
@@ -781,7 +809,7 @@ fn run_connected(
         // behind *now* — step the ceiling immediately instead of waiting a
         // full second for the receiver-loss report to confirm the overload.
         // Only in automatic mode (manual bitrate is pinned) and only for
-        // codecs that accept in-place ceiling changes (svtav1enc's CBR rate
+        // codecs that accept in-place ceiling changes (svtav1enc's rate
         // path is not mutable mid-stream).
         backpressure_ticks += 1;
         if backpressure_ticks >= RATE_BACKPRESSURE_TICKS {
@@ -802,7 +830,7 @@ fn run_connected(
         // sustained remote-inbound loss, back up toward the configured
         // ceiling after clean intervals. Only in automatic mode (manual
         // bitrate is pinned) and only for codecs that accept in-place
-        // ceiling changes (svtav1enc's CBR rate path is not mutable
+        // ceiling changes (svtav1enc's rate path is not mutable
         // mid-stream).
         rate_ticks += 1;
         if rate_ticks >= RATE_ADAPT_TICKS {
@@ -997,7 +1025,7 @@ impl PublisherPipeline {
 
     /// Re-applies an adapted encoder ceiling after a rebuild/reconnect (the
     /// fresh encoder starts at the configured ceiling). Returns whether the
-    /// encoder actually changed rate (false for svtav1enc, whose CBR rate
+    /// encoder actually changed rate (false for svtav1enc, whose rate
     /// path is not mutable mid-stream).
     fn apply_rate(&mut self, ceiling_kbps: u32) -> bool {
         let Some(encoder) = self.encoder.as_mut() else {
@@ -2084,13 +2112,35 @@ mod tests {
         let next = controller.observe_backpressure(&telemetry_with_backpressure(0, 0, Some(6)));
         assert_eq!(next, Some(17_000));
 
+        // A fullness-only step resets the accumulation and starts a cooldown:
+        // a still-full queue cannot keep stepping every ~200 ms window.
+        for _ in 0..RATE_QUEUE_FULL_COOLDOWN_TICKS {
+            assert!(
+                controller
+                    .observe_backpressure(&telemetry_with_backpressure(0, 0, Some(6)))
+                    .is_none()
+            );
+            assert_eq!(controller.current_kbps(), 17_000);
+        }
+        // After the cooldown the queue must re-accumulate sustained fullness
+        // before the weak signal may step again.
+        for _ in 0..(RATE_QUEUE_FULL_TICKS - 1) {
+            assert!(
+                controller
+                    .observe_backpressure(&telemetry_with_backpressure(0, 0, Some(6)))
+                    .is_none()
+            );
+        }
+        let next = controller.observe_backpressure(&telemetry_with_backpressure(0, 0, Some(6)));
+        assert_eq!(next, Some(14_450)); // 17_000 × 0.85
+
         // Queue drains → no further steps.
         assert!(
             controller
                 .observe_backpressure(&telemetry_with_backpressure(0, 0, Some(0)))
                 .is_none()
         );
-        assert_eq!(controller.current_kbps(), 17_000);
+        assert_eq!(controller.current_kbps(), 14_450);
     }
 
     #[test]
@@ -2126,6 +2176,52 @@ mod tests {
             controller.observe_backpressure(&telemetry_with_backpressure(1, 0, Some(0))),
             Some(14_450) // 17_000 × 0.85
         );
+    }
+
+    #[test]
+    fn rate_controller_observation_paths_prime_independently() {
+        let config = CaptureConfig {
+            max_bitrate: Some(20_000_000.0),
+            auto_bitrate: true,
+            ..Default::default()
+        };
+        let mut controller = RateController::default();
+        controller.reset(&config);
+
+        // The loss path primes its own baseline...
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 0.0))
+                .is_none()
+        );
+        // ...so the backpressure path's first observation must not read the
+        // loss baseline as a drop delta: it primes its own counters instead.
+        assert!(
+            controller
+                .observe_backpressure(&telemetry_with_backpressure(5, 0, Some(6)))
+                .is_none()
+        );
+        assert_eq!(controller.current_kbps(), 20_000);
+        // Primed now, the next observation measures against the new baseline.
+        assert_eq!(
+            controller.observe_backpressure(&telemetry_with_backpressure(6, 0, Some(6))),
+            Some(17_000) // 20_000 × 0.85
+        );
+
+        // The other direction: backpressure priming must not let the loss
+        // path's first observation read a stale zero baseline as 3% loss.
+        controller.reset(&config);
+        assert!(
+            controller
+                .observe_backpressure(&telemetry_with_backpressure(0, 0, Some(0)))
+                .is_none()
+        );
+        assert!(
+            controller
+                .observe(&telemetry_with_loss(10_000.0, 300.0))
+                .is_none()
+        );
+        assert_eq!(controller.current_kbps(), 20_000);
     }
 
     #[test]
