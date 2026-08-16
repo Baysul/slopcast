@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-docker:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       packages: write
@@ -16,11 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         target: [server, web]
+
     steps:
       - uses: actions/checkout@v6
 
-      # Docker Hub flakes on runners; fall back to Google's mirror for
-      # daemon-side pulls (buildkit/QEMU images) and buildkit-side base images.
       - name: Configure Docker Hub mirror
         run: |
           sudo mkdir -p /etc/docker
@@ -71,15 +70,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             name: linux-appimage
             script: dist:desktop:linux:appimage
             asset-path: target/release/bundle/appimage/*.AppImage
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             name: linux-deb
             script: dist:desktop:linux:deb
             asset-path: target/release/bundle/deb/*.deb
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             name: linux-tar
             script: dist:desktop:linux:tar
             asset-path: target/release/bundle/*.tar.gz
@@ -87,26 +86,18 @@ jobs:
             name: win
             script: dist:desktop:win
             asset-path: target/release/bundle/nsis/*.exe
+
     steps:
       - uses: actions/checkout@v6
 
-      # Tauri 2 (wry/tao) + native stack pkg-config deps required at link time:
-      #   webkit2gtk-4.1 / javascriptcoregtk / soup3 / gtk3 / glib -> webview
-      #   dbus (tao default feature)                              -> libdbus-1
-      #   wayland-client (wayland-sys)                            -> libwayland-dev
-      #   pipewire-0.3 / glib                                     -> capture engine
-      #   gstreamer core/app/video + VA                           -> Linux video encoder
-      #   librsvg2-dev + patchelf                                 -> bundler (deb/AppImage icons)
-      #   cmake/nasm                                              -> turbojpeg-sys (builds libjpeg-turbo from source; SIMD needs nasm)
+      # CEF replaces wry/WebKitGTK. Remaining packages are for Tauri's native
+      # windowing/bundling plus Slopcast's capture/video stack.
       - name: Install Linux system deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
             libgtk-3-dev \
-            libsoup-3.0-dev \
             libdbus-1-dev \
             libwayland-dev \
             librsvg2-dev \
@@ -143,6 +134,21 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify Tauri CEF runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if cargo tree --workspace | grep -q 'tauri-runtime-wry '; then
+            echo "::error::tauri-runtime-wry is present in the dependency graph"
+            cargo tree --workspace -i tauri-runtime-wry || true
+            exit 1
+          fi
+
+          if ! cargo tree --workspace | grep -q 'tauri-runtime-cef '; then
+            echo "::error::tauri-runtime-cef is missing from the dependency graph"
+            exit 1
+          fi
 
       - name: Build desktop
         run: pnpm ${{ matrix.script }}
