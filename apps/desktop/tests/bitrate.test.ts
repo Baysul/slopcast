@@ -32,35 +32,15 @@ test('recommendBitrateCap gives H.264 a higher ceiling than AV1 at the same reso
     codec: 'h264',
     resolution: '1080p',
     fps: 60,
-    hardware: false,
     motionTier: 'static',
   });
   const av1 = recommendBitrateCap({
     codec: 'av1',
     resolution: '1080p',
     fps: 60,
-    hardware: false,
     motionTier: 'static',
   });
   assert.ok(h264 > av1);
-});
-
-test('recommendBitrateCap lifts the ceiling for hardware encoders', () => {
-  const software = recommendBitrateCap({
-    codec: 'h264',
-    resolution: '1080p',
-    fps: 60,
-    hardware: false,
-    motionTier: 'static',
-  });
-  const hardware = recommendBitrateCap({
-    codec: 'h264',
-    resolution: '1080p',
-    fps: 60,
-    hardware: true,
-    motionTier: 'static',
-  });
-  assert.ok(hardware > software);
 });
 
 test('recommendBitrateCap scales down for 30 fps', () => {
@@ -68,14 +48,12 @@ test('recommendBitrateCap scales down for 30 fps', () => {
     codec: 'av1',
     resolution: '1080p',
     fps: 60,
-    hardware: false,
     motionTier: 'static',
   });
   const thirty = recommendBitrateCap({
     codec: 'av1',
     resolution: '1080p',
     fps: 30,
-    hardware: false,
     motionTier: 'static',
   });
   assert.ok(thirty < sixty);
@@ -86,7 +64,6 @@ test('recommendBitrateCap snaps to an allowed option', () => {
     codec: 'av1',
     resolution: '1080p',
     fps: 60,
-    hardware: false,
     motionTier: 'static',
   });
   assert.ok(manualBitrateOptions('av1').includes(cap));

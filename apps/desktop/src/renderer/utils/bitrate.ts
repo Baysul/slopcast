@@ -1,9 +1,9 @@
 import type { ResolutionPreset, VideoCodec } from '@slopcast/shared-types';
 
 // The auto-bitrate algorithm derives a sensible bitrate ceiling (bits/sec)
-// from the codec, resolution, framerate, hardware-encoder availability, and
-// content motion. It is enforced by default but can be toggled off to expose
-// the manual per-codec bitrate dropdown.
+// from the codec, resolution, framerate, and content motion. It is enforced
+// by default but can be toggled off to expose the manual per-codec bitrate
+// dropdown.
 
 /** Content motion class. `auto` resolves to a detected tier at runtime. */
 export type MotionMode = 'auto' | 'static' | 'mixed' | 'dynamic';
@@ -23,17 +23,13 @@ const AV1_SOFTWARE_CEILING_BPS: Record<ResolutionPreset, number> = {
 };
 
 // Relative ceiling scale per codec (AV1 = 1.0). The older codecs need more
-// bits for the same quality: VP9 ~1.4x, VP8 ~1.7x, H.264 ~2x AV1's ceiling.
+// bits for the same quality: VP9 ~1.4x, VP8 ~1.7x, H.264 ~1.5x AV1's ceiling.
 const CODEC_SCALE: Record<VideoCodec, number> = {
   av1: 1.0,
   vp9: 1.4,
   vp8: 1.7,
-  h264: 2.0,
+  h264: 1.5,
 };
-
-// Hardware encoders are quality-bound rather than CPU-bound, so they can
-// afford a modestly higher ceiling without risking real-time throughput.
-const HARDWARE_LIFT = 1.25;
 
 // Motion multiplies the ceiling: high-motion content (gaming, full-motion
 // video) needs substantially more bits to avoid blocky artifacts. The ~1.5x
@@ -58,7 +54,6 @@ export interface BitrateInput {
   codec: VideoCodec;
   resolution: ResolutionPreset;
   fps: number;
-  hardware: boolean;
   motionTier: MotionTier;
 }
 
@@ -76,8 +71,7 @@ const fpsScale = (fps: number): number => {
 export const recommendBitrateCap = (input: BitrateInput): number => {
   const base = AV1_SOFTWARE_CEILING_BPS[input.resolution];
   const scale = CODEC_SCALE[input.codec] * MOTION_FACTOR[input.motionTier];
-  const lift = input.hardware ? HARDWARE_LIFT : 1.0;
-  const raw = base * fpsScale(input.fps) * scale * lift;
+  const raw = base * fpsScale(input.fps) * scale;
 
   return Math.max(1_000_000, Math.round(raw / 500_000) * 500_000);
 };

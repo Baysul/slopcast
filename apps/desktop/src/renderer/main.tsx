@@ -181,8 +181,8 @@ export const PresenterApp: React.FC = () => {
   const lastVideoConfigKeyRef = useRef<string | null>(null);
 
   // The bitrate actually sent to the encoder. In auto mode it is derived from
-  // the codec/resolution/fps/hardware; in manual mode it is the user's
-  // selection. `bitrateLimit` stays the persisted/manual value either way.
+  // the codec/resolution/fps; in manual mode it is the user's selection.
+  // `bitrateLimit` stays the persisted/manual value either way.
   //
   // Content motion is deliberately NOT part of this ceiling: the native
   // publisher's loss-driven `RateController` already adapts the encoder rate
@@ -190,8 +190,7 @@ export const PresenterApp: React.FC = () => {
   // this value every time the 2 s motion poll reclassifies the tier, which
   // restarts the video track mid-stream and breaks negotiation with the
   // livekitwebrtcsink — freezing the video while audio keeps flowing. The
-  // ceiling therefore changes only on codec/resolution/fps/hardware changes.
-  const activeCodecHardware = availableCodecs.find((c) => c.codec === videoCodec)?.hardware ?? false;
+  // ceiling therefore changes only on codec/resolution/fps changes.
   const effectiveBitrate = useMemo(
     () =>
       autoBitrate
@@ -199,11 +198,10 @@ export const PresenterApp: React.FC = () => {
             codec: videoCodec,
             resolution,
             fps: streamFps,
-            hardware: activeCodecHardware,
             motionTier: 'static',
           })
         : bitrateLimit,
-    [autoBitrate, videoCodec, resolution, streamFps, activeCodecHardware, bitrateLimit],
+    [autoBitrate, videoCodec, resolution, streamFps, bitrateLimit],
   );
   const effectiveBitrateRef = useRef(effectiveBitrate);
   useEffect(() => {
