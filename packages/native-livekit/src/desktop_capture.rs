@@ -32,8 +32,13 @@ type CaptureEndedCallback = Box<dyn Fn() + Send + Sync>;
 
 use arc_swap::ArcSwapOption;
 use livekit::webrtc::native::yuv_helper;
+#[cfg(target_os = "linux")]
+use livekit::webrtc::prelude::{I420Buffer, VideoBuffer};
+#[cfg(not(target_os = "linux"))]
 use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
 use std::collections::VecDeque;
+#[cfg(target_os = "linux")]
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -42,6 +47,10 @@ use std::time::{Duration, Instant};
 use crate::CaptureConfig;
 #[cfg(not(target_os = "linux"))]
 use crate::VIDEO_SOURCE;
+#[cfg(target_os = "linux")]
+use gstreamer as gst;
+#[cfg(target_os = "linux")]
+use gstreamer_video as gst_video;
 
 pub(crate) struct DesktopCaptureSession {
     stop: Arc<AtomicBool>,
@@ -84,6 +93,201 @@ pub(crate) fn reset_stats() {
     CAPTURE_ENDED_EMITTED.store(false, Ordering::Relaxed);
 }
 
+/// Freelist cap for `OwnedI420` plane allocations — the old input pool's
+/// size. Steady-state capture reuses this bounded set of allocations: the
+/// `GStreamer` pipeline returns each one here when it releases the wrapping
+/// buffer, and `OwnedI420::new` pops it back for the next frame.
+#[cfg(target_os = "linux")]
+const I420_FREELIST_CAP: usize = 24;
+
+/// Recycled `OwnedI420` plane allocations (see `OwnedI420::new`/`Drop`).
+#[cfg(target_os = "linux")]
+static I420_FREELIST: LazyLock<Mutex<Vec<Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(Vec::with_capacity(I420_FREELIST_CAP)));
+
+/// Discards the cached `OwnedI420` plane allocations. Called on every video
+/// pipeline attach: the previous session's pipeline returns its buffers to
+/// the freelist during teardown, and this frees them once the new pipeline
+/// is in place — mirroring the old input pool's lifetime.
+#[cfg(target_os = "linux")]
+pub(crate) fn clear_i420_freelist() {
+    if let Ok(mut freelist) = I420_FREELIST.lock() {
+        freelist.clear();
+    }
+}
+
+/// I420 plane layout for `OwnedI420`, derived from `gst_video::VideoInfo` so
+/// it always matches the layout the encoder's appsrc caps describe (same
+/// builder call, same default alignment). The plane `Vec` is sized exactly
+/// to `size`.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+struct I420Layout {
+    offsets: [usize; 3],
+    strides: [i32; 3],
+    size: usize,
+}
+
+/// An owned, contiguous I420 frame whose plane allocation is handed straight
+/// to `GStreamer` as the input buffer (`gst::Buffer::from_mut_slice`, zero
+/// copy): the capture engine converts BGRA directly into the allocation, the
+/// encoder's buffer wraps the *same* allocation, and `OwnedI420::drop`
+/// returns it to `I420_FREELIST` when `GStreamer` releases the buffer — one
+/// copy total per frame, where the old path copied `I420Buffer` → pool buffer.
+///
+/// This is the Linux publish interchange type; Windows keeps the libwebrtc
+/// `I420Buffer` path (`SampleBuffer` below).
+#[cfg(target_os = "linux")]
+pub(crate) struct OwnedI420 {
+    width: u32,
+    height: u32,
+    layout: I420Layout,
+    planes: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedI420 {
+    /// The I420 `VideoInfo` this frame's layout derives from. The fps is
+    /// left unset, so `VideoConverter::new` accepts it as both source and
+    /// destination (see `scale`).
+    fn video_info(width: u32, height: u32) -> Result<gst_video::VideoInfo, String> {
+        gst_video::VideoInfo::builder(gst_video::VideoFormat::I420, width, height)
+            .build()
+            .map_err(|error| format!("Failed to build GStreamer I420 video info: {error}"))
+    }
+
+    fn layout(width: u32, height: u32) -> Result<I420Layout, String> {
+        let info = Self::video_info(width, height)?;
+        let offsets = info.offset();
+        let strides = info.stride();
+        Ok(I420Layout {
+            offsets: [offsets[0], offsets[1], offsets[2]],
+            strides: [strides[0], strides[1], strides[2]],
+            size: info.size(),
+        })
+    }
+
+    /// Allocates a frame's plane buffer, reusing a cached allocation from
+    /// `I420_FREELIST` when one is available (a static screen's keepalive
+    /// path reuses them back-to-back).
+    fn new(width: u32, height: u32) -> Self {
+        let layout = Self::layout(width, height).unwrap_or_else(|error| {
+            unreachable!("I420 VideoInfo for {width}x{height} cannot fail to build: {error}")
+        });
+        let mut planes = if let Ok(mut freelist) = I420_FREELIST.lock() {
+            freelist.pop().unwrap_or_default()
+        } else {
+            log::warn!("I420 freelist lock poisoned; allocating a fresh plane buffer");
+            Vec::new()
+        };
+        planes.resize(layout.size, 0);
+        Self {
+            width,
+            height,
+            layout,
+            planes,
+        }
+    }
+
+    /// Plane strides as `u32`, matching the `argb_to_i420`/`i420_to_argb`
+    /// signatures. `GStreamer` reports I420 strides as positive `i32` values.
+    fn strides(&self) -> (u32, u32, u32) {
+        (
+            u32::try_from(self.layout.strides[0]).unwrap_or(0),
+            u32::try_from(self.layout.strides[1]).unwrap_or(0),
+            u32::try_from(self.layout.strides[2]).unwrap_or(0),
+        )
+    }
+
+    fn data(&self) -> (&[u8], &[u8], &[u8]) {
+        (
+            &self.planes[self.layout.offsets[0]..self.layout.offsets[1]],
+            &self.planes[self.layout.offsets[1]..self.layout.offsets[2]],
+            &self.planes[self.layout.offsets[2]..],
+        )
+    }
+
+    fn data_mut(&mut self) -> (&mut [u8], &mut [u8], &mut [u8]) {
+        let (y, u, v) = (
+            self.layout.offsets[0],
+            self.layout.offsets[1],
+            self.layout.offsets[2],
+        );
+        let (y_and_u, v_plane) = self.planes.split_at_mut(v);
+        let (y_and_u_head, u_plane) = y_and_u.split_at_mut(u);
+        let (_, y_plane) = y_and_u_head.split_at_mut(y);
+        (y_plane, u_plane, v_plane)
+    }
+
+    /// Zero-copy I420 scaling via `GStreamer`'s `VideoConverter`: it maps the
+    /// plane allocation directly (no copy), and the scaled destination
+    /// allocation is recovered from the buffer it wrapped. Consumes the
+    /// source frame.
+    fn scale(self, width: u32, height: u32) -> Result<Self, String> {
+        let src_info = Self::video_info(self.width, self.height)?;
+        let dst_info = Self::video_info(width, height)?;
+        // `VideoConverter::new` rejects differing framerates; both infos are
+        // built without one (fps 0/1), so they always agree.
+        let converter = gst_video::VideoConverter::new(&src_info, &dst_info, None)
+            .map_err(|error| format!("Failed to create I420 scaler: {error}"))?;
+
+        let mut dest = Self::new(width, height);
+        let src_buffer = gst::Buffer::from_mut_slice(self);
+        let mut dst_buffer = gst::Buffer::from_mut_slice(dest);
+        {
+            let src =
+                gst_video::VideoFrameRef::from_buffer_ref_readable(src_buffer.as_ref(), &src_info)
+                    .map_err(|error| format!("Failed to map I420 scale source: {error}"))?;
+            let dst_ref = dst_buffer
+                .get_mut()
+                .ok_or_else(|| "I420 scale destination is unexpectedly shared".to_string())?;
+            let mut dst_frame =
+                gst_video::VideoFrameRef::from_buffer_ref_writable(dst_ref, &dst_info)
+                    .map_err(|error| format!("Failed to map I420 scale destination: {error}"))?;
+            converter.frame_ref(&src, &mut dst_frame);
+        }
+        dest = dst_buffer
+            .try_into_inner::<OwnedI420>()
+            .map_err(|_| "I420 scaler destination lost its wrapped allocation".to_string())?;
+        Ok(dest)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl AsMut<[u8]> for OwnedI420 {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.planes
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedI420 {
+    fn drop(&mut self) {
+        if let Ok(mut freelist) = I420_FREELIST.lock()
+            && freelist.len() < I420_FREELIST_CAP
+        {
+            freelist.push(std::mem::take(&mut self.planes));
+        }
+    }
+}
+
+/// The frame handed to the publish path: capture dimensions, the capture
+/// clock timestamp, and the I420 plane buffer. On Linux the buffer is an
+/// `OwnedI420` allocation that becomes the `GStreamer` input buffer itself; on
+/// other platforms it is a libwebrtc `I420Buffer` wrapped in a `VideoFrame`
+/// at publish time.
+pub(crate) struct VideoSample {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) pts_us: i64,
+    pub(crate) buffer: SampleBuffer,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) type SampleBuffer = OwnedI420;
+#[cfg(not(target_os = "linux"))]
+pub(crate) type SampleBuffer = I420Buffer;
+
 /// Preview cadence before a video track is published (no stream fps to
 /// target yet).
 const PREVIEW_FALLBACK_FPS: u32 = 30;
@@ -104,11 +308,13 @@ const PACER_CAPACITY: usize = 4;
 /// is honored at delivery time instead of being baked in at capture time.
 const HISTORY_RING_CAPACITY: usize = 2;
 
-/// Keepalive delivery ring (Ring B) capacity: delivery buffers the keepalive
-/// arm rotates through when the pacer runs dry. Sized larger than m144's
-/// encoder retention window (`kMaxFramesInPreparation` = 10), so no buffer
-/// instance is ever re-submitted — or repacked in place — while the
-/// asynchronous encode path may still reference it.
+/// Keepalive delivery ring (Ring B) capacity (Windows only): delivery buffers
+/// the keepalive arm rotates through when the pacer runs dry. Sized larger
+/// than m144's encoder retention window (`kMaxFramesInPreparation` = 10), so
+/// no buffer instance is ever re-submitted — or repacked in place — while the
+/// asynchronous encode path may still reference it. Linux needs no ring (see
+/// `keepalive_sample`).
+#[cfg(not(target_os = "linux"))]
 const KEEPALIVE_RING_CAPACITY: usize = 16;
 
 /// Preview callback: invoked with a BGRA frame while a capture session is
@@ -220,18 +426,83 @@ pub(crate) fn clear_preview_viewport() {
 /// source already fits inside the viewport the source resolution is returned
 /// unchanged (the renderer's CSS does the upscale). `None` only on zero
 /// dimensions.
+/// Scales a sample's plane buffer to the target dimensions, returning the
+/// sample with updated width/height. Consumes the sample: Linux scaling
+/// takes ownership of the plane allocation, Windows `I420Buffer::scale`
+/// allocates a new buffer.
+fn scale_sample(
+    mut sample: VideoSample,
+    target_width: u32,
+    target_height: u32,
+) -> Result<VideoSample, String> {
+    sample.buffer = scale_buffer(sample.buffer, target_width, target_height)?;
+    sample.width = target_width;
+    sample.height = target_height;
+    Ok(sample)
+}
+
 #[cfg(target_os = "linux")]
-fn publish_video_frame(frame: &VideoFrame<I420Buffer>) -> bool {
-    crate::gstreamer_publisher::push_video_frame(frame).is_ok()
+fn scale_buffer(buffer: OwnedI420, width: u32, height: u32) -> Result<OwnedI420, String> {
+    buffer.scale(width, height)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn publish_video_frame(frame: &VideoFrame<I420Buffer>) -> bool {
+fn scale_buffer(buffer: I420Buffer, width: u32, height: u32) -> Result<I420Buffer, String> {
+    Ok(buffer.scale(
+        i32::try_from(width).unwrap_or(0),
+        i32::try_from(height).unwrap_or(0),
+    ))
+}
+
+/// Scales a sample to the current `SCALE_TARGET` when its dimensions differ
+/// (OBS-style canvas scaling: libwebrtc's encoder has no explicit size, so a
+/// 4K source would otherwise stream at 4K with the user's 1080p bitrate).
+/// Logs scales slower than 5 ms at most once per 3 s. Errors bubble up for
+/// the delivery loop to count as drops.
+fn scale_to_target(
+    sample: VideoSample,
+    target: Option<&ScaleTarget>,
+    last_slow_scale: &mut Instant,
+) -> Result<VideoSample, String> {
+    let Some(target) =
+        target.filter(|target| sample.width != target.width || sample.height != target.height)
+    else {
+        return Ok(sample);
+    };
+
+    let scale_start = Instant::now();
+    let scaled = scale_sample(sample, target.width, target.height)?;
+    let scale_ms = scale_start.elapsed().as_secs_f64() * 1000.0;
+    if scale_ms >= 5.0 && last_slow_scale.elapsed() >= Duration::from_secs(3) {
+        *last_slow_scale = Instant::now();
+        log::info!(
+            "[desktop-capture] slow target scale: {scale_ms:.1} ms ({}x{} -> {}x{})",
+            scaled.width,
+            scaled.height,
+            target.width,
+            target.height,
+        );
+    }
+    Ok(scaled)
+}
+
+#[cfg(target_os = "linux")]
+fn publish_video_frame(sample: VideoSample) -> bool {
+    crate::gstreamer_publisher::push_video_frame(sample).is_ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_video_frame(sample: VideoSample) -> bool {
     let Some(source) = VIDEO_SOURCE.load_full() else {
         return false;
     };
 
-    source.capture_frame(frame);
+    source.capture_frame(&VideoFrame {
+        rotation: VideoRotation::VideoRotation0,
+        timestamp_us: sample.pts_us,
+        frame_metadata: None,
+        buffer: sample.buffer,
+    });
     true
 }
 
@@ -525,7 +796,7 @@ fn emit_preview_frame(
 /// derives from arrival time) sees even pacing even when the source
 /// delivers in bursts.
 struct FramePacer {
-    queue: Mutex<VecDeque<VideoFrame<I420Buffer>>>,
+    queue: Mutex<VecDeque<VideoSample>>,
     /// Maximum frames held; the oldest is dropped when a push overflows.
     capacity: usize,
 }
@@ -540,7 +811,7 @@ impl FramePacer {
 
     /// Queues a converted frame, dropping the oldest queued frame when
     /// full (drop-oldest: keep the freshest content, bound latency).
-    fn push(&self, frame: VideoFrame<I420Buffer>) {
+    fn push(&self, frame: VideoSample) {
         let Ok(mut queue) = self.queue.lock() else {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
@@ -553,27 +824,32 @@ impl FramePacer {
     }
 
     /// Pops the oldest queued frame for delivery to the encoder.
-    fn pop(&self) -> Option<VideoFrame<I420Buffer>> {
+    fn pop(&self) -> Option<VideoSample> {
         self.queue.lock().ok()?.pop_front()
     }
 }
 
-/// Ring B: the keepalive delivery ring. The capture loop's keepalive arm
-/// (pacer empty) must keep the RTP cadence even without fresh frames, but it
-/// must never re-submit the same `VideoFrame`/`I420Buffer` instance while the
-/// encoder may still hold it asynchronously (the SDK exposes no release
-/// callback). Instead, each keepalive tick:
+/// Ring B: the keepalive delivery ring (Windows only). The capture loop's
+/// keepalive arm (pacer empty) must keep the RTP cadence even without fresh
+/// frames, but it must never re-submit the same `VideoFrame`/`I420Buffer`
+/// instance while the encoder may still hold it asynchronously (the SDK
+/// exposes no release callback). Instead, each keepalive tick:
 ///
 /// 1. Snapshot the newest capture-resolution planes from Ring A.
 /// 2. Scale them to the current `SCALE_TARGET` into the next ring slot.
-/// 3. Submit that slot as a `VideoFrame` with a fresh timestamp.
+/// 3. Submit that slot as a `VideoSample` with the source's timestamp.
 ///
 /// The ring rotates `KEEPALIVE_RING_CAPACITY` distinct buffer instances, so
 /// no instance is re-packed/re-submitted within that many ticks — well beyond
 /// m144's encoder retention window (`kMaxFramesInPreparation` = 10). The ring
 /// is owned by `run_capture` (single-threaded access), so no lock is needed.
+///
+/// On Linux this ring is unnecessary: every keepalive buffer is a fresh
+/// allocation or an `I420_FREELIST` pop, both released by GStreamer, so the
+/// encoder can never see the same buffer instance twice (`keepalive_sample`).
+#[cfg(not(target_os = "linux"))]
 struct KeepaliveRing {
-    slots: Vec<VideoFrame<I420Buffer>>,
+    slots: Vec<VideoSample>,
     /// Next slot to fill; wraps every `KEEPALIVE_RING_CAPACITY` submissions.
     next: usize,
     /// Reusable snapshot buffer: `keepalive_frame` copies the newest Ring-A
@@ -583,6 +859,7 @@ struct KeepaliveRing {
     scratch: Vec<u8>,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl KeepaliveRing {
     fn new() -> Self {
         Self {
@@ -599,19 +876,19 @@ impl KeepaliveRing {
     /// checker.
     fn next_slot(&mut self, target: (u32, u32)) -> usize {
         if self.slots.len() < KEEPALIVE_RING_CAPACITY {
-            self.slots.push(VideoFrame {
-                rotation: VideoRotation::VideoRotation0,
-                timestamp_us: 0,
-                frame_metadata: None,
+            self.slots.push(VideoSample {
+                width: target.0,
+                height: target.1,
+                pts_us: 0,
                 buffer: I420Buffer::new(target.0, target.1),
             });
         }
         let slot = &mut self.slots[self.next];
         if (slot.buffer.width(), slot.buffer.height()) != target {
-            *slot = VideoFrame {
-                rotation: VideoRotation::VideoRotation0,
-                timestamp_us: 0,
-                frame_metadata: None,
+            *slot = VideoSample {
+                width: target.0,
+                height: target.1,
+                pts_us: 0,
                 buffer: I420Buffer::new(target.0, target.1),
             };
         }
@@ -624,14 +901,53 @@ impl KeepaliveRing {
 /// The capture-source frame callback: `(width, height, bgra, pts_us)`.
 pub(crate) type FrameCallback = Box<dyn FnMut(u32, u32, &[u8], i64) + Send>;
 
-/// Converts a linear BGRA frame into a fresh, immutable I420 buffer.
+/// Converts a linear BGRA frame into a fresh `VideoSample` whose plane
+/// buffer is sized to the capture resolution.
 ///
 /// Every frame gets its own buffer: the encoder consumes frames
 /// asynchronously on its own queue (the cadence adapter posts them by
 /// value, `VideoStreamEncoder` encodes on the encoder thread), so a
 /// reused buffer would be torn or duplicated mid-read — blocky smearing
-/// during motion, independent of codec.
-fn convert_frame(width: u32, height: u32, bgra: &[u8], pts_us: i64) -> VideoFrame<I420Buffer> {
+/// during motion, independent of codec. On Linux the plane buffer becomes
+/// the `GStreamer` input buffer itself (zero extra copy); on other platforms
+/// it is a libwebrtc `I420Buffer`, wrapped in a `VideoFrame` at publish.
+#[cfg(target_os = "linux")]
+fn convert_frame(width: u32, height: u32, bgra: &[u8], pts_us: i64) -> VideoSample {
+    let mut out = OwnedI420::new(width, height);
+    let (stride_y, stride_u, stride_v) = out.strides();
+    let (plane_y, plane_u, plane_v) = out.data_mut();
+    // The engine delivers tightly packed rows (stride == width * 4).
+    yuv_helper::argb_to_i420(
+        bgra,
+        width * 4,
+        plane_y,
+        stride_y,
+        plane_u,
+        stride_u,
+        plane_v,
+        stride_v,
+        i32::try_from(width).unwrap_or(0),
+        i32::try_from(height).unwrap_or(0),
+    );
+    PREVIEW_GENERATION.fetch_add(1, Ordering::Relaxed);
+    STATS_LAST_WIDTH.store(width, Ordering::Relaxed);
+    STATS_LAST_HEIGHT.store(height, Ordering::Relaxed);
+    VideoSample {
+        width,
+        height,
+        // Preserve the capture timestamp the callback supplied (measured at
+        // callback entry, before the stride re-pack) rather than re-measuring
+        // now: variable BGRA→I420 conversion time would otherwise leak into
+        // the source-timestamp jitter the encoder's `TimestampAligner` sees.
+        pts_us,
+        buffer: out,
+    }
+}
+
+/// Non-Linux twin of `convert_frame`: the same `VideoSample` shape, with a
+/// libwebrtc `I420Buffer` as the plane buffer.
+#[cfg(not(target_os = "linux"))]
+fn convert_frame(width: u32, height: u32, bgra: &[u8], pts_us: i64) -> VideoSample {
     let mut out = I420Buffer::new(width, height);
     let (stride_y, stride_u, stride_v) = out.strides();
     let (plane_y, plane_u, plane_v) = out.data_mut();
@@ -651,14 +967,14 @@ fn convert_frame(width: u32, height: u32, bgra: &[u8], pts_us: i64) -> VideoFram
     PREVIEW_GENERATION.fetch_add(1, Ordering::Relaxed);
     STATS_LAST_WIDTH.store(width, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(height, Ordering::Relaxed);
-    VideoFrame {
-        rotation: VideoRotation::VideoRotation0,
+    VideoSample {
+        width,
+        height,
         // Preserve the capture timestamp the callback supplied (measured at
         // callback entry, before the stride re-pack) rather than re-measuring
         // now: variable BGRA→I420 conversion time would otherwise leak into
         // the source-timestamp jitter the encoder's `TimestampAligner` sees.
-        timestamp_us: pts_us,
-        frame_metadata: None,
+        pts_us,
         buffer: out,
     }
 }
@@ -697,18 +1013,20 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
     })
 }
 
-/// Builds one keepalive frame from the newest Ring-A snapshot, honoring the
-/// current `SCALE_TARGET` at delivery time (Ring A stores the original
-/// capture resolution, so a client-side resolution change is applied here,
-/// not baked in at capture). Packs the snapshot into the next rotating
-/// Ring-B slot — each submission gets a fresh `I420Buffer` instance, so the
-/// encoder's asynchronous retention window never sees the same buffer twice.
-/// The frame carries the source frame's *capture* timestamp (not delivery
-/// time), keeping the `TimestampAligner`'s RTP timestamp chain monotonic.
+/// Builds one keepalive `VideoSample` from the newest Ring-A snapshot,
+/// honoring the current `SCALE_TARGET` at delivery time (Ring A stores the
+/// original capture resolution, so a client-side resolution change is
+/// applied here, not baked in at capture). Packs the snapshot into the next
+/// rotating Ring-B slot — each submission gets a fresh `I420Buffer` instance,
+/// so the encoder's asynchronous retention window never sees the same buffer
+/// twice. The sample carries the source frame's *capture* timestamp (not
+/// delivery time), keeping the `TimestampAligner`'s RTP timestamp chain
+/// monotonic.
 ///
 /// Returns `None` when nothing has been captured yet (e.g. the portal picker
 /// is still open, or the gap before the first frame).
-fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
+#[cfg(not(target_os = "linux"))]
+fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoSample> {
     // Scale to the configured encoder target, or fall back to the source
     // resolution when no track is live (the keepalive arm only runs with a
     // live `VIDEO_SOURCE`, so `SCALE_TARGET` is normally set).
@@ -755,10 +1073,15 @@ fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
         plane_v[..n].copy_from_slice(&ring.scratch[y_len + u_len..y_len + u_len + n]);
     }
     if (src_w, src_h) != (out_w, out_h) {
-        ring.slots[slot_idx].buffer = ring.slots[slot_idx].buffer.scale(
-            i32::try_from(out_w).unwrap_or(0),
-            i32::try_from(out_h).unwrap_or(0),
-        );
+        ring.slots[slot_idx].buffer = scale_buffer(
+            std::mem::replace(
+                &mut ring.slots[slot_idx].buffer,
+                I420Buffer::new(src_w, src_h),
+            ),
+            out_w,
+            out_h,
+        )
+        .ok()?;
     }
     // Stamp the keepalive with the *source frame's* capture timestamp, not
     // wall-clock now: the real path (`convert_frame`) uses capture time, and
@@ -770,21 +1093,79 @@ fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoFrame<I420Buffer>> {
     // H.264 ping-pong). Re-sending the same content with its own capture
     // timestamp keeps the capturer clock stable; the aligner clips to
     // prev+1ms and the encoder compresses the duplicate to near-nothing.
-    ring.slots[slot_idx].timestamp_us = pts_us;
-    // Hand the packed slot buffer out; the ring slot is re-packed on its next
-    // rotation, so the submitted frame's buffer instance stays unique within
+    ring.slots[slot_idx].pts_us = pts_us;
+    // Hand the packed slot out; the ring slot is re-packed on its next
+    // rotation, so the submitted sample's buffer instance stays unique within
     // the retention window. The fresh buffer is at the *source* size — that's
     // what `next_slot` packs into on the next rotation.
-    let slot = std::mem::replace(
+    Some(std::mem::replace(
         &mut ring.slots[slot_idx],
-        VideoFrame {
-            rotation: VideoRotation::VideoRotation0,
-            timestamp_us: 0,
-            frame_metadata: None,
+        VideoSample {
+            width: src_w,
+            height: src_h,
+            pts_us: 0,
             buffer: I420Buffer::new(src_w, src_h),
         },
-    );
-    Some(slot)
+    ))
+}
+
+/// Linux twin of `keepalive_frame`: builds one keepalive `VideoSample` from
+/// the newest Ring-A snapshot, honoring the current `SCALE_TARGET` at
+/// delivery time. No rotation ring is needed — each submission packs the
+/// snapshot planes into a fresh `OwnedI420` allocation that `GStreamer`
+/// releases back to `I420_FREELIST` after the encoder is done with it, so
+/// the encoder can never see the same buffer instance twice (`GStreamer` is
+/// the release callback Windows lacks). The allocation doubles as the
+/// snapshot scratch, so a static screen's steady-state keepalives reuse the
+/// freelist allocation instead of allocating per tick.
+///
+/// Returns `None` when nothing has been captured yet (e.g. the portal picker
+/// is still open, or the gap before the first frame).
+#[cfg(target_os = "linux")]
+fn keepalive_sample() -> Option<VideoSample> {
+    // Scale to the configured encoder target, or fall back to the source
+    // resolution when no track is live (the keepalive arm only runs with a
+    // live video track, so `SCALE_TARGET` is normally set).
+    let target = SCALE_TARGET.load_full().map(|t| (t.width, t.height));
+    let (src_w, src_h, pts_us, mut buffer) = {
+        let Ok(guard) = PREVIEW_I420.lock() else {
+            return None;
+        };
+        let history = guard.as_ref()?;
+        let entry = history.newest()?;
+        // Copy the newest snapshot's planes into the fresh allocation under
+        // the brief lock; the scale below runs outside it. The ring stores
+        // the *capture* timestamp, so re-deliveries are stamped with the
+        // source frame's clock (see the Windows twin's timestamp note).
+        let mut fresh = OwnedI420::new(entry.width, entry.height);
+        let (dst_y, dst_u, dst_v) = fresh.data_mut();
+        let n = dst_y.len().min(entry.y_len);
+        dst_y[..n].copy_from_slice(&entry.planes[..n]);
+        let n = dst_u.len().min(entry.u_len);
+        dst_u[..n].copy_from_slice(&entry.planes[entry.y_len..entry.y_len + n]);
+        let n = dst_v.len().min(entry.v_len);
+        dst_v[..n].copy_from_slice(
+            &entry.planes[entry.y_len + entry.u_len..entry.y_len + entry.u_len + n],
+        );
+        (entry.width, entry.height, entry.pts_us, fresh)
+    };
+    let (out_w, out_h) = target.unwrap_or((src_w, src_h));
+
+    if (src_w, src_h) != (out_w, out_h) {
+        buffer = match buffer.scale(out_w, out_h) {
+            Ok(scaled) => scaled,
+            Err(error) => {
+                log::warn!("[desktop-capture] keepalive scale failed: {error}");
+                return None;
+            }
+        };
+    }
+    Some(VideoSample {
+        width: out_w,
+        height: out_h,
+        pts_us,
+        buffer,
+    })
 }
 
 /// Monotonic microsecond timestamp for video frames, anchored at first use.
@@ -1016,17 +1397,18 @@ fn run_capture(
     let mut next_delivery_at = Instant::now();
     // When the pacer is empty on a delivery tick (the portal capture is
     // event-driven — KWin records only on compositor render or cursor move),
-    // the newest captured frame is re-submitted with a fresh timestamp so the
-    // RTP cadence stays even instead of stalling; the encoder compresses the
-    // duplicates to near-nothing. Mirrors the WGC engine, which re-delivers
-    // the last frame on static content.
+    // the newest captured frame is re-submitted with its own capture
+    // timestamp so the RTP cadence stays even instead of stalling; the
+    // encoder compresses the duplicates to near-nothing. Mirrors the WGC
+    // engine, which re-delivers the last frame on static content.
     //
-    // The re-submission goes through Ring B: the keepalive arm snapshots the
-    // newest capture-resolution planes from Ring A, scales them to the
-    // current `SCALE_TARGET`, packs them into the next rotating slot, and
-    // submits a *fresh* `VideoFrame` — never mutating (or reusing within the
-    // retention window) the same buffer instance the encoder may still hold
-    // asynchronously.
+    // The re-submission snapshot is the newest Ring-A capture-resolution
+    // plane set, scaled to the current `SCALE_TARGET`. On Windows it is
+    // packed into the next rotating Ring-B slot so the encoder never sees
+    // the same buffer instance twice within its async retention window; on
+    // Linux each submission is a fresh `OwnedI420` (freelist pop or new
+    // allocation) that GStreamer releases, so no rotation is needed.
+    #[cfg(not(target_os = "linux"))]
     let mut keepalive_ring = KeepaliveRing::new();
     // Rate-limits the slow-scale log below (at most one line per 3 s).
     // Initialized so the first slow scale always logs.
@@ -1055,51 +1437,29 @@ fn run_capture(
                 engine.poll();
             }
             match pacer.pop() {
-                Some(mut frame) => {
+                Some(sample) => {
                     if crate::is_video_track_active() {
                         // Fast path: a real captured frame. Scale to the
                         // configured target, up or down (OBS-style canvas
                         // scaling): libwebrtc's encoder has no explicit size,
                         // so a 4K source would otherwise stream at 4K with
                         // the user's 1080p bitrate (see `ScaleTarget`).
-                        let push_frame = match SCALE_TARGET.load_full().map(|t| *t).filter(
-                            |target| {
-                                frame.buffer.width() != target.width
-                                    || frame.buffer.height() != target.height
-                            },
+                        match scale_to_target(
+                            sample,
+                            SCALE_TARGET.load_full().as_deref(),
+                            &mut last_slow_scale,
                         ) {
-                            Some(target) => {
-                                let scale_start = Instant::now();
-                                let scaled = frame.buffer.scale(
-                                    i32::try_from(target.width).unwrap_or(0),
-                                    i32::try_from(target.height).unwrap_or(0),
-                                );
-                                let scale_ms = scale_start.elapsed().as_secs_f64() * 1000.0;
-                                if scale_ms >= 5.0
-                                    && last_slow_scale.elapsed() >= Duration::from_secs(3)
-                                {
-                                    last_slow_scale = Instant::now();
-                                    log::info!(
-                                        "[desktop-capture] slow target scale: {scale_ms:.1} ms ({}x{} -> {}x{})",
-                                        frame.buffer.width(),
-                                        frame.buffer.height(),
-                                        target.width,
-                                        target.height,
-                                    );
-                                }
-                                VideoFrame {
-                                    rotation: VideoRotation::VideoRotation0,
-                                    timestamp_us: frame.timestamp_us,
-                                    frame_metadata: None,
-                                    buffer: scaled,
+                            Ok(sample) => {
+                                if publish_video_frame(sample) {
+                                    STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
-                            None => frame,
-                        };
-                        if publish_video_frame(&push_frame) {
-                            STATS_PUSHED.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                            Err(error) => {
+                                log::warn!("[desktop-capture] target scale failed: {error}");
+                                STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     } else {
                         // No live track: drop the frame, but the Ring-A stash
@@ -1115,18 +1475,22 @@ fn run_capture(
                     // had nothing to record, not that delivery should stop —
                     // but a dropped corrupt buffer or the gap between picker
                     // answer and first frame can still leave a tick empty.
-                    // Re-submit the newest captured frame through Ring B
-                    // (fresh buffer + fresh timestamp) so arrival pacing
-                    // stays even and the encoder never sees the same buffer
-                    // instance twice within its async retention window.
-                    if crate::is_video_track_active()
-                        && let Some(frame) = keepalive_frame(&mut keepalive_ring)
-                    {
-                        STATS_KEEPALIVE_ATTEMPTED.fetch_add(1, Ordering::Relaxed);
-                        if publish_video_frame(&frame) {
-                            STATS_KEEPALIVE_PUSHED.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            STATS_KEEPALIVE_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    // Re-submit the newest captured frame (fresh planes +
+                    // capture timestamp) so arrival pacing stays even and the
+                    // encoder never sees the same buffer instance twice
+                    // within its async retention window.
+                    if crate::is_video_track_active() {
+                        #[cfg(target_os = "linux")]
+                        let frame = keepalive_sample();
+                        #[cfg(not(target_os = "linux"))]
+                        let frame = keepalive_frame(&mut keepalive_ring);
+                        if let Some(frame) = frame {
+                            STATS_KEEPALIVE_ATTEMPTED.fetch_add(1, Ordering::Relaxed);
+                            if publish_video_frame(frame) {
+                                STATS_KEEPALIVE_PUSHED.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                STATS_KEEPALIVE_DROPPED.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -1323,6 +1687,20 @@ mod probe {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+    /// The `OwnedI420` layout derives from `gst_video::VideoInfo`, whose
+    /// builder asserts `gst::init` has run. `gst::init` is idempotent, so a
+    /// one-time helper is safe across tests. Linux-only: `gst` is not
+    /// imported on other platforms.
+    #[cfg(target_os = "linux")]
+    fn init_gst() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INIT.get_or_init(|| {
+            if let Err(error) = gst::init() {
+                panic!("gst::init failed: {error}");
+            }
+        });
+    }
+
     /// The encode-target scale path uses libwebrtc's libyuv-backed
     /// `I420Buffer::scale`: a uniform-color 8×8 frame scaled 2:1 must keep
     /// its dimensions and its dominant color (a broken scaler would either
@@ -1351,6 +1729,53 @@ mod probe {
         );
         assert!(plane_u.iter().all(|&v| v == 90));
         assert!(plane_v.iter().all(|&v| v == 240));
+    }
+
+    /// The Linux encode-target scale path uses the `GStreamer` scaler on an
+    /// owned `OwnedI420` allocation: a uniform-color 8×8 frame scaled 2:1
+    /// must keep its dimensions and its dominant color (a broken scaler
+    /// would either panic, resize wrong or shift the color).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_i420_scale_preserves_dimensions_and_mean_color() {
+        init_gst();
+        let mut src = OwnedI420::new(8, 8);
+        {
+            let (plane_y, plane_u, plane_v) = src.data_mut();
+            for byte in &mut *plane_y {
+                *byte = 100;
+            }
+            for byte in &mut *plane_u {
+                *byte = 90;
+            }
+            for byte in &mut *plane_v {
+                *byte = 240;
+            }
+        }
+        let scaled = src.scale(4, 4).unwrap_or_else(|error| {
+            panic!("OwnedI420::scale must not fail for valid dims: {error}")
+        });
+        assert_eq!((scaled.width, scaled.height), (4, 4));
+        let (plane_y, plane_u, plane_v) = scaled.data();
+        assert!(
+            plane_y.iter().all(|&v| v == 100),
+            "luma must survive the scale"
+        );
+        // GStreamer's default I420 layout aligns the chroma row stride, so
+        // the plane slices include pad bytes after each row's real pixels:
+        // assert on the actual 2×2 chroma region (stride-aware), not the
+        // full slice.
+        let (_, stride_u, stride_v) = scaled.strides();
+        let real_u: Vec<u8> = plane_u
+            .chunks_exact(stride_u as usize)
+            .flat_map(|row| row[..scaled.width as usize / 2].iter().copied())
+            .collect();
+        let real_v: Vec<u8> = plane_v
+            .chunks_exact(stride_v as usize)
+            .flat_map(|row| row[..scaled.width as usize / 2].iter().copied())
+            .collect();
+        assert!(real_u.iter().all(|&v| v == 90));
+        assert!(real_v.iter().all(|&v| v == 240));
     }
 
     /// The encode target is applied whenever the source dimensions differ
@@ -1883,10 +2308,11 @@ mod probe {
         assert!(ring.newest().is_none());
     }
 
-    /// Ring B (keepalive): consecutive submissions never reuse the same
-    /// slot instance within `KEEPALIVE_RING_CAPACITY` ticks (each tick packs
-    /// the slot's buffer in place, so a reused slot would mutate a buffer the
-    /// encoder may still hold).
+    /// Ring B (keepalive, Windows): consecutive submissions never reuse the
+    /// same slot instance within `KEEPALIVE_RING_CAPACITY` ticks (each tick
+    /// packs the slot's buffer in place, so a reused slot would mutate a
+    /// buffer the encoder may still hold).
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn keepalive_ring_rotates_distinct_buffers() {
         let mut ring = KeepaliveRing::new();
@@ -1913,8 +2339,10 @@ mod probe {
         }
     }
 
-    /// `keepalive_frame` honors a dynamic `SCALE_TARGET` change: Ring A holds
-    /// capture resolution, the delivered frame is at the current target.
+    /// `keepalive_frame` (Windows) honors a dynamic `SCALE_TARGET` change:
+    /// Ring A holds capture resolution, the delivered frame is at the current
+    /// target.
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn keepalive_frame_scales_to_current_target() {
         set_preview_callback(Box::new(|_bytes, _pts_us| {}));
@@ -1945,7 +2373,7 @@ mod probe {
             "keepalive must scale the capture-resolution snapshot to SCALE_TARGET"
         );
         assert_eq!(
-            frame.timestamp_us, 42,
+            frame.pts_us, 42,
             "keepalive must carry the source frame's capture timestamp (not delivery time)"
         );
         clear_scale_target();
@@ -1963,6 +2391,7 @@ mod probe {
     /// gradient (each row = its own unique value) makes any stride
     /// misalignment or truncation produce wrong pixels, not just a scale
     /// artifact.
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn keepalive_packs_source_planes_then_scales() {
         set_preview_callback(Box::new(|_bytes, _pts_us| {}));
@@ -1996,6 +2425,115 @@ mod probe {
         let frame = keepalive_frame(&mut keepalive)
             .unwrap_or_else(|| panic!("keepalive must produce a frame"));
         assert_eq!((frame.buffer.width(), frame.buffer.height()), (640, 360));
+        // The output must be a genuine downscale of the gradient: the top
+        // output row ≈ top source rows (0..2), the bottom output row ≈ the
+        // bottom source row (row 719 = 0xCF = 207, sampled with edge clamp).
+        // A stride bug (copying 1280-wide rows into a 640-wide buffer) would
+        // put wrong row values in the output.
+        let (plane_y, _, _) = frame.buffer.data();
+        let top = plane_y[0];
+        let bottom = plane_y[(360 - 1) * 640];
+        assert!(
+            top <= 3,
+            "top output row must average the top source rows (got {top})"
+        );
+        assert!(
+            (200..=214).contains(&bottom),
+            "bottom output row must sample the bottom source row 719 = 0xCF (got {bottom})"
+        );
+        clear_scale_target();
+        clear_preview_callback();
+        let Ok(mut slot) = PREVIEW_I420.lock() else {
+            panic!("PREVIEW_I420 lock poisoned");
+        };
+        *slot = None;
+    }
+
+    /// Linux twin of `keepalive_frame_scales_to_current_target`: Ring A holds
+    /// capture resolution, the delivered sample is at the current target.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keepalive_sample_scales_to_current_target() {
+        init_gst();
+        set_preview_callback(Box::new(|_bytes, _pts_us| {}));
+        set_scale_target(640, 360, 30);
+        // Seed Ring A with a capture-resolution snapshot.
+        {
+            let mut ring = HistoryRing::new(2);
+            let planes = vec![0u8; 1280 * 720 + 640 * 360 + 640 * 360];
+            ring.push_planes(
+                1280,
+                720,
+                42,
+                &planes[..1280 * 720],
+                &planes[1280 * 720..1280 * 720 + 640 * 360],
+                &planes[1280 * 720 + 640 * 360..],
+            );
+            let Ok(mut slot) = PREVIEW_I420.lock() else {
+                panic!("PREVIEW_I420 lock poisoned");
+            };
+            *slot = Some(ring);
+        }
+        let frame = keepalive_sample().unwrap_or_else(|| panic!("keepalive must produce a frame"));
+        assert_eq!(
+            (frame.width, frame.height),
+            (640, 360),
+            "keepalive must scale the capture-resolution snapshot to SCALE_TARGET"
+        );
+        assert_eq!(
+            (frame.buffer.width, frame.buffer.height),
+            (640, 360),
+            "the sample's plane buffer must match the scaled dimensions"
+        );
+        assert_eq!(
+            frame.pts_us, 42,
+            "keepalive must carry the source frame's capture timestamp (not delivery time)"
+        );
+        clear_scale_target();
+        clear_preview_callback();
+        let Ok(mut slot) = PREVIEW_I420.lock() else {
+            panic!("PREVIEW_I420 lock poisoned");
+        };
+        *slot = None;
+    }
+
+    /// Linux twin of `keepalive_packs_source_planes_then_scales`: the
+    /// keepalive packs capture-resolution planes into a fresh allocation at
+    /// the *source* dimensions, then scales (see the Windows twin's
+    /// regression note).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keepalive_sample_packs_source_planes_then_scales() {
+        init_gst();
+        set_preview_callback(Box::new(|_bytes, _pts_us| {}));
+        set_scale_target(640, 360, 30);
+        // Seed Ring A with a 1280x720 capture-resolution snapshot whose luma
+        // rows each carry a distinct value: row y has byte value (y & 0xFF).
+        {
+            let mut ring = HistoryRing::new(2);
+            let mut planes = vec![0u8; 1280 * 720 + 640 * 360 + 640 * 360];
+            for y in 0..720u32 {
+                let row = &mut planes[y as usize * 1280..(y as usize + 1) * 1280];
+                row.fill((y & 0xFF) as u8);
+            }
+            // Chroma planes: flat, distinct from any luma row value.
+            planes[1280 * 720..1280 * 720 + 640 * 360].fill(128);
+            planes[1280 * 720 + 640 * 360..].fill(128);
+            ring.push_planes(
+                1280,
+                720,
+                7,
+                &planes[..1280 * 720],
+                &planes[1280 * 720..1280 * 720 + 640 * 360],
+                &planes[1280 * 720 + 640 * 360..],
+            );
+            let Ok(mut slot) = PREVIEW_I420.lock() else {
+                panic!("PREVIEW_I420 lock poisoned");
+            };
+            *slot = Some(ring);
+        }
+        let frame = keepalive_sample().unwrap_or_else(|| panic!("keepalive must produce a frame"));
+        assert_eq!((frame.width, frame.height), (640, 360));
         // The output must be a genuine downscale of the gradient: the top
         // output row ≈ top source rows (0..2), the bottom output row ≈ the
         // bottom source row (row 719 = 0xCF = 207, sampled with edge clamp).

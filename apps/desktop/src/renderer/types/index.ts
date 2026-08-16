@@ -131,9 +131,6 @@ export interface NativeTelemetry {
   videoAppsrcLevelBuffers: number | null;
   videoAppsrcLevelBytes: number | null;
   videoAppsrcLevelTime: number | null;
-  /** Frames dropped because the I420 input buffer pool was exhausted (before
-   * reaching the appsrc) — distinct from `videoAppsrcDropped`. */
-  videoPoolExhausted: number | null;
   audioCodec: string | null;
   audioBytesSent: number | null;
   audioPacketsSent: number | null;

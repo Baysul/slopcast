@@ -11,11 +11,11 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::CaptureConfig;
+use crate::desktop_capture::VideoSample;
 
 /// Video appsrc queue depth in buffers. Two was too tight: any transient
 /// encoder hiccup (VA-API pipeline stall, driver swap) saturated it
@@ -25,21 +25,6 @@ use crate::CaptureConfig;
 /// publisher's congestion controller reads this as the "queue is full"
 /// threshold for its local backpressure signal.
 pub(crate) const APPSRC_MAX_BUFFERS: u64 = 6;
-/// Size of the I420 input buffer pool (buffers in flight: the appsrc queue
-/// plus the synchronous convert/encode stages). Pool buffers are returned
-/// automatically when the pipeline releases them, so the steady state does
-/// zero per-frame input-buffer allocation — the previous
-/// `gst::Buffer::with_size` per frame was a 2.25 MB allocate+page-fault
-/// at 1080p (4× at 4K) on the hot delivery path.
-///
-/// Sized well above `APPSRC_MAX_BUFFERS` (6) so the leaky-appsrc queue can
-/// fill while the encoder's 120 ms output window retains frames without
-/// exhausting the pool — pool acquisition fails *before* `push_buffer`, so a
-/// too-small pool shows up as silent frame drops that `appsrc.dropped` never
-/// counts (see `VIDEO_POOL_EXHAUSTED`). This is the pool's *maximum*; the
-/// minimum is 0 (see `attach`), so buffers are allocated lazily up to the
-/// cap, not eagerly.
-const VIDEO_BUFFER_POOL_SIZE: u32 = 24;
 const GOP_SECONDS: u32 = 1;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
@@ -73,24 +58,13 @@ enum RateMode {
 /// 200 ms time-bounded queue) before they could be encoded.
 static VIDEO_FRAMES_ENCODED: AtomicU64 = AtomicU64::new(0);
 
-/// Frames dropped because the input buffer pool was exhausted when
-/// `push_frame` acquired with `DONTWAIT`. This happens *before* the frame
-/// reaches the appsrc, so it is invisible to `appsrc.dropped` — a dedicated
-/// counter is the only way to distinguish "encoder retained every buffer"
-/// from "the leaky appsrc discarded a buffered frame".
-static VIDEO_POOL_EXHAUSTED: AtomicU64 = AtomicU64::new(0);
-
 pub(crate) fn reset_encoded_frames() {
     VIDEO_FRAMES_ENCODED.store(0, Ordering::Relaxed);
-    VIDEO_POOL_EXHAUSTED.store(0, Ordering::Relaxed);
+    crate::desktop_capture::clear_i420_freelist();
 }
 
 pub(crate) fn encoded_frames() -> u64 {
     VIDEO_FRAMES_ENCODED.load(Ordering::Relaxed)
-}
-
-pub(crate) fn pool_exhausted_frames() -> u64 {
-    VIDEO_POOL_EXHAUSTED.load(Ordering::Relaxed)
 }
 
 /// Live GstBaseSrc/AppSrc statistics (all present on the appsrc element
@@ -128,7 +102,6 @@ fn running_time_ns(appsrc: &gst_app::AppSrc) -> Result<u64, String> {
 #[derive(Clone)]
 pub(crate) struct VideoInput {
     appsrc: gst_app::AppSrc,
-    input_info: gst_video::VideoInfo,
     width: u32,
     height: u32,
     fps: u32,
@@ -145,83 +118,22 @@ pub(crate) struct VideoInput {
     /// `max(capture_pts, last + frame_duration)` keeps the sink's RTP
     /// timestamp chain strictly monotonic (see `push_frame`).
     last_pts_ns: Arc<Mutex<Option<u64>>>,
-    /// Pool of I420 input buffers capped at `VIDEO_BUFFER_POOL_SIZE` (or
-    /// `AV1_BUFFER_POOL_SIZE` for AV1, see `attach`): `push_frame` acquires
-    /// from the pool instead of allocating a fresh full-frame buffer per
-    /// frame. Pool buffers are returned to the pool automatically when the
-    /// pipeline releases them.
-    buffer_pool: gst::BufferPool,
 }
 
 impl VideoInput {
-    pub(crate) fn push_frame(&self, frame: &VideoFrame<I420Buffer>) -> Result<(), String> {
-        if frame.buffer.width() != self.width || frame.buffer.height() != self.height {
+    pub(crate) fn push_frame(&self, sample: VideoSample) -> Result<(), String> {
+        if sample.width != self.width || sample.height != self.height {
             return Err(format!(
                 "GStreamer input frame is {}x{}, expected {}x{}",
-                frame.buffer.width(),
-                frame.buffer.height(),
-                self.width,
-                self.height
+                sample.width, sample.height, self.width, self.height
             ));
         }
 
-        // Acquire from the preallocated input pool rather than allocating a
-        // fresh 2.25 MB (1080p) / 6.2 MB (4K) buffer + page faults per
-        // frame. DONTWAIT: when the encoder is stalled and every pool buffer
-        // is in flight, fail fast (the publish path counts the drop) instead
-        // of blocking the delivery loop.
-        let acquire_params =
-            gst::BufferPoolAcquireParams::with_flags(gst::BufferPoolAcquireFlags::DONTWAIT);
-        let mut buffer = self
-            .buffer_pool
-            .acquire_buffer(Some(&acquire_params))
-            .map_err(|_| {
-                VIDEO_POOL_EXHAUSTED.fetch_add(1, Ordering::Relaxed);
-                "GStreamer video input buffer pool exhausted (encoder stalled; dropping frame)"
-                    .to_string()
-            })?;
-        {
-            let buffer_ref = buffer
-                .get_mut()
-                .ok_or_else(|| "GStreamer input buffer is unexpectedly shared".to_string())?;
-            let mut mapped = buffer_ref
-                .map_writable()
-                .map_err(|_| "Failed to map GStreamer input buffer writable".to_string())?;
-            let (plane_y, plane_u, plane_v) = frame.buffer.data();
-            let (stride_y, stride_u, stride_v) = frame.buffer.strides();
-            let offsets = self.input_info.offset();
-            let strides = self.input_info.stride();
-            let chroma_width = self.width.div_ceil(2);
-            let chroma_height = self.height.div_ceil(2);
-
-            copy_plane(
-                plane_y,
-                stride_y,
-                &mut mapped,
-                offsets[0],
-                strides[0],
-                self.width,
-                self.height,
-            )?;
-            copy_plane(
-                plane_u,
-                stride_u,
-                &mut mapped,
-                offsets[1],
-                strides[1],
-                chroma_width,
-                chroma_height,
-            )?;
-            copy_plane(
-                plane_v,
-                stride_v,
-                &mut mapped,
-                offsets[2],
-                strides[2],
-                chroma_width,
-                chroma_height,
-            )?;
-        }
+        // Wrap the capture engine's plane allocation directly (zero copy):
+        // the frame was converted into this buffer, the appsrc pipeline
+        // reads it in place, and `OwnedI420::drop` returns the allocation to
+        // the capture engine's freelist when the pipeline releases it.
+        let mut buffer = gst::Buffer::from_mut_slice(sample.buffer);
         // PTS comes from the capture clock, anchored onto the pipeline's
         // running time at the first frame: PTS = P0 + (C - C0). Capture
         // timestamps advance at the true frame cadence, so the sink's RTP
@@ -234,16 +146,16 @@ impl VideoInput {
             .lock()
             .map_err(|_| "video PTS anchor lock poisoned".to_string())?;
         let (c0_us, p0_ns) = match *anchor {
-            Some((c0, p0)) if frame.timestamp_us >= c0 => (c0, p0),
+            Some((c0, p0)) if sample.pts_us >= c0 => (c0, p0),
             _ => {
-                let anchored = (frame.timestamp_us, running_time_ns(&self.appsrc)?);
+                let anchored = (sample.pts_us, running_time_ns(&self.appsrc)?);
                 *anchor = Some(anchored);
                 anchored
             }
         };
         // Capture anchors are i64; the anchor branch guarantees a
         // non-negative difference, so cast_unsigned is lossless.
-        let pts_ns = p0_ns + (frame.timestamp_us - c0_us).cast_unsigned() * 1000;
+        let pts_ns = p0_ns + (sample.pts_us - c0_us).cast_unsigned() * 1000;
         // Keepalives re-deliver a static screen's newest frame with its own
         // capture timestamp, so back-to-back pushes can carry an identical
         // PTS. Clamp to at least `last + frame_duration` so the sink's RTP
@@ -273,9 +185,9 @@ impl VideoInput {
     }
 
     /// Live appsrc statistics — `dropped` counts buffers the appsrc discarded
-    /// (leaky-downstream on a full 6-buffer queue). Frames that never reached
-    /// the appsrc because the input buffer pool was exhausted are counted
-    /// separately in `VIDEO_POOL_EXHAUSTED` (see `push_frame`).
+    /// (leaky-downstream on a full 6-buffer queue). The capture engine's
+    /// I420 freelist doubles as the input-buffer headroom, so there is no
+    /// separate exhaustion signal here (see `push_frame`).
     pub(crate) fn appsrc_stats(&self) -> AppSrcStats {
         let element = self.appsrc.upcast_ref::<gst::Element>();
         AppSrcStats {
@@ -483,30 +395,6 @@ impl GstreamerEncoder {
             log_caps_events(&pad, "queue -> sink");
         }
 
-        // I420 input buffer pool: cap at `VIDEO_BUFFER_POOL_SIZE` buffers of
-        // the input frame size. The minimum is 0, so buffers are allocated
-        // lazily up to the cap — this is headroom, not a 24-buffer eager
-        // allocation. Steady-state `push_frame` then acquires from the pool
-        // (zero allocation); the pool is deactivated and freed when
-        // `VideoInput` is dropped (pipeline teardown).
-        let buffer_pool = gst::BufferPool::new();
-        {
-            let mut pool_config = buffer_pool.config();
-            pool_config.set_params(
-                Some(&input_caps),
-                u32::try_from(input_info.size())
-                    .map_err(|_| "GStreamer input buffer size exceeds u32")?,
-                0,
-                VIDEO_BUFFER_POOL_SIZE,
-            );
-            buffer_pool.set_config(pool_config).map_err(|error| {
-                format!("Failed to configure GStreamer input buffer pool: {error}")
-            })?;
-        }
-        buffer_pool
-            .set_active(true)
-            .map_err(|error| format!("Failed to activate GStreamer input buffer pool: {error}"))?;
-
         pipeline
             .add_many(elements.iter())
             .map_err(|error| format!("Failed to add GStreamer video elements: {error}"))?;
@@ -554,13 +442,11 @@ impl GstreamerEncoder {
             sink_pad,
             input: VideoInput {
                 appsrc,
-                input_info,
                 width: config.width,
                 height: config.height,
                 fps: config.fps,
                 pts_anchor: Arc::new(Mutex::new(None)),
                 last_pts_ns: Arc::new(Mutex::new(None)),
-                buffer_pool,
             },
         })
     }
@@ -667,7 +553,7 @@ fn configure_encoder(
             encoder.set_property_from_str("target-percentage", &VBR_TARGET_PERCENTAGE.to_string());
         }
         if encoder.find_property("target-usage").is_some() {
-            encoder.set_property_from_str("target-usage", "5");
+            encoder.set_property_from_str("target-usage", "7");
         }
         if encoder.find_property("ref-frames").is_some() {
             encoder.set_property_from_str("ref-frames", "1");
@@ -1013,52 +899,6 @@ fn vbr_target_kbps(ceiling_kbps: u32, percentage: u32) -> u32 {
 
 fn frame_duration(fps: u32) -> gst::ClockTime {
     gst::ClockTime::from_nseconds(gst::ClockTime::SECOND.nseconds() / u64::from(fps.max(1)))
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "plane copy requires explicit source and destination layout metadata"
-)]
-fn copy_plane(
-    source: &[u8],
-    source_stride: u32,
-    destination: &mut [u8],
-    destination_offset: usize,
-    destination_stride: i32,
-    row_width: u32,
-    row_count: u32,
-) -> Result<(), String> {
-    let destination_stride = usize::try_from(destination_stride)
-        .map_err(|_| "GStreamer I420 plane has a negative stride")?;
-    let source_stride =
-        usize::try_from(source_stride).map_err(|_| "I420 source stride overflow")?;
-    let row_width = usize::try_from(row_width).map_err(|_| "I420 plane width overflow")?;
-    let row_count = usize::try_from(row_count).map_err(|_| "I420 plane height overflow")?;
-    if row_width > source_stride || row_width > destination_stride {
-        return Err("I420 plane row width exceeds its stride".into());
-    }
-
-    for row in 0..row_count {
-        let source_start = row
-            .checked_mul(source_stride)
-            .ok_or_else(|| "I420 source row offset overflow".to_string())?;
-        let destination_start = destination_offset
-            .checked_add(
-                row.checked_mul(destination_stride)
-                    .ok_or_else(|| "GStreamer destination row offset overflow".to_string())?,
-            )
-            .ok_or_else(|| "GStreamer destination plane offset overflow".to_string())?;
-        let source_row = source
-            .get(source_start..source_start + row_width)
-            .ok_or_else(|| "I420 source plane is shorter than its declared layout".to_string())?;
-        let destination_row = destination
-            .get_mut(destination_start..destination_start + row_width)
-            .ok_or_else(|| "GStreamer buffer is shorter than its VideoInfo layout".to_string())?;
-
-        destination_row.copy_from_slice(source_row);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

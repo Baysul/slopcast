@@ -125,12 +125,6 @@ pub struct NativeTelemetry {
     pub video_appsrc_level_buffers: Option<u32>,
     pub video_appsrc_level_bytes: Option<u32>,
     pub video_appsrc_level_time: Option<u64>,
-    /// Linux `GStreamer` branch: frames dropped because the I420 input buffer
-    /// pool was exhausted (`push_frame` acquire with DONTWAIT). Counted
-    /// *before* the frame reaches the appsrc, so `video_appsrc_dropped` never
-    /// reflects it — a nonzero value here isolates pool/encoder retention from
-    /// leaky-appsrc backpressure.
-    pub video_pool_exhausted: Option<u64>,
     pub audio_codec: Option<String>,
     pub audio_bytes_sent: Option<f64>,
     pub audio_packets_sent: Option<f64>,
