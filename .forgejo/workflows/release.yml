@@ -7,11 +7,12 @@ on:
 
 jobs:
   build-docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
         target: [server, web]
+
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7
 
@@ -51,7 +52,7 @@ jobs:
           cache-to: type=registry,ref=forge.cunny.cat/${{ gitea.repository }}/${{ matrix.target }}-cache:main,mode=max
 
   build-desktop:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -65,24 +66,17 @@ jobs:
           - name: linux-tar
             script: dist:desktop:linux:tar
             asset-path: target/release/bundle/*.tar.gz
+
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v7
 
-      # Tauri 2 (wry/tao) + native stack pkg-config deps required at link time:
-      #   webkit2gtk-4.1 / javascriptcoregtk / soup3 / gtk3 / glib -> webview
-      #   dbus (tao default feature)                              -> libdbus-1
-      #   wayland-client (wayland-sys)                            -> libwayland-dev
-      #   pipewire-0.3 / glib                                     -> capture engine
-      #   librsvg2-dev + patchelf                                 -> bundler (deb/AppImage icons)
-      #   cmake/nasm                                              -> turbojpeg-sys (builds libjpeg-turbo from source; SIMD needs nasm)
+      # CEF replaces wry/WebKitGTK. Remaining packages are for Tauri's native
+      # windowing/bundling plus Slopcast's capture/video stack.
       - name: Install Linux system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
             libgtk-3-dev \
-            libsoup-3.0-dev \
             libdbus-1-dev \
             libwayland-dev \
             librsvg2-dev \
@@ -91,6 +85,15 @@ jobs:
             nasm \
             libpipewire-0.3-dev \
             libglib2.0-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-va \
+            gstreamer1.0-nice \
+            libnice-dev \
             libx11-dev \
             pkg-config \
             clang
@@ -110,6 +113,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify Tauri CEF runtime
+        shell: bash
+        run: |
+          if cargo tree --workspace | grep -q 'tauri-runtime-wry '; then
+            echo "::error::tauri-runtime-wry is present in the dependency graph"
+            cargo tree --workspace -i tauri-runtime-wry || true
+            exit 1
+          fi
+
+          if ! cargo tree --workspace | grep -q 'tauri-runtime-cef '; then
+            echo "::error::tauri-runtime-cef is missing from the dependency graph"
+            exit 1
+          fi
+
       - name: Build desktop
         run: pnpm ${{ matrix.script }}
 
@@ -122,8 +139,9 @@ jobs:
 
   create-release:
     needs: [build-docker, build-desktop]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: gitea.ref_type == 'tag'
+
     steps:
       - uses: https://data.forgejo.org/actions/download-artifact@v7
         with:
