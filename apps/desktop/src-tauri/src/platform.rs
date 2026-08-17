@@ -330,6 +330,7 @@ pub fn probe_gpu_info() -> Result<GpuInfo, String> {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
 
@@ -341,7 +342,6 @@ mod tests {
     ///
     /// Linux-only: the probe is a stub elsewhere.
     #[test]
-    #[cfg(target_os = "linux")]
     #[ignore = "manual diagnostic: requires a DRM render node"]
     fn gpu_probe() {
         match probe_gpu_info() {

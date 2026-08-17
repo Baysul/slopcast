@@ -112,6 +112,13 @@ for element in "${OPTIONAL_ELEMENTS[@]}"; do
   fi
 done
 
+# Resolve each element's plugin on the host first; when the host lacks an
+# element that the bundled runtime ships (e.g. rtpav1pay from gst-plugin-rtp
+# on hosts whose gst-plugins-bad predates it), fall back to the bundled
+# plugin dir. The isolated registry pins the scan to $PLUGIN_DIR so a stale
+# system registry cannot mask a missing plugin.
+REGISTRY_FILE="$BUILD_DIR/isolated-registry.bin"
+rm -f "$REGISTRY_FILE"
 for element in "${BUNDLED_ELEMENTS[@]}"; do
   plugin_path=""
   while IFS= read -r line; do
@@ -121,10 +128,25 @@ for element in "${BUNDLED_ELEMENTS[@]}"; do
     fi
   done < <(gst-inspect-1.0 "$element")
   if [[ ! -f "$plugin_path" ]]; then
+    while IFS= read -r line; do
+      if [[ "$line" == *Filename* ]]; then
+        plugin_path="${line##* }"
+        break
+      fi
+    done < <(GST_PLUGIN_SYSTEM_PATH_1_0= \
+      GST_PLUGIN_PATH_1_0="$PLUGIN_DIR" \
+      GST_REGISTRY_1_0="$REGISTRY_FILE" \
+      gst-inspect-1.0 "$element")
+  fi
+  if [[ ! -f "$plugin_path" ]]; then
     printf 'Unable to locate the GStreamer plugin supplying %s\n' "$element" >&2
     exit 1
   fi
-  install -m 0755 "$plugin_path" "$PLUGIN_DIR/$(basename "$plugin_path")"
+  # Never copy a file onto itself: bundled-only elements are already in the
+  # plugin dir from the Rust crate install above or a previous run.
+  if [[ "$plugin_path" != "$PLUGIN_DIR"/* ]]; then
+    install -m 0755 "$plugin_path" "$PLUGIN_DIR/$(basename "$plugin_path")"
+  fi
 done
 
 SCANNER_DIR=$(pkg-config --variable=pluginscannerdir gstreamer-1.0)
@@ -140,8 +162,8 @@ stock gst-plugin-webrtc $WEBRTC_VERSION $WEBRTC_SHA256
 stock gst-plugin-rtp $RTP_VERSION $RTP_SHA256
 EOF
 
-REGISTRY_FILE="$BUILD_DIR/isolated-registry.bin"
-rm -f "$REGISTRY_FILE"
+# Reuse the isolated registry populated by the element-resolution loop above;
+# resetting it here would force a full rescan and hide nothing new.
 for element in livekitwebrtcsink rtpgccbwe "${BUNDLED_ELEMENTS[@]}"; do
   GST_PLUGIN_SYSTEM_PATH_1_0= \
     GST_PLUGIN_PATH_1_0="$PLUGIN_DIR" \
