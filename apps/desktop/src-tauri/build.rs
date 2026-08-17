@@ -19,10 +19,20 @@ const FRONTEND_DIST: &str = "../dist/renderer";
 fn main() {
     tauri_build::build();
 
+    let out_dir = std::env::var_os("OUT_DIR").map(PathBuf::from);
+    let Some(out_dir) = out_dir else {
+        return;
+    };
+    let stamp_path = out_dir.join("slopcast-frontend-stamp");
+
     let dist = Path::new(FRONTEND_DIST);
     if !dist.is_dir() {
-        // tauri_codegen already panics with a precise message when the
-        // frontend bundle is required for an embedded build.
+        // No renderer bundle (bare `cargo check`/`clippy` on a fresh checkout,
+        // e.g. CI before any Vite build): still write a placeholder stamp so
+        // the crate's `include_bytes!` always resolves; there are no assets to
+        // track yet. tauri_codegen panics with a precise message when the
+        // bundle is required for an embedded build.
+        let _ = fs::write(&stamp_path, "no-frontend");
         return;
     }
 
@@ -39,10 +49,6 @@ fn main() {
 
     // Persist a fingerprint of every asset; the crate includes this file, so a
     // content change here forces `slopcast_lib` to recompile and re-embed.
-    let Some(out_dir) = std::env::var_os("OUT_DIR").map(PathBuf::from) else {
-        return;
-    };
-    let stamp_path = out_dir.join("slopcast-frontend-stamp");
     let stamp = format!("{:016x}", hash_files(&files));
     if fs::read_to_string(&stamp_path).ok().as_deref() != Some(stamp.as_str()) {
         let _ = fs::write(&stamp_path, stamp);
