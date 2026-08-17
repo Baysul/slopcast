@@ -4,7 +4,7 @@
   "homepage": "https://github.com/Baysul/slopcast",
   "private": true,
   "version": "0.1.0",
-  "packageManager": "pnpm@11.20.0",
+  "packageManager": "pnpm@11.22.0",
   "engines": {
     "node": ">=24.0.0"
   },
