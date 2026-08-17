@@ -616,19 +616,18 @@ fn configure_encoder(
             encoder.set_property_from_str("static-threshold", "100");
         }
         if codec == "vp9" {
-            // VP9 realtime screen-share profile (WebRTC-style): `cpu-used=8`
-            // is the libvpx realtime sweet spot (we can spend a bit more
-            // than the 10 used by VP8/AV1 because `row-mt` spreads the
-            // work over `threads` cores), `max-quantizer=48` caps the worst
-            // case so CBR can shed quality on busy scenes without letting
-            // a frame blow the ceiling, and `max-intra-bitrate=300` (a
-            // libvpx percentage of the target) bounds the keyframe burst so
-            // the rate controller cannot overshoot on scene changes.
+            // VP9 realtime screen-share profile: `cpu-used=10` favors
+            // throughput so high-motion 1080p60 frames stay inside their
+            // deadline, while row/tile parallelism spreads the work over
+            // the encoder threads. The full quantizer range lets CBR shed
+            // quality instead of falling behind on complex scenes, and
+            // `max-intra-bitrate=300` (a libvpx percentage of the target)
+            // bounds keyframe bursts on scene changes.
             // `error-resilient` is left at its default — WebRTC's own loss
             // recovery (PLI/keyframe requests) covers packet loss, so
             // libvpx's redundancy would only waste bandwidth.
             if encoder.find_property("cpu-used").is_some() {
-                encoder.set_property_from_str("cpu-used", "8");
+                encoder.set_property_from_str("cpu-used", "10");
             }
             if encoder.find_property("row-mt").is_some() {
                 encoder.set_property("row-mt", true);
@@ -640,7 +639,7 @@ fn configure_encoder(
                 encoder.set_property_from_str("threads", "8");
             }
             if encoder.find_property("max-quantizer").is_some() {
-                encoder.set_property_from_str("max-quantizer", "48");
+                encoder.set_property_from_str("max-quantizer", "63");
             }
             if encoder.find_property("max-intra-bitrate").is_some() {
                 encoder.set_property_from_str("max-intra-bitrate", "300");
@@ -1323,16 +1322,16 @@ mod tests {
         configure_encoder(&encoder, "vp9", 8_000, 60, RateMode::Cbr);
 
         // Realtime libvpx knobs (screen-share profile): CBR deadline 1,
-        // cpu-used 8, row/tile parallelism over 8 threads. `error-resilient`
+        // cpu-used 10, row/tile parallelism over 8 threads. `error-resilient`
         // stays default — WebRTC handles loss recovery itself.
         assert_eq!(encoder.property::<i64>("deadline"), 1);
-        assert_eq!(encoder.property::<i32>("cpu-used"), 8);
+        assert_eq!(encoder.property::<i32>("cpu-used"), 10);
         assert!(encoder.property::<bool>("row-mt"));
         assert_eq!(encoder.property::<i32>("tile-columns"), 2);
         assert_eq!(encoder.property::<i32>("threads"), 8);
         // Rate control: CBR target applied in bits/sec, keyframe burst
-        // capped at 300% of the target, and `max-quantizer=48` gives the
-        // controller Q headroom to shed quality on busy scenes.
+        // capped at 300% of the target, and the full quantizer range gives
+        // the controller enough headroom for busy scenes.
         assert_eq!(encoder.property::<i32>("target-bitrate"), 8_000_000);
         assert_eq!(
             encoder
@@ -1343,7 +1342,7 @@ mod tests {
             "cbr"
         );
         assert_eq!(encoder.property::<i32>("max-intra-bitrate"), 300);
-        assert_eq!(encoder.property::<i32>("max-quantizer"), 48);
+        assert_eq!(encoder.property::<i32>("max-quantizer"), 63);
 
         Ok(())
     }
