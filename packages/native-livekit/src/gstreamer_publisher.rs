@@ -381,9 +381,10 @@ pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
 }
 
 /// Whether the active codec supports in-place ceiling changes. VPx/VA rate
-/// knobs change mid-stream; `svtav1enc`'s `target-bitrate` is not mutable
-/// in PLAYING state, so AV1 is pinned to its configured ceiling for now.
-/// The default codec (no `video_codec`) is VP8, which can adapt.
+/// knobs change mid-stream; libaom `av1enc`'s CBR `target-bitrate`
+/// reconfiguration mid-stream is unverified, so AV1 is pinned to its
+/// configured ceiling for now. The default codec (no `video_codec`) is VP8,
+/// which can adapt.
 fn can_adapt(codec: Option<&str>) -> bool {
     !matches!(codec.unwrap_or("vp8"), "av1")
 }
@@ -801,8 +802,8 @@ fn run_connected(
         // step the ceiling immediately instead of waiting a full second for
         // the receiver-loss report to confirm the overload.
         // Only in automatic mode (manual bitrate is pinned) and only for
-        // codecs that accept in-place ceiling changes (svtav1enc's rate
-        // path is not mutable mid-stream).
+        // codecs that accept in-place ceiling changes (libaom av1enc's CBR
+        // rate path is not verified to).
         backpressure_ticks += 1;
         if backpressure_ticks >= RATE_BACKPRESSURE_TICKS {
             backpressure_ticks = 0;
@@ -822,8 +823,7 @@ fn run_connected(
         // sustained remote-inbound loss, back up toward the configured
         // ceiling after clean intervals. Only in automatic mode (manual
         // bitrate is pinned) and only for codecs that accept in-place
-        // ceiling changes (svtav1enc's rate path is not mutable
-        // mid-stream).
+        // ceiling changes (libaom av1enc's CBR rate path is not verified to).
         rate_ticks += 1;
         if rate_ticks >= RATE_ADAPT_TICKS {
             rate_ticks = 0;
@@ -1017,8 +1017,8 @@ impl PublisherPipeline {
 
     /// Re-applies an adapted encoder ceiling after a rebuild/reconnect (the
     /// fresh encoder starts at the configured ceiling). Returns whether the
-    /// encoder actually changed rate (false for svtav1enc, whose rate
-    /// path is not mutable mid-stream).
+    /// encoder actually changed rate (false for libaom av1enc, whose CBR
+    /// rate path is not verified to move mid-stream).
     fn apply_rate(&mut self, ceiling_kbps: u32) -> bool {
         let Some(encoder) = self.encoder.as_mut() else {
             return true;
@@ -1425,7 +1425,7 @@ pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
         return "vp9enc";
     }
     if codec == "av1" {
-        return "svtav1enc";
+        return "av1enc";
     }
 
     let hardware = match codec {
@@ -1437,7 +1437,7 @@ pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
         "h264" => "x264enc",
         "h265" => "x265enc",
         "vp9" => "vp9enc",
-        "av1" => "svtav1enc",
+        "av1" => "av1enc",
         _ => "vp8enc",
     };
     if hardware.is_empty() {
@@ -1482,7 +1482,7 @@ pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)
         ("h264", "H.264", "x264enc", "vah264enc"),
         ("h265", "H.265", "x265enc", "vah265enc"),
         ("vp9", "VP9", "vp9enc", "vavp9enc"),
-        ("av1", "AV1", "svtav1enc", "vaav1enc"),
+        ("av1", "AV1", "av1enc", "vaav1enc"),
     ]
     .into_iter()
     .filter(|(codec, _, software, hardware)| {

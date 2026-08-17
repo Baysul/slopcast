@@ -69,7 +69,7 @@ SYSTEM_ELEMENTS=(
   vp9parse
   av1parse
   h265parse
-  svtav1enc
+  av1enc
   vah264enc
   vah265enc
   h264parse
