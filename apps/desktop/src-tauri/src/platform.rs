@@ -3,10 +3,8 @@
 //! dlopens `libEGL.so.1`; other platforms report no GPU information (the
 //! renderer treats a null result as "unavailable").
 
-use std::ffi::c_void;
-
 #[cfg(target_os = "linux")]
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 #[cfg(target_os = "linux")]
 use std::os::raw::c_int;
 #[cfg(target_os = "linux")]
@@ -316,6 +314,12 @@ pub fn probe_gpu_info() -> Result<GpuInfo, String> {
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
+/// Reports no GPU information; the renderer treats a null result as
+/// "unavailable" on non-Linux platforms.
+///
+/// # Errors
+///
+/// Never errors.
 pub fn probe_gpu_info() -> Result<GpuInfo, String> {
     Ok(GpuInfo {
         egl_vendor: None,
