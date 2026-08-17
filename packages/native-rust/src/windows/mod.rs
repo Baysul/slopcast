@@ -925,7 +925,7 @@ fn activate_process_loopback(
 
     let setup = Arc::new((Mutex::new(false), Condvar::new()));
     let callback: IActivateAudioInterfaceCompletionHandler = ActivationHandler {
-        state: setup.clone(),
+        state: Arc::clone(&setup),
     }
     .into();
     // SAFETY: `raw_prop` points to the heap-allocated `activation_params`. On
