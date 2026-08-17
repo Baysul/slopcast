@@ -45,9 +45,9 @@ export interface AudioAppWave {
 /// two epsilons can never drift apart.
 export const WAVE_EPSILON = 0.002;
 
-export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1';
+export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1' | 'h265';
 
-export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['h264', 'vp8', 'vp9', 'av1'];
+export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['h264', 'h265', 'vp8', 'vp9', 'av1'];
 
 export type ResolutionPreset = '480p' | '720p' | '1080p' | '1440p' | '2160p';
 
@@ -100,6 +100,7 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
 
 export const VIDEO_CODEC_LABEL: Record<string, string> = {
   'VIDEO/H264': 'H.264',
+  'VIDEO/H265': 'H.265',
   'VIDEO/VP8': 'VP8',
   'VIDEO/VP9': 'VP9',
   'VIDEO/AV1': 'AV1',
@@ -136,7 +137,7 @@ export function sanitizeStreamSettings(raw: unknown): StreamSettings {
   const num = (v: unknown, min: number, max: number, fallback: number): number =>
     typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : fallback;
   const codec = (v: unknown): VideoCodec =>
-    v === 'h264' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
+    v === 'h264' || v === 'h265' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
   const resolution = (v: unknown): ResolutionPreset =>
     v === '480p' || v === '720p' || v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
   const motionMode = (v: unknown): MotionMode =>

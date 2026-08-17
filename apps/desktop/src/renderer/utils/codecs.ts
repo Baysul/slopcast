@@ -9,9 +9,9 @@ export interface CodecInfo {
   recommended: boolean;
 }
 
-// Preference order from `VIDEO_CODEC_PRIORITY` (shared-types): h264 first —
-// it is the only hardware-capable codec in the native stack, so the picker
-// shows it on top.
+// Preference order from `VIDEO_CODEC_PRIORITY` (shared-types): h264 first,
+// then h265 — the hardware-capable codecs — so the picker shows them on
+// top.
 export const sortByCodecPreference = (codecs: CodecInfo[]): CodecInfo[] => {
   const priority = new Map<VideoCodec, number>(VIDEO_CODEC_PRIORITY.map((c, i) => [c, i]));
   return [...codecs].sort((a, b) => (priority.get(a.codec) ?? 99) - (priority.get(b.codec) ?? 99));
@@ -21,13 +21,15 @@ export const sortByCodecPreference = (codecs: CodecInfo[]): CodecInfo[] => {
 // this app uses — the webview's `RTCRtpSender.getCapabilities` reflects the
 // WebKitGTK/GStreamer stack, which never touches the stream, so it must never
 // drive the codec picker. `hardware` comes from `get_native_supported_codecs`
-// at runtime: the bundled libwebrtc currently ships a hardware encoder factory
-// only for H264 (VA-API on Linux, Media Foundation on Windows, VideoToolbox on
-// macOS), so today VP8/VP9/AV1 report software — but labels always follow the
+// at runtime: the bundled libwebrtc ships hardware encoder factories for
+// H264/H265 (VA-API on Linux, Media Foundation on Windows, VideoToolbox on
+// macOS), so VP8/VP9/AV1 report software — but labels always follow the
 // reported flag, never a hardcoded codec → encoder mapping.
 export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
   const codecs = infos
-    .filter((i): i is NativeCodecInfo & { codec: VideoCodec } => ['vp8', 'h264', 'vp9', 'av1'].includes(i.codec))
+    .filter((i): i is NativeCodecInfo & { codec: VideoCodec } =>
+      ['vp8', 'h264', 'h265', 'vp9', 'av1'].includes(i.codec),
+    )
     .map((i) => ({ codec: i.codec, label: i.label, hardware: i.hardware, recommended: false }));
   return sortByCodecPreference(codecs);
 };

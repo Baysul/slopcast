@@ -53,7 +53,7 @@ pub fn default_stream_settings() -> StreamSettings {
     }
 }
 
-const VALID_CODECS: [&str; 4] = ["vp8", "h264", "vp9", "av1"];
+const VALID_CODECS: [&str; 5] = ["vp8", "h264", "h265", "vp9", "av1"];
 const VALID_RESOLUTIONS: [&str; 5] = ["480p", "720p", "1080p", "1440p", "2160p"];
 const VALID_MOTION_MODES: [&str; 4] = ["auto", "static", "mixed", "dynamic"];
 
@@ -221,7 +221,7 @@ mod tests {
     // TS↔Rust sync rule: these values must match DEFAULT_STREAM_SETTINGS in
     // packages/shared-types/src/index.ts (fps 60, bitrateLimit 20_000_000,
     // videoCodec 'vp8', resolution '1080p', apiEndpoint 'http://localhost:3001',
-    // autoBitrate true, motionMode 'auto').
+    // autoBitrate true, motionMode 'auto'; VALID_CODECS = vp8/h264/h265/vp9/av1).
     #[test]
     fn defaults_match_ts_table() {
         let defaults = default_stream_settings();

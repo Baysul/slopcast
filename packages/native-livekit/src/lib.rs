@@ -105,8 +105,9 @@ pub struct NativeTelemetry {
     pub video_packets_lost: Option<f64>,
     /// `framesEncoded` from the outbound-rtp stat (m144's `framesSent`
     /// never increments); the renderer derives fps from this. On the Linux
-    /// `GStreamer` branch this is the count of encoded H.264 access units
-    /// measured after `h264parse` — the true encoder-throughput counter.
+    /// `GStreamer` branch this is the count of encoded access units
+    /// measured after the codec parser — the true encoder-throughput
+    /// counter.
     pub video_frames_encoded: Option<f64>,
     /// On the Linux `GStreamer` branch: frames pushed into the video appsrc
     /// (`push_frame` successes). Any shortfall vs. `video_frames_encoded`
@@ -149,19 +150,23 @@ pub struct NativeCodecInfo {
 /// Encoder support baked into the bundled libwebrtc build
 /// (`webrtc-sys` prebuilts: `rtc_use_h264`/`rtc_use_h265` +
 /// `rtc_libvpx_build_vp9` + `enable_libaom` on every platform). The native
-/// stack hardware-encodes only H264 (H265 on some platforms), so H264 is the
-/// only codec that can ever use a hardware encoder.
-pub const NATIVE_VIDEO_CODECS: [(&str, &str); 4] = [
+/// stack hardware-encodes H264 and H265 (H265 on some platforms), so those
+/// are the only codecs that can ever use a hardware encoder.
+pub const NATIVE_VIDEO_CODECS: [(&str, &str); 5] = [
     ("h264", "H.264"),
+    ("h265", "H.265"),
     ("vp8", "VP8"),
     ("vp9", "VP9"),
     ("av1", "AV1"),
 ];
 
-/// The single codec with a hardware encoder factory in the bundled libwebrtc
-/// build (VA-API + NVENC on Linux, `Media Foundation` on Windows,
-/// `VideoToolbox` on macOS).
-pub const NATIVE_HW_CODEC: &str = "h264";
+/// The codecs with a hardware encoder factory in the bundled libwebrtc build
+/// (VA-API + NVENC on Linux, `Media Foundation` on Windows,
+/// `VideoToolbox` on macOS). Actual per-platform factory availability stays
+/// a build-time property of the bundled libwebrtc; the `hardware` flag is
+/// informational for the picker's group labels, and a platform without the
+/// hardware encoder silently falls back to libwebrtc's software H.265.
+pub const NATIVE_HW_CODECS: [&str; 2] = ["h264", "h265"];
 
 /// Returns the codecs the native stack can encode with (build-time constant,
 /// verified against the bundled libwebrtc in `get_native_supported_codecs`).
@@ -186,7 +191,7 @@ pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
         .map(|(codec, label)| NativeCodecInfo {
             codec: (*codec).to_string(),
             label: (*label).to_string(),
-            hardware: *codec == NATIVE_HW_CODEC,
+            hardware: NATIVE_HW_CODECS.contains(codec),
         })
         .collect()
 }
@@ -450,6 +455,7 @@ fn parse_video_codec(codec: Option<&str>) -> VideoCodec {
     match codec {
         Some("vp8") => VideoCodec::VP8,
         Some("h264") => VideoCodec::H264,
+        Some("h265") => VideoCodec::H265,
         Some("av1") => VideoCodec::AV1,
         _ => VideoCodec::VP9,
     }
@@ -1131,17 +1137,27 @@ mod tests {
     }
 
     #[test]
-    fn native_codec_list_marks_only_h264_as_hardware() {
+    fn native_codec_list_marks_h264_and_h265_as_hardware() {
         let codecs = get_native_supported_codecs();
-        assert_eq!(codecs.len(), 4);
+        assert_eq!(codecs.len(), 5);
         let h264 = codecs
             .iter()
             .find(|c| c.codec == "h264")
             .unwrap_or_else(|| {
                 panic!("h264 must be in the native codec list");
             });
+        let h265 = codecs
+            .iter()
+            .find(|c| c.codec == "h265")
+            .unwrap_or_else(|| {
+                panic!("h265 must be in the native codec list");
+            });
         assert!(h264.hardware);
-        for codec in codecs.iter().filter(|c| c.codec != "h264") {
+        assert!(h265.hardware);
+        for codec in codecs
+            .iter()
+            .filter(|c| c.codec != "h264" && c.codec != "h265")
+        {
             assert!(!codec.hardware, "{} must be software", codec.codec);
         }
         // The picker contract: every codec has a non-empty display label.
@@ -1185,6 +1201,7 @@ mod tests {
         assert_eq!(parse_video_codec(Some("vp8")), VideoCodec::VP8);
         assert_eq!(parse_video_codec(Some("vp9")), VideoCodec::VP9);
         assert_eq!(parse_video_codec(Some("h264")), VideoCodec::H264);
+        assert_eq!(parse_video_codec(Some("h265")), VideoCodec::H265);
         assert_eq!(parse_video_codec(Some("av1")), VideoCodec::AV1);
     }
 

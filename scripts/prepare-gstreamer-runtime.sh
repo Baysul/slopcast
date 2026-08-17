@@ -63,12 +63,15 @@ SYSTEM_ELEMENTS=(
   videoconvert
   videorate
   x264enc
+  x265enc
   vp8enc
   vp9enc
   vp9parse
   av1parse
+  h265parse
   svtav1enc
   vah264enc
+  vah265enc
   h264parse
   audioconvert
   audioresample
@@ -87,6 +90,7 @@ SYSTEM_ELEMENTS=(
   rtpvp8pay
   rtpvp9pay
   rtph264pay
+  rtph265pay
 )
 
 for element in "${SYSTEM_ELEMENTS[@]}"; do

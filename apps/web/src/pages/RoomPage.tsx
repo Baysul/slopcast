@@ -452,6 +452,34 @@ export const RoomPage: React.FC = () => {
       setParticipantCount(room.remoteParticipants.size);
     });
 
+    // A video publication this browser cannot subscribe to (e.g. the
+    // presenter publishing H.265 while this Chromium build has no HEVC
+    // decoder) leaves the spectator stuck on "waiting for presenter" with no
+    // error. Surface the codec gap instead of hanging silently.
+    room.on(RoomEvent.TrackPublished, () => {
+      if (isStale()) return;
+      const unsupported = [...room.remoteParticipants.values()]
+        .flatMap((p) => [...p.videoTrackPublications.values()])
+        .find((pub) => {
+          if (pub.track) return false;
+          const mime = pub.mimeType?.toUpperCase();
+          if (!mime) return false;
+          const receiverCodecs =
+            typeof RTCRtpReceiver !== 'undefined' && RTCRtpReceiver.getCapabilities
+              ? (RTCRtpReceiver.getCapabilities('video')?.codecs.map((c) => c.mimeType.toUpperCase()) ?? [])
+              : [];
+          return !receiverCodecs.some((m) => m.includes(mime.replace(/^VIDEO\//, '')));
+        });
+      if (!unsupported) return;
+      const codec = unsupported.mimeType?.replace(/^video\//i, '').toUpperCase();
+      setConnectionStatus('error');
+      setStatusText(`This browser cannot decode ${codec} video`);
+      setErrorMsg(
+        `The presenter is streaming ${codec}, which this browser does not support. ` +
+          'Try Chrome or Edge with HEVC hardware support.',
+      );
+    });
+
     room.on(RoomEvent.ParticipantDisconnected, () => {
       if (isStale()) return;
       const count = room.remoteParticipants.size;

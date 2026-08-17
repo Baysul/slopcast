@@ -24,9 +24,11 @@ const AV1_SOFTWARE_CEILING_BPS: Record<ResolutionPreset, number> = {
 
 // Relative ceiling scale per codec (AV1 = 1.0). The older codecs need more
 // bits for the same quality: VP9 ~1.4x, VP8 ~1.7x, H.264 ~1.5x AV1's ceiling.
+// H.265 sits in the same efficiency class as VP9 (~1.4x).
 const CODEC_SCALE: Record<VideoCodec, number> = {
   av1: 1.0,
   vp9: 1.4,
+  h265: 1.4,
   vp8: 1.7,
   h264: 1.5,
 };
@@ -45,6 +47,7 @@ const MOTION_FACTOR: Record<MotionTier, number> = {
 // 20+ Mbps band because AV1 delivers equivalent quality at ~half the rate.
 const MANUAL_OPTIONS: Record<VideoCodec, number[]> = {
   h264: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
+  h265: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
   vp8: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
   vp9: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
   av1: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 8_000_000, 12_000_000, 16_000_000, 20_000_000],

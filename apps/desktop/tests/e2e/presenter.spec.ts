@@ -177,21 +177,22 @@ function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promis
 }
 
 /// The outbound codec must match the requested one — this pins the whole
-/// codec path (picker → config → publish → SFU) per E2E_CODEC pass — and H264
-/// must use a hardware encoder (VA-API/NVENC on Linux, Media Foundation on
-/// Windows) when one is available; the other codecs are software by design.
+/// codec path (picker → config → publish → SFU) per E2E_CODEC pass — and the
+/// H.26x codecs must use a hardware encoder (VA-API/NVENC on Linux, Media
+/// Foundation on Windows, VideoToolbox on macOS) when one is available; the
+/// other codecs are software by design.
 function assertCodecTelemetry(phase: PhaseResult): void {
   const expectedMime = `video/${codec.toUpperCase()}`;
   assert(
     (phase.videoCodecReported ?? '').toUpperCase() === expectedMime.toUpperCase(),
     `Outbound codec mismatch: requested ${expectedMime}, reported ${phase.videoCodecReported ?? 'null'}`,
   );
-  if (codec !== 'h264') return;
+  if (codec !== 'h264' && codec !== 'h265') return;
   const impl = phase.encoderImplementation ?? '';
-  console.log(`[e2e] h264 encoder implementation: ${impl || '(not yet reported)'}`);
+  console.log(`[e2e] ${codec} encoder implementation: ${impl || '(not yet reported)'}`);
   assert(
-    /VAAPI|vah264enc|NVENC|Media\s*Foundation|VideoToolbox/i.test(impl),
-    `H264 was not hardware-encoded (encoderImplementation=${impl || 'empty'})`,
+    /VAAPI|vah264enc|vah265enc|x265enc|NVENC|Media\s*Foundation|VideoToolbox/i.test(impl),
+    `${codec} was not hardware-encoded (encoderImplementation=${impl || 'empty'})`,
   );
 }
 

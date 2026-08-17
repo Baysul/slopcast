@@ -941,7 +941,7 @@ async function checkSpectatorDecodedFps(page: Page, result: TestResult, codec: s
 }
 
 function codecLabelForTest(codec: string): string {
-  return codec.replace(/^H264$/i, 'H.264');
+  return codec.replace(/^H26[45]$/i, (m) => `H.${m.slice(2)}`);
 }
 
 async function checkDecoderStall(page: Page, result: TestResult): Promise<void> {
@@ -1249,7 +1249,7 @@ async function runTest(): Promise<TestResult> {
   // requirement — the app feeds a test pattern through the real publish path.
   // Portal mode keeps the manual picker flow for humans.
   const captureMode = process.env.E2E_CAPTURE === 'portal' ? 'portal' : 'synthetic';
-  const defaultCodecs = 'h264,vp8,vp9,av1';
+  const defaultCodecs = 'h264,h265,vp8,vp9,av1';
   const codecs = (process.env.E2E_CODECS ?? defaultCodecs)
     .split(',')
     .map((c) => c.trim())

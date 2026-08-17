@@ -259,7 +259,7 @@ Room codes, ports, and LiveKit credentials are read from `slopcast.config.json` 
 | **Linux** | [PipeWire](https://pipewire.org/) (`libpipewire-0.3-dev`), `xdg-desktop-portal` (Wayland), GStreamer core/app/video development libraries, `gstreamer1.0-plugins-bad`, `gstreamer1.0-va`, `libx11-dev`, `pkg-config`, `clang` |
 | **Windows** | MSVC 2022+ (Build Tools for Visual Studio) |
 
-Linux H.264 publishing uses the system GStreamer `vah264enc` element. The `.deb` declares the LGPL VA and parser plugins as runtime dependencies; the AppImage intentionally relies on the host GStreamer installation. The GPL `x264enc` plugin is neither bundled nor used as a fallback. Windows keeps the bundled libwebrtc encoder path.
+Linux H.264 publishing uses the system GStreamer `vah264enc` element; H.265 uses `vah265enc` with an `x265enc` software fallback (no VA display or driver encode support). The `.deb` declares the LGPL VA and parser plugins as runtime dependencies; the AppImage intentionally relies on the host GStreamer installation (which must provide `gstreamer1.0-plugins-bad` for `vah265enc`, plus `gstreamer1.0-plugins-ugly` for the `x265enc` fallback). Windows keeps the bundled libwebrtc encoder path (H.265 via Media Foundation).
 
 The native Rust crates (`packages/native-rust`, `packages/native-livekit`) are linked directly into the Tauri backend (`apps/desktop/src-tauri`). A C++20-capable toolchain is required (gcc >= 10, clang >= 10, or MSVC 2022+) for libwebrtc.
 

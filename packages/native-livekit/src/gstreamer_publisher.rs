@@ -24,7 +24,13 @@ use gstreamer_app as gst_app;
 /// stream (AV-sync drift), then dropped nothing until the backlog overflow.
 /// Leaky-downstream bound at 160 ms (see `attach_audio`).
 const AUDIO_APPSRC_MAX_BUFFERS: u64 = 8;
-const AUDIO_DISCOVERY_SAMPLES: usize = 960;
+/// PCM samples pushed at pipeline attach so the sink's codec discovery can
+/// see the audio stream. Must span at least one full opusenc frame (20 ms =
+/// 960 frames at 48 kHz; with stereo that is 1920 samples) or opusenc never
+/// emits, the sink never gets the audio caps, and its signaller stays
+/// gated on `codec_discovery_done` — the presenter would never join the
+/// room. Two frames (40 ms) cover frame-boundary rounding.
+const AUDIO_DISCOVERY_SAMPLES: usize = 3840;
 /// Command reply timeout. 30 s (was 10 s): a legitimate `StartVideo`
 /// rebuild can be slow when the SFU connection path stalls, and the worker
 /// processes commands serially — a timed-out caller must not race state
@@ -938,11 +944,11 @@ impl PublisherPipeline {
         sink.set_property("do-fec", false);
         sink.set_property("do-retransmission", true);
         connect_payloader_setup(&sink);
-        configure_signaller(&sink, connection, generation);
         let pipeline = gst::Pipeline::new();
         pipeline
             .add(&sink)
             .map_err(|error| format!("Failed to add livekitwebrtcsink: {error}"))?;
+        configure_signaller(&sink, &pipeline, connection, generation);
         let audio_input = attach_audio(&pipeline, &sink)?;
         let mut publisher = Self {
             pipeline,
@@ -1188,7 +1194,12 @@ fn attach_audio(pipeline: &gst::Pipeline, sink: &gst::Element) -> Result<gst_app
     Ok(appsrc)
 }
 
-fn configure_signaller(sink: &gst::Element, config: &ConnectionConfig, generation: u64) {
+fn configure_signaller(
+    sink: &gst::Element,
+    pipeline: &gst::Pipeline,
+    config: &ConnectionConfig,
+    generation: u64,
+) {
     let signaller = sink.property::<gst::glib::Object>("signaller");
     signaller.set_property("ws-url", &config.url);
     signaller.set_property("auth-token", &config.token);
@@ -1215,6 +1226,29 @@ fn configure_signaller(sink: &gst::Element, config: &ConnectionConfig, generatio
         if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
             ROOM_CONNECTED.store(connected, Ordering::Relaxed);
         }
+    });
+    // The signaller reports websocket failures (server disconnect, ping
+    // timeout, join rejection) through its `error` signal, NOT a GStreamer
+    // bus error — the worker's poll_error would never see them and the
+    // pipeline would keep encoding into a dead connection while
+    // `ROOM_CONNECTED` stays true. Surface the failure as a bus error on
+    // the pipeline so the existing reconnect machinery tears down and
+    // rejoins. This is the watch on the silent signaller death observed
+    // in the field: the websocket vanishes, the app still claims live, and
+    // spectators see nothing.
+    let pipeline_for_error = pipeline.clone();
+    signaller.connect("error", false, move |values| {
+        let message = values[1]
+            .get::<String>()
+            .unwrap_or_else(|_| "LiveKit signaller error".into());
+        if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
+            log::warn!("GStreamer LiveKit signaller error: {message}");
+            let _ = pipeline_for_error.post_message(gst::message::Error::new(
+                gst::LibraryError::Failed,
+                &format!("LiveKit signaller: {message}"),
+            ));
+        }
+        None
     });
 }
 
@@ -1356,7 +1390,7 @@ pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
     // parser factories are required in our branch — but that observation is
     // specific to the bundled 0.15.3 build, not asserted for every runtime.
     let encoder = match codec {
-        "h264" | "vp8" | "vp9" | "av1" => selected_encoder_name(codec),
+        "h264" | "h265" | "vp8" | "vp9" | "av1" => selected_encoder_name(codec),
         other => return Err(format!("Unsupported GStreamer video codec: {other}")),
     };
     if can_initialize_element(encoder) {
@@ -1396,10 +1430,12 @@ pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
 
     let hardware = match codec {
         "h264" => "vah264enc",
+        "h265" => "vah265enc",
         _ => "",
     };
     let software = match codec {
         "h264" => "x264enc",
+        "h265" => "x265enc",
         "vp9" => "vp9enc",
         "av1" => "svtav1enc",
         _ => "vp8enc",
@@ -1408,7 +1444,8 @@ pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
         return software;
     }
     // Factory presence does not guarantee instantiation (missing VA display
-    // or driver encode support), so probe before selecting H.264 hardware.
+    // or driver encode support), so probe before selecting H.264/H.265
+    // hardware.
     if can_initialize_element(hardware) {
         hardware
     } else {
@@ -1419,6 +1456,7 @@ pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
 fn supported_video_caps() -> gst::Caps {
     gst::Caps::builder_full()
         .structure(gst::Structure::builder("video/x-h264").build())
+        .structure(gst::Structure::builder("video/x-h265").build())
         .structure(gst::Structure::builder("video/x-vp8").build())
         .structure(gst::Structure::builder("video/x-vp9").build())
         .structure(gst::Structure::builder("video/x-av1").build())
@@ -1430,6 +1468,7 @@ fn sink_video_caps(codec: &str) -> Result<gst::Caps, String> {
         "vp8" => "video/x-vp8",
         "vp9" => "video/x-vp9",
         "h264" => "video/x-h264",
+        "h265" => "video/x-h265",
         "av1" => "video/x-av1",
         other => return Err(format!("Unsupported codec: {other}")),
     };
@@ -1441,6 +1480,7 @@ pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)
     [
         ("vp8", "VP8", "vp8enc", ""),
         ("h264", "H.264", "x264enc", "vah264enc"),
+        ("h265", "H.265", "x265enc", "vah265enc"),
         ("vp9", "VP9", "vp9enc", "vavp9enc"),
         ("av1", "AV1", "svtav1enc", "vaav1enc"),
     ]
@@ -1499,7 +1539,7 @@ fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> Nat
         }
     }
     if let Some(config) = config {
-        // Encoded count is measured after h264parse (the real encoder
+        // Encoded count is measured after the codec parser (the real encoder
         // throughput); the submitted count is frames pushed into the appsrc.
         // The gap between them is backpressure drops.
         telemetry.video_frames_encoded = Some(stat_as_f64(encoded_frames()));
@@ -2392,6 +2432,7 @@ mod tests {
     fn can_adapt_allows_every_codec_except_av1() {
         assert!(!can_adapt(Some("av1")));
         assert!(can_adapt(Some("h264")));
+        assert!(can_adapt(Some("h265")));
         assert!(can_adapt(Some("vp8")));
         assert!(can_adapt(Some("vp9")));
         assert!(can_adapt(None));

@@ -115,7 +115,8 @@ export interface NativeTelemetry {
   videoPacketsSent: number | null;
   videoPacketsLost: number | null;
   /** Encoded-frame count — on the Linux GStreamer branch measured after
-   * h264parse (the true encoder throughput); the renderer derives fps here. */
+   * the codec parser (the true encoder throughput); the renderer derives
+   * fps here. */
   videoFramesEncoded: number | null;
   /** Linux GStreamer branch only: frames pushed into the video appsrc.
    * Shortfall vs. `videoFramesEncoded` = backpressure drops (also visible

@@ -167,7 +167,7 @@ The renderer is a sandboxed webview with `nodeIntegration`-equivalent access **d
 ---
 ### Automated End-to-End Test (`pnpm test:e2e`)
 
-The harness lives at `apps/server/src/e2e-test.ts` and orchestrates **two automation phases**: a **WebdriverIO presenter phase** driving the real Tauri binary (embedded WebDriver via the `e2e` cargo feature, spec at `apps/desktop/tests/e2e/presenter.spec.ts`) and a **Playwright Chromium spectator phase**. It runs one full presenter → spectator pass **per codec** (`E2E_CODECS`, default `h264,vp8,vp9,av1`).
+The harness lives at `apps/server/src/e2e-test.ts` and orchestrates **two automation phases**: a **WebdriverIO presenter phase** driving the real Tauri binary (embedded WebDriver via the `e2e` cargo feature, spec at `apps/desktop/tests/e2e/presenter.spec.ts`) and a **Playwright Chromium spectator phase**. It runs one full presenter → spectator pass **per codec** (`E2E_CODECS`, default `h264,h265,vp8,vp9,av1`).
 
 **Prerequisites:**
 ```bash

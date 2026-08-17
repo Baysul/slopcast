@@ -1,11 +1,12 @@
 //! Linux video encoder branch attached to `livekitwebrtcsink`.
 //!
-//! `vah264enc` provides a hard VBR ceiling through `target-percentage`; the
-//! software encoders run CBR (`VPx` in automatic mode) or the ceiling-capped
-//! VBR quality target (`svtav1enc` always, manual-mode `VPx`), where the
-//! requested rate is a target the output can vary around. The
-//! publisher's congestion controller re-targets each encoder at runtime
-//! through `GstreamerEncoder::set_ceiling_kbps`.
+//! `vah264enc`/`vah265enc` provide a hard VBR ceiling through
+//! `target-percentage`; the software encoders run CBR (`VPx` in automatic
+//! mode) or the ceiling-capped VBR quality target (`svtav1enc` always,
+//! manual-mode `VPx`, `x264enc`/`x265enc` always), where the requested rate
+//! is a target the output can vary around. The publisher's congestion
+//! controller re-targets each encoder at runtime through
+//! `GstreamerEncoder::set_ceiling_kbps`.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -50,7 +51,7 @@ enum RateMode {
     Vbr,
 }
 
-/// Number of encoded H.264 access units that emerged from `h264parse`
+/// Number of encoded access units that emerged from the codec parser
 /// (i.e. actually encoded and pushed downstream), as opposed to
 /// `VIDEO_FRAMES_SUBMITTED` which counts frames pushed into the appsrc.
 /// This is the true encoder-throughput counter; any gap vs. the submitted
@@ -308,7 +309,7 @@ impl GstreamerEncoder {
         // VBR_TARGET_PERCENTAGE). SVT-AV1 always runs VBR: its realtime
         // GOP mode rejects CBR rate control entirely.
         let rate_mode = match codec {
-            "av1" | "h264" => RateMode::Vbr,
+            "av1" | "h264" | "h265" => RateMode::Vbr,
             _ if config.auto_bitrate => RateMode::Cbr,
             _ => RateMode::Vbr,
         };
@@ -506,6 +507,7 @@ impl GstreamerEncoder {
 fn codec_pipeline(codec: &str) -> Result<&'static str, String> {
     let (software, hardware) = match codec {
         "h264" => ("x264enc", "vah264enc"),
+        "h265" => ("x265enc", "vah265enc"),
         "vp9" => ("vp9enc", "vavp9enc"),
         "av1" => ("svtav1enc", "vaav1enc"),
         "vp8" => ("vp8enc", ""),
@@ -548,7 +550,9 @@ fn configure_encoder(
     if encoder.find_property("keyframe-max-dist").is_some() {
         encoder.set_property_from_str("keyframe-max-dist", &key_int_max.to_string());
     }
-    if codec == "h264" {
+    if codec == "h265" {
+        configure_h265(encoder);
+    } else if codec == "h264" {
         if encoder.find_property("target-percentage").is_some() {
             encoder.set_property_from_str("target-percentage", &VBR_TARGET_PERCENTAGE.to_string());
         }
@@ -700,6 +704,63 @@ fn configure_svt_av1(encoder: &gst::Element, ceiling_kbps: u32) {
     }
 
     // Do NOT set maximum-buffer-size in this VBR configuration.
+}
+
+/// Applies the H.265 low-latency VBR configuration shared by the VA-API
+/// `vah265enc` hardware path and the `x265enc` software fallback. Both
+/// encoders expose `bitrate` (kbps), which the congestion controller also
+/// re-targets live (`apply_encoder_ceiling`), so H.265 inherits the
+/// ceiling-capped VBR behavior of the H.264 branch.
+///
+/// `vah265enc`: `rate-control=vbr` + `target-percentage=80` pins the
+/// driver-computed maximum exactly onto the presenter's ceiling (the
+/// encoder maximum is `bitrate × 100 / target-percentage`), the same
+/// ceiling-pinning trick as `vah264enc` (`VBR_TARGET_PERCENTAGE`).
+/// `b-frames=0` and `ref-frames=1` minimize decode latency — B-frames pack
+/// out of order (reordering delay) and single-reference decoding is the
+/// low-latency norm for realtime WebRTC; the quality cost is small at
+/// high bitrates and screenshare content. `target-usage=7` is the fastest
+/// VA encode preset (range 1–7). `aud=false` is the default (unset):
+/// webrtcsink's `rtph265pay` runs zero-latency with `config-interval=-1`,
+/// so per-frame AUDs are unnecessary overhead.
+///
+/// `x265enc` (the no-VA fallback): `tune=zerolatency` zeroes lookahead,
+/// B-frames and sliced-threads latency at once, `speed-preset=veryfast`
+/// keeps the worst-case encode time under the frame interval, and the VBR
+/// target is the 80% bitrate — mirroring the `x264enc` fallback. The
+/// plugin exposes no `bframes`/`ref`/`rc-lookahead` properties (they are
+/// x265 CLI options, not element properties; gst-inspect 1.28.6), so the
+/// latency knobs are the tune preset, never `option-string`.
+fn configure_h265(encoder: &gst::Element) {
+    if encoder.find_property("target-percentage").is_some() {
+        encoder.set_property_from_str("target-percentage", &VBR_TARGET_PERCENTAGE.to_string());
+    }
+    if encoder.find_property("target-usage").is_some() {
+        encoder.set_property_from_str("target-usage", "7");
+    }
+    if encoder.find_property("ref-frames").is_some() {
+        encoder.set_property_from_str("ref-frames", "1");
+    }
+    if encoder.find_property("b-frames").is_some() {
+        encoder.set_property_from_str("b-frames", "0");
+    }
+    if encoder.find_property("rate-control").is_some() {
+        encoder.set_property_from_str("rate-control", "vbr");
+    }
+    // The x265enc fallback (no VA display) pins the low-latency tune and
+    // the fast preset so the software path behaves like the VA path
+    // instead of holding frames (x264enc does the same).
+    if encoder
+        .factory()
+        .is_some_and(|factory| factory.name() == "x265enc")
+    {
+        if encoder.find_property("tune").is_some() {
+            encoder.set_property_from_str("tune", "zerolatency");
+        }
+        if encoder.find_property("speed-preset").is_some() {
+            encoder.set_property_from_str("speed-preset", "veryfast");
+        }
+    }
 }
 
 fn make_element(name: &str) -> Result<gst::Element, String> {
@@ -948,6 +1009,122 @@ mod tests {
             crate::gstreamer_publisher::selected_encoder_name("av1"),
             "svtav1enc"
         );
+    }
+
+    #[test]
+    fn h265_probes_vah265enc_then_falls_back_to_x265enc() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        // The VA-API H.265 path is probe-gated exactly like H.264: when the
+        // hardware element initializes (VA display + driver encode support)
+        // it wins; otherwise the software x265enc fallback is selected.
+        let expected = if crate::gstreamer_publisher::can_initialize_element("vah265enc") {
+            "vah265enc"
+        } else {
+            "x265enc"
+        };
+        assert_eq!(codec_pipeline("h265")?, expected);
+        assert_eq!(
+            crate::gstreamer_publisher::selected_encoder_name("h265"),
+            expected
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn vah265_hardware_configures_vbr_target_pinned_to_the_ceiling() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+        // Skip when the machine has no VA-API H.265 encode path (software
+        // x265 fallback machines run the x265 test instead).
+        if !crate::gstreamer_publisher::can_initialize_element("vah265enc") {
+            return Ok(());
+        }
+
+        let encoder = gst::ElementFactory::make("vah265enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let ceiling_kbps = 20_000;
+        configure_encoder(
+            &encoder,
+            "h265",
+            encoder_target_kbps(RateMode::Vbr, ceiling_kbps),
+            60,
+            RateMode::Vbr,
+        );
+
+        // VBR target at 80% of the ceiling: the driver computes the encoder
+        // maximum as `bitrate × 100 / target-percentage`, so 80%/80% pins
+        // the max exactly onto the ceiling (never past it).
+        assert_eq!(encoder.property::<u32>("bitrate"), 16_000);
+        assert_eq!(encoder.property::<u32>("target-percentage"), 80);
+        assert_eq!(
+            encoder
+                .property_value("rate-control")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "vbr"
+        );
+        // Low-latency realtime profile: single reference, no B-frames
+        // (reordering delay), fastest target-usage.
+        assert_eq!(encoder.property::<u32>("ref-frames"), 1);
+        assert_eq!(encoder.property::<u32>("b-frames"), 0);
+        assert_eq!(encoder.property::<u32>("target-usage"), 7);
+
+        Ok(())
+    }
+
+    #[test]
+    fn x265_fallback_configures_zerolatency_veryfast_vbr() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("x265enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(&encoder, "h265", 16_000, 60, RateMode::Vbr);
+
+        // VBR target is the 80% ceiling discount (the shared
+        // VBR_TARGET_PERCENTAGE), the same as the H.264 VA path. x265enc's
+        // `bitrate` is an unsigned gint; `key-int-max` is signed.
+        assert_eq!(encoder.property::<u32>("bitrate"), 16_000);
+        assert_eq!(encoder.property::<i32>("key-int-max"), 60);
+        assert_eq!(
+            encoder
+                .property_value("tune")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "zerolatency"
+        );
+        assert_eq!(
+            encoder
+                .property_value("speed-preset")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "veryfast"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn h265_mutable_encoder_applies_a_live_ceiling_change() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("x265enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(&encoder, "h265", 16_000, 60, RateMode::Vbr);
+
+        // Unlike svtav1enc, x265enc's `bitrate` is mutable mid-stream, so
+        // the congestion controller can step the ceiling live (the same
+        // property both H.265 encoders expose).
+        assert!(apply_encoder_ceiling(&encoder, 10_000, RateMode::Vbr));
+        assert_eq!(encoder.property::<u32>("bitrate"), 8_000);
+
+        Ok(())
     }
 
     #[test]

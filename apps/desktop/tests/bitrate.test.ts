@@ -43,6 +43,30 @@ test('recommendBitrateCap gives H.264 a higher ceiling than AV1 at the same reso
   assert.ok(h264 > av1);
 });
 
+test('recommendBitrateCap treats H.265 like VP9 (same efficiency class)', () => {
+  const h265 = recommendBitrateCap({
+    codec: 'h265',
+    resolution: '1080p',
+    fps: 60,
+    motionTier: 'static',
+  });
+  const vp9 = recommendBitrateCap({
+    codec: 'vp9',
+    resolution: '1080p',
+    fps: 60,
+    motionTier: 'static',
+  });
+  const av1 = recommendBitrateCap({
+    codec: 'av1',
+    resolution: '1080p',
+    fps: 60,
+    motionTier: 'static',
+  });
+  assert.equal(h265, vp9);
+  assert.ok(h265 > av1);
+  assert.ok(manualBitrateOptions('h265').length > 0);
+});
+
 test('recommendBitrateCap scales down for 30 fps', () => {
   const sixty = recommendBitrateCap({
     codec: 'av1',
