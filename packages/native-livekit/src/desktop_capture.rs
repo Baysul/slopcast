@@ -447,6 +447,10 @@ fn scale_buffer(buffer: OwnedI420, width: u32, height: u32) -> Result<OwnedI420,
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "non-Linux I420Buffer::scale cannot fail; the Result matches the fallible Linux arm so scale_sample stays uniform"
+)]
 fn scale_buffer(mut buffer: I420Buffer, width: u32, height: u32) -> Result<I420Buffer, String> {
     Ok(buffer.scale(
         i32::try_from(width).unwrap_or(0),
@@ -845,7 +849,7 @@ impl FramePacer {
 /// is owned by `run_capture` (single-threaded access), so no lock is needed.
 ///
 /// On Linux this ring is unnecessary: every keepalive buffer is a fresh
-/// allocation or an `I420_FREELIST` pop, both released by GStreamer, so the
+/// allocation or an `I420_FREELIST` pop, both released by `GStreamer`, so the
 /// encoder can never see the same buffer instance twice (`keepalive_sample`).
 #[cfg(not(target_os = "linux"))]
 struct KeepaliveRing {

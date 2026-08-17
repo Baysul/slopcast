@@ -130,7 +130,7 @@ impl From<WgcSourceKind> for DesktopCaptureSourceType {
 ///
 /// Returns an error when the worker thread cannot be spawned, COM fails to
 /// initialize, or no capturer of either kind can be created.
-pub fn get_windows_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
+pub(crate) fn get_windows_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     let (tx, rx) = mpsc::channel();
     let handle = thread::Builder::new()
         .name("wgc-enumerate".into())

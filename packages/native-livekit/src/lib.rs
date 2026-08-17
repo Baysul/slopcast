@@ -294,6 +294,10 @@ pub fn load_gstreamer_plugins(plugin_dir: &std::path::Path) -> Result<(), String
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(
+    clippy::missing_errors_doc,
+    reason = "non-Linux stub cannot fail; the Result signature mirrors the Linux load_plugins scan"
+)]
 pub fn load_gstreamer_plugins(_plugin_dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
