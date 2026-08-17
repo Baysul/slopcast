@@ -126,6 +126,7 @@ jobs:
             gstreamer1.0-plugins-bad \
             gstreamer1.0-va \
             gstreamer1.0-nice \
+            gstreamer1.0-tools \
             libnice-dev \
             libx11-dev \
             pkg-config \
