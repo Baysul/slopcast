@@ -52,7 +52,6 @@ use std::time::{Duration, Instant};
 /// (a worker that ignores its stop flag is detached, not joined). The handle
 /// is dropped with the closure — the worker's OS thread is reclaimed whenever
 /// it finally unwinds.
-#[cfg(target_os = "linux")]
 pub(crate) fn reap_detached(join: std::thread::JoinHandle<()>, name: &'static str) {
     if join.is_finished() {
         let _ = join.join();

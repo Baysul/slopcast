@@ -447,7 +447,7 @@ fn scale_buffer(buffer: OwnedI420, width: u32, height: u32) -> Result<OwnedI420,
 }
 
 #[cfg(not(target_os = "linux"))]
-fn scale_buffer(buffer: I420Buffer, width: u32, height: u32) -> Result<I420Buffer, String> {
+fn scale_buffer(mut buffer: I420Buffer, width: u32, height: u32) -> Result<I420Buffer, String> {
     Ok(buffer.scale(
         i32::try_from(width).unwrap_or(0),
         i32::try_from(height).unwrap_or(0),
