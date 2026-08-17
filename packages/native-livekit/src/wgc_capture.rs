@@ -1,7 +1,9 @@
 //! Windows desktop capture engine: libwebrtc's `DesktopCapturer` with the
 //! WGC backend, driven through the livekit crate's bundled bindings
 //! (`livekit::webrtc::desktop_capturer` — libwebrtc 0.3.44 over
-//! webrtc-sys 0.3.41, already in the dependency tree; no forks, no patches).
+//! webrtc-sys 0.3.41, already in the dependency tree; the vendored
+//! webrtc-sys carries the cursor-compositing shim patch, Windows-arm
+//! unchanged).
 //!
 //! Why WGC via libwebrtc instead of the `windows` crate's `GraphicsCapture`
 //! APIs directly: the shim (`webrtc-sys` `desktop_capturer.cpp`, `_WIN64`)
@@ -9,8 +11,10 @@
 //! `allow_wgc_window_capturer`, `allow_directx_capturer` as the pre-2004
 //! fallback, `set_enumerate_current_process_windows(false)` so our own
 //! windows never appear in the picker, and `prefer_cursor_embedded` so the
-//! cursor is painted into the frames — and the prebuilt libwebrtc ships the
-//! whole `modules/desktop_capture` module. The engine only has to poll.
+//! cursor is painted into the frames (WGC embeds the cursor natively, so the
+//! `DesktopAndCursorComposer` shim wrapper is Linux-only) — and the prebuilt
+//! libwebrtc ships the whole `modules/desktop_capture` module. The engine
+//! only has to poll.
 //!
 //! Capture semantics (verified against the webrtc-sdk fork's m144 line —
 //! `webrtc-sdk/webrtc@m144_release`, tags `libwebrtc.m144.7559.xx` —

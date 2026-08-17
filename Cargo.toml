@@ -23,6 +23,10 @@ opt-level = "z"
 [patch.crates-io]
 tao = { git = "https://github.com/tauri-apps/tao", rev = "07f3742b1833b64be27b1ef991e38d557d4276c9" }
 
+# Vendored webrtc-sys with the cursor-compositing fix for the PipeWire
+# desktop capturer (see vendor/webrtc-sys/src/desktop_capturer.cpp).
+webrtc-sys = { path = "vendor/webrtc-sys" }
+
 tauri = {
   git = "https://github.com/tauri-apps/tauri",
   branch = "feat/cef"

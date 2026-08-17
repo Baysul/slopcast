@@ -4,8 +4,17 @@
 //! Windows arm uses for WGC, no forks, no patches. It replaces the former
 //! in-house portal + `pw_stream` + EGL engine (see SCREEN-CAPTURE-INHOUSE.md):
 //! the m144 prebuilt ships the whole `PipeWire` capturer including the three
-//! `KWin` corrupt-buffer checks and cursor handling, so ~3,000 lines of
-//! hand-rolled zbus/EGL code and portal-protocol maintenance move upstream.
+//! `KWin` corrupt-buffer checks, so ~3,000 lines of hand-rolled zbus/EGL code
+//! and portal-protocol maintenance move upstream.
+//!
+//! Cursor: m144's `BaseCapturerPipeWire` ignores `prefer_cursor_embedded` on
+//! Wayland — it always requests `cursor_mode=metadata` from the portal, and
+//! `KWin` then attaches the cursor as `SPA_META_Cursor` stream metadata instead
+//! of rendering it into the pixels. The vendored `webrtc-sys` shim
+//! (`vendor/webrtc-sys/src/desktop_capturer.cpp`) wraps the capturer in a
+//! `DesktopAndCursorComposer` (with `MouseCursorMonitorPipeWire` reading the
+//! same `SharedScreenCastStream`) so the cursor is alpha-blended into every
+//! frame — the same path Chromium uses for Wayland screensharing.
 //!
 //! Capture semantics (verified against `webrtc-sdk/webrtc@m144_release`):
 //! - `DesktopCaptureSourceType::Generic` → `kAnyScreenContent` (Screen |
@@ -86,6 +95,10 @@ impl LinuxDesktopCapture {
         let ended = Arc::new(AtomicBool::new(false));
         let ended_cb = Arc::clone(&ended);
         let mut options = DesktopCapturerOptions::new(DesktopCaptureSourceType::Generic);
+        // The vendored webrtc-sys shim wraps the PipeWire capturer in a
+        // `DesktopAndCursorComposer` when this flag is set, so the cursor is
+        // composited into the frames (m144 itself ignores the flag — see the
+        // module doc).
         options.set_include_cursor(true);
         let capturer = glib_ctx
             .with_thread_default(move || {

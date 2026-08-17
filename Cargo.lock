@@ -7963,8 +7963,6 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bd328126bc3653b10eab635579f74a562a472ff032ff09b5d1681d35e6201fd"
 dependencies = [
  "cc",
  "cxx",
