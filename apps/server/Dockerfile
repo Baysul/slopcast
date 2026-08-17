@@ -13,7 +13,7 @@ COPY packages/shared-types/ packages/shared-types/
 COPY apps/server/ apps/server/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter @slopcast/shared-types build
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter server build
-RUN pnpm --filter server deploy --prod /deploy
+RUN pnpm --filter server --prod deploy --legacy /deploy
 
 FROM node:24-slim
 ENV PNPM_HOME="/pnpm"
