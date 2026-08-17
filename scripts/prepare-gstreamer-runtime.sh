@@ -57,7 +57,12 @@ fi
 install -m 0755 "$WEBRTC_TARGET/release/libgstrswebrtc.so" "$PLUGIN_DIR/libgstrswebrtc.so"
 install -m 0755 "$RTP_TARGET/release/libgstrsrtp.so" "$PLUGIN_DIR/libgstrsrtp.so"
 
-SYSTEM_ELEMENTS=(
+# Elements that must exist on the host and be bundled. VA-API hardware
+# encoders are handled separately below: the `va` plugin only registers its
+# elements when a VA device (a /dev/dri/renderD* node) is present, so
+# headless build hosts never expose them — and the publisher falls back to
+# x264enc/x265enc at runtime when they are absent.
+REQUIRED_ELEMENTS=(
   appsrc
   queue
   videoconvert
@@ -70,8 +75,6 @@ SYSTEM_ELEMENTS=(
   av1parse
   h265parse
   av1enc
-  vah264enc
-  vah265enc
   h264parse
   audioconvert
   audioresample
@@ -93,7 +96,23 @@ SYSTEM_ELEMENTS=(
   rtph265pay
 )
 
-for element in "${SYSTEM_ELEMENTS[@]}"; do
+# Bundled only when this host has a usable VA device; skipped otherwise so
+# headless CI runners (no /dev/dri) can still prepare the runtime.
+OPTIONAL_ELEMENTS=(
+  vah264enc
+  vah265enc
+)
+
+BUNDLED_ELEMENTS=("${REQUIRED_ELEMENTS[@]}")
+for element in "${OPTIONAL_ELEMENTS[@]}"; do
+  if gst-inspect-1.0 "$element" >/dev/null 2>&1; then
+    BUNDLED_ELEMENTS+=("$element")
+  else
+    printf 'Skipping %s: no VA device on this host (software encoder fallback)\n' "$element" >&2
+  fi
+done
+
+for element in "${BUNDLED_ELEMENTS[@]}"; do
   plugin_path=""
   while IFS= read -r line; do
     if [[ "$line" == *Filename* ]]; then
@@ -123,7 +142,7 @@ EOF
 
 REGISTRY_FILE="$BUILD_DIR/isolated-registry.bin"
 rm -f "$REGISTRY_FILE"
-for element in livekitwebrtcsink rtpgccbwe "${SYSTEM_ELEMENTS[@]}"; do
+for element in livekitwebrtcsink rtpgccbwe "${BUNDLED_ELEMENTS[@]}"; do
   GST_PLUGIN_SYSTEM_PATH_1_0= \
     GST_PLUGIN_PATH_1_0="$PLUGIN_DIR" \
     GST_REGISTRY_1_0="$REGISTRY_FILE" \

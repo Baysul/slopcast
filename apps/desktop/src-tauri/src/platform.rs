@@ -1,8 +1,15 @@
 //! Platform introspection: Wayland detection and the dlopen'd EGL GPU
-//! probe (D5).
+//! probe (D5). The probe is Linux-only: it opens a DRM render node and
+//! dlopens `libEGL.so.1`; other platforms report no GPU information (the
+//! renderer treats a null result as "unavailable").
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::c_void;
+
+#[cfg(target_os = "linux")]
+use std::ffi::{CStr, CString, c_char};
+#[cfg(target_os = "linux")]
 use std::os::raw::c_int;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -51,22 +58,35 @@ pub struct GpuInfo {
     pub software_rasterizer: bool,
 }
 
+#[cfg(target_os = "linux")]
 const EGL_PLATFORM_SURFACELESS_MESA: c_int = 0x31DD;
+#[cfg(target_os = "linux")]
 const EGL_PLATFORM_X11_KHR: c_int = 0x31D5;
+#[cfg(target_os = "linux")]
 const EGL_DEFAULT_DISPLAY: *mut c_void = std::ptr::null_mut();
+#[cfg(target_os = "linux")]
 const EGL_VENDOR: c_int = 0x3053;
+#[cfg(target_os = "linux")]
 const EGL_VERSION: c_int = 0x3054;
+#[cfg(target_os = "linux")]
 const GL_RENDERER: u32 = 0x1F01;
+#[cfg(target_os = "linux")]
 const GL_VERSION: u32 = 0x1F02;
 
+#[cfg(target_os = "linux")]
 type EglGetPlatformDisplay =
     unsafe extern "C" fn(*const c_void, *mut c_void, *const c_int) -> *mut c_void;
+#[cfg(target_os = "linux")]
 type EglInitialize = unsafe extern "C" fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;
+#[cfg(target_os = "linux")]
 type EglQueryString = unsafe extern "C" fn(*mut c_void, c_int) -> *const c_char;
+#[cfg(target_os = "linux")]
 type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+#[cfg(target_os = "linux")]
 type GlGetString = unsafe extern "C" fn(u32) -> *const c_char;
 
 /// The first `/dev/dri/renderD*` node, if any.
+#[cfg(target_os = "linux")]
 fn first_render_node() -> Option<PathBuf> {
     std::fs::read_dir("/dev/dri")
         .ok()?
@@ -82,8 +102,10 @@ fn first_render_node() -> Option<PathBuf> {
 
 /// RAII guard for the dlopen'd `libEGL.so.1` handle: every error path closes
 /// it exactly once via `Drop`.
+#[cfg(target_os = "linux")]
 struct EglLib(*mut c_void);
 
+#[cfg(target_os = "linux")]
 impl Drop for EglLib {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -95,6 +117,7 @@ impl Drop for EglLib {
 }
 
 /// The EGL entry points resolved from the dlopen'd library.
+#[cfg(target_os = "linux")]
 struct EglFunctions {
     get_platform_display: EglGetPlatformDisplay,
     initialize: EglInitialize,
@@ -105,6 +128,7 @@ struct EglFunctions {
 /// Opens the first `/dev/dri/renderD*` node read-write and closes it again,
 /// proving hardware-accelerated rendering is reachable — mirrors libwebrtc's
 /// own render-node acquisition.
+#[cfg(target_os = "linux")]
 fn open_render_node() -> Result<(), String> {
     let render_node = first_render_node().ok_or_else(|| {
         "no /dev/dri/renderD* render node found — hardware acceleration unavailable".to_string()
@@ -128,6 +152,7 @@ fn open_render_node() -> Result<(), String> {
 
 /// dlopens `libEGL.so.1` (the same pattern libwebrtc uses — no new crate) and
 /// resolves the four EGL entry points.
+#[cfg(target_os = "linux")]
 fn dlopen_egl() -> Result<(EglLib, EglFunctions), String> {
     let lib_cstr = CString::new("libEGL.so.1").map_err(|_| "NUL in library name".to_string())?;
     // SAFETY: dlopen with a valid NUL-terminated path; the handle is owned by
@@ -177,6 +202,7 @@ fn dlopen_egl() -> Result<(EglLib, EglFunctions), String> {
 
 /// Creates and initializes a display: surfaceless-Mesa first, X11 as
 /// fallback.
+#[cfg(target_os = "linux")]
 fn create_egl_display(functions: &EglFunctions) -> Result<*mut c_void, String> {
     // SAFETY: `functions.get_platform_display` is a valid EGL function
     // pointer; the display is checked for null below.
@@ -212,6 +238,7 @@ fn create_egl_display(functions: &EglFunctions) -> Result<*mut c_void, String> {
     Ok(display)
 }
 
+#[cfg(target_os = "linux")]
 fn query_string(functions: &EglFunctions, display: *mut c_void, name: c_int) -> Option<String> {
     // SAFETY: `display` is an initialized EGL display; `name` is a valid EGL
     // string attribute.
@@ -228,6 +255,7 @@ fn query_string(functions: &EglFunctions, display: *mut c_void, name: c_int) -> 
     }
 }
 
+#[cfg(target_os = "linux")]
 fn gl_string(functions: &EglFunctions, name: u32) -> Option<String> {
     // SAFETY: `functions.get_proc_address` is a valid EGL function pointer
     // and the argument a NUL-terminated C string.
@@ -261,6 +289,7 @@ fn gl_string(functions: &EglFunctions, name: u32) -> Option<String> {
 /// Returns an error when no DRM render node exists, `libEGL.so.1` cannot be
 /// loaded, or EGL fails to initialize.
 #[tauri::command]
+#[cfg(target_os = "linux")]
 pub fn probe_gpu_info() -> Result<GpuInfo, String> {
     open_render_node()?;
     let (_lib, functions) = dlopen_egl()?;
@@ -285,6 +314,17 @@ pub fn probe_gpu_info() -> Result<GpuInfo, String> {
     })
 }
 
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+pub fn probe_gpu_info() -> Result<GpuInfo, String> {
+    Ok(GpuInfo {
+        egl_vendor: None,
+        gl_renderer: None,
+        gl_version: None,
+        software_rasterizer: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,7 +334,10 @@ mod tests {
     /// ```sh
     /// cargo test -p slopcast gpu_probe -- --ignored --nocapture
     /// ```
+    ///
+    /// Linux-only: the probe is a stub elsewhere.
     #[test]
+    #[cfg(target_os = "linux")]
     #[ignore = "manual diagnostic: requires a DRM render node"]
     fn gpu_probe() {
         match probe_gpu_info() {

@@ -15,6 +15,7 @@ pub type App = tauri::App<tauri::Cef>;
 #[cfg(feature = "e2e")]
 mod e2e;
 
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 use tauri::Manager;
