@@ -27,17 +27,35 @@
   --color-input: oklch(0.3729 0.0306 259.7);
   --color-ring: oklch(0.6594 0.1096 57.8);
   --color-body-text: oklch(0.8717 0.0093 258.3);
-  --color-caption-text: oklch(0.52 0.02 260);
+  --color-caption-text: oklch(0.64 0.02 260);
 }
 
 @layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-variant-ligatures: common-ligatures;
+    font-variant-numeric: tabular-nums;
+  }
+
   body {
     color-scheme: dark;
     font-family:
       system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans",
       "Helvetica Neue", sans-serif;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    letter-spacing: -0.01em;
     background-color: var(--color-background);
     color: var(--color-foreground);
+  }
+
+  /* Operate surface: labels are uppercase tracking carriers — keep them
+     tight and legible on dark at 12px. */
+  label,
+  [class*="tracking-wider"] {
+    letter-spacing: 0.05em;
   }
 
   button:not(:disabled),

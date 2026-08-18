@@ -1,10 +1,28 @@
-import { Check, Copy, X } from 'lucide-react';
-import React, { useState } from 'react';
+import { Check, Copy, Video, X } from 'lucide-react';
+import { motion } from 'motion/react';
+import * as React from 'react';
+import { useEffect, useState } from 'react';
+
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import type { CaptureContext, CaptureSourceSelection, CaptureStage } from '../../types';
 import { CaptureSourcePicker } from './CaptureSourcePicker';
+
+function usePrefersReducedMotion(): boolean {
+  const [prefersReduced, setPrefersReduced] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setPrefersReduced(mediaQuery.matches);
+
+    const handleChange = (): void => setPrefersReduced(mediaQuery.matches);
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
+
+  return prefersReduced;
+}
 
 export interface SourcePickerProps {
   roomCode: string;
@@ -48,14 +66,20 @@ const RoomControls: React.FC<RoomControlsProps> = React.memo(
   ({ roomCode, isCreatingRoom, copied, spectatorCount, onCreateRoom, onCopyCode, onCopyLink }) => {
     if (!roomCode) {
       return (
-        <Button variant="default" onClick={onCreateRoom} disabled={isCreatingRoom} className="w-full font-bold">
-          {isCreatingRoom ? 'Creating Room...' : 'Create Live Room'}
+        <Button
+          variant="default"
+          onClick={onCreateRoom}
+          disabled={isCreatingRoom}
+          aria-busy={isCreatingRoom}
+          className="w-full font-bold"
+        >
+          {isCreatingRoom ? 'Creating Room…' : 'Create Live Room'}
         </Button>
       );
     }
 
     return (
-      <div className="space-y-3">
+      <div className="space-y-3" aria-live="polite">
         <div className="flex items-center gap-2 flex-wrap">
           {spectatorCount > 0 && (
             <Badge variant="info" className="tabular-nums">
@@ -65,17 +89,9 @@ const RoomControls: React.FC<RoomControlsProps> = React.memo(
           <span className="font-mono text-sm font-semibold tabular-nums tracking-wide text-foreground/90">
             {roomCode}
           </span>
-          <Button variant="secondary" size="sm" onClick={onCopyCode} className="gap-2">
-            <span className="text-foreground bg-accent/50 px-2 py-0.5 rounded-md text-xs flex items-center gap-1">
-              {copied === 'code' ? (
-                <>
-                  <Check className="w-3 h-3 text-safelight" aria-hidden="true" />
-                  Copied
-                </>
-              ) : (
-                'Copy'
-              )}
-            </span>
+          <Button variant="secondary" size="sm" onClick={onCopyCode} className="gap-1.5">
+            {copied === 'code' ? <Check className="w-3.5 h-3.5 text-safelight" aria-hidden="true" /> : null}
+            {copied === 'code' ? 'Copied' : 'Copy code'}
           </Button>
           <Button size="sm" onClick={onCopyLink} className="gap-1.5">
             {copied === 'link' ? (
@@ -83,7 +99,7 @@ const RoomControls: React.FC<RoomControlsProps> = React.memo(
             ) : (
               <Copy className="w-4 h-4" aria-hidden="true" />
             )}
-            {copied === 'link' ? 'Link Copied!' : 'Copy Link'}
+            {copied === 'link' ? 'Link copied' : 'Copy link'}
           </Button>
         </div>
       </div>
@@ -116,7 +132,9 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
     onStartShare,
     onGoLive,
     onStopShare,
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: presenter source surface owns room, capture stages, KDE notices and stop-confirm; splitting would trade clarity for indirection
   }) => {
+    const shouldReduceMotion = usePrefersReducedMotion();
     const [kdeNoticeDismissed, setKdeNoticeDismissed] = useState(false);
     const [kdeFailedNoticeDismissed, setKdeFailedNoticeDismissed] = useState(false);
 
@@ -175,16 +193,59 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
           {pickerOpen && <CaptureSourcePicker onSelect={onSourceSelected} onCancel={() => setPickerOpen(false)} />}
 
           {captureStage === 'idle' && (
-            <>
-              <Button variant="default" onClick={onStartShare} disabled={!canStartShare} className="w-full font-bold">
-                Start Screenshare
+            <div className="space-y-2.5">
+              <Button
+                variant="default"
+                onClick={onStartShare}
+                disabled={!canStartShare}
+                aria-describedby={disabledReason ? 'start-screenshare-hint' : 'start-screenshare-ready-hint'}
+                className="group relative w-full font-bold overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.14)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] active:shadow-[inset_0_1px_1px_rgba(0,0,0,0.2)] active:scale-[0.99] transition-[transform,box-shadow,background-color] duration-200 ease-out disabled:shadow-none disabled:active:scale-100"
+              >
+                {/* Idle shimmer — motion.dev loop, just enough to draw the eye. Hidden when disabled or reduced-motion. */}
+                {canStartShare && !shouldReduceMotion && (
+                  <motion.span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-white/[0.14] to-transparent"
+                    initial={{ x: '-100%' }}
+                    animate={{ x: '100%' }}
+                    transition={{
+                      duration: 0.95,
+                      ease: [0.16, 1, 0.3, 1],
+                      repeat: Infinity,
+                      repeatDelay: 3.2,
+                      repeatType: 'loop',
+                    }}
+                    style={{ willChange: 'transform' }}
+                  />
+                )}
+                {/* Hover wash — quick darkroom sweep on interaction. */}
+                <span
+                  aria-hidden="true"
+                  className={`pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/[0.1] to-transparent opacity-0 transition-[transform,opacity] duration-[520ms] ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-full group-hover:opacity-100 group-focus-visible:translate-x-full group-focus-visible:opacity-100 motion-reduce:hidden ${!canStartShare ? 'hidden' : ''}`}
+                />
+                {/* Viewfinder brackets — capture frame at the edges. */}
+                <span
+                  aria-hidden="true"
+                  className={`pointer-events-none absolute inset-[5px] rounded-[7px] border transition-colors duration-200 ${!canStartShare ? 'border-transparent' : 'border-transparent group-hover:border-white/10 group-focus-visible:border-white/10'}`}
+                />
+                <span className="relative flex items-center justify-center gap-2.5">
+                  <Video
+                    aria-hidden="true"
+                    className={`h-4 w-4 shrink-0 transition-[transform,opacity] duration-200 ease-out motion-reduce:transition-none ${!canStartShare ? 'opacity-60' : 'group-hover:scale-[1.08] group-focus-visible:scale-[1.08] group-active:scale-95'}`}
+                  />
+                  Start Screenshare
+                </span>
               </Button>
-              {disabledReason && (
-                <p id="start-screenshare-hint" className="text-sm text-muted-foreground leading-relaxed">
+              {disabledReason ? (
+                <p id="start-screenshare-hint" className="text-sm leading-relaxed text-muted-foreground">
                   {disabledReason}
                 </p>
+              ) : (
+                <p id="start-screenshare-ready-hint" className="text-center text-xs leading-relaxed text-caption-text">
+                  Preview first — Go Live when the frame is ready
+                </p>
               )}
-            </>
+            </div>
           )}
 
           {captureStage === 'previewing' && (

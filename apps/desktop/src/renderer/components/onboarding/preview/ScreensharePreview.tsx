@@ -71,7 +71,7 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
 
             {captureStage === 'previewing' && (
               <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5 rounded-full bg-black/60 backdrop-blur px-2.5 py-1">
-                <span className="size-1.5 rounded-full bg-amber-400 motion-safe:animate-pulse" aria-hidden="true" />
+                <span className="size-1.5 rounded-full bg-safelight motion-safe:animate-pulse" aria-hidden="true" />
                 <span className="text-xs font-semibold uppercase tracking-wider text-foreground">Preview</span>
               </div>
             )}
@@ -83,9 +83,9 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
                     <span className="p-3 rounded-full bg-safelight/10 mb-1">
                       <ScreenShare className="size-7 text-safelight/60" aria-hidden="true" />
                     </span>
-                    <p className="text-sm text-foreground font-semibold">Ready to stream</p>
+                    <p className="text-sm text-foreground font-semibold">No room yet</p>
                     <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
-                      Create a live room to get a shareable link, then select your source and go live.
+                      Create a live room to get your invite link, then pick a source to preview before you go live.
                     </p>
                   </>
                 ) : (
@@ -93,16 +93,17 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
                     <span className="p-3 rounded-full bg-secondary mb-1">
                       <ScreenShare className="size-7 text-muted-foreground" aria-hidden="true" />
                     </span>
-                    <p className="text-sm text-foreground font-semibold">Ready to go live</p>
+                    <p className="text-sm text-foreground font-semibold">Ready to preview</p>
                     <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
-                      Click Start Screenshare below to begin broadcasting.
+                      Choose a window or screen to preview. You’ll go live from the preview.
                     </p>
                     <button
                       type="button"
                       onClick={onCopyLink}
+                      aria-label={copied === 'link' ? 'Invite link copied' : 'Copy invite link'}
                       className="mt-1 inline-flex items-center gap-1.5 text-xs font-medium text-safelight hover:text-safelight-hover transition-colors focus:outline-none focus-visible:underline"
                     >
-                      {copied === 'link' ? 'Link copied' : `Copy link — ${roomCode}`}
+                      {copied === 'link' ? 'Link copied' : 'Copy invite link'}
                     </button>
                   </>
                 )}
@@ -114,9 +115,9 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
                 <span className="p-3 rounded-full bg-secondary">
                   <ScreenShare className="size-7 text-muted-foreground" aria-hidden="true" />
                 </span>
-                <p className="text-sm text-foreground font-semibold">Choosing a source…</p>
+                <p className="text-sm text-foreground font-semibold">Waiting for your selection…</p>
                 <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
-                  Pick what to share in the portal dialog to see a live preview.
+                  Select a window or screen in the system dialog. Your preview will appear here.
                 </p>
               </div>
             )}

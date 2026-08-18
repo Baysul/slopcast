@@ -635,11 +635,9 @@ export const PresenterApp: React.FC = () => {
   } else if (platformInfo) {
     content = (
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-5xl mx-auto w-full px-6 pt-6">
+        <main className="max-w-5xl mx-auto w-full px-6 py-6 space-y-6">
           <WelcomeBanner />
-        </div>
 
-        <main className="max-w-5xl mx-auto w-full px-6 py-8 space-y-8">
           <ScreensharePreview
             captureStage={captureStage}
             roomCode={roomCode}
@@ -649,16 +647,7 @@ export const PresenterApp: React.FC = () => {
             onCopyLink={handleCopyLink}
           />
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            <AudioAppPicker
-              audioApps={audioApps}
-              audioAppGroups={audioAppGroups}
-              selectedAudioAppId={selectedAudioAppId}
-              autoDetectedApp={autoDetectedApp}
-              onSelectApp={handleSelectApp}
-              onRefresh={loadAudioApps}
-            />
-
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <SourcePicker
               roomCode={roomCode}
               isCreatingRoom={isCreatingRoom}
@@ -681,6 +670,15 @@ export const PresenterApp: React.FC = () => {
               onStartShare={handleStartShare}
               onGoLive={handleGoLive}
               onStopShare={handleStopShare}
+            />
+
+            <AudioAppPicker
+              audioApps={audioApps}
+              audioAppGroups={audioAppGroups}
+              selectedAudioAppId={selectedAudioAppId}
+              autoDetectedApp={autoDetectedApp}
+              onSelectApp={handleSelectApp}
+              onRefresh={loadAudioApps}
             />
           </div>
 
@@ -712,7 +710,7 @@ export const PresenterApp: React.FC = () => {
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
-      <TitleBar />
+      <TitleBar isLive={captureStage === 'live'} isPreviewing={captureStage === 'previewing'} />
       {content}
       <Toaster />
     </div>

@@ -27,7 +27,7 @@
   --color-input: oklch(0.3729 0.0306 259.7);
   --color-ring: oklch(0.6594 0.1096 57.8);
   --color-body-text: oklch(0.8717 0.0093 258.3);
-  --color-caption-text: oklch(0.52 0.02 260);
+  --color-caption-text: oklch(0.64 0.02 260);
 }
 
 @layer base {

@@ -11,7 +11,34 @@ import { windowControls } from '@/api/windowControls';
 // dead, and the injected drag-region script is unreliable in the CEF runtime.
 // Control-button targets are excluded so the buttons keep receiving clicks,
 // and double-click on the bar maximizes (mirroring the native drag path).
-export const TitleBar: React.FC = React.memo(() => {
+export interface TitleBarProps {
+  isLive?: boolean;
+  isPreviewing?: boolean;
+}
+
+function getCenterSignal(isLive: boolean, isPreviewing: boolean): React.ReactNode {
+  if (isLive) {
+    return (
+      <span role="status" aria-live="polite" className="inline-flex items-center gap-2">
+        <span className="size-1.5 rounded-full bg-safelight motion-safe:animate-pulse" aria-hidden="true" />
+        <span className="text-xs font-medium uppercase tracking-widest text-safelight leading-none">Live</span>
+      </span>
+    );
+  }
+  if (isPreviewing) {
+    return (
+      <span className="inline-flex items-center gap-2">
+        <span className="size-1.5 rounded-full bg-muted-foreground/60" aria-hidden="true" />
+        <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground leading-none">
+          Preview
+        </span>
+      </span>
+    );
+  }
+  return null;
+}
+
+export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, isPreviewing = false }) => {
   const [maximized, setMaximized] = useState(false);
 
   const handleMouseDown = (event: React.MouseEvent<HTMLElement>): void => {
@@ -51,10 +78,13 @@ export const TitleBar: React.FC = React.memo(() => {
       className="h-10 shrink-0 flex items-stretch border-b border-border bg-background select-none"
     >
       <div className="flex items-center gap-2.5 pl-4 pr-3">
-        <span className="p-1.5 bg-safelight/10 rounded-lg text-safelight">
-          <ScreenShare className="w-4 h-4" aria-hidden="true" />
-        </span>
+        <ScreenShare className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
         <span className="text-sm font-semibold tracking-tight text-foreground/90">Slopcast</span>
+      </div>
+
+      {/* Center signal — pointer-events-none so the drag region stays live. */}
+      <div className="flex-1 flex items-center justify-center pointer-events-none select-none">
+        {getCenterSignal(isLive, isPreviewing)}
       </div>
 
       <div className="ml-auto flex items-stretch">
