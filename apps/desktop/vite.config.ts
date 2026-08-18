@@ -24,6 +24,15 @@ export default defineConfig({
       treeshake: {
         preset: 'recommended',
       },
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-dom/client'],
+          'vendor-tauri': ['@tauri-apps/api', '@tauri-apps/plugin-clipboard-manager'],
+          'vendor-motion': ['motion/react'],
+          'vendor-radix': ['@radix-ui/react-select', '@radix-ui/react-slot', '@radix-ui/react-switch'],
+          'vendor-ui': ['lucide-react', 'sonner', 'class-variance-authority', 'clsx', 'tailwind-merge'],
+        },
+      },
     },
   },
   esbuild: {
