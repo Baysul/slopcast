@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-docker:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -82,15 +82,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-26.04
+          - os: ubuntu-24.04
             name: linux-appimage
             script: dist:desktop:linux:appimage
             asset-path: target/release/bundle/appimage/*.AppImage
-          - os: ubuntu-26.04
+          - os: ubuntu-24.04
             name: linux-deb
             script: dist:desktop:linux:deb
             asset-path: target/release/bundle/deb/*.deb
-          - os: ubuntu-26.04
+          - os: ubuntu-24.04
             name: linux-tar
             script: dist:desktop:linux:tar
             asset-path: target/release/bundle/*.tar.gz
@@ -125,7 +125,7 @@ jobs:
             gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly \
-            gstreamer1.0-va \
+            gstreamer1.0-vaapi \
             gstreamer1.0-nice \
             gstreamer1.0-tools \
             libnice-dev \
@@ -165,7 +165,9 @@ jobs:
           fi
 
       - name: Build desktop
-        run: pnpm ${{ matrix.script }}
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: pnpm ${{ matrix.script }} --verbose
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -176,7 +178,7 @@ jobs:
 
   create-release:
     needs: [build-docker, build-desktop]
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
