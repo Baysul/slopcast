@@ -281,6 +281,7 @@ pub fn run() {
             room::connect_native_room,
             room::disconnect_native_room,
             room::is_native_room_connected,
+            room::has_native_room_session,
             room::get_spectator_count,
             room::get_native_telemetry,
             room::get_native_supported_codecs,

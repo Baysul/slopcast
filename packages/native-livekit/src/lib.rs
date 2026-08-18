@@ -447,6 +447,19 @@ pub fn is_livekit_room_connected() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
+/// Returns whether the presenter still owns a room session, including brief
+/// reconnect and settings-rebuild windows where signaling is not connected.
+#[must_use]
+pub fn has_livekit_room_session() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        gstreamer_publisher::has_active_session()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    ROOM_CONNECTED.load(Ordering::Relaxed)
+}
+
 /// Resolves a codec string to a `VideoCodec`, defaulting to VP9 for anything
 /// unrecognized (including `None`).
 #[cfg(not(target_os = "linux"))]

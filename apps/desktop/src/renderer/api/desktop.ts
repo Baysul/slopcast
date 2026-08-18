@@ -108,6 +108,7 @@ export const desktopApi = {
     invokeErr('connect_native_room', { args: { url, token, roomName, identity } }),
   disconnectNativeRoom: (): Promise<boolean> => invokeOk('disconnect_native_room', undefined),
   isNativeRoomConnected: (): Promise<boolean> => invokeOr('is_native_room_connected', undefined, false),
+  hasNativeRoomSession: (): Promise<boolean> => invokeOr('has_native_room_session', undefined, false),
   startNativeCapture: (config: DesktopCaptureConfig, source?: CaptureSourceSelection): Promise<CaptureStartResult> =>
     invokeOr('start_native_capture', source ? { config, source } : { config }, {
       ok: false,

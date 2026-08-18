@@ -533,6 +533,14 @@ pub(crate) fn is_connected() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
+pub(crate) fn has_active_session() -> bool {
+    PUBLISHER.lock().is_ok_and(|publisher| {
+        publisher
+            .as_ref()
+            .is_some_and(|handle| !handle.join.is_finished())
+    })
+}
+
 pub(crate) fn start_video(config: CaptureConfig) -> Result<(), String> {
     let command_sender = command_sender()?;
     let (reply_sender, reply_receiver) = mpsc::sync_channel(1);

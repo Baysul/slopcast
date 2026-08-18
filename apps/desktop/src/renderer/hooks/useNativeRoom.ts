@@ -105,7 +105,9 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
   }, [apiEndpoint, livekitUrl, disconnectRoom, isCreatingRoom]);
 
   // Poll spectator count and detect an unexpected room drop (native-livekit
-  // has no event push to the renderer).
+  // has no event push to the renderer). A settings update rebuilds the Linux
+  // publisher pipeline and briefly drops its connection flag, so only clear
+  // the room after the native session itself has ended.
   useEffect(() => {
     if (!roomCode) return;
 
@@ -117,7 +119,10 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
       if (connected === true) {
         sawConnectedRef.current = true;
       }
-      if (connected === false && sawConnectedRef.current && roomActiveRef.current) {
+      if (connected !== false || !sawConnectedRef.current || !roomActiveRef.current) return;
+
+      const hasSession = await desktopApi.hasNativeRoomSession();
+      if (!hasSession && roomActiveRef.current) {
         notify('error', 'Room disconnected', 'The connection to the room was lost. Create a new room to continue.');
         onDisconnect?.();
         roomActiveRef.current = false;

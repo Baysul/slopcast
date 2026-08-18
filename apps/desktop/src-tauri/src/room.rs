@@ -50,6 +50,15 @@ pub fn is_native_room_connected() -> bool {
     native_livekit::is_livekit_room_connected()
 }
 
+/// Returns whether the presenter still owns a room session. Unlike the
+/// connection flag, this stays true during transient reconnects and video
+/// settings rebuilds.
+#[must_use]
+#[tauri::command(rename_all = "camelCase")]
+pub fn has_native_room_session() -> bool {
+    native_livekit::has_livekit_room_session()
+}
+
 /// Returns the current spectator (remote participant) count.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
