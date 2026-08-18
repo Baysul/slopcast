@@ -17,6 +17,15 @@ use std::path::{Path, PathBuf};
 const FRONTEND_DIST: &str = "../dist/renderer";
 
 fn main() {
+    // The Tauri CLI 2.11.x still exports STATIC_VCRUNTIME=true on every cargo
+    // invocation. Our tauri-build (feat/cef) deprecated that variable, and any
+    // CLI-set value silently overrides `build.windows.staticVCRuntime` in
+    // tauri.conf.json, so drop it and let the config (default true) decide.
+    // The variable only affects MSVC linking, so this is safe on any host.
+    // Remove once the npm CLI stops setting it (tauri-apps/tauri#15372).
+    // SAFETY: this build script is single-threaded and nothing else touches
+    // the environment before tauri_build::build() runs below.
+    unsafe { std::env::remove_var("STATIC_VCRUNTIME") };
     tauri_build::build();
 
     let out_dir = std::env::var_os("OUT_DIR").map(PathBuf::from);
