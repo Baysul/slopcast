@@ -10,7 +10,7 @@ colors:
   muted-text: oklch(0.7137 0.0192 261.3)
   body-text: oklch(0.8717 0.0093 258.3)
   heading-text: oklch(0.967 0.0029 264.5)
-  caption-text: oklch(0.52 0.02 260)
+  caption-text: oklch(0.64 0.02 260)
   safelight: oklch(0.6594 0.1096 57.8)
   safelight-hover: oklch(0.6036 0.1044 57)
   safelight-glow: oklch(0.6594 0.1096 57.8 / 0.15)
@@ -128,14 +128,14 @@ components:
 
 Slopcast's visual language is the darkroom at work. The interface is a dim, focused space where the only things that matter are the broadcast and the controls that serve it. Deep near-black backgrounds absorb distraction; layered grays define surfaces by density, not by light. The single roasted accent — Safelight — is the darkroom's glow: it signals live transmission, active capture, and anything that demands the user's attention. The rest of the interface recedes into shadow, precise and present but never competing with the stream.
 
-This is not a gaming aesthetic — it is a *studio* aesthetic. Every control earns its place through purpose, not decoration. The stream is the subject; the chrome is the enlarger.
+This is not a gaming aesthetic — it is a *studio* aesthetic. Every control earns its place through purpose, not decoration. The stream is the subject; the chrome is the enlarger. The live signal is distilled to a dot and a word — no pill, no glow, no wash.
 
 **Key Characteristics:**
 - Monochrome with one shot of roasted amber; 90%+ of any surface is neutral.
 - Layered darkness distinguishes hierarchy: deeper bg for the canvas, lighter surfaces for controls.
 - Edges are soft but never timid — rounded corners on containers, sharp on controls.
 - Backdrop blur on overlays and headers creates atmospheric depth without breaking the dark field.
-- Motion is reserved for signal, not ornament: a pulse for live, a fade for presence, a glow for capture.
+- Motion is one pulse for live. The title-bar signal is a 6px dot and a word on flat dark — no pill, no glow, no wash — everything else stays still.
 
 ### Known drift
 
@@ -164,7 +164,7 @@ The palette is a darkroom: total black, paper-white for the stream, and one roas
 - **Muted Text** (oklch(0.7137 0.0192 261.3) / #9CA3AF): Secondary information, labels, placeholders, metadata.
 - **Body Text** (oklch(0.8717 0.0093 258.3) / #D1D5DB): Primary readable content.
 - **Heading Text** (oklch(0.967 0.0029 264.5) / #F3F4F6): Titles, headings, emphasized information.
-- **Caption Text** (oklch(0.52 0.02 260)): Telemetry sub-values, sparkline captions, secondary metadata at the very bottom of the visual hierarchy.
+- **Caption Text** (oklch(0.64 0.02 260)): Telemetry sub-values, sparkline captions, secondary metadata at the very bottom of the visual hierarchy.
 
 ### Named Rules
 
@@ -271,7 +271,7 @@ Borders are thin (1px), semi-transparent (0.5–0.8 opacity), and always the bor
 ### Navigation / Header
 - **Web Header (HomePage):** Dark glass (`bg-background/80 border-b backdrop-blur-md`). Sticky top. Brand icon box + Slopcast wordmark (`text-base font-bold tracking-tight`).
 - **Web Room Page header overlay:** Fixed top, gradient-faded to transparent (`bg-black/60`). The cluster holds `[Back] [Status Badge] [Spectators pill]` on the left and `[Copy link]` on the right. Long status text truncates with `max-w-[60vw] sm:max-w-[320px]`. Spectator pill is hidden below `sm` per the mobile-truncation rule.
-- **Desktop Header:** Sticky `bg-background/80 backdrop-blur-md`. h-14 max-w-5xl. Left: wordmark (`text-xl font-bold leading-tight tracking-tight`) + LIVE badge (when sharing). Right: `Create Live Room` button, or `[Code + Copy Link]` cluster once a room exists.
+- **Desktop Header (TitleBar):** Custom Tauri chrome (`decorations: false`), `h-10`, flat `bg-background` with `border-b border-border` — no glass, no glow. Left: bare `ScreenShare` icon (`w-4 h-4 text-muted-foreground`) + wordmark (`text-sm font-semibold tracking-tight`). Center: distilled signal — a 6px dot + uppercase word, no pill or background (`gap-2`, `text-xs font-medium tracking-widest`). `Live` uses `bg-safelight` with `motion-safe:animate-pulse` + `text-safelight`; `Preview` uses `bg-muted-foreground/60` + `text-muted-foreground`. The center slot is `pointer-events-none` so the drag region stays live; the whole bar is the drag target via `windowControls.startDragging()`, double-click toggles maximize. Right: native window controls (`w-11`, `Minus` / `Square`+`Copy` / `X`) with `hover:bg-accent/60` (close: `hover:bg-destructive`). Sticky, `select-none`, owns the window.
 - **Mobile:** Icon-based back navigation truncates secondary info. Spectator count pill hides below the `sm` breakpoint.
 
 ### Video Player

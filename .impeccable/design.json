@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-30T00:00:00.000Z",
+  "generatedAt": "2026-08-18T10:05:49.798731Z",
   "title": "Design System: Slopcast",
   "extensions": {
     "colorMeta": {
@@ -138,6 +138,21 @@
           "oklch(0.967 0.0029 264.5)",
           "oklch(0.99 0.0029 264.5)"
         ]
+      },
+      "caption-text": {
+        "role": "neutral",
+        "displayName": "Caption Text",
+        "canonical": "oklch(0.64 0.02 260)",
+        "tonalRamp": [
+          "oklch(0.30 0.02 260)",
+          "oklch(0.40 0.02 260)",
+          "oklch(0.48 0.02 260)",
+          "oklch(0.56 0.02 260)",
+          "oklch(0.64 0.02 260)",
+          "oklch(0.72 0.02 260)",
+          "oklch(0.84 0.02 260)",
+          "oklch(0.93 0.02 260)"
+        ]
       }
     },
     "typographyMeta": {
@@ -147,11 +162,11 @@
       },
       "heading": {
         "displayName": "Heading",
-        "purpose": "Section titles, panel headers, modal titles — also used for the product wordmark."
+        "purpose": "Section titles, panel headers, modal titles \u2014 also used for the product wordmark."
       },
       "body": {
         "displayName": "Body",
-        "purpose": "All reading text, descriptions, participant info. 14px with 65–75ch measure."
+        "purpose": "All reading text, descriptions, participant info. 14px with 65\u201375ch measure."
       },
       "label": {
         "displayName": "Label",
@@ -197,10 +212,22 @@
       }
     ],
     "breakpoints": [
-      { "name": "sm", "value": "640px" },
-      { "name": "md", "value": "768px" },
-      { "name": "lg", "value": "1024px" },
-      { "name": "xl", "value": "1280px" }
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      },
+      {
+        "name": "xl",
+        "value": "1280px"
+      }
     ]
   },
   "components": [
@@ -280,9 +307,9 @@
       "name": "Desktop Header",
       "kind": "nav",
       "refersTo": "header-desktop",
-      "description": "Sticky glass header for the desktop presenter app. Wordmark + platform pill + LIVE badge on the left, CTA on the right.",
-      "html": "<header class=\"ds-header\"><div class=\"ds-header-inner\"><div class=\"ds-header-left\"><div class=\"ds-brand-icon\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M13 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4\"/><polyline points=\"9 7 4 12 9 17\"/><line x1=\"15\" y1=\"12\" x2=\"4\" y2=\"12\"/></svg></div><span class=\"ds-wordmark\">Slopcast</span></div><button class=\"ds-btn-primary\">CREATE LIVE ROOM</button></div></header>",
-      "css": ".ds-header { position: sticky; top: 0; z-index: 10; border-bottom: 1px solid var(--color-border); background: color-mix(in oklch, var(--color-background), transparent 20%); backdrop-filter: blur(12px); } .ds-header-inner { max-width: 64rem; margin: 0 auto; padding: 0 1.5rem; height: 3.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; } .ds-header-left { display: flex; align-items: center; gap: 0.75rem; min-width: 0; } .ds-brand-icon { padding: 0.5rem; border-radius: 0.75rem; background: oklch(0.6594 0.1096 57.8 / 0.1); color: var(--color-safelight); flex-shrink: 0; } .ds-wordmark { font-size: 1.25rem; font-weight: 700; line-height: 1.25; letter-spacing: -0.025em; color: var(--color-foreground); flex-shrink: 0; }"
+      "description": "Flat custom Tauri chrome (h-10, border-b). Bare icon + wordmark on the left, distilled center signal (dot + word, no pill) in the middle, native window controls on the right.",
+      "html": "<header class=\"ds-header-flat\"><div class=\"ds-header-flat-inner\"><div class=\"ds-header-flat-left\"><svg class=\"ds-header-icon\" width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M13 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4\"/><polyline points=\"9 7 4 12 9 17\"/><line x1=\"15\" y1=\"12\" x2=\"4\" y2=\"12\"/></svg><span class=\"ds-wordmark-flat\">Slopcast</span></div><div class=\"ds-center-signal\"><span class=\"ds-dot-live\"></span><span class=\"ds-signal-label\">Live</span></div><div class=\"ds-window-controls\"><span class=\"ds-win-btn\">\u2013</span><span class=\"ds-win-btn\">\u25a1</span><span class=\"ds-win-btn\">\u00d7</span></div></div></header>",
+      "css": ".ds-header-flat { height: 2.5rem; display: flex; align-items: stretch; border-bottom: 1px solid var(--color-border); background: var(--color-background); user-select: none; } .ds-header-flat-inner { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; gap: 0.75rem; } .ds-header-flat-left { display: flex; align-items: center; gap: 0.625rem; } .ds-header-icon { color: var(--color-muted-foreground); flex-shrink: 0; } .ds-wordmark-flat { font-size: 0.875rem; font-weight: 600; letter-spacing: -0.025em; color: color-mix(in oklch, var(--color-foreground), transparent 10%); } .ds-center-signal { flex: 1; display: flex; align-items: center; justify-content: center; gap: 0.5rem; } .ds-dot-live { width: 6px; height: 6px; border-radius: 9999px; background: var(--color-safelight); animation: ds-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; } .ds-signal-label { font-size: 0.75rem; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-safelight); line-height: 1; } @keyframes ds-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } } .ds-window-controls { display: flex; align-items: stretch; gap: 0; margin-left: auto; } .ds-win-btn { width: 2.75rem; display: flex; align-items: center; justify-content: center; color: var(--color-muted-foreground); font-size: 0.875rem; }"
     },
     {
       "name": "Telemetry Cell",
@@ -291,27 +318,35 @@
       "description": "A single data point in the stream telemetry bar. Uppercase label above a monospace tabular-nums value.",
       "html": "<div class=\"ds-telemetry-cell\"><span class=\"ds-telemetry-label\">BITRATE</span><span class=\"ds-telemetry-value\">4.2 Mbps</span></div>",
       "css": ".ds-telemetry-cell { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; flex-shrink: 0; } .ds-telemetry-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; line-height: 1; color: var(--color-muted-foreground); } .ds-telemetry-value { font-size: 0.875rem; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; color: var(--color-foreground); }"
+    },
+    {
+      "name": "TitleBar Signal",
+      "kind": "custom",
+      "refersTo": "titlebar-signal",
+      "description": "Distilled center signal in the desktop TitleBar. No pill, no background \u2014 a 6px dot and an uppercase word. Live pulses in Safelight; Preview is muted and static.",
+      "html": "<div class=\"ds-titlebar-signal\"><div class=\"ds-signal-row\"><span class=\"ds-dot ds-dot-live\" aria-hidden=\"true\"></span><span class=\"ds-signal-text ds-signal-text-live\">Live</span></div><span class=\"ds-signal-sep\" aria-hidden=\"true\">\u00b7</span><div class=\"ds-signal-row\"><span class=\"ds-dot ds-dot-preview\" aria-hidden=\"true\"></span><span class=\"ds-signal-text ds-signal-text-preview\">Preview</span></div></div>",
+      "css": ".ds-titlebar-signal { display: inline-flex; align-items: center; gap: 1rem; padding: 0.5rem 0; } .ds-signal-row { display: inline-flex; align-items: center; gap: 0.5rem; } .ds-dot { width: 6px; height: 6px; border-radius: 9999px; flex-shrink: 0; } .ds-dot-live { background: var(--color-safelight); animation: ds-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; } .ds-dot-preview { background: color-mix(in oklch, var(--color-muted-foreground), transparent 40%); } .ds-signal-text { font-size: 0.75rem; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; line-height: 1; } .ds-signal-text-live { color: var(--color-safelight); } .ds-signal-text-preview { color: var(--color-muted-foreground); } .ds-signal-sep { color: var(--color-border); font-size: 0.875rem; } @keyframes ds-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }"
     }
   ],
   "narrative": {
     "northStar": "The Darkroom Studio",
-    "overview": "Slopcast's visual language is the darkroom at work. The interface is a dim, focused space where the only things that matter are the broadcast and the controls that serve it. Deep near-black backgrounds absorb distraction; layered grays define surfaces by density, not by light. The single roasted accent — Safelight — is the darkroom's glow: it signals live transmission, active capture, and anything that demands the user's attention. The rest of the interface recedes into shadow, precise and present but never competing with the stream.\n\nThis is not a gaming aesthetic — it is a *studio* aesthetic. Every control earns its place through purpose, not decoration. The stream is the subject; the chrome is the enlarger.",
+    "overview": "Slopcast's visual language is the darkroom at work. The interface is a dim, focused space where the only things that matter are the broadcast and the controls that serve it. Deep near-black backgrounds absorb distraction; layered grays define surfaces by density, not by light. The single roasted accent \u2014 Safelight \u2014 is the darkroom's glow: it signals live transmission, active capture, and anything that demands the user's attention. The rest of the interface recedes into shadow, precise and present but never competing with the stream.\n\nThis is not a gaming aesthetic \u2014 it is a *studio* aesthetic. Every control earns its place through purpose, not decoration. The stream is the subject; the chrome is the enlarger. The live signal is distilled to a dot and a word \u2014 no pill, no glow, no wash.",
     "keyCharacteristics": [
       "Monochrome with one shot of roasted amber; 90%+ of any surface is neutral.",
       "Layered darkness distinguishes hierarchy: deeper bg for the canvas, lighter surfaces for controls.",
-      "Edges are soft but never timid — rounded corners on containers, sharp on controls.",
+      "Edges are soft but never timid \u2014 rounded corners on containers, sharp on controls.",
       "Backdrop blur on overlays and headers creates atmospheric depth without breaking the dark field.",
-      "Motion is reserved for signal, not ornament: a pulse for live, a fade for presence, a glow for capture."
+      "Motion is one pulse for live. The title-bar signal is a 6px dot and a word on flat dark \u2014 no pill, no glow, no wash \u2014 everything else stays still."
     ],
     "rules": [
       {
         "name": "The Safelight Rule",
-        "body": "The roasted amber accent appears on at most 10% of any screen. It is reserved exclusively for live/active/capture states and the primary call to action. Overuse dilutes its signal power — if everything glows, nothing is live.",
+        "body": "The roasted amber accent appears on at most 10% of any screen. It is reserved exclusively for live/active/capture states and the primary call to action. Overuse dilutes its signal power \u2014 if everything glows, nothing is live.",
         "section": "colors"
       },
       {
         "name": "The No-Background Rule",
-        "body": "Backgrounds never carry color. Every visible tint comes from surface elevation (bg → surface → elevated), never from a colored wash. The Safelight accent lives only on elements with semantic meaning, never on chrome.",
+        "body": "Backgrounds never carry color. Every visible tint comes from surface elevation (bg \u2192 surface \u2192 elevated), never from a colored wash. The Safelight accent lives only on elements with semantic meaning, never on chrome.",
         "section": "colors"
       },
       {
@@ -326,25 +361,25 @@
       }
     ],
     "dos": [
-      "Do use the Safelight accent sparingly — it signals live, active, or actionable. If it's not one of those three, it should be neutral.",
+      "Do use the Safelight accent sparingly \u2014 it signals live, active, or actionable. If it's not one of those three, it should be neutral.",
       "Do let the stream own the viewport. The interface is the frame, not the picture.",
       "Do use border-gray-800 for structural separation; it's visible but not distracting.",
-      "Do use backdrop blur for depth on overlays, headers, and banners — it creates atmospheric separation without lifting elements off the page.",
+      "Do use backdrop blur for depth on overlays, headers, and banners \u2014 it creates atmospheric separation without lifting elements off the page.",
       "Do keep icon-only controls accessible: aria-label, title, and a visible focus-visible ring matching the Safelight ring spec.",
       "Do wrap dynamically-updating status pills in role=\"status\" aria-live=\"polite\" so screen readers announce transitions; mark their decorative ping dots aria-hidden.",
       "Do give error toasts role=\"alert\" and decorative alert icons aria-hidden=\"true\" so the message text is what the screen reader announces.",
-      "Do use the Label role (text-xs font-semibold uppercase tracking-wider) for all form labels, card titles, and telemetry labels — keep the role consistent across surfaces.",
+      "Do use the Label role (text-xs font-semibold uppercase tracking-wider) for all form labels, card titles, and telemetry labels \u2014 keep the role consistent across surfaces.",
       "Do use text-caption-text for the quietest metadata tier (sparkline captions, telemetry sub-values)."
     ],
     "donts": [
       "Don't add a second accent color. The darkroom has one roasted safelight. If you need to distinguish a secondary state, use neutral hierarchy (weight, size, opacity), not another color. The single exception is the documented Indigo-Platform-Only desktop Wayland/X11 pill.",
       "Don't add shadows as decoration. Flat is the default; shadow is a deliberate response to elevation or focus.",
-      "Don't use light mode or lighter background values for sections — the darkroom is dark everywhere. The darkest background is the canvas; every other surface is lighter, never lighter than Elevated for a fill.",
+      "Don't use light mode or lighter background values for sections \u2014 the darkroom is dark everywhere. The darkest background is the canvas; every other surface is lighter, never lighter than Elevated for a fill.",
       "Don't use gradient backgrounds on content sections. The page background is flat black; surfaces are flat gray. The only gradient is the brand icon box, the Spectator Banner aspirational design, and the gradient-faded video overlay chrome.",
-      "Don't hand-roll status pills and badges — use the shared Badge component. Compose variants via variant and use className only to make the container aware of its surface.",
+      "Don't hand-roll status pills and badges \u2014 use the shared Badge component. Compose variants via variant and use className only to make the container aware of its surface.",
       "Don't inline icon-only buttons without an aria-label and visible focus-visible ring.",
-      "Don't use sub-12px text anywhere — 0.75rem (12px) is the floor. The Label role at text-xs is the smallest permitted size.",
-      "Don't use hardcoded gray values (e.g., text-gray-500) in components — use semantic tokens (text-muted-foreground, text-caption-text, text-foreground) so the palette stays consistent across themes."
+      "Don't use sub-12px text anywhere \u2014 0.75rem (12px) is the floor. The Label role at text-xs is the smallest permitted size.",
+      "Don't use hardcoded gray values (e.g., text-gray-500) in components \u2014 use semantic tokens (text-muted-foreground, text-caption-text, text-foreground) so the palette stays consistent across themes."
     ]
   }
 }
