@@ -133,7 +133,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Cache CEF
+      - name: Cache CEF (Linux)
         if: runner.os == 'Linux'
         uses: actions/cache@v4
         with:
@@ -142,15 +142,23 @@ jobs:
           restore-keys: |
             cef-${{ runner.os }}-
 
+      - name: Cache CEF (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          # ~ expands to C:\Users\runneradmin, i.e. LOCALAPPDATA, on Windows runners
+          path: ~/AppData/Local/tauri-cef
+          key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cef-${{ runner.os }}-
+
       - name: Install Tauri CEF CLI
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           cargo install --git https://github.com/tauri-apps/tauri --branch feat/cef tauri-cli --locked --force
           cargo tauri --version
 
       - name: Verify Tauri CEF runtime
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           if cargo tree --workspace | grep -q 'tauri-runtime-wry '; then
