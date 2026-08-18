@@ -181,14 +181,14 @@ jobs:
             # Use the feat/cef cargo-tauri so cef_path is resolved and sharun_cef is used
             # (npm @tauri-apps/cli 2.11.4 is the wry bundler and would hit linuxdeploy on libcef.so).
             case "${{ matrix.name }}" in
-              linux-appimage) cargo tauri --tauri-dir apps/desktop/src-tauri build --bundles appimage --verbose ;;
-              linux-deb) cargo tauri --tauri-dir apps/desktop/src-tauri build --bundles deb --verbose ;;
+              linux-appimage) cargo tauri build --bundles appimage --verbose ;;
+              linux-deb) cargo tauri build --bundles deb --verbose ;;
               linux-tar)
-                cargo tauri --tauri-dir apps/desktop/src-tauri build --bundles deb --verbose
+                cargo tauri build --bundles deb --verbose
                 ver=$(node -p "require('./package.json').version")
                 cd target/release/bundle/deb && tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_*_amd64.deb 2>/dev/null || tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_"$ver"_amd64 2>/dev/null || tar -czf ../Slopcast-0.1.0-linux-amd64.tar.gz slopcast_*_amd64*
                 ;;
-              *) cargo tauri --tauri-dir apps/desktop/src-tauri build --verbose ;;
+              *) cargo tauri build --verbose ;;
             esac
           else
             pnpm ${{ matrix.script }} --verbose
