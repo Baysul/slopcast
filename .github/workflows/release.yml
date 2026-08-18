@@ -149,6 +149,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Cache CEF
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tauri-cef
+          key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cef-${{ runner.os }}-
+
+      - name: Install Tauri CEF CLI
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo install --git https://github.com/tauri-apps/tauri --branch feat/cef tauri-cli --locked --force
+          cargo tauri --version
+
       - name: Verify Tauri CEF runtime
         if: runner.os == 'Linux'
         shell: bash
@@ -163,11 +179,32 @@ jobs:
             echo "::error::tauri-runtime-cef is missing from the dependency graph"
             exit 1
           fi
+          cargo tauri --version
 
       - name: Build desktop
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
-        run: pnpm ${{ matrix.script }} --verbose
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export CEF_PATH="$HOME/.cache/tauri-cef"
+            pnpm check
+            pnpm desktop:prepare-gstreamer
+            # Use the feat/cef cargo-tauri so cef_path is resolved and sharun_cef is used
+            # (npm @tauri-apps/cli 2.11.4 is the wry bundler and would hit linuxdeploy on libcef.so).
+            case "${{ matrix.name }}" in
+              linux-appimage) cargo tauri --tauri-dir apps/desktop/src-tauri build --bundles appimage --verbose ;;
+              linux-deb) cargo tauri --tauri-dir apps/desktop/src-tauri build --bundles deb --verbose ;;
+              linux-tar)
+                cargo tauri --tauri-dir apps/desktop/src-tauri build --bundles deb --verbose
+                ver=$(node -p "require('./package.json').version")
+                cd target/release/bundle/deb && tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_*_amd64.deb 2>/dev/null || tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_"$ver"_amd64 2>/dev/null || tar -czf ../Slopcast-0.1.0-linux-amd64.tar.gz slopcast_*_amd64*
+                ;;
+              *) cargo tauri --tauri-dir apps/desktop/src-tauri build --verbose ;;
+            esac
+          else
+            pnpm ${{ matrix.script }} --verbose
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
