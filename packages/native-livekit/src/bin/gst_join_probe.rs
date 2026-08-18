@@ -7,9 +7,14 @@
 // like, so a "presenter never appears in the room" report can be
 // reproduced without the Tauri shell. TEMPORARY — deleted after use.
 //
-// Env: PROBE_URL, PROBE_TOKEN, PROBE_ROOM, PROBE_IDENTITY.
+// Env: PROBE_URL, PROBE_TOKEN, PROBE_ROOM, PROBE_IDENTITY,
+// PROBE_CODEC, PROBE_WIDTH, PROBE_HEIGHT, PROBE_FPS, PROBE_BITRATE,
+// PROBE_PLUGIN_DIR (optional; defaults to the repo's prepared runtime).
 
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use native_livekit::{
     CaptureConfig, connect_livekit_room, disconnect_livekit_room, get_native_telemetry,
@@ -18,6 +23,16 @@ use native_livekit::{
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
+}
+
+fn plugin_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("PROBE_PLUGIN_DIR") {
+        return PathBuf::from(dir);
+    }
+    // Scratch probe; resolving from the manifest instead of the CWD keeps
+    // it runnable from any directory on any checkout.
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins")
 }
 
 fn poll(label: &str, seconds: u64) {
@@ -37,11 +52,9 @@ fn poll(label: &str, seconds: u64) {
 }
 
 fn main() {
-    let plugin_dir = std::path::Path::new(
-        "/home/basil/Projects/screen-share/apps/desktop/src-tauri/resources/gstreamer-plugins",
-    );
+    let plugin_dir = plugin_dir();
     println!("[probe] loading plugins from {}", plugin_dir.display());
-    match load_gstreamer_plugins(plugin_dir) {
+    match load_gstreamer_plugins(&plugin_dir) {
         Ok(()) => println!("[probe] plugins loaded"),
         Err(error) => panic!("[probe] plugin load failed: {error}"),
     }
