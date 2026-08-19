@@ -4,12 +4,32 @@ import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SpectatorBanner } from '../components/SpectatorBanner';
 import { VideoPlayer } from '../components/VideoPlayer';
 
 type StatusVariant = 'live' | 'disconnected' | 'info';
+
+// Distilled status signal, matching the desktop titlebar convention: a bare
+// dot + uppercase word, no pill or background. The video owns the viewport.
+const StatusSignal: React.FC<{ variant: StatusVariant; children: React.ReactNode }> = ({ variant, children }) => {
+  let dotClass: string;
+  if (variant === 'live') {
+    dotClass = 'bg-safelight motion-safe:animate-pulse';
+  } else if (variant === 'info') {
+    dotClass = 'bg-white/60';
+  } else {
+    dotClass = 'bg-muted-foreground/60';
+  }
+  const textClass = variant === 'live' ? 'text-safelight' : 'text-muted-foreground';
+
+  return (
+    <span className="inline-flex items-center gap-2 text-xs font-medium uppercase tracking-widest leading-none min-w-0">
+      <span className={`size-1.5 rounded-full shrink-0 ${dotClass}`} aria-hidden="true" />
+      <span className={`truncate min-w-0 ${textClass}`}>{children}</span>
+    </span>
+  );
+};
 
 const DECODER_STALL_THRESHOLD_MS = 8000;
 const DECODER_STALL_CHECK_MS = 2000;
@@ -715,27 +735,23 @@ export const RoomPage: React.FC = () => {
               onClick={() => navigate('/')}
               aria-label="Leave room"
               title="Leave room"
-              className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+              className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
-            <span role="status" aria-live="polite" className="min-w-0">
-              <Badge
-                variant={variant}
-                className="min-w-0 max-w-[60vw] sm:max-w-[320px] shrink transition-colors duration-300"
-              >
-                {connectionStatus === 'live' && (
-                  <span className="relative w-1.5 h-1.5 shrink-0" aria-hidden="true">
-                    <span className="absolute inset-0 rounded-full bg-safelight animate-ping opacity-75" />
-                    <span className="absolute inset-0 rounded-full bg-safelight" />
-                  </span>
-                )}
-                <span className="truncate min-w-0">{statusText}</span>
-              </Badge>
+            <span
+              role="status"
+              aria-live="polite"
+              className="inline-flex items-center min-w-0 max-w-[60vw] sm:max-w-[320px] shrink"
+            >
+              <StatusSignal variant={variant}>{statusText}</StatusSignal>
             </span>
             {participantCount > 0 && (
-              <span className="hidden sm:inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium text-muted-foreground bg-black/40 border border-white/10 backdrop-blur-md shrink-0">
-                {participantCount} spectator{participantCount !== 1 ? 's' : ''}
+              <span className="hidden sm:inline-flex items-center gap-2 text-xs font-medium text-white/60 whitespace-nowrap shrink-0 leading-none">
+                <span className="size-1.5 rounded-full bg-white/25" aria-hidden="true" />
+                <span className="tabular-nums">
+                  {participantCount} spectator{participantCount !== 1 ? 's' : ''}
+                </span>
               </span>
             )}
           </div>
@@ -744,7 +760,7 @@ export const RoomPage: React.FC = () => {
             onClick={copyLink}
             aria-label={copied ? 'Link copied' : 'Copy room link'}
             title="Copy room link"
-            className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+            className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
           >
             <CopyIcon className="w-4 h-4" />
           </button>

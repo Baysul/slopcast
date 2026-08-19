@@ -374,7 +374,7 @@ const MediaControls: React.FC<{
   const FullscreenIcon = isFullscreen ? Minimize : Maximize;
   const volumeValue = isMuted ? 0 : volume;
   const controlClass =
-    'p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black';
+    'p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-all backdrop-blur-sm cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black';
   return (
     <div
       className={`absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-4 pt-12 pb-4 z-20 transition-opacity duration-300 flex items-end justify-between gap-4 ${overlayClass}`}
@@ -390,7 +390,7 @@ const MediaControls: React.FC<{
           <button
             type="button"
             onClick={onToggleMute}
-            className="text-white/60 hover:text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded-md"
+            className="text-white/60 hover:text-white transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black rounded-md"
             title={muteLabel}
             aria-label={muteLabel}
           >
