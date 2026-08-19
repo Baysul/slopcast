@@ -235,7 +235,8 @@ struct NativeLiveKit {
 }
 
 /// ~1.28 s of 10 ms chunks; full means WebRTC encoding is stalled, so the
-/// newest chunk is dropped (drop-newest, like `audio_ring`).
+/// newest chunk is dropped (drop-newest; unlike `audio_ring`, which evicts
+/// the oldest chunk).
 #[cfg(not(target_os = "linux"))]
 const PCM_CHANNEL_CAPACITY: usize = 128;
 

@@ -377,7 +377,6 @@ pub struct AudioRingStats {
     pub captured_chunks: i64,
     pub captured_bytes: i64,
     pub ring_drops: i64,
-    pub tsfn_drops: i64,
     pub truncated_bytes: i64,
 }
 
@@ -393,7 +392,6 @@ pub fn get_audio_ring_stats() -> AudioRingStats {
         captured_chunks: s.captured_chunks as i64,
         captured_bytes: s.captured_bytes as i64,
         ring_drops: s.ring_drops as i64,
-        tsfn_drops: s.tsfn_drops as i64,
         truncated_bytes: s.truncated_bytes as i64,
     }
 }

@@ -598,13 +598,35 @@ pub(crate) fn push_video_frame(sample: crate::desktop_capture::VideoSample) -> R
 }
 
 pub(crate) fn feed_pcm(samples: &[i16]) {
-    let input = AUDIO_INPUT.lock().ok().and_then(|input| input.clone());
-    let Some(input) = input else {
-        return;
-    };
     if samples.is_empty() {
         return;
     }
+    // A silent no-input return is legitimate before any room is connected
+    // (the audio ring runs as soon as capture starts, before Go Live), so
+    // only count it as a drop once a room session exists: the input is then
+    // missing because a rebuild/reconnect tore the audio branch down, and
+    // the chunks really are lost.
+    if !ROOM_CONNECTED.load(Ordering::Relaxed) {
+        return;
+    }
+    let input = AUDIO_INPUT.lock().ok().and_then(|input| input.clone());
+    let Some(input) = input else {
+        AUDIO_PCM_DROPS.fetch_add(1, Ordering::Relaxed);
+        // Rate-limit the warning: at ~50 Hz push cadence a sustained rebuild
+        // would otherwise flood the log with one line per dropped chunk.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(LAST_AUDIO_DROP_WARN_AT.load(Ordering::Relaxed)) >= 5 {
+            LAST_AUDIO_DROP_WARN_AT.store(now, Ordering::Relaxed);
+            log::warn!(
+                "GStreamer audio input absent during video rebuild/reconnect: {} PCM chunks dropped since last report",
+                AUDIO_PCM_DROPS.load(Ordering::Relaxed),
+            );
+        }
+        return;
+    };
 
     if let Err(error) = push_pcm(&input, samples) {
         AUDIO_PCM_DROPS.fetch_add(1, Ordering::Relaxed);
@@ -870,6 +892,14 @@ fn reconnect(
             }
             match command_receiver.recv_timeout(remaining) {
                 Ok(PublisherCommand::StartVideo { config, reply }) => {
+                    if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
+                        // A late process from a reaped worker: answering Ok
+                        // here would leave the caller holding a dead stream.
+                        let _ = reply.send(Err(
+                            "GStreamer publisher worker is stale; reconnecting refreshes it".into(),
+                        ));
+                        continue;
+                    }
                     rate_controller.reset(&config);
                     *video_config = Some(config);
                     let _ = reply.send(Ok(()));
@@ -1623,9 +1653,11 @@ fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> Nat
         });
         // Live appsrc statistics — `dropped` is the stutter diagnostic
         // (buffers the leaky appsrc discarded when the queue was full).
-        if let Ok(input) = VIDEO_INPUT.lock()
-            && let Some(input) = input.as_ref()
-        {
+        // Clone the input out and read stats after dropping the lock: the
+        // capture thread's per-frame push takes the same lock, and a stats
+        // read stalled behind a busy GLib context must not hold it up.
+        let video_input = VIDEO_INPUT.lock().ok().and_then(|input| input.clone());
+        if let Some(input) = video_input {
             let stats = input.appsrc_stats();
             telemetry.video_appsrc_input = stats.input;
             telemetry.video_appsrc_output = stats.output;
