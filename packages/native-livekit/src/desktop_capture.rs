@@ -223,13 +223,26 @@ impl OwnedI420 {
     /// plane allocation directly (no copy), and the scaled destination
     /// allocation is recovered from the buffer it wrapped. Consumes the
     /// source frame.
+    ///
+    /// The converter is cached by (src, dst) dimensions so steady-state
+    /// 1080p60 pays for `VideoConverter::new` only once per resolution
+    /// change — the delivery hot path already drops frames when it slips
+    /// 16 ms (the fixed-deadline `next_delivery_at` skips a missed tick),
+    /// so a per-frame converter construction was measured as a recurring
+    /// frame-interval overrun that directly surfaced as presenter stutter
+    /// at high capture sizes.
     fn scale(self, width: u32, height: u32) -> Result<Self, String> {
+        // Fast path: identical dimensions are handled upstream
+        // (`scale_to_target`), but `keepalive_sample` still routes 1:1
+        // through here when the capture and target resolutions already
+        // match — avoid all VideoInfo allocation in that case.
+        if self.width == width && self.height == height {
+            return Ok(self);
+        }
         let src_info = Self::video_info(self.width, self.height)?;
         let dst_info = Self::video_info(width, height)?;
-        // `VideoConverter::new` rejects differing framerates; both infos are
-        // built without one (fps 0/1), so they always agree.
-        let converter = gst_video::VideoConverter::new(&src_info, &dst_info, None)
-            .map_err(|error| format!("Failed to create I420 scaler: {error}"))?;
+        let converter = Self::cached_converter(&src_info, &dst_info)
+            .ok_or_else(|| "Failed to create I420 scaler".to_string())?;
 
         let mut dest = Self::new(width, height);
         let src_buffer = gst::Buffer::from_mut_slice(self);
@@ -251,6 +264,45 @@ impl OwnedI420 {
             .map_err(|_| "I420 scaler destination lost its wrapped allocation".to_string())?;
         Ok(dest)
     }
+
+    fn cached_converter(
+        src: &gst_video::VideoInfo,
+        dst: &gst_video::VideoInfo,
+    ) -> Option<Arc<gst_video::VideoConverter>> {
+        // `VideoConverter` wraps a non-clonable GStreamer object (no Clone/Copy),
+        // so cache the boxed instance behind an `Arc` keyed on dimensions.
+        // A `Mutex` protects the singleton; the hot path only pays for an
+        // `Arc::clone` after the first hit. A `LazyLock` would complicate
+        // invalidation (resolution changes), and dimensions are small enough
+        // to compare cheaply.
+        #[allow(
+            clippy::type_complexity,
+            reason = "single cache entry keyed on four small dimensions; extracted type would obscure the tuple shape"
+        )]
+        static CACHE: std::sync::Mutex<
+            Option<(u32, u32, u32, u32, Arc<gst_video::VideoConverter>)>,
+        > = std::sync::Mutex::new(None);
+        // Dimensions fully qualify the conversion (format is always I420,
+        // fps is unset — see `video_info`). Two sw/u32 pairs are cheaper to
+        // compare than two `VideoInfo` values.
+        let key = (src.width(), src.height(), dst.width(), dst.height());
+        #[allow(
+            clippy::collapsible_if,
+            reason = "guard + data check are clearer separated here for the cache-hit fast path"
+        )]
+        if let Ok(cache) = CACHE.lock()
+            && let Some((sw, sh, dw, dh, converter)) = cache.as_ref()
+            && (*sw, *sh, *dw, *dh) == key
+        {
+            return Some(Arc::clone(converter));
+        }
+        let converter = gst_video::VideoConverter::new(src, dst, None).ok()?;
+        let wrapped = Arc::new(converter);
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((key.0, key.1, key.2, key.3, Arc::clone(&wrapped)));
+        }
+        Some(wrapped)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -261,8 +313,25 @@ impl AsMut<[u8]> for OwnedI420 {
 }
 
 #[cfg(target_os = "linux")]
+impl OwnedI420 {
+    /// Hands the plane allocation straight to the freelist, skipping the
+    /// `Drop` push (which would return it again on drop). Used by the
+    /// keepalive warm-up, which wants the allocation resident *without*
+    /// an owning buffer instance.
+    fn into_planes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.planes)
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl Drop for OwnedI420 {
     fn drop(&mut self) {
+        // A `std::mem::take`d allocation (the keepalive warm-up's
+        // `into_planes`) leaves an empty shell; never push it back — the
+        // freelist must only ever hold real plane allocations.
+        if self.planes.is_empty() {
+            return;
+        }
         if let Ok(mut freelist) = I420_FREELIST.lock()
             && freelist.len() < I420_FREELIST_CAP
         {
@@ -376,8 +445,43 @@ struct ScaleTarget {
 static SCALE_TARGET: ArcSwapOption<ScaleTarget> = ArcSwapOption::const_empty();
 
 /// Updates the encoder scale target; called when a video track publishes.
+/// On Linux this also warms the I420 freelist with ready-made keepalive
+/// buffers at the target size (see `warm_keepalive_freelist`).
 pub(crate) fn set_scale_target(width: u32, height: u32, fps: u32) {
     SCALE_TARGET.store(Some(Arc::new(ScaleTarget { width, height, fps })));
+    #[cfg(target_os = "linux")]
+    warm_keepalive_freelist(width, height);
+}
+
+/// Pre-allocates two target-sized `OwnedI420` buffers into `I420_FREELIST`
+/// so the first keepalives after a busy stretch never allocate on the
+/// delivery thread. Without this, the stillness onset (the last real
+/// frames' buffers are still held by the pipeline) paid a 2.25 MB
+/// alloc + zero-fill + copy on the delivery path — the same transition
+/// where libvpx's rate controller is already wobbling, so the allocation
+/// hitch compounded the visible "lazy" stutter.
+#[cfg(target_os = "linux")]
+fn warm_keepalive_freelist(width: u32, height: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    // Allocate *before* taking the lock: `OwnedI420::new` pops from the
+    // freelist itself, so holding the mutex across the allocation would
+    // self-deadlock on the non-reentrant lock.
+    let warmed = [
+        OwnedI420::new(width, height).into_planes(),
+        OwnedI420::new(width, height).into_planes(),
+    ];
+    let Ok(mut freelist) = I420_FREELIST.lock() else {
+        log::warn!("I420 freelist lock poisoned; skipping keepalive warm-up");
+        return;
+    };
+    for planes in warmed {
+        if freelist.len() >= I420_FREELIST_CAP {
+            break;
+        }
+        freelist.push(planes);
+    }
 }
 
 /// Clears the encoder scale target; called when the video track stops.
@@ -1141,6 +1245,9 @@ fn keepalive_sample() -> Option<VideoSample> {
         // the brief lock; the scale below runs outside it. The ring stores
         // the *capture* timestamp, so re-deliveries are stamped with the
         // source frame's clock (see the Windows twin's timestamp note).
+        // The allocation is a freelist pop in steady state: `set_scale_target`
+        // warmed the freelist with target-sized buffers, and each keepalive
+        // the pipeline releases lands back in it at capture resolution.
         let mut fresh = OwnedI420::new(entry.width, entry.height);
         let (dst_y, dst_u, dst_v) = fresh.data_mut();
         let n = dst_y.len().min(entry.y_len);
@@ -1703,6 +1810,21 @@ mod probe {
                 panic!("gst::init failed: {error}");
             }
         });
+    }
+
+    /// Serializes tests that touch the process-global capture statics
+    /// (`SCALE_TARGET`, `PREVIEW_I420`, `I420_FREELIST`): cargo runs tests in
+    /// parallel threads, and two tests mutating the shared target/ring state
+    /// interleaved corrupt each other's fixtures (a keepalive scaling to a
+    /// neighboring test's target, a freelist assertion counting another
+    /// test's warmed buffers). Call this guard at the top of every test that
+    /// reads or writes those statics.
+    #[cfg(target_os = "linux")]
+    fn capture_statics_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        GUARD
+            .lock()
+            .unwrap_or_else(|_| panic!("capture statics guard poisoned"))
     }
 
     /// The encode-target scale path uses libwebrtc's libyuv-backed
@@ -2458,6 +2580,7 @@ mod probe {
     #[cfg(target_os = "linux")]
     #[test]
     fn keepalive_sample_scales_to_current_target() {
+        let _guard = capture_statics_guard();
         init_gst();
         set_preview_callback(Box::new(|_bytes, _pts_us| {}));
         set_scale_target(640, 360, 30);
@@ -2508,6 +2631,7 @@ mod probe {
     #[cfg(target_os = "linux")]
     #[test]
     fn keepalive_sample_packs_source_planes_then_scales() {
+        let _guard = capture_statics_guard();
         init_gst();
         set_preview_callback(Box::new(|_bytes, _pts_us| {}));
         set_scale_target(640, 360, 30);
@@ -2560,5 +2684,66 @@ mod probe {
             panic!("PREVIEW_I420 lock poisoned");
         };
         *slot = None;
+    }
+
+    /// `set_scale_target` warms the freelist with two target-sized buffers,
+    /// so the first keepalive after going live never allocates on the
+    /// delivery thread (the stillness-transition hitch). The warmed buffers
+    /// must already carry the target-sized plane layout.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scale_target_warmup_primes_keepalive_freelist() {
+        let _guard = capture_statics_guard();
+        init_gst();
+        clear_i420_freelist();
+        set_scale_target(1920, 1080, 60);
+
+        let freelist_len = I420_FREELIST.lock().map_or_else(
+            |_| panic!("I420 freelist lock poisoned"),
+            |freelist| freelist.len(),
+        );
+        assert!(
+            freelist_len >= 2,
+            "set_scale_target must warm at least two keepalive buffers (got {freelist_len})"
+        );
+        {
+            let freelist = I420_FREELIST
+                .lock()
+                .unwrap_or_else(|_| panic!("I420 freelist lock poisoned"));
+            let layout = OwnedI420::layout(1920, 1080).unwrap_or_else(|error| {
+                panic!("target layout cannot fail: {error}");
+            });
+            for planes in freelist.iter() {
+                assert_eq!(
+                    planes.len(),
+                    layout.size,
+                    "warmed buffer must be target-sized"
+                );
+            }
+        }
+
+        clear_scale_target();
+        clear_i420_freelist();
+    }
+
+    /// Warm-up on a zero-sized target is a no-op (the keepalive arm falls
+    /// back to the source resolution in that state, so there is nothing
+    /// sensible to pre-allocate).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scale_target_warmup_ignores_zero_dimensions() {
+        let _guard = capture_statics_guard();
+        init_gst();
+        clear_i420_freelist();
+        set_scale_target(0, 0, 60);
+
+        let freelist_len = I420_FREELIST.lock().map_or_else(
+            |_| panic!("I420 freelist lock poisoned"),
+            |freelist| freelist.len(),
+        );
+        assert_eq!(freelist_len, 0);
+
+        clear_scale_target();
+        clear_i420_freelist();
     }
 }
