@@ -1098,16 +1098,21 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
             return;
         }
         let frame = convert_frame(width, height, bgra, pts_us);
-        // Stash the newest frame's I420 planes for the preview thread
-        // (skipped when no preview is subscribed — 1080p planes are
-        // ~2.25 MB, a third of the old BGRA copy). The stash write is a
-        // brief memcpy under the lock; the emitter copies out the same way,
-        // so neither side ever holds the lock for a scale or convert.
-        // Always stash at the *capture resolution*: Ring A feeds the
-        // keepalive delivery arm too, which scales to the current
-        // `SCALE_TARGET` at delivery time, so a client-side resolution
-        // change is honored without a capture restart.
-        if let Ok(mut slot) = PREVIEW_I420.lock() {
+        // Stash the newest frame's I420 planes for the preview thread,
+        // skipped when neither consumer exists — the preview emitter/poll
+        // only reads Ring A while `PREVIEW_CALLBACK` is registered, and the
+        // keepalive arm only reads it while a video track is active. 1080p
+        // planes are ~2.25 MB, a third of the old BGRA copy; paying that on
+        // every frame with no consumer is pure waste on the capture thread's
+        // 16.67 ms budget. The stash write is a brief memcpy under the lock;
+        // the emitter copies out the same way, so neither side ever holds
+        // the lock for a scale or convert. Always stash at the *capture
+        // resolution*: Ring A feeds the keepalive delivery arm too, which
+        // scales to the current `SCALE_TARGET` at delivery time, so a
+        // client-side resolution change is honored without a capture restart.
+        let ring_has_consumers =
+            crate::is_video_track_active() || PREVIEW_CALLBACK.load_full().is_some();
+        if ring_has_consumers && let Ok(mut slot) = PREVIEW_I420.lock() {
             let ring = slot.get_or_insert_with(|| HistoryRing::new(HISTORY_RING_CAPACITY));
             let (plane_y, plane_u, plane_v) = frame.buffer.data();
             // `push_planes` packs the planes straight into the ring slot —
@@ -2192,6 +2197,7 @@ mod probe {
     #[test]
     #[ignore = "probe: runs the synthetic capture thread for a few seconds"]
     fn synthetic_capture_probe() {
+        init_gst();
         let config = CaptureConfig {
             width: 1280,
             height: 720,
@@ -2273,7 +2279,7 @@ mod probe {
             STATS_PREVIEW_SENT.load(Ordering::Relaxed),
         );
         if STATS_PUSHED.load(Ordering::Relaxed) == 0 {
-            eprintln!("[probe] WARNING: no frames pushed — run pw_video_probe first");
+            eprintln!("[probe] WARNING: no frames pushed — portal capture needs a Wayland session");
         }
     }
 

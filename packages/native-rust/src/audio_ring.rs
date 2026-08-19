@@ -54,14 +54,12 @@ pub(crate) struct AudioRingStats {
     pub captured_chunks: u64,
     pub captured_bytes: u64,
     pub ring_drops: u64,
-    pub tsfn_drops: u64,
     pub truncated_bytes: u64,
 }
 
 static CAPTURED_CHUNKS: AtomicU64 = AtomicU64::new(0);
 static CAPTURED_BYTES: AtomicU64 = AtomicU64::new(0);
 static RING_DROPS: AtomicU64 = AtomicU64::new(0);
-static TSFN_DROPS: AtomicU64 = AtomicU64::new(0);
 static TRUNCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 static AUDIO_PRODUCER: ArcSwapOption<AudioProducer> = ArcSwapOption::const_empty();
@@ -342,9 +340,9 @@ fn stop_audio_ring_internal(guard: &mut Option<AudioRingSession>) {
             // `AUDIO_RING_LIFECYCLE` (and `CAPTURE_STATE` above it) is held
             // would deadlock the moment that callback ever re-enters
             // capture control. Same detached-reaper pattern as the capture
-            // and metering workers. The worker drains and exits on its stop
-            // flag; `AUDIO_PRODUCER` is already swapped to `None`, so no new
-            // chunks can arrive.
+            // and metering workers. The worker exits on its stop flag
+            // without draining queued chunks; `AUDIO_PRODUCER` is already
+            // swapped to `None`, so no new chunks can arrive.
             let _ = thread::Builder::new()
                 .name("audio-ring-reaper".into())
                 .spawn(move || {
@@ -368,7 +366,6 @@ pub(crate) fn get_audio_ring_stats() -> AudioRingStats {
         captured_chunks: CAPTURED_CHUNKS.load(Ordering::Relaxed),
         captured_bytes: CAPTURED_BYTES.load(Ordering::Relaxed),
         ring_drops: RING_DROPS.load(Ordering::Relaxed),
-        tsfn_drops: TSFN_DROPS.load(Ordering::Relaxed),
         truncated_bytes: TRUNCATED_BYTES.load(Ordering::Relaxed),
     }
 }
@@ -377,7 +374,6 @@ pub(crate) fn reset_audio_ring_stats() {
     CAPTURED_CHUNKS.store(0, Ordering::Relaxed);
     CAPTURED_BYTES.store(0, Ordering::Relaxed);
     RING_DROPS.store(0, Ordering::Relaxed);
-    TSFN_DROPS.store(0, Ordering::Relaxed);
     TRUNCATED_BYTES.store(0, Ordering::Relaxed);
 }
 
@@ -509,7 +505,6 @@ mod tests {
         assert_eq!(stats.captured_chunks, 0);
         assert_eq!(stats.captured_bytes, 0);
         assert_eq!(stats.ring_drops, 0);
-        assert_eq!(stats.tsfn_drops, 0);
         assert_eq!(stats.truncated_bytes, 0);
         stop_audio_ring();
     }
