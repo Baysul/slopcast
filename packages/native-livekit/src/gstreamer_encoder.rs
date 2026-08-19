@@ -14,7 +14,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::CaptureConfig;
@@ -119,7 +119,9 @@ pub(crate) struct VideoInput {
     appsrc: gst_app::AppSrc,
     width: u32,
     height: u32,
-    fps: u32,
+    /// Shared cadence for buffer durations and PTS clamping: a live fps
+    /// change updates it once and every clone reads the new value.
+    fps: Arc<AtomicU32>,
     /// Capture-clock anchor `(C0_us, P0_ns)`: the first pushed frame's
     /// capture timestamp and the pipeline running time at that instant.
     /// Every frame's PTS is then `P0 + (capture_timestamp - C0)`, which
@@ -181,22 +183,36 @@ impl VideoInput {
             .lock()
             .map_err(|_| "video PTS monotonicity lock poisoned".to_string())?;
         let pts_ns = match *last_pts {
-            Some(previous) if pts_ns <= previous => previous + frame_duration(self.fps).nseconds(),
+            Some(previous) if pts_ns <= previous => {
+                previous + frame_duration(self.fps.load(Ordering::Relaxed)).nseconds()
+            }
             _ => pts_ns,
         };
         *last_pts = Some(pts_ns);
         drop(last_pts);
+        let fps = self.fps.load(Ordering::Relaxed);
         let buffer_ref = buffer
             .get_mut()
             .ok_or_else(|| "GStreamer input buffer is unexpectedly shared".to_string())?;
         buffer_ref.set_pts(gst::ClockTime::from_nseconds(pts_ns));
-        buffer_ref.set_duration(frame_duration(self.fps));
+        buffer_ref.set_duration(frame_duration(fps));
 
         self.appsrc
             .push_buffer(buffer)
             .map_err(|error| format!("GStreamer appsrc rejected an I420 frame: {error}"))?;
 
         Ok(())
+    }
+
+    /// The active buffer cadence; the publisher updates it on a live fps
+    /// change and `push_frame` reads it per frame.
+    pub(crate) fn fps(&self) -> u32 {
+        self.fps.load(Ordering::Relaxed)
+    }
+
+    /// Updates the buffer cadence in place (no pipeline rebuild).
+    pub(crate) fn set_fps(&self, fps: u32) {
+        self.fps.store(fps, Ordering::Relaxed);
     }
 
     /// Live appsrc statistics — `dropped` counts buffers the appsrc discarded
@@ -459,7 +475,7 @@ impl GstreamerEncoder {
                 appsrc,
                 width: config.width,
                 height: config.height,
-                fps: config.fps,
+                fps: Arc::new(AtomicU32::new(config.fps)),
                 pts_anchor: Arc::new(Mutex::new(None)),
                 last_pts_ns: Arc::new(Mutex::new(None)),
             },
