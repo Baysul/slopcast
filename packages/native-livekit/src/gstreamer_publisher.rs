@@ -381,10 +381,11 @@ pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
 }
 
 /// Whether the active codec supports in-place ceiling changes. VPx/VA rate
-/// knobs change mid-stream; libaom `av1enc`'s CBR `target-bitrate`
-/// reconfiguration mid-stream is unverified, so AV1 is pinned to its
-/// configured ceiling for now. The default codec (no `video_codec`) is VP8,
-/// which can adapt.
+/// knobs change mid-stream — including `vah264enc` QVBR, whose `bitrate`/
+/// `target-percentage` re-derive the driver maximum in PLAYING state;
+/// libaom `av1enc`'s CBR `target-bitrate` reconfiguration mid-stream is
+/// unverified, so AV1 is pinned to its configured ceiling for now. The
+/// default codec (no `video_codec`) is VP8, which can adapt.
 fn can_adapt(codec: Option<&str>) -> bool {
     !matches!(codec.unwrap_or("vp8"), "av1")
 }
@@ -1463,8 +1464,36 @@ pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
 
 fn supported_video_caps() -> gst::Caps {
     gst::Caps::builder_full()
-        .structure(gst::Structure::builder("video/x-h264").build())
-        .structure(gst::Structure::builder("video/x-h265").build())
+        // Offer the full H.264 profile ladder (see sink_video_caps): any
+        // `High` decoder can decode `constrained-baseline`; pinning only
+        // the baseline would filter Chrome's `High` offer for no gain.
+        .structure(
+            gst::Structure::builder("video/x-h264")
+                .field("stream-format", "avc")
+                .field("alignment", "au")
+                .field("profile", "constrained-baseline")
+                .build(),
+        )
+        .structure(
+            gst::Structure::builder("video/x-h264")
+                .field("stream-format", "avc")
+                .field("alignment", "au")
+                .field("profile", "main")
+                .build(),
+        )
+        .structure(
+            gst::Structure::builder("video/x-h264")
+                .field("stream-format", "avc")
+                .field("alignment", "au")
+                .field("profile", "high")
+                .build(),
+        )
+        .structure(
+            gst::Structure::builder("video/x-h265")
+                .field("stream-format", "byte-stream")
+                .field("alignment", "au")
+                .build(),
+        )
         .structure(gst::Structure::builder("video/x-vp8").build())
         .structure(gst::Structure::builder("video/x-vp9").build())
         .structure(gst::Structure::builder("video/x-av1").build())
@@ -1472,16 +1501,40 @@ fn supported_video_caps() -> gst::Caps {
 }
 
 fn sink_video_caps(codec: &str) -> Result<gst::Caps, String> {
-    let media_type = match codec {
-        "vp8" => "video/x-vp8",
-        "vp9" => "video/x-vp9",
-        "h264" => "video/x-h264",
-        "h265" => "video/x-h265",
-        "av1" => "video/x-av1",
+    let caps = match codec {
+        "vp8" => gst::Caps::builder("video/x-vp8").build(),
+        "vp9" => gst::Caps::builder("video/x-vp9").build(),
+        "h264" => gst::Caps::builder_full()
+            .structure(
+                gst::Structure::builder("video/x-h264")
+                    .field("stream-format", "avc")
+                    .field("alignment", "au")
+                    .field("profile", "constrained-baseline")
+                    .build(),
+            )
+            .structure(
+                gst::Structure::builder("video/x-h264")
+                    .field("stream-format", "avc")
+                    .field("alignment", "au")
+                    .field("profile", "main")
+                    .build(),
+            )
+            .structure(
+                gst::Structure::builder("video/x-h264")
+                    .field("stream-format", "avc")
+                    .field("alignment", "au")
+                    .field("profile", "high")
+                    .build(),
+            )
+            .build(),
+        "h265" => gst::Caps::builder("video/x-h265")
+            .field("stream-format", "byte-stream")
+            .field("alignment", "au")
+            .build(),
+        "av1" => gst::Caps::builder("video/x-av1").build(),
         other => return Err(format!("Unsupported codec: {other}")),
     };
-
-    Ok(gst::Caps::builder(media_type).build())
+    Ok(caps)
 }
 
 pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)> {

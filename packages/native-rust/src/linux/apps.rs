@@ -21,6 +21,28 @@ static PW_ACCESS: Mutex<()> = Mutex::new(());
 /// same-named applications apart. Browsers put the tab title in `media.name`;
 /// values that just restate the app name or a generic role are not titles.
 fn stream_window_title(props: &DictRef, app_name: &str) -> Option<String> {
+    for key in [
+        "media.name",
+        "media.title",
+        "window.title",
+        "node.description",
+    ] {
+        let Some(value) = props.get(key).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        if is_generic_title(value, app_name) {
+            continue;
+        }
+        return Some(value.into());
+    }
+    None
+}
+
+/// True for values that restate the app name or a generic stream role.
+/// `WirePlumber`'s numbered defaults ("audio stream #1") count as generic once
+/// the trailing " #<n>" counter is stripped, so the picker falls back to its
+/// "N audio streams" count label instead of displaying them as titles.
+fn is_generic_title(value: &str, app_name: &str) -> bool {
     const GENERIC: [&str; 11] = [
         "playback",
         "playback stream",
@@ -34,21 +56,18 @@ fn stream_window_title(props: &DictRef, app_name: &str) -> Option<String> {
         "audio",
         "stream",
     ];
-    for key in [
-        "media.name",
-        "media.title",
-        "window.title",
-        "node.description",
-    ] {
-        let Some(value) = props.get(key).filter(|v| !v.is_empty()) else {
-            continue;
-        };
-        if value == app_name || GENERIC.contains(&value.to_lowercase().as_str()) {
-            continue;
-        }
-        return Some(value.into());
+
+    if value == app_name {
+        return true;
     }
-    None
+    let lower = value.to_lowercase();
+    if GENERIC.contains(&lower.as_str()) {
+        return true;
+    }
+
+    lower.split_once(" #").is_some_and(|(base, suffix)| {
+        !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) && GENERIC.contains(&base)
+    })
 }
 
 /// True when a `PipeWire` client should never be offered as an audio capture
@@ -418,7 +437,7 @@ pub(crate) fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{append_idle_clients, is_skip_client};
+    use super::{append_idle_clients, is_generic_title, is_skip_client};
     use crate::AudioApp;
     use std::collections::HashMap;
 
@@ -498,6 +517,33 @@ mod tests {
         let clients = HashMap::from([(1, (42u32, "Spotify".to_string()))]);
         append_idle_clients(&mut apps, clients);
         assert_eq!(apps.len(), 1, "a stream-owning pid must not be duplicated");
+    }
+
+    #[test]
+    fn generic_titles_include_numbered_stream_defaults() {
+        for generic in [
+            "Audio Stream #1",
+            "audio stream #12",
+            "playback stream #3",
+            "audio stream",
+            "playback",
+        ] {
+            assert!(
+                is_generic_title(generic, "Chromium"),
+                "{generic} must be generic"
+            );
+        }
+        assert!(is_generic_title("Chromium", "Chromium"));
+        for title in [
+            "YouTube - audio stream",
+            "audio stream #x",
+            "Never Gonna Give You Up",
+        ] {
+            assert!(
+                !is_generic_title(title, "Chromium"),
+                "{title} must be a real title"
+            );
+        }
     }
 
     #[test]

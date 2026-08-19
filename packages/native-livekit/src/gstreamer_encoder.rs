@@ -1,11 +1,15 @@
 //! Linux video encoder branch attached to `livekitwebrtcsink`.
 //!
-//! `vah264enc`/`vah265enc` provide a hard VBR ceiling through
-//! `target-percentage`; the software encoders run CBR (`VPx` in automatic
-//! mode, libaom `av1enc` always) or the ceiling-capped VBR quality target
-//! (manual-mode `VPx`, `x264enc`/`x265enc` always), where the requested rate
-//! is a target the output can vary around. The publisher's congestion
-//! controller re-targets each encoder at runtime through
+//! `vah264enc` runs quality-defined VBR (`qvbr`): the configured ceiling is
+//! the encoder's **maximum** bitrate (the same `bitrate × 100 /
+//! target-percentage` derivation as VBR, `VBR_TARGET_PERCENTAGE`) while
+//! `qpi` sets the base quality factor, so the per-frame output is capped by
+//! the driver instead of converging on a rate target over a window;
+//! `vah265enc` keeps VBR with the same ceiling pinning. The software
+//! encoders run CBR (`VPx` in automatic mode, libaom `av1enc` always) or
+//! the ceiling-capped VBR quality target (manual-mode `VPx`,
+//! `x264enc`/`x265enc` always). The publisher's congestion controller
+//! re-targets each encoder at runtime through
 //! `GstreamerEncoder::set_ceiling_kbps`.
 
 use gstreamer as gst;
@@ -27,6 +31,18 @@ use crate::desktop_capture::VideoSample;
 /// threshold for its local backpressure signal.
 pub(crate) const APPSRC_MAX_BUFFERS: u64 = 6;
 const GOP_SECONDS: u32 = 1;
+/// H.264 IDR interval in seconds. VBR quality intra frames are large
+/// (multi-megabit), so the shared 1 s GOP bursts 2-4 Mbit into the
+/// non-leaky output queue every 60 frames — at 20 Mbps ceilings that
+/// overflows the queue and the receiver's jitter buffer (periodic hitch).
+/// Two seconds halves the burst frequency without meaningfully slowing
+/// join-time keyframe recovery.
+const H264_GOP_SECONDS: u32 = 2;
+/// Base quality factor for `vah264enc` QVBR (`qpi`, the H.264 QP scale):
+/// the driver chooses the per-macroblock QP that meets this quality
+/// without exceeding the ceiling. VA-API QVBR defaults it to 26 when left
+/// unset — a mid-range, driver-neutral base.
+const H264_QVBR_QUALITY: u32 = 26;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
 /// `rate-control = vbr`, `vah264enc` computes the encoder's **maximum**
@@ -44,7 +60,8 @@ const VBR_TARGET_PERCENTAGE: u32 = 80;
 /// predictable output is worth more than VBR quality bursts, and the
 /// congestion controller's ceiling step is directly observable as bits/s.
 /// VBR keeps the ceiling-capped quality-target behavior for manual/high
-/// bitrate sessions and for the `vah264enc` hardware path.
+/// bitrate sessions and for the `vah265enc` hardware path (`vah264enc`
+/// runs QVBR, whose `bitrate` semantics match VBR's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RateMode {
     Cbr,
@@ -306,15 +323,20 @@ impl GstreamerEncoder {
         // Rate mode: VP8/VP9 run CBR in automatic mode (predictable output
         // beats VBR bursts under a real-time requirement) and keep the
         // ceiling-capped VBR quality target in manual mode; libaom av1enc
-        // always runs CBR at the ceiling; H.264/H.265 keep VBR with the
-        // ceiling pinned by `target-percentage` (see VBR_TARGET_PERCENTAGE).
+        // always runs CBR at the ceiling; H.264 runs QVBR with the ceiling
+        // as the encoder maximum and H.265 keeps VBR with the ceiling
+        // pinned by `target-percentage` (see VBR_TARGET_PERCENTAGE).
         let rate_mode = match codec {
             "av1" => RateMode::Cbr,
             "h264" | "h265" => RateMode::Vbr,
             _ if config.auto_bitrate => RateMode::Cbr,
             _ => RateMode::Vbr,
         };
-        let key_int_max = config.fps.saturating_mul(GOP_SECONDS).min(1024);
+        let key_int_max = if codec == "h264" {
+            config.fps.saturating_mul(H264_GOP_SECONDS).min(1024)
+        } else {
+            config.fps.saturating_mul(GOP_SECONDS).min(1024)
+        };
         let encoder = gst::ElementFactory::make(encoder_name)
             .build()
             .map_err(|error| {
@@ -569,7 +591,26 @@ fn configure_encoder(
         if encoder.find_property("dct8x8").is_some() {
             encoder.set_property("dct8x8", false);
         }
-        if encoder.find_property("rate-control").is_some() {
+        if encoder
+            .factory()
+            .is_some_and(|factory| factory.name() == "vah264enc")
+        {
+            // QVBR: the ceiling is the encoder's maximum (same
+            // `target-percentage` derivation as VBR) and `qpi` is the base
+            // quality factor the driver spends up to the ceiling. The
+            // per-frame cap prevents the VBR feedback loop's window-averaged
+            // overshoot, whose bursts stalled the encoder branch (see the
+            // output-queue comment). An unsupported driver falls back to CBR
+            // inside the plugin with the same bitrate knobs, so the
+            // properties stay valid either way.
+            if encoder.find_property("rate-control").is_some() {
+                encoder.set_property_from_str("rate-control", "qvbr");
+            }
+            if encoder.find_property("qpi").is_some() {
+                encoder.set_property("qpi", H264_QVBR_QUALITY);
+            }
+        } else if encoder.find_property("rate-control").is_some() {
+            // The x264enc fallback has no QVBR mode; keep ceiling-capped VBR.
             encoder.set_property_from_str("rate-control", "vbr");
         }
         // The x264enc fallback (no VA display) disables B-frames above but
@@ -587,7 +628,7 @@ fn configure_encoder(
                 encoder.set_property_from_str("speed-preset", "veryfast");
             }
             if encoder.find_property("rc-lookahead").is_some() {
-                encoder.set_property("rc-lookahead", 0_u32);
+                encoder.set_property("rc-lookahead", 0_i32);
             }
             if encoder.find_property("sync-lookahead").is_some() {
                 encoder.set_property("sync-lookahead", 0_i32);
@@ -619,8 +660,11 @@ fn configure_encoder(
             // VP9 realtime screen-share profile: `cpu-used=10` favors
             // throughput so high-motion 1080p60 frames stay inside their
             // deadline, while row/tile parallelism spreads the work over
-            // the encoder threads. The full quantizer range lets CBR shed
-            // quality instead of falling behind on complex scenes, and
+            // the encoder threads. The quantizer range lets CBR shed
+            // quality instead of falling behind on complex scenes —
+            // `max-quantizer=63` gives the controller headroom, while
+            // `min-quantizer=10` (below) stops it from idling at QP 0 on
+            // still content and overshooting when motion returns.
             // `max-intra-bitrate=300` (a libvpx percentage of the target)
             // bounds keyframe bursts on scene changes.
             // `error-resilient` is left at its default — WebRTC's own loss
@@ -643,6 +687,28 @@ fn configure_encoder(
             }
             if encoder.find_property("max-intra-bitrate").is_some() {
                 encoder.set_property_from_str("max-intra-bitrate", "300");
+            }
+            // Mirror the AV1/WebRTC treatment: `min-quantizer` (default 0)
+            // is the hard quality floor — after a still stretch the CBR
+            // buffer refills at the undershoot floor and QP walks down to
+            // zero, so the first frames of returning motion overshoot until
+            // the buffer drains (the "lazy" hitch). Pinning the floor to 10
+            // stops the controller from idling in the near-lossless corner
+            // it then has to recover from, while still spending freely on
+            // truly static content (those frames never approach the floor).
+            // `undershoot`/`overshoot` (default 25) cap the per-frame
+            // target-size adjustment the CBR buffer correction may apply;
+            // 50/50 matches WebRTC's libaom AV1 RTC path and keeps the
+            // target closer to the optimal-buffer rate without letting a
+            // single deviation swing the frame target more than 25%.
+            if encoder.find_property("min-quantizer").is_some() {
+                encoder.set_property_from_str("min-quantizer", "10");
+            }
+            if encoder.find_property("undershoot").is_some() {
+                encoder.set_property("undershoot", 50_i32);
+            }
+            if encoder.find_property("overshoot").is_some() {
+                encoder.set_property("overshoot", 50_i32);
             }
         } else if codec == "vp8" {
             // vp8enc defaults cpu-used to 0 (slowest): fast enough for the
@@ -1062,6 +1128,86 @@ mod tests {
     }
 
     #[test]
+    fn vah264_hardware_configures_qvbr_ceiling_and_quality() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+        // Skip when the machine has no VA-API H.264 encode path (software
+        // x264 fallback machines run the x264 test instead).
+        if !crate::gstreamer_publisher::can_initialize_element("vah264enc") {
+            return Ok(());
+        }
+
+        let encoder = gst::ElementFactory::make("vah264enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let ceiling_kbps = 20_000;
+        configure_encoder(
+            &encoder,
+            "h264",
+            encoder_target_kbps(RateMode::Vbr, ceiling_kbps),
+            120,
+            RateMode::Vbr,
+        );
+
+        // QVBR keeps the VBR ceiling derivation (`bitrate` is the VBR
+        // target, 80% of the ceiling; `target-percentage` pins the driver
+        // maximum onto the ceiling) and adds `qpi` as the base quality
+        // factor. The per-frame cap prevents the VBR feedback loop's
+        // window-averaged overshoot from stalling the encoder branch.
+        assert_eq!(encoder.property::<u32>("bitrate"), 16_000);
+        assert_eq!(encoder.property::<u32>("target-percentage"), 80);
+        assert_eq!(
+            encoder
+                .property_value("rate-control")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "qvbr"
+        );
+        assert_eq!(encoder.property::<u32>("qpi"), H264_QVBR_QUALITY);
+        // Low-latency realtime profile: single reference, no B-frames
+        // (reordering delay), fastest target-usage.
+        assert_eq!(encoder.property::<u32>("ref-frames"), 1);
+        assert_eq!(encoder.property::<u32>("b-frames"), 0);
+        assert_eq!(encoder.property::<u32>("target-usage"), 7);
+
+        Ok(())
+    }
+
+    #[test]
+    fn x264_fallback_keeps_ceiling_capped_vbr() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let encoder = gst::ElementFactory::make("x264enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(&encoder, "h264", 16_000, 120, RateMode::Vbr);
+
+        // The software fallback has no QVBR mode, so it keeps VBR at the
+        // 80% target.
+        assert_eq!(encoder.property::<u32>("bitrate"), 16_000);
+        // x264enc's `tune` is a dynamically-registered flags type with no
+        // Rust type to fetch; read the set nicks through the GLib flags
+        // class and assert zerolatency.
+        let tune = encoder.property_value("tune");
+        let (_, values) = gst::glib::FlagsValue::from_value(&tune)
+            .ok_or_else(|| "tune is not a flags value".to_string())?;
+        let nicks = values.iter().map(|value| value.nick()).collect::<Vec<_>>();
+        assert!(nicks.contains(&"zerolatency"), "tune nicks: {nicks:?}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn h264_gop_interval_is_two_seconds() {
+        // The H.264 IDR interval is 2 s (not the shared 1 s GOP): VBR/qvbr
+        // quality intra frames are multi-megabit, and a 1 s cadence burst
+        // them into the output queue and the receiver's jitter buffer at
+        // high ceilings (the periodic hitch).
+        assert_eq!(H264_GOP_SECONDS, 2);
+        assert_eq!(60_u32.saturating_mul(H264_GOP_SECONDS).min(1024), 120);
+    }
+
+    #[test]
     fn vah265_hardware_configures_vbr_target_pinned_to_the_ceiling() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
         // Skip when the machine has no VA-API H.265 encode path (software
@@ -1330,8 +1476,9 @@ mod tests {
         assert_eq!(encoder.property::<i32>("tile-columns"), 2);
         assert_eq!(encoder.property::<i32>("threads"), 8);
         // Rate control: CBR target applied in bits/sec, keyframe burst
-        // capped at 300% of the target, and the full quantizer range gives
-        // the controller enough headroom for busy scenes.
+        // capped at 300% of the target, and the quantizer range gives the
+        // controller headroom in both directions (min 10 stops the
+        // near-lossless idle after still stretches).
         assert_eq!(encoder.property::<i32>("target-bitrate"), 8_000_000);
         assert_eq!(
             encoder
@@ -1343,6 +1490,11 @@ mod tests {
         );
         assert_eq!(encoder.property::<i32>("max-intra-bitrate"), 300);
         assert_eq!(encoder.property::<i32>("max-quantizer"), 63);
+        // WebRTC's libaom AV1 treatment mirrored on VP9: min Q 10,
+        // undershoot/overshoot 50 (the libvpx default is 25).
+        assert_eq!(encoder.property::<i32>("min-quantizer"), 10);
+        assert_eq!(encoder.property::<i32>("undershoot"), 50);
+        assert_eq!(encoder.property::<i32>("overshoot"), 50);
 
         Ok(())
     }

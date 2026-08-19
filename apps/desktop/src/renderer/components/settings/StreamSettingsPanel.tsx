@@ -181,7 +181,7 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                   Bitrate Limit
                 </label>
                 <Select
-                  value={String(bitrateLimit)}
+                  value={String(autoBitrate ? effectiveBitrate : bitrateLimit)}
                   onValueChange={(v) => setBitrateLimit(Number(v))}
                   disabled={autoBitrate}
                 >
@@ -189,6 +189,9 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    {autoBitrate && !bitrateOptions.includes(effectiveBitrate) && (
+                      <SelectItem value={String(effectiveBitrate)}>{fmtBitrate(effectiveBitrate)}</SelectItem>
+                    )}
                     {bitrateOptions.map((bps) => (
                       <SelectItem key={bps} value={String(bps)}>
                         {fmtBitrate(bps)}
@@ -196,9 +199,6 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  {autoBitrate ? `Auto: ${fmtBitrate(effectiveBitrate)}` : 'Manual bitrate selected.'}
-                </p>
               </div>
             </div>
 

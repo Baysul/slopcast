@@ -194,6 +194,35 @@ const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapsh
   return snapshot;
 };
 
+const evaluateNegotiationFailure = (
+  stats: VideoStatSnapshot,
+  stallStartRef: React.RefObject<number>,
+  setDecoderStalled: (v: boolean) => void,
+  setStalledCodec: (v: string | null) => void,
+): boolean => {
+  if (!(stats.packetsReceived > 0 && stats.codecMime == null)) return false;
+
+  if (stallStartRef.current === 0) {
+    stallStartRef.current = Date.now();
+    console.warn(
+      `[Room] Negotiation failure: packets=${stats.packetsReceived} framesReceived=${stats.framesReceived} ` +
+        `framesDecoded=${stats.framesDecoded} codecMime=${stats.codecMime} impl=${stats.decoderImpl} — ` +
+        `check offer caps / SDP fmtp`,
+    );
+  }
+
+  if (Date.now() - stallStartRef.current >= DECODER_STALL_THRESHOLD_MS) {
+    setDecoderStalled(true);
+    setStalledCodec(null);
+    console.error(
+      `[Room] SDP/caps negotiation failure confirmed after ${DECODER_STALL_THRESHOLD_MS}ms: ` +
+        `packets=${stats.packetsReceived} but no inbound-rtp codec binding — ` +
+        `sink sink_video_caps / supported_video_caps mismatch (H.264 stream-format/profile)`,
+    );
+  }
+  return true;
+};
+
 const evaluateStall = (
   stats: VideoStatSnapshot,
   stallStartRef: React.RefObject<number>,
@@ -201,6 +230,8 @@ const evaluateStall = (
   setDecoderStalled: (v: boolean) => void,
   setStalledCodec: (v: string | null) => void,
 ): void => {
+  if (evaluateNegotiationFailure(stats, stallStartRef, setDecoderStalled, setStalledCodec)) return;
+
   if (stats.packetsReceived > 0 && stats.framesDecoded === 0) {
     if (stallStartRef.current === 0) {
       stallStartRef.current = Date.now();
