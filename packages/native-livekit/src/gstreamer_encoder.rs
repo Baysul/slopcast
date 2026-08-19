@@ -1,11 +1,9 @@
 //! Linux video encoder branch attached to `livekitwebrtcsink`.
 //!
-//! `vah264enc` runs quality-defined VBR (`qvbr`): the configured ceiling is
-//! the encoder's **maximum** bitrate (the same `bitrate × 100 /
-//! target-percentage` derivation as VBR, `VBR_TARGET_PERCENTAGE`) while
-//! `qpi` sets the base quality factor, so the per-frame output is capped by
-//! the driver instead of converging on a rate target over a window;
-//! `vah265enc` keeps VBR with the same ceiling pinning. The software
+//! `vah264enc` runs CBR at the configured ceiling: the `bitrate` is applied
+//! verbatim as the encoder's target for predictable output under the
+//! real-time requirement; `vah265enc` keeps VBR with the same ceiling
+//! pinning via `target-percentage`. The software
 //! encoders run CBR (`VPx` in automatic mode, libaom `av1enc` always) or
 //! the ceiling-capped VBR quality target (manual-mode `VPx`,
 //! `x264enc`/`x265enc` always). The publisher's congestion controller
@@ -38,10 +36,9 @@ const GOP_SECONDS: u32 = 1;
 /// Two seconds halves the burst frequency without meaningfully slowing
 /// join-time keyframe recovery.
 const H264_GOP_SECONDS: u32 = 2;
-/// Base quality factor for `vah264enc` QVBR (`qpi`, the H.264 QP scale):
-/// the driver chooses the per-macroblock QP that meets this quality
-/// without exceeding the ceiling. VA-API QVBR defaults it to 26 when left
-/// unset — a mid-range, driver-neutral base.
+/// Base quality factor for `vah264enc` QVBR (`qpi`): retained for reference;
+/// the `vah264enc` path now runs CBR and does not use `qpi`.
+#[allow(dead_code, reason = "retained for reference; vah264enc now runs CBR")]
 const H264_QVBR_QUALITY: u32 = 26;
 
 /// VBR target as a percentage of the presenter's bitrate ceiling. With
@@ -328,6 +325,7 @@ impl GstreamerEncoder {
         // pinned by `target-percentage` (see VBR_TARGET_PERCENTAGE).
         let rate_mode = match codec {
             "av1" => RateMode::Cbr,
+            "h264" if encoder_name == "vah264enc" => RateMode::Cbr,
             "h264" | "h265" => RateMode::Vbr,
             _ if config.auto_bitrate => RateMode::Cbr,
             _ => RateMode::Vbr,
@@ -573,7 +571,10 @@ fn configure_encoder(
     if codec == "h265" {
         configure_h265(encoder);
     } else if codec == "h264" {
-        if encoder.find_property("target-percentage").is_some() {
+        let is_vah264 = encoder
+            .factory()
+            .is_some_and(|factory| factory.name() == "vah264enc");
+        if !is_vah264 && encoder.find_property("target-percentage").is_some() {
             encoder.set_property_from_str("target-percentage", &VBR_TARGET_PERCENTAGE.to_string());
         }
         if encoder.find_property("target-usage").is_some() {
@@ -591,23 +592,12 @@ fn configure_encoder(
         if encoder.find_property("dct8x8").is_some() {
             encoder.set_property("dct8x8", false);
         }
-        if encoder
-            .factory()
-            .is_some_and(|factory| factory.name() == "vah264enc")
-        {
-            // QVBR: the ceiling is the encoder's maximum (same
-            // `target-percentage` derivation as VBR) and `qpi` is the base
-            // quality factor the driver spends up to the ceiling. The
-            // per-frame cap prevents the VBR feedback loop's window-averaged
-            // overshoot, whose bursts stalled the encoder branch (see the
-            // output-queue comment). An unsupported driver falls back to CBR
-            // inside the plugin with the same bitrate knobs, so the
-            // properties stay valid either way.
+        if is_vah264 {
+            // CBR at the ceiling: predictable output, no VBR/qvbr
+            // window-averaged overshoot that burst multi-megabit I-frames
+            // into the non-leaky output queue.
             if encoder.find_property("rate-control").is_some() {
-                encoder.set_property_from_str("rate-control", "qvbr");
-            }
-            if encoder.find_property("qpi").is_some() {
-                encoder.set_property("qpi", H264_QVBR_QUALITY);
+                encoder.set_property_from_str("rate-control", "cbr");
             }
         } else if encoder.find_property("rate-control").is_some() {
             // The x264enc fallback has no QVBR mode; keep ceiling-capped VBR.
@@ -1128,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn vah264_hardware_configures_qvbr_ceiling_and_quality() -> Result<(), String> {
+    fn vah264_hardware_configures_cbr_at_ceiling() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
         // Skip when the machine has no VA-API H.264 encode path (software
         // x264 fallback machines run the x264 test instead).
@@ -1143,27 +1133,21 @@ mod tests {
         configure_encoder(
             &encoder,
             "h264",
-            encoder_target_kbps(RateMode::Vbr, ceiling_kbps),
+            encoder_target_kbps(RateMode::Cbr, ceiling_kbps),
             120,
-            RateMode::Vbr,
+            RateMode::Cbr,
         );
 
-        // QVBR keeps the VBR ceiling derivation (`bitrate` is the VBR
-        // target, 80% of the ceiling; `target-percentage` pins the driver
-        // maximum onto the ceiling) and adds `qpi` as the base quality
-        // factor. The per-frame cap prevents the VBR feedback loop's
-        // window-averaged overshoot from stalling the encoder branch.
-        assert_eq!(encoder.property::<u32>("bitrate"), 16_000);
-        assert_eq!(encoder.property::<u32>("target-percentage"), 80);
+        // CBR at the ceiling: predictable output, no VBR/qvbr burst.
+        assert_eq!(encoder.property::<u32>("bitrate"), 20_000);
         assert_eq!(
             encoder
                 .property_value("rate-control")
                 .get::<&gst::glib::EnumValue>()
                 .map_err(|error| error.to_string())?
                 .nick(),
-            "qvbr"
+            "cbr"
         );
-        assert_eq!(encoder.property::<u32>("qpi"), H264_QVBR_QUALITY);
         // Low-latency realtime profile: single reference, no B-frames
         // (reordering delay), fastest target-usage.
         assert_eq!(encoder.property::<u32>("ref-frames"), 1);
