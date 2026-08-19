@@ -142,10 +142,35 @@ enum PublisherCommand {
     Shutdown,
 }
 
+/// The video encoder target the publisher can change without a pipeline
+/// rebuild. `codec` is missing only from `CaptureConfig` (VP8 default), but
+/// after the first `attach_video` the codec is always known and fixed for the
+/// session — an in-place update with a different codec never happens here.
+#[derive(Debug, Clone, PartialEq)]
+struct VideoTarget {
+    codec: String,
+    fps: u32,
+    ceiling_kbps: u32,
+    auto_bitrate: bool,
+}
+
+impl VideoTarget {
+    fn from_config(config: &CaptureConfig) -> Self {
+        Self {
+            codec: config.video_codec.as_deref().unwrap_or("vp8").to_string(),
+            fps: config.fps,
+            ceiling_kbps: configured_ceiling_kbps(config),
+            auto_bitrate: config.auto_bitrate,
+        }
+    }
+}
+
 enum ConnectedOutcome {
     Reconnect,
     /// A video settings change arrived that requires a full pipeline rebuild
-    /// (the sink's `video-caps` is only changeable in NULL/READY state).
+    /// (the sink's `video-caps` is only changeable in NULL/READY state). The
+    /// in-place path in `run_connected` handles codec-unchanged fps/bitrate
+    /// changes without one.
     Rebuild {
         config: CaptureConfig,
         reply: SyncSender<Result<(), String>>,
@@ -797,14 +822,26 @@ fn run_connected(
     loop {
         match command_receiver.recv_timeout(POLL_INTERVAL) {
             Ok(PublisherCommand::StartVideo { config, reply }) => {
-                // `livekitwebrtcsink`'s `video-caps` is only changeable in
-                // NULL or READY state, and the 0.15.3 sink does not reliably
-                // renegotiate an in-place request-pad rebuild — so an encoder
-                // settings change must rebuild the whole pipeline (the same
-                // path a reconnect takes), not just the video branch. The
-                // codec is fixed for a session, so this only fires on explicit
-                // resolution/fps/manual-bitrate changes from the presenter.
                 if Some(&config) == pipeline.video_config.as_ref() {
+                    let _ = reply.send(Ok(()));
+                    continue;
+                }
+                // An fps/bitrate change under the same codec is applied to
+                // the running encoder in place: the capture cadence and the
+                // PTS clock adapt without touching the WebRTC session, so
+                // the spectator's decoder keeps receiving frames. Width,
+                // height, or a codec change is a pipeline rebuild.
+                let target = VideoTarget::from_config(&config);
+                let current = pipeline.video_config.as_ref().map(VideoTarget::from_config);
+                let same_frame = pipeline.video_config.as_ref().is_some_and(|current| {
+                    current.width == config.width && current.height == config.height
+                });
+                if current.as_ref().is_some_and(|c| c.codec == target.codec)
+                    && same_frame
+                    && pipeline.apply_target(&target)
+                {
+                    pipeline.video_config = Some(config.clone());
+                    rate_controller.reset(&config);
                     let _ = reply.send(Ok(()));
                 } else {
                     return ConnectedOutcome::Rebuild { config, reply };
@@ -1063,6 +1100,25 @@ impl PublisherPipeline {
             return true;
         };
         encoder.set_ceiling_kbps(ceiling_kbps)
+    }
+
+    /// Applies an fps/bitrate change to the running encoder in place (codec
+    /// and frame size unchanged). The shared fps atomic updates the PTS
+    /// clock and buffer durations on the very next pushed frame, and the
+    /// ceiling moves through the same knob the congestion controller uses.
+    /// Returns `false` when the encoder cannot move its rate live (libaom
+    /// av1enc), in which case the caller must rebuild the pipeline. The
+    /// caller's `RateController::reset` re-arms the controller at the new
+    /// configured ceiling.
+    fn apply_target(&mut self, target: &VideoTarget) -> bool {
+        let Some(encoder) = self.encoder.as_mut() else {
+            return false;
+        };
+        if encoder.input().fps() != target.fps {
+            encoder.input().set_fps(target.fps);
+            log::info!("GStreamer encoder: live fps change to {}", target.fps);
+        }
+        encoder.set_ceiling_kbps(target.ceiling_kbps)
     }
 
     /// One ~1 s congestion-control observation: fold the sink stats, step
