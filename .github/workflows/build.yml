@@ -115,7 +115,9 @@ jobs:
             libnice-dev \
             libx11-dev \
             pkg-config \
-            clang
+            clang \
+            # cuda.h lets webrtc-sys compile NVENC encoder support
+            nvidia-cuda-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -180,6 +182,9 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             export CEF_PATH="$HOME/.cache/tauri-cef"
+            # webrtc-sys enables NVENC only when cuda.h is found at $CUDA_HOME/include;
+            # Ubuntu's nvidia-cuda-dev installs it to /usr/include.
+            export CUDA_HOME=/usr
             pnpm check
             pnpm desktop:prepare-gstreamer
             # Use the feat/cef cargo-tauri so cef_path is resolved and sharun_cef is used
