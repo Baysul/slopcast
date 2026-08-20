@@ -19,3 +19,7 @@ _Avoid_: encoder prefix, conversion stage
 **Hardware encoder suffix**:
 The encoder name shown in the picker next to a hardware codec (e.g. "H.264 (NVENC)").
 _Avoid_: codec badge, vendor label
+
+**Encoder plan**:
+The probe-gated result for a codec: its selected encoder chain and rate-control behavior.
+_Avoid_: selected encoder, encoder configuration
