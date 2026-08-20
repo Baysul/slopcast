@@ -20,11 +20,11 @@ export const sortByCodecPreference = (codecs: CodecInfo[]): CodecInfo[] => {
 // The native stack (bundled libwebrtc in native-livekit) is the ONLY encoder
 // this app uses — the webview's `RTCRtpSender.getCapabilities` reflects the
 // WebKitGTK/GStreamer stack, which never touches the stream, so it must never
-// drive the codec picker. `hardware` comes from `get_native_supported_codecs`
-// at runtime: the bundled libwebrtc ships hardware encoder factories for
-// H264/H265 (VA-API on Linux, Media Foundation on Windows, VideoToolbox on
-// macOS), so VP8/VP9/AV1 report software — but labels always follow the
-// reported flag, never a hardcoded codec → encoder mapping.
+// drive the codec picker. `hardware` and `label` come from
+// `get_native_supported_codecs` at runtime: the native stack probes its
+// encoder chain (NVENC → VA-API → software on Linux) and reports both the
+// winning encoder's hardware flag and its vendor suffix ("H.264 (NVENC)"),
+// so the renderer never hardcodes a codec → encoder mapping.
 export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
   const codecs = infos
     .filter((i): i is NativeCodecInfo & { codec: VideoCodec } =>
@@ -34,10 +34,16 @@ export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
   return sortByCodecPreference(codecs);
 };
 
-// Hoists the recommended choice: the shipped default codec (vp8 — see
-// DEFAULT_STREAM_SETTINGS; VA-API H264 collapses to ~1-3 fps on Linux).
+// Hoists the recommended choice: a hardware H.264 when one is present (the
+// fastest encode path on NVENC/VA-API/Media Foundation/VideoToolbox boxes),
+// otherwise the shipped default codec (vp8 — see DEFAULT_STREAM_SETTINGS).
+// A saved setting always beats the recommendation: the persisted codec is
+// hydrated first and the recommendation only fills a fresh session.
 export const recommendCodec = (codecs: CodecInfo[]): CodecInfo[] => {
-  const recommended = codecs.find((c) => c.codec === DEFAULT_STREAM_SETTINGS.videoCodec) ?? codecs.at(0);
+  const recommended =
+    codecs.find((c) => c.hardware && c.codec === 'h264') ??
+    codecs.find((c) => c.codec === DEFAULT_STREAM_SETTINGS.videoCodec) ??
+    codecs.at(0);
   if (!recommended) return [];
 
   return [{ ...recommended, recommended: true }, ...codecs.filter((c) => c.codec !== recommended.codec)];

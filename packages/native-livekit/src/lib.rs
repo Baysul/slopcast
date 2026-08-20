@@ -141,9 +141,11 @@ pub struct NativeTelemetry {
 pub struct NativeCodecInfo {
     pub codec: String,
     pub label: String,
-    /// True when the bundled libwebrtc ships a hardware encoder factory for
-    /// this codec on this platform (VA-API/NVENC on Linux, `Media Foundation`
-    /// on Windows, `VideoToolbox` on macOS); VP8/VP9/AV1 are software-only.
+    /// True when the selected encoder for this codec on this machine is a
+    /// hardware encoder factory (NVENC or VA-API on Linux, `Media
+    /// Foundation` on Windows, `VideoToolbox` on macOS). On Linux this is
+    /// computed per machine by probing the encoder chain
+    /// (`gstreamer_encoder::codec_chains`); elsewhere it is build-time.
     pub hardware: bool,
 }
 
@@ -151,7 +153,7 @@ pub struct NativeCodecInfo {
 /// (`webrtc-sys` prebuilts: `rtc_use_h264`/`rtc_use_h265` +
 /// `rtc_libvpx_build_vp9` + `enable_libaom` on every platform). The native
 /// stack hardware-encodes H264 and H265 (H265 on some platforms), so those
-/// are the only codecs that can ever use a hardware encoder.
+/// are the only codecs that can ever use a hardware encoder off Linux.
 pub const NATIVE_VIDEO_CODECS: [(&str, &str); 5] = [
     ("h264", "H.264"),
     ("h265", "H.265"),
@@ -168,8 +170,8 @@ pub const NATIVE_VIDEO_CODECS: [(&str, &str); 5] = [
 /// hardware encoder silently falls back to libwebrtc's software H.265.
 pub const NATIVE_HW_CODECS: [&str; 2] = ["h264", "h265"];
 
-/// Returns the codecs the native stack can encode with (build-time constant,
-/// verified against the bundled libwebrtc in `get_native_supported_codecs`).
+/// Returns the codecs the native stack can encode with (build-time constant
+/// off Linux, probed encoder chain on Linux).
 #[must_use]
 pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
     #[cfg(target_os = "linux")]
@@ -179,7 +181,7 @@ pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
             .into_iter()
             .map(|(codec, label, hardware)| NativeCodecInfo {
                 codec: codec.into(),
-                label: label.into(),
+                label,
                 hardware,
             })
             .collect()
@@ -1175,9 +1177,17 @@ mod tests {
             assert!(!codec.hardware, "{} must be software", codec.codec);
         }
         // The picker contract: every codec has a non-empty display label.
+        // Off Linux the labels are the bare codec names (the encoder-suffix
+        // labels only exist on the probed GStreamer chain).
         for codec in &codecs {
             assert!(!codec.label.is_empty());
             assert!(!codec.codec.is_empty());
+            assert!(
+                !codec.label.contains('('),
+                "{} label: {}",
+                codec.codec,
+                codec.label
+            );
         }
     }
 
