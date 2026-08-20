@@ -212,7 +212,7 @@ pub fn run() {
     });
 
     #[cfg(feature = "e2e")]
-    let builder = e2e::with_plugins(builder);
+    let builder = e2e::with_command_line_args(builder);
 
     let app = builder
         .setup(|app| {
