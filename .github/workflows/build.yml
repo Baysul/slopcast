@@ -92,6 +92,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # cuda.h lets webrtc-sys compile NVENC encoder support
           sudo apt-get install -y \
             libgtk-3-dev \
             libdbus-1-dev \
@@ -116,7 +117,6 @@ jobs:
             libx11-dev \
             pkg-config \
             clang \
-            # cuda.h lets webrtc-sys compile NVENC encoder support
             nvidia-cuda-dev
 
       - uses: dtolnay/rust-toolchain@stable
