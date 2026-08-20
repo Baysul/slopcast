@@ -10,9 +10,9 @@
 //! verbatim as the encoder's target for predictable output under the
 //! real-time requirement. `nvh265enc` and `vah265enc` keep VBR: the target
 //! is 80% of the ceiling, pinned onto the ceiling via `max-bitrate` (NVENC)
-//! or `target-percentage` (VA-API). The software encoders run CBR (`VPx` in
-//! automatic mode, libaom `av1enc` always) or the ceiling-capped VBR
-//! quality target (manual-mode `VPx`, `x264enc`/`x265enc` always). The
+//! or `target-percentage` (VA-API). `VPx` always uses an explicit low-latency
+//! CBR profile because its `target-bitrate` property has no separate maximum;
+//! VBR would turn a user-selected limit into an advisory quality target. The
 //! publisher's congestion controller re-targets each encoder at runtime
 //! through `GstreamerEncoder::set_ceiling_kbps`.
 
@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::CaptureConfig;
-use crate::desktop_capture::VideoSample;
+use crate::desktop_capture::{VideoSample, trace_encoder_output, trace_frame};
 
 /// Video appsrc queue depth in buffers. Two was too tight: any transient
 /// encoder hiccup (VA-API pipeline stall, driver swap) saturated it
@@ -60,18 +60,22 @@ const H264_QVBR_QUALITY: u32 = 26;
 /// minimum = maximum), so it is never used here.
 const VBR_TARGET_PERCENTAGE: u32 = 80;
 
-/// Rate-control mode for the software encoders. CBR pins the output to the
-/// ceiling: with software encoding and a strict real-time requirement,
-/// predictable output is worth more than VBR quality bursts, and the
-/// congestion controller's ceiling step is directly observable as bits/s.
-/// VBR keeps the ceiling-capped quality-target behavior for manual/high
-/// bitrate sessions and for the H.265 hardware paths (`nvh265enc` and
-/// `vah265enc`). H.264 always runs CBR, on `nvh264enc` and `vah264enc`
-/// alike (`bitrate` is the ceiling in both, never a VBR target).
+/// Rate-control mode for the encoder path. `VPx` always uses CBR because its
+/// VBR target has no maximum. VBR remains for encoder paths with a distinct
+/// VBR policy; H.264 hardware encoders remain CBR at the ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RateMode {
     Cbr,
     Vbr,
+}
+
+fn encoder_rate_mode(codec: &str, encoder_name: &str) -> RateMode {
+    match (codec, encoder_name) {
+        ("av1", "nvav1enc" | "av1enc")
+        | ("h264", "nvh264enc" | "vah264enc")
+        | ("vp8" | "vp9", _) => RateMode::Cbr,
+        _ => RateMode::Vbr,
+    }
 }
 
 /// Number of encoded access units that emerged from the codec parser
@@ -263,6 +267,8 @@ impl VideoInput {
         // the frame was converted into this buffer, the appsrc pipeline
         // reads it in place, and `OwnedI420::drop` returns the allocation to
         // the capture engine's freelist when the pipeline releases it.
+        let sequence = sample.sequence;
+        let capture_pts_us = sample.pts_us;
         let mut buffer = gst::Buffer::from_mut_slice(sample.buffer);
         // PTS comes from the capture clock, anchored onto the pipeline's
         // running time at the first frame: PTS = P0 + (C - C0). Capture
@@ -304,15 +310,25 @@ impl VideoInput {
         *last_pts = Some(pts_ns);
         drop(last_pts);
         let fps = self.fps.load(Ordering::Relaxed);
+        let duration_ns = frame_duration(fps).nseconds();
         let buffer_ref = buffer
             .get_mut()
             .ok_or_else(|| "GStreamer input buffer is unexpectedly shared".to_string())?;
         buffer_ref.set_pts(gst::ClockTime::from_nseconds(pts_ns));
-        buffer_ref.set_duration(frame_duration(fps));
+        buffer_ref.set_duration(gst::ClockTime::from_nseconds(duration_ns));
 
         self.appsrc
             .push_buffer(buffer)
             .map_err(|error| format!("GStreamer appsrc rejected an I420 frame: {error}"))?;
+        let queue_depth = self.appsrc_stats().level_buffers.unwrap_or(0) as usize;
+        trace_frame(
+            "appsrc-push",
+            sequence,
+            capture_pts_us,
+            queue_depth,
+            Some(pts_ns),
+            Some(duration_ns),
+        );
 
         Ok(())
     }
@@ -455,22 +471,10 @@ impl GstreamerEncoder {
             .iter()
             .map(|name| make_element(name))
             .collect::<Result<Vec<_>, _>>()?;
-        // Rate mode: VP8/VP9 run CBR in automatic mode (predictable output
-        // beats VBR bursts under a real-time requirement) and keep the
-        // ceiling-capped VBR quality target in manual mode; libaom av1enc
-        // always runs CBR at the ceiling; H.264 runs CBR at the ceiling on
-        // its hardware encoders (nvh264enc/vah264enc) and ceiling-capped VBR
-        // on x264enc; H.265 keeps VBR on every encoder, with the ceiling
-        // pinned by `max-bitrate` (nvh265enc) or `target-percentage`
-        // (vah265enc); NVENC AV1 (nvav1enc) runs CBR like av1enc, while
-        // vaav1enc mirrors the vah265enc VBR pinning (see
-        // VBR_TARGET_PERCENTAGE).
-        let rate_mode = match (codec, encoder_name) {
-            ("av1", "nvav1enc" | "av1enc") | ("h264", "nvh264enc" | "vah264enc") => RateMode::Cbr,
-            ("av1", "vaav1enc") | ("h264" | "h265", _) => RateMode::Vbr,
-            _ if config.auto_bitrate => RateMode::Cbr,
-            _ => RateMode::Vbr,
-        };
+        // VPx must use CBR even for a manual limit: libvpx exposes only a
+        // target bitrate, not a VBR maximum. The other encoder paths retain
+        // their codec-specific CBR or ceiling-pinned VBR policies.
+        let rate_mode = encoder_rate_mode(codec, encoder_name);
         let key_int_max = if codec == "h264" {
             config.fps.saturating_mul(H264_GOP_SECONDS).min(1024)
         } else {
@@ -524,8 +528,13 @@ impl GstreamerEncoder {
         let encoder_src = encoder
             .static_pad("src")
             .ok_or_else(|| "GStreamer encoder has no src pad".to_string())?;
-        encoder_src.add_probe(gst::PadProbeType::BUFFER, |_, _| {
-            VIDEO_FRAMES_ENCODED.fetch_add(1, Ordering::Relaxed);
+        encoder_src.add_probe(gst::PadProbeType::BUFFER, |_, info| {
+            let encoded_count = VIDEO_FRAMES_ENCODED.fetch_add(1, Ordering::Relaxed) + 1;
+            let gstreamer_pts_ns = info
+                .buffer()
+                .and_then(|buffer| buffer.pts())
+                .map(gst::ClockTime::nseconds);
+            trace_encoder_output(gstreamer_pts_ns, encoded_count);
             gst::PadProbeReturn::Ok
         });
         // `keyframe-max-dist` bounds the automatic keyframe interval; verify
@@ -857,14 +866,40 @@ fn configure_encoder(
                 encoder.set_property("overshoot", 50_i32);
             }
         } else if codec == "vp8" {
-            // vp8enc defaults cpu-used to 0 (slowest): fast enough for the
-            // average frame but a busy scene's worst-case encode time blows
-            // the frame interval, and the encoder falls behind. 6 keeps the
-            // worst case under the frame interval at screenshare
-            // resolutions; target-bitrate/quantizer settings are the
-            // quality controls, not this knob.
+            // `vp8enc` defaults are for offline VBR encodes: a 6 s virtual
+            // buffer, 100% overshoot, unlimited intra frames, and no frame
+            // dropping. That lets a 20 Mbps target flood the receiver with
+            // oversized frames. Keep the virtual buffer short and use the
+            // encoder's frame-drop path when a frame cannot fit the ceiling.
             if encoder.find_property("cpu-used").is_some() {
                 encoder.set_property_from_str("cpu-used", "6");
+            }
+            if encoder.find_property("dropframe-threshold").is_some() {
+                encoder.set_property("dropframe-threshold", 30_i32);
+            }
+            if encoder.find_property("buffer-size").is_some() {
+                encoder.set_property("buffer-size", 100_i32);
+            }
+            if encoder.find_property("buffer-initial-size").is_some() {
+                encoder.set_property("buffer-initial-size", 50_i32);
+            }
+            if encoder.find_property("buffer-optimal-size").is_some() {
+                encoder.set_property("buffer-optimal-size", 50_i32);
+            }
+            if encoder.find_property("max-intra-bitrate").is_some() {
+                encoder.set_property("max-intra-bitrate", 300_i32);
+            }
+            if encoder.find_property("min-quantizer").is_some() {
+                encoder.set_property("min-quantizer", 12_i32);
+            }
+            if encoder.find_property("max-quantizer").is_some() {
+                encoder.set_property("max-quantizer", 63_i32);
+            }
+            if encoder.find_property("undershoot").is_some() {
+                encoder.set_property("undershoot", 100_i32);
+            }
+            if encoder.find_property("overshoot").is_some() {
+                encoder.set_property("overshoot", 15_i32);
             }
         }
     }
@@ -1316,6 +1351,12 @@ mod tests {
         assert_eq!(vbr_target_kbps(20_000, 80), 16_000);
         assert_eq!(vbr_target_kbps(8_000, 80), 6_400);
         assert_eq!(vbr_target_kbps(1_000, 80), 800);
+    }
+
+    #[test]
+    fn vpx_rate_mode_is_always_cbr() {
+        assert_eq!(encoder_rate_mode("vp8", "vp8enc"), RateMode::Cbr);
+        assert_eq!(encoder_rate_mode("vp9", "vp9enc"), RateMode::Cbr);
     }
 
     #[test]
@@ -1832,7 +1873,7 @@ mod tests {
     }
 
     #[test]
-    fn vp8_software_configures_realtime_speed_knobs() -> Result<(), String> {
+    fn vp8_software_configures_bounded_screenshare_rate_control() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
         let encoder = gst::ElementFactory::make("vp8enc")
@@ -1840,8 +1881,18 @@ mod tests {
             .map_err(|error| error.to_string())?;
         configure_encoder(&encoder, "vp8", 10_000, 10_000, 60, RateMode::Cbr);
 
+        assert_eq!(encoder.property::<i64>("deadline"), 1);
         assert_eq!(encoder.property::<i32>("cpu-used"), 6);
         assert_eq!(encoder.property::<i32>("static-threshold"), 100);
+        assert_eq!(encoder.property::<i32>("dropframe-threshold"), 30);
+        assert_eq!(encoder.property::<i32>("buffer-size"), 100);
+        assert_eq!(encoder.property::<i32>("buffer-initial-size"), 50);
+        assert_eq!(encoder.property::<i32>("buffer-optimal-size"), 50);
+        assert_eq!(encoder.property::<i32>("max-intra-bitrate"), 300);
+        assert_eq!(encoder.property::<i32>("min-quantizer"), 12);
+        assert_eq!(encoder.property::<i32>("max-quantizer"), 63);
+        assert_eq!(encoder.property::<i32>("undershoot"), 100);
+        assert_eq!(encoder.property::<i32>("overshoot"), 15);
         assert_eq!(
             encoder
                 .property_value("end-usage")
