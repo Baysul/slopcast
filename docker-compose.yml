@@ -1,23 +1,15 @@
 services:
   livekit:
     image: livekit/livekit-server:latest
-    # `--dev` is for local development / evaluation only: it serves the default
-    # devkey/secret that slopcast-server's environment below already uses, and
-    # muxes all WebRTC media onto UDP 7882 (single port, published below).
-    # Without `--bind 0.0.0.0` LiveKit binds to 127.0.0.1 only, unreachable
-    # from the other containers.
+    # Rootless port forwarding drops and reorders 1080p60 RTP on this path.
+    # Host networking lets the SFU own UDP 7882 directly instead of sending
+    # packets through rootlessport. This local stack is Linux-only.
     #
     # `--node-ip` makes the SFU advertise a host-reachable ICE candidate.
-    # Without it, LiveKit advertises the container's internal bridge IP
-    # (e.g. 10.89.2.5), which clients on the host cannot route to — ICE
-    # fails and the desktop app dies with "wait_pc_connection timed out".
-    # Defaults to a typical LAN address; override for your network:
-    #   LIVEKIT_NODE_IP=192.168.1.50 podman-compose up -d livekit
-    command: --dev --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-10.0.0.128}
-    ports:
-      - "7880:7880/tcp"  # WebSocket signaling
-      - "7881:7881/tcp"  # ICE/TCP fallback
-      - "7882:7882/udp"  # WebRTC media (dev mode uses a single UDP port)
+    # Defaults to the local host used by the desktop client. Set a LAN address
+    # when remote spectators need to join.
+    network_mode: host
+    command: --dev --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
     restart: unless-stopped
 
   slopcast-server:
@@ -28,8 +20,8 @@ services:
       - "3001:3001"
     environment:
       - SERVER_PORT=3001
-      # Server-to-SFU: resolvable only inside the compose network.
-      - LIVEKIT_URL=ws://livekit:7880
+      # LiveKit uses the host network so it can receive UDP directly.
+      - LIVEKIT_URL=ws://host.containers.internal:7880
       # Client-facing URL, advertised to browsers / the desktop app in token
       # responses. ws://localhost:7880 works when the browser runs on the same
       # machine as the stack; set wss://livekit.example.com for remote
@@ -38,6 +30,8 @@ services:
       - LIVEKIT_API_KEY=devkey
       - LIVEKIT_API_SECRET=secret
       - WEBSITE_URL=http://localhost
+    extra_hosts:
+      - host.containers.internal:host-gateway
     depends_on:
       livekit:
         condition: service_started

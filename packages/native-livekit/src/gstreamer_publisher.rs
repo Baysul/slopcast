@@ -116,6 +116,11 @@ static WORKER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_PCM_DROPS: AtomicU64 = AtomicU64::new(0);
 /// Wall-clock seconds of the last audio-drop warning (rate limiting).
 static LAST_AUDIO_DROP_WARN_AT: AtomicU64 = AtomicU64::new(0);
+/// Real-path diagnostic switch. It removes the audio track from the WebRTC
+/// publication, unlike muting the spectator element, so Chromium cannot use
+/// it for A/V synchronization during an isolation run.
+static AUDIO_PUBLICATION_DISABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("SLOPCAST_DISABLE_AUDIO").is_some());
 
 struct PublisherHandle {
     command_sender: SyncSender<PublisherCommand>,
@@ -627,7 +632,7 @@ pub(crate) fn push_video_frame(sample: crate::desktop_capture::VideoSample) -> R
 }
 
 pub(crate) fn feed_pcm(samples: &[i16]) {
-    if samples.is_empty() {
+    if *AUDIO_PUBLICATION_DISABLED || samples.is_empty() {
         return;
     }
     // A silent no-input return is legitimate before any room is connected
@@ -1029,7 +1034,12 @@ impl PublisherPipeline {
             .add(&sink)
             .map_err(|error| format!("Failed to add livekitwebrtcsink: {error}"))?;
         configure_signaller(&sink, &pipeline, connection, generation);
-        let audio_input = attach_audio(&pipeline, &sink)?;
+        let audio_input = if *AUDIO_PUBLICATION_DISABLED {
+            log::info!("GStreamer audio publication disabled for diagnostic isolation");
+            None
+        } else {
+            Some(attach_audio(&pipeline, &sink)?)
+        };
         let mut publisher = Self {
             pipeline,
             sink,
@@ -1053,7 +1063,9 @@ impl PublisherPipeline {
         // Gate the shared audio-input install (and the discovery PCM push)
         // on the generation: a stale pipeline must not steal the input a
         // newer worker already installed.
-        if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
+        if WORKER_GENERATION.load(Ordering::Relaxed) == generation
+            && let Some(audio_input) = audio_input
+        {
             set_audio_input(Some(audio_input.clone()))?;
             push_pcm(&audio_input, &[0; AUDIO_DISCOVERY_SAMPLES])?;
         }

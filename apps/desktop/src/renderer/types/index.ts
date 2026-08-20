@@ -154,6 +154,11 @@ export interface DesktopCaptureStats {
   keepaliveDropped: number;
   lastWidth: number;
   lastHeight: number;
+  pacerPushes: number;
+  pacerPops: number;
+  pacerDrops: number;
+  pacerDepth: number;
+  pacerMaxDepth: number;
 }
 
 /// EGL probe output from `probe_gpu_info` (D5).

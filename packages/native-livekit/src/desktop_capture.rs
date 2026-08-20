@@ -78,6 +78,16 @@ pub(crate) static STATS_KEEPALIVE_PUSHED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STATS_KEEPALIVE_DROPPED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static STATS_LAST_WIDTH: AtomicU32 = AtomicU32::new(0);
 pub(crate) static STATS_LAST_HEIGHT: AtomicU32 = AtomicU32::new(0);
+/// `FramePacer` counters are separate from generic capture drops so a real-path
+/// trace can distinguish source failure from queue overflow.
+pub(crate) static STATS_PACER_PUSHES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STATS_PACER_POPS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STATS_PACER_DROPS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STATS_PACER_DEPTH: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STATS_PACER_MAX_DEPTH: AtomicU64 = AtomicU64::new(0);
+static NEXT_FRAME_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static FRAME_TRACE_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("SLOPCAST_FRAME_TRACE").is_some());
 
 pub(crate) fn reset_stats() {
     STATS_PUSHED.store(0, Ordering::Relaxed);
@@ -90,6 +100,12 @@ pub(crate) fn reset_stats() {
     STATS_KEEPALIVE_DROPPED.store(0, Ordering::Relaxed);
     STATS_LAST_WIDTH.store(0, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(0, Ordering::Relaxed);
+    STATS_PACER_PUSHES.store(0, Ordering::Relaxed);
+    STATS_PACER_POPS.store(0, Ordering::Relaxed);
+    STATS_PACER_DROPS.store(0, Ordering::Relaxed);
+    STATS_PACER_DEPTH.store(0, Ordering::Relaxed);
+    STATS_PACER_MAX_DEPTH.store(0, Ordering::Relaxed);
+    NEXT_FRAME_SEQUENCE.store(0, Ordering::Relaxed);
     CAPTURE_ENDED_EMITTED.store(false, Ordering::Relaxed);
 }
 
@@ -346,10 +362,43 @@ impl Drop for OwnedI420 {
 /// other platforms it is a libwebrtc `I420Buffer` wrapped in a `VideoFrame`
 /// at publish time.
 pub(crate) struct VideoSample {
+    pub(crate) sequence: u64,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) pts_us: i64,
     pub(crate) buffer: SampleBuffer,
+}
+
+/// Emits one structured, monotonic-clock record per sender boundary when the
+/// temporary real-path diagnostic is enabled. Keeping it opt-in avoids adding
+/// logging work to normal capture.
+pub(crate) fn trace_frame(
+    stage: &str,
+    sequence: u64,
+    capture_pts_us: i64,
+    queue_depth: usize,
+    gstreamer_pts_ns: Option<u64>,
+    duration_ns: Option<u64>,
+) {
+    if !*FRAME_TRACE_ENABLED {
+        return;
+    }
+
+    log::info!(
+        "[frame-trace] stage={stage} sequence={sequence} callback_us={capture_pts_us} local_us={} pacer_depth={queue_depth} gstreamer_pts_ns={gstreamer_pts_ns:?} duration_ns={duration_ns:?}",
+        monotonic_us(),
+    );
+}
+
+pub(crate) fn trace_encoder_output(gstreamer_pts_ns: Option<u64>, encoded_count: u64) {
+    if !*FRAME_TRACE_ENABLED {
+        return;
+    }
+
+    log::info!(
+        "[frame-trace] stage=encoder-output encoded_count={encoded_count} local_us={} gstreamer_pts_ns={gstreamer_pts_ns:?}",
+        monotonic_us(),
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -924,16 +973,41 @@ impl FramePacer {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        if queue.len() >= self.capacity {
-            let _ = queue.pop_front();
+        if queue.len() >= self.capacity
+            && let Some(dropped) = queue.pop_front()
+        {
             STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+            STATS_PACER_DROPS.fetch_add(1, Ordering::Relaxed);
+            trace_frame(
+                "pacer-drop",
+                dropped.sequence,
+                dropped.pts_us,
+                queue.len(),
+                None,
+                None,
+            );
         }
+        let sequence = frame.sequence;
+        let capture_pts_us = frame.pts_us;
         queue.push_back(frame);
+        let depth = queue.len();
+        STATS_PACER_PUSHES.fetch_add(1, Ordering::Relaxed);
+        STATS_PACER_DEPTH.store(depth as u64, Ordering::Relaxed);
+        STATS_PACER_MAX_DEPTH.fetch_max(depth as u64, Ordering::Relaxed);
+        trace_frame("pacer-push", sequence, capture_pts_us, depth, None, None);
     }
 
     /// Pops the oldest queued frame for delivery to the encoder.
     fn pop(&self) -> Option<VideoSample> {
-        self.queue.lock().ok()?.pop_front()
+        let Ok(mut queue) = self.queue.lock() else {
+            return None;
+        };
+        let frame = queue.pop_front()?;
+        let depth = queue.len();
+        STATS_PACER_POPS.fetch_add(1, Ordering::Relaxed);
+        STATS_PACER_DEPTH.store(depth as u64, Ordering::Relaxed);
+        trace_frame("pacer-pop", frame.sequence, frame.pts_us, depth, None, None);
+        Some(frame)
     }
 }
 
@@ -985,6 +1059,7 @@ impl KeepaliveRing {
     fn next_slot(&mut self, target: (u32, u32)) -> usize {
         if self.slots.len() < KEEPALIVE_RING_CAPACITY {
             self.slots.push(VideoSample {
+                sequence: 0,
                 width: target.0,
                 height: target.1,
                 pts_us: 0,
@@ -994,6 +1069,7 @@ impl KeepaliveRing {
         let slot = &mut self.slots[self.next];
         if (slot.buffer.width(), slot.buffer.height()) != target {
             *slot = VideoSample {
+                sequence: 0,
                 width: target.0,
                 height: target.1,
                 pts_us: 0,
@@ -1041,6 +1117,7 @@ fn convert_frame(width: u32, height: u32, bgra: &[u8], pts_us: i64) -> VideoSamp
     STATS_LAST_WIDTH.store(width, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(height, Ordering::Relaxed);
     VideoSample {
+        sequence: NEXT_FRAME_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         width,
         height,
         // Preserve the capture timestamp the callback supplied (measured at
@@ -1076,6 +1153,7 @@ fn convert_frame(width: u32, height: u32, bgra: &[u8], pts_us: i64) -> VideoSamp
     STATS_LAST_WIDTH.store(width, Ordering::Relaxed);
     STATS_LAST_HEIGHT.store(height, Ordering::Relaxed);
     VideoSample {
+        sequence: NEXT_FRAME_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         width,
         height,
         // Preserve the capture timestamp the callback supplied (measured at
@@ -1098,6 +1176,7 @@ fn make_on_frame(pacer: Arc<FramePacer>) -> FrameCallback {
             return;
         }
         let frame = convert_frame(width, height, bgra, pts_us);
+        trace_frame("capture", frame.sequence, frame.pts_us, 0, None, None);
         // Stash the newest frame's I420 planes for the preview thread,
         // skipped when neither consumer exists — the preview emitter/poll
         // only reads Ring A while `PREVIEW_CALLBACK` is registered, and the
@@ -1214,6 +1293,7 @@ fn keepalive_frame(ring: &mut KeepaliveRing) -> Option<VideoSample> {
     Some(std::mem::replace(
         &mut ring.slots[slot_idx],
         VideoSample {
+            sequence: 0,
             width: src_w,
             height: src_h,
             pts_us: 0,
@@ -1277,6 +1357,7 @@ fn keepalive_sample() -> Option<VideoSample> {
         };
     }
     Some(VideoSample {
+        sequence: NEXT_FRAME_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         width: out_w,
         height: out_h,
         pts_us,
@@ -1795,6 +1876,11 @@ pub(crate) fn stats() -> crate::DesktopCaptureStats {
             .cast_signed(),
         last_width: i64::from(STATS_LAST_WIDTH.load(Ordering::Relaxed)),
         last_height: i64::from(STATS_LAST_HEIGHT.load(Ordering::Relaxed)),
+        pacer_pushes: STATS_PACER_PUSHES.load(Ordering::Relaxed).cast_signed(),
+        pacer_pops: STATS_PACER_POPS.load(Ordering::Relaxed).cast_signed(),
+        pacer_drops: STATS_PACER_DROPS.load(Ordering::Relaxed).cast_signed(),
+        pacer_depth: STATS_PACER_DEPTH.load(Ordering::Relaxed).cast_signed(),
+        pacer_max_depth: STATS_PACER_MAX_DEPTH.load(Ordering::Relaxed).cast_signed(),
     }
 }
 

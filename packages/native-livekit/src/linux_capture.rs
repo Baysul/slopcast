@@ -217,7 +217,7 @@ impl LinuxDesktopCapture {
         // would put the next deadline in the past for any frame slower than
         // the interval — a catch-up/tight-loop that degrades pacing instead
         // of backing off.
-        let interval = Duration::from_millis(u64::from(1000 / capture_poll_fps().max(1)));
+        let interval = Duration::from_micros(1_000_000 / u64::from(capture_poll_fps().max(1)));
         self.next_poll_at += interval;
         let after = Instant::now();
         if self.next_poll_at <= after {

@@ -215,6 +215,11 @@ pub struct DesktopCaptureStats {
     pub keepalive_dropped: i64,
     pub last_width: i64,
     pub last_height: i64,
+    pub pacer_pushes: i64,
+    pub pacer_pops: i64,
+    pub pacer_drops: i64,
+    pub pacer_depth: i64,
+    pub pacer_max_depth: i64,
 }
 
 #[cfg(not(target_os = "linux"))]
