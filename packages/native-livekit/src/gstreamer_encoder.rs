@@ -69,6 +69,19 @@ enum RateMode {
     Vbr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CeilingUpdate {
+    Applied,
+    Attempted,
+    Pinned,
+}
+
+impl CeilingUpdate {
+    pub(crate) fn is_pinned(self) -> bool {
+        matches!(self, Self::Pinned)
+    }
+}
+
 fn encoder_rate_mode(codec: &str, encoder_name: &str) -> RateMode {
     match (codec, encoder_name) {
         ("av1", "nvav1enc" | "av1enc")
@@ -106,6 +119,96 @@ pub(crate) fn encoded_frames() -> u64 {
 pub(crate) struct EncoderChain {
     pub(crate) encoder: &'static str,
     pub(crate) pre_chain: &'static [&'static str],
+}
+
+/// The probe-gated encoder choice for one attached video pipeline. It keeps
+/// branch construction, initial rate setup, and live ceiling behavior in one
+/// place so callers cannot reconstruct policy from a codec string.
+struct EncoderPlan {
+    codec: &'static str,
+    chain: &'static EncoderChain,
+    rate_mode: RateMode,
+}
+
+impl EncoderPlan {
+    fn select(codec: &str, probe: impl Fn(&str) -> bool) -> Result<Self, String> {
+        let codec = match codec {
+            "h264" => "h264",
+            "h265" => "h265",
+            "av1" => "av1",
+            "vp8" => "vp8",
+            "vp9" => "vp9",
+            other => return Err(format!("Unsupported GStreamer video codec: {other}")),
+        };
+        let chain = select_chain(codec, probe)?;
+
+        Ok(Self {
+            codec,
+            chain,
+            rate_mode: encoder_rate_mode(codec, chain.encoder),
+        })
+    }
+
+    fn encoder_name(&self) -> &'static str {
+        self.chain.encoder
+    }
+
+    fn creates_pre_chain(&self) -> Result<Vec<gst::Element>, String> {
+        self.chain
+            .pre_chain
+            .iter()
+            .map(|name| make_element(name))
+            .collect()
+    }
+
+    fn create_encoder(&self, ceiling_kbps: u32, key_int_max: u32) -> Result<gst::Element, String> {
+        let encoder = gst::ElementFactory::make(self.encoder_name())
+            .build()
+            .map_err(|error| {
+                format!(
+                    "Failed to create GStreamer element {}: {error}",
+                    self.encoder_name()
+                )
+            })?;
+        let bitrate = encoder_target_kbps(self.rate_mode, ceiling_kbps);
+        configure_encoder(
+            &encoder,
+            self.codec,
+            bitrate,
+            ceiling_kbps,
+            key_int_max,
+            self.rate_mode,
+        );
+
+        Ok(encoder)
+    }
+
+    fn can_adapt(&self) -> bool {
+        !self.ceiling_update().is_pinned()
+    }
+
+    fn apply_ceiling(&self, encoder: &gst::Element, ceiling_kbps: u32) -> CeilingUpdate {
+        let outcome = self.ceiling_update();
+        if outcome.is_pinned() {
+            log::warn!("GStreamer libaom av1enc cannot change its bitrate mid-stream");
+            return outcome;
+        }
+        if !apply_encoder_ceiling(encoder, ceiling_kbps, self.rate_mode) {
+            return CeilingUpdate::Pinned;
+        }
+
+        outcome
+    }
+
+    fn ceiling_update(&self) -> CeilingUpdate {
+        if self.encoder_name() == "av1enc" {
+            CeilingUpdate::Pinned
+        } else if self.encoder_name().starts_with("nv") {
+            CeilingUpdate::Attempted
+        } else {
+            CeilingUpdate::Applied
+        }
+    }
 }
 
 pub(crate) fn codec_chains(codec: &str) -> Result<&'static [EncoderChain], String> {
@@ -370,49 +473,47 @@ pub(crate) struct GstreamerEncoder {
     /// derived from the stream settings and is stepped by the publisher's
     /// `RateController` on congestion signals.
     ceiling_kbps: u32,
-    /// Whether the encoder runs CBR (ceiling applied verbatim) or VBR
-    /// (ceiling-capped quality target, see `VBR_TARGET_PERCENTAGE`). Drives
-    /// how the ceiling maps onto the encoder's rate knob.
-    rate_mode: RateMode,
+    /// The probe-gated encoder policy fixed when this pipeline attached.
+    plan: EncoderPlan,
+    /// A runtime property mismatch pins further automatic changes until this
+    /// pipeline rebuilds.
+    rate_is_pinned: bool,
     elements: Vec<gst::Element>,
     sink_pad: gst::Pad,
 }
 
 impl GstreamerEncoder {
-    /// Re-targets the encoder at runtime: NVENC and VA-API take `bitrate`
-    /// (the VBR target, `ceiling × target-percentage / 100`), NVENC VBR
-    /// additionally re-pins `max-bitrate` to the ceiling, and `VPx` takes
-    /// `target-bitrate` (the ceiling itself in CBR, the VBR target in VBR
-    /// mode). libaom `av1enc`'s CBR rate path is not verified to accept
-    /// mid-stream `target-bitrate` reconfiguration, so it reports `false`
-    /// and leaves `ceiling_kbps` untouched (the encoder keeps its configured
-    /// cap; a `true`/`false` return keeps the caller's state from pretending
-    /// the change landed). NVENC mid-stream re-targeting is likewise
-    /// unverified on hardware (docs/adr/0001-nvenc-bitrate-retarget.md);
-    /// `apply_encoder_ceiling` still attempts it, warns once, and reports
-    /// `true` so the ceiling bookkeeping matches the attempt. The NVENC,
-    /// VA-API and `VPx` rate controllers pick the new rate up on the next
-    /// encoded frame — no pipeline rebuild, so this is safe to call from the
-    /// publisher's ~1 s congestion control tick even mid-stream.
-    ///
-    /// Returns `true` when the new ceiling was actually applied (or was
-    /// already in effect), `false` when the encoder cannot change it live.
-    pub(crate) fn set_ceiling_kbps(&mut self, ceiling_kbps: u32) -> bool {
+    /// Re-targets the encoder at runtime through the active plan. NVENC
+    /// updates are attempted under ADR-0001, VA-API and `VPx` updates apply,
+    /// and libaom AV1 remains pinned. A pinned plan leaves `ceiling_kbps`
+    /// untouched so the publisher cannot claim an unapplied rate change.
+    pub(crate) fn set_ceiling_kbps(&mut self, ceiling_kbps: u32) -> CeilingUpdate {
         let ceiling_kbps = ceiling_kbps.clamp(1, u32::MAX);
         if ceiling_kbps == self.ceiling_kbps {
-            return true;
+            return CeilingUpdate::Applied;
         }
-        if !apply_encoder_ceiling(&self.encoder, ceiling_kbps, self.rate_mode) {
-            // The encoder cannot change its ceiling live; leave `ceiling_kbps`
-            // untouched so our bookkeeping never lies about the real cap.
-            return false;
+
+        let outcome = self.plan.apply_ceiling(&self.encoder, ceiling_kbps);
+        if outcome.is_pinned() {
+            self.rate_is_pinned = true;
+            return outcome;
         }
+
         log::info!(
             "[gstreamer-encoder] ceiling {} kbps -> {ceiling_kbps} kbps",
             self.ceiling_kbps,
         );
         self.ceiling_kbps = ceiling_kbps;
-        true
+
+        outcome
+    }
+
+    pub(crate) fn can_adapt(&self) -> bool {
+        !self.rate_is_pinned
+    }
+
+    pub(crate) fn encoder_name(&self) -> &'static str {
+        self.plan.encoder_name()
     }
     #[allow(
         clippy::too_many_lines,
@@ -433,9 +534,8 @@ impl GstreamerEncoder {
         }
         let codec = config.video_codec.as_deref().unwrap_or("vp8");
         let ceiling_kbps = crate::gstreamer_publisher::configured_ceiling_kbps(config);
-        crate::gstreamer_publisher::verify_codec_elements(codec)?;
-        let chain = select_chain(codec, crate::gstreamer_publisher::can_initialize_element)?;
-        let encoder_name = chain.encoder;
+        let plan = EncoderPlan::select(codec, crate::gstreamer_publisher::can_initialize_element)?;
+        let encoder_name = plan.encoder_name();
 
         let fps = i32::try_from(config.fps).map_err(|_| "GStreamer encoder fps exceeds i32")?;
         let input_info = gst_video::VideoInfo::builder(
@@ -466,34 +566,14 @@ impl GstreamerEncoder {
         // for live screen share stale frames are worthless, so freshness
         // wins (leaky-upstream would instead keep the oldest frame queued
         // and reject the newest, trailing real time).
-        let pre_chain_elements = chain
-            .pre_chain
-            .iter()
-            .map(|name| make_element(name))
-            .collect::<Result<Vec<_>, _>>()?;
-        // VPx must use CBR even for a manual limit: libvpx exposes only a
-        // target bitrate, not a VBR maximum. The other encoder paths retain
-        // their codec-specific CBR or ceiling-pinned VBR policies.
-        let rate_mode = encoder_rate_mode(codec, encoder_name);
+        let pre_chain_elements = plan.creates_pre_chain()?;
         let key_int_max = if codec == "h264" {
             config.fps.saturating_mul(H264_GOP_SECONDS).min(1024)
         } else {
             config.fps.saturating_mul(GOP_SECONDS).min(1024)
         };
-        let encoder = gst::ElementFactory::make(encoder_name)
-            .build()
-            .map_err(|error| {
-                format!("Failed to create GStreamer element {encoder_name}: {error}")
-            })?;
-        let encoder_rate = encoder_target_kbps(rate_mode, ceiling_kbps);
-        configure_encoder(
-            &encoder,
-            codec,
-            encoder_rate,
-            ceiling_kbps,
-            key_int_max,
-            rate_mode,
-        );
+        let encoder = plan.create_encoder(ceiling_kbps, key_int_max)?;
+        let rate_is_pinned = !plan.can_adapt();
         // On the bundled livekitwebrtcsink (gst-plugin-webrtc 0.15.3) we
         // observed the sink inserting its own codec parser (vp9parse/av1parse)
         // internally before its payloader and rejecting caps renegotiation on
@@ -617,7 +697,8 @@ impl GstreamerEncoder {
         Ok(Self {
             encoder,
             ceiling_kbps,
-            rate_mode,
+            plan,
+            rate_is_pinned,
             elements,
             sink_pad,
             input: VideoInput {
@@ -1231,14 +1312,6 @@ fn log_av1_encode_diagnostics(pad: &gst::Pad, label: &'static str) {
     });
 }
 
-/// Whether `encoder` is the libaom `av1enc` (software AV1), whose CBR rate
-/// path is not verified to accept mid-stream `target-bitrate` reconfiguration.
-fn is_libaom_av1(encoder: &gst::Element) -> bool {
-    encoder
-        .factory()
-        .is_some_and(|factory| factory.name() == "av1enc")
-}
-
 /// Whether `encoder` is one of the NVENC hardware encoders
 /// (nvh264enc/nvh265enc/nvav1enc).
 fn is_nvenc(encoder: &gst::Element) -> bool {
@@ -1250,17 +1323,10 @@ fn is_nvenc(encoder: &gst::Element) -> bool {
 /// Whether the NVENC mid-stream re-target warning has already been logged.
 static NVENC_RETARGET_WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Applies `ceiling_kbps` to `encoder`'s runtime rate knob. Returns `false`
-/// when the encoder cannot change its ceiling live: libaom `av1enc`'s CBR
-/// `target-bitrate` reconfiguration mid-stream is unverified, and a codec
-/// exposing neither `bitrate` nor `target-bitrate` has no runtime knob at
-/// all. The caller must treat `false` as "the encoder kept its old cap" and
-/// must not record the requested value.
+/// Applies `ceiling_kbps` to an encoder the active plan marked as live
+/// re-targetable. Returns `false` only when its expected runtime property is
+/// unavailable, so the plan can pin future updates without moving bookkeeping.
 fn apply_encoder_ceiling(encoder: &gst::Element, ceiling_kbps: u32, rate_mode: RateMode) -> bool {
-    if is_libaom_av1(encoder) {
-        log::warn!("GStreamer libaom av1enc cannot change its bitrate mid-stream");
-        return false;
-    }
     if is_nvenc(encoder) {
         let target = encoder_target_kbps(rate_mode, ceiling_kbps);
         if encoder.find_property("bitrate").is_some() {
@@ -1770,19 +1836,14 @@ mod tests {
     }
 
     #[test]
-    fn libaom_av1_rejects_live_ceiling_changes() -> Result<(), String> {
+    fn libaom_av1_plan_pins_live_ceiling_changes() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
-        let encoder = gst::ElementFactory::make("av1enc")
-            .build()
-            .map_err(|error| error.to_string())?;
-        let target_kbps = encoder_target_kbps(RateMode::Cbr, 8_000);
-        configure_encoder(&encoder, "av1", target_kbps, 8_000, 60, RateMode::Cbr);
+        let plan = EncoderPlan::select("av1", |name| name == "av1enc")?;
+        let encoder = plan.create_encoder(8_000, 60)?;
         let target_before = encoder.property::<u32>("target-bitrate");
 
-        // The CBR rate path is not verified to accept mid-stream changes:
-        // the caller must not record the requested ceiling as applied.
-        assert!(!apply_encoder_ceiling(&encoder, 6_000, RateMode::Cbr));
+        assert_eq!(plan.apply_ceiling(&encoder, 6_000), CeilingUpdate::Pinned);
         assert_eq!(encoder.property::<u32>("target-bitrate"), target_before);
 
         Ok(())
@@ -1907,21 +1968,33 @@ mod tests {
     }
 
     #[test]
-    fn is_nvenc_and_is_libaom_av1_match_their_factories() -> Result<(), String> {
-        gst::init().map_err(|error| error.to_string())?;
+    fn encoder_plan_keeps_selection_and_rate_policy_together() -> Result<(), String> {
+        let nvenc_av1 = EncoderPlan::select("av1", |name| name == "nvav1enc")?;
+        assert_eq!(nvenc_av1.encoder_name(), "nvav1enc");
+        assert_eq!(nvenc_av1.ceiling_update(), CeilingUpdate::Attempted);
+        assert!(nvenc_av1.can_adapt());
 
-        let av1enc = gst::ElementFactory::make("av1enc")
-            .build()
-            .map_err(|error| error.to_string())?;
-        assert!(!is_nvenc(&av1enc));
-        assert!(is_libaom_av1(&av1enc));
-        let vp8enc = gst::ElementFactory::make("vp8enc")
-            .build()
-            .map_err(|error| error.to_string())?;
-        assert!(!is_nvenc(&vp8enc));
-        assert!(!is_libaom_av1(&vp8enc));
+        let vaapi_av1 = EncoderPlan::select("av1", |name| name == "vaav1enc")?;
+        assert_eq!(vaapi_av1.encoder_name(), "vaav1enc");
+        assert_eq!(vaapi_av1.ceiling_update(), CeilingUpdate::Applied);
+        assert!(vaapi_av1.can_adapt());
+
+        let software_av1 = EncoderPlan::select("av1", |name| name == "av1enc")?;
+        assert_eq!(software_av1.encoder_name(), "av1enc");
+        assert_eq!(software_av1.ceiling_update(), CeilingUpdate::Pinned);
+        assert!(!software_av1.can_adapt());
 
         Ok(())
+    }
+
+    #[test]
+    fn encoder_plan_fails_when_no_chain_passes_the_probe_gate() {
+        let result = EncoderPlan::select("h264", |_| false);
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "GStreamer encoder unavailable for h264: tried nvh264enc -> vah264enc -> x264enc"
+        ));
     }
 
     #[test]

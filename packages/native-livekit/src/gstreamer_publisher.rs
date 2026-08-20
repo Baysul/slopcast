@@ -410,20 +410,6 @@ pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
     bitrate_bps_to_kbps(bps)
 }
 
-/// Whether the active codec supports in-place ceiling changes. `VPx` and
-/// VA-API rate knobs change mid-stream — including `vah264enc` CBR, whose
-/// `bitrate` re-derives the driver target in PLAYING state. NVENC
-/// mid-stream re-targeting is attempted and bookkept as applied but is
-/// unverified on hardware (docs/adr/0001-nvenc-bitrate-retarget.md;
-/// `apply_encoder_ceiling` warns once per process). libaom `av1enc`'s CBR
-/// `target-bitrate` reconfiguration mid-stream is unverified, so AV1 is
-/// pinned to its configured ceiling for now — regardless of which AV1
-/// encoder won the selection chain. The default codec (no `video_codec`)
-/// is VP8, which can adapt.
-fn can_adapt(codec: Option<&str>) -> bool {
-    !matches!(codec.unwrap_or("vp8"), "av1")
-}
-
 /// Clears the shared publish state, but only if this worker is still the
 /// current one. A stale worker that finishes late (reaped after
 /// `disconnect()`'s grace period) must never clear the *next* worker's
@@ -878,20 +864,12 @@ fn run_connected(
         // persistently full queue) mean the encoder is falling behind *now* —
         // step the ceiling immediately instead of waiting a full second for
         // the receiver-loss report to confirm the overload.
-        // Only in automatic mode (manual bitrate is pinned) and only for
-        // codecs that accept in-place ceiling changes (libaom av1enc's CBR
-        // rate path is not verified to).
+        // Only in automatic mode and when the active encoder plan supports
+        // an in-place ceiling change.
         backpressure_ticks += 1;
         if backpressure_ticks >= RATE_BACKPRESSURE_TICKS {
             backpressure_ticks = 0;
-            if rate_controller.enabled
-                && can_adapt(
-                    pipeline
-                        .video_config
-                        .as_ref()
-                        .and_then(|config| config.video_codec.as_deref()),
-                )
-            {
+            if rate_controller.enabled && pipeline.can_adapt_rate() {
                 pipeline.adapt_rate_backpressure(rate_controller);
             }
         }
@@ -899,19 +877,12 @@ fn run_connected(
         // ~1 s congestion-control cadence: step the encoder ceiling down on
         // sustained remote-inbound loss, back up toward the configured
         // ceiling after clean intervals. Only in automatic mode (manual
-        // bitrate is pinned) and only for codecs that accept in-place
-        // ceiling changes (libaom av1enc's CBR rate path is not verified to).
+        // bitrate is pinned) and when the active encoder plan supports an
+        // in-place ceiling change.
         rate_ticks += 1;
         if rate_ticks >= RATE_ADAPT_TICKS {
             rate_ticks = 0;
-            if rate_controller.enabled
-                && can_adapt(
-                    pipeline
-                        .video_config
-                        .as_ref()
-                        .and_then(|config| config.video_codec.as_deref()),
-                )
-            {
+            if rate_controller.enabled && pipeline.can_adapt_rate() {
                 pipeline.adapt_rate(rate_controller);
             }
         }
@@ -1107,15 +1078,17 @@ impl PublisherPipeline {
         Ok(())
     }
 
-    /// Re-applies an adapted encoder ceiling after a rebuild/reconnect (the
-    /// fresh encoder starts at the configured ceiling). Returns whether the
-    /// encoder actually changed rate (false for libaom av1enc, whose CBR
-    /// rate path is not verified to move mid-stream).
-    fn apply_rate(&mut self, ceiling_kbps: u32) -> bool {
-        let Some(encoder) = self.encoder.as_mut() else {
-            return true;
-        };
-        encoder.set_ceiling_kbps(ceiling_kbps)
+    /// Re-applies an adapted encoder ceiling after a rebuild or reconnect.
+    fn apply_rate(&mut self, ceiling_kbps: u32) {
+        if let Some(encoder) = self.encoder.as_mut() {
+            let _ = encoder.set_ceiling_kbps(ceiling_kbps);
+        }
+    }
+
+    fn can_adapt_rate(&self) -> bool {
+        self.encoder
+            .as_ref()
+            .is_some_and(GstreamerEncoder::can_adapt)
     }
 
     /// Applies an fps/bitrate change to the running encoder in place (codec
@@ -1134,17 +1107,14 @@ impl PublisherPipeline {
             encoder.input().set_fps(target.fps);
             log::info!("GStreamer encoder: live fps change to {}", target.fps);
         }
-        encoder.set_ceiling_kbps(target.ceiling_kbps)
+        !encoder.set_ceiling_kbps(target.ceiling_kbps).is_pinned()
     }
 
     /// One ~1 s congestion-control observation: fold the sink stats, step
     /// the `RateController`, and re-target the encoder when it decides to
     /// move.
     fn adapt_rate(&mut self, rate_controller: &mut RateController) {
-        let Some(config) = self.video_config.as_ref() else {
-            return;
-        };
-        if !can_adapt(config.video_codec.as_deref()) {
+        if !self.can_adapt_rate() {
             return;
         }
         let telemetry = self.telemetry();
@@ -1152,7 +1122,7 @@ impl PublisherPipeline {
             log::info!(
                 "GStreamer congestion controller: applying encoder ceiling {ceiling_kbps} kbps"
             );
-            let _ = self.apply_rate(ceiling_kbps);
+            self.apply_rate(ceiling_kbps);
         }
     }
 
@@ -1160,10 +1130,7 @@ impl PublisherPipeline {
     /// the `RateController` on encoder-overload signals, and re-target the
     /// encoder when it decides to move.
     fn adapt_rate_backpressure(&mut self, rate_controller: &mut RateController) {
-        let Some(config) = self.video_config.as_ref() else {
-            return;
-        };
-        if !can_adapt(config.video_codec.as_deref()) {
+        if !self.can_adapt_rate() {
             return;
         }
         let telemetry = self.telemetry();
@@ -1171,7 +1138,7 @@ impl PublisherPipeline {
             log::info!(
                 "GStreamer congestion controller: backpressure, applying encoder ceiling {ceiling_kbps} kbps"
             );
-            let _ = self.apply_rate(ceiling_kbps);
+            self.apply_rate(ceiling_kbps);
         }
     }
 
@@ -1196,7 +1163,9 @@ impl PublisherPipeline {
 
     fn telemetry(&self) -> NativeTelemetry {
         let stats = self.sink.property::<gst::Structure>("stats");
-        fold_telemetry(&stats, self.video_config.as_ref())
+        let encoder_name = self.encoder.as_ref().map(GstreamerEncoder::encoder_name);
+
+        fold_telemetry(&stats, self.video_config.as_ref(), encoder_name)
     }
 }
 
@@ -1682,7 +1651,11 @@ fn encoder_suffix(encoder: &str) -> Option<&'static str> {
     }
 }
 
-fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> NativeTelemetry {
+fn fold_telemetry(
+    stats: &gst::Structure,
+    config: Option<&CaptureConfig>,
+    encoder_name: Option<&str>,
+) -> NativeTelemetry {
     let structures = flatten_structures(stats);
     let mut telemetry = NativeTelemetry {
         timestamp_ms: Some(epoch_timestamp_ms()),
@@ -1728,10 +1701,7 @@ fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> Nat
         telemetry.video_frames_submitted = Some(VIDEO_FRAMES_SUBMITTED.load(Ordering::Relaxed));
         telemetry.video_width = Some(config.width);
         telemetry.video_height = Some(config.height);
-        telemetry.encoder_implementation = Some(format!(
-            "GStreamer {}",
-            selected_encoder_name(config.video_codec.as_deref().unwrap_or("vp8"))
-        ));
+        telemetry.encoder_implementation = encoder_name.map(|name| format!("GStreamer {name}"));
         telemetry.video_codec.get_or_insert_with(|| {
             format!(
                 "video/{}",
@@ -1939,7 +1909,7 @@ mod tests {
             .field("audio", outbound("codec-stats-src_1", 2000, 13, 3))
             .build();
 
-        let telemetry = fold_telemetry(&stats, None);
+        let telemetry = fold_telemetry(&stats, None, None);
 
         assert_eq!(telemetry.video_bytes_sent, Some(42.0));
         assert_eq!(telemetry.video_packets_sent, Some(7.0));
@@ -1958,7 +1928,7 @@ mod tests {
             .field("rtx", outbound("codec-stats-src_1", 1001, 13, 3))
             .build();
 
-        let telemetry = fold_telemetry(&stats, None);
+        let telemetry = fold_telemetry(&stats, None, None);
 
         assert_eq!(telemetry.video_bytes_sent, Some(55.0));
         assert_eq!(telemetry.video_packets_sent, Some(10.0));
@@ -1980,7 +1950,7 @@ mod tests {
             )
             .build();
 
-        let telemetry = fold_telemetry(&stats, None);
+        let telemetry = fold_telemetry(&stats, None, None);
 
         assert_eq!(telemetry.video_packets_lost, Some(0.0));
         assert_eq!(telemetry.rtt_ms, Some(50.0));
@@ -2001,7 +1971,7 @@ mod tests {
             )
             .build();
 
-        let telemetry = fold_telemetry(&stats, None);
+        let telemetry = fold_telemetry(&stats, None, None);
 
         assert!(telemetry.video_packets_lost.is_none());
         assert!(telemetry.rtt_ms.is_none());
@@ -2020,10 +1990,27 @@ mod tests {
             )
             .build();
 
-        let telemetry = fold_telemetry(&stats, None);
+        let telemetry = fold_telemetry(&stats, None, None);
 
         assert!(telemetry.video_bytes_sent.is_none());
         assert!(telemetry.audio_bytes_sent.is_none());
+    }
+
+    #[test]
+    fn telemetry_uses_the_attached_encoder_name() {
+        init_gst();
+        let stats = gst::Structure::builder("application/x-webrtcsink-stats").build();
+        let config = CaptureConfig {
+            video_codec: Some("av1".to_string()),
+            ..Default::default()
+        };
+
+        let telemetry = fold_telemetry(&stats, Some(&config), Some("nvav1enc"));
+
+        assert_eq!(
+            telemetry.encoder_implementation.as_deref(),
+            Some("GStreamer nvav1enc")
+        );
     }
 
     fn telemetry_with_loss(sent: f64, lost: f64) -> NativeTelemetry {
@@ -2611,16 +2598,6 @@ mod tests {
             }),
             20_000
         );
-    }
-
-    #[test]
-    fn can_adapt_allows_every_codec_except_av1() {
-        assert!(!can_adapt(Some("av1")));
-        assert!(can_adapt(Some("h264")));
-        assert!(can_adapt(Some("h265")));
-        assert!(can_adapt(Some("vp8")));
-        assert!(can_adapt(Some("vp9")));
-        assert!(can_adapt(None));
     }
 
     #[test]
