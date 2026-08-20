@@ -24,6 +24,107 @@ interface VideoPlayerProps {
 }
 
 const STATS_POLL_MS = 2000;
+const MAX_PRESENTATION_TRACE_FRAMES = 20_000;
+
+interface PresentationFrame {
+  callbackTime: number;
+  callbackGap: number | null;
+  mediaTime: number;
+  mediaTimeGap: number | null;
+  presentationTime: number;
+  presentationGap: number | null;
+  expectedDisplayTime: number;
+  expectedDisplayLead: number;
+  presentedFrames: number;
+  processingDuration: number | null;
+}
+
+interface PresentationSummary {
+  frameInterval: number;
+  medianGap: number | null;
+  p95Gap: number | null;
+  p99Gap: number | null;
+  maximumGap: number | null;
+  aboveOnePointFiveIntervals: number;
+  aboveTwoIntervals: number;
+  presentedFrames: number;
+}
+
+interface PlaybackDiagnostics {
+  frames: PresentationFrame[];
+  summary: (fps?: number) => PresentationSummary;
+}
+
+declare global {
+  interface Window {
+    __slopcastPlaybackDiagnostics?: PlaybackDiagnostics;
+  }
+}
+
+const diagnosticEnabled = (): boolean => new URLSearchParams(window.location.search).has('diagnostics');
+
+const percentile = (values: number[], percentileValue: number): number | null => {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * percentileValue))] ?? null;
+};
+
+const summarizePresentation = (frames: PresentationFrame[], fps = 60): PresentationSummary => {
+  const frameInterval = 1000 / fps;
+  const gaps = frames.flatMap((frame) => (frame.presentationGap == null ? [] : [frame.presentationGap]));
+  const maximumGap = gaps.length === 0 ? null : Math.max(...gaps);
+
+  return {
+    frameInterval,
+    medianGap: percentile(gaps, 0.5),
+    p95Gap: percentile(gaps, 0.95),
+    p99Gap: percentile(gaps, 0.99),
+    maximumGap,
+    aboveOnePointFiveIntervals: gaps.filter((gap) => gap > frameInterval * 1.5).length,
+    aboveTwoIntervals: gaps.filter((gap) => gap > frameInterval * 2).length,
+    presentedFrames: frames.length,
+  };
+};
+
+const usePlaybackDiagnostics = (videoRef: React.RefObject<HTMLVideoElement | null>): void => {
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !diagnosticEnabled()) return;
+
+    const frames: PresentationFrame[] = [];
+    let previous: PresentationFrame | null = null;
+    let callbackId = 0;
+    const diagnostics: PlaybackDiagnostics = {
+      frames,
+      summary: (fps = 60) => summarizePresentation(frames, fps),
+    };
+    window.__slopcastPlaybackDiagnostics = diagnostics;
+
+    const recordFrame = (now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata): void => {
+      const frame: PresentationFrame = {
+        callbackTime: now,
+        callbackGap: previous == null ? null : now - previous.callbackTime,
+        mediaTime: metadata.mediaTime,
+        mediaTimeGap: previous == null ? null : metadata.mediaTime - previous.mediaTime,
+        presentationTime: metadata.presentationTime,
+        presentationGap: previous == null ? null : metadata.presentationTime - previous.presentationTime,
+        expectedDisplayTime: metadata.expectedDisplayTime,
+        expectedDisplayLead: metadata.expectedDisplayTime - now,
+        presentedFrames: metadata.presentedFrames,
+        processingDuration: metadata.processingDuration ?? null,
+      };
+      frames.push(frame);
+      if (frames.length > MAX_PRESENTATION_TRACE_FRAMES) frames.shift();
+      previous = frame;
+      callbackId = video.requestVideoFrameCallback(recordFrame);
+    };
+
+    callbackId = video.requestVideoFrameCallback(recordFrame);
+    return () => {
+      video.cancelVideoFrameCallback(callbackId);
+    };
+  }, [videoRef]);
+};
 
 // Browsers block unmuted autoplay without a gesture: try playing at normal
 // volume first, then retry muted. Resolves to whether a user gesture is still
@@ -463,6 +564,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     handleVolumeChange,
     toggleFullscreen,
   } = usePlaybackControls(mediaStream, fullBleed);
+  usePlaybackDiagnostics(videoRef);
 
   const overlayControlsClass = getOverlayClass(isFullscreen, showFullscreenControls);
 

@@ -139,6 +139,11 @@ export const desktopApi = {
       keepaliveDropped: 0,
       lastWidth: 0,
       lastHeight: 0,
+      pacerPushes: 0,
+      pacerPops: 0,
+      pacerDrops: 0,
+      pacerDepth: 0,
+      pacerMaxDepth: 0,
     }),
   // Pre-roll flow (§9): capture-only mode and publish-with-audio. On
   // Windows, `source` is the picker's selection (required for real capture);

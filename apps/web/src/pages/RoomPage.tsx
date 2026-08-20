@@ -10,6 +10,14 @@ import { VideoPlayer } from '../components/VideoPlayer';
 
 type StatusVariant = 'live' | 'disconnected' | 'info';
 
+declare global {
+  interface Window {
+    __slopcastReceiverStats?: () => Promise<RTCStatsReport | null>;
+  }
+}
+
+const diagnosticEnabled = (): boolean => new URLSearchParams(window.location.search).has('diagnostics');
+
 // Distilled status signal, matching the desktop titlebar convention: a bare
 // dot + uppercase word, no pill or background. The video owns the viewport.
 const StatusSignal: React.FC<{ variant: StatusVariant; children: React.ReactNode }> = ({ variant, children }) => {
@@ -697,6 +705,14 @@ export const RoomPage: React.FC = () => {
       return null;
     }
   }, []);
+
+  useEffect(() => {
+    if (!diagnosticEnabled()) return;
+    window.__slopcastReceiverStats = getStatsFn;
+    return () => {
+      delete window.__slopcastReceiverStats;
+    };
+  }, [getStatsFn]);
 
   const statusVariant = (): StatusVariant => {
     if (connectionStatus === 'live') return 'live';
