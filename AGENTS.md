@@ -132,7 +132,7 @@ The `packages/native-rust/rustfmt.toml` and `packages/native-livekit/rustfmt.tom
 
 ## 4. Tauri security model
 
-The renderer is a sandboxed webview with no Node in it. All privileged work runs in Rust commands, plugin permissions are capability-granted (`src-tauri/capabilities/default.json`), and a strict CSP is set in `tauri.conf.json`. Never bypass the `desktopApi` wrapper, never expose a command that accepts free-form paths or shell input, and never weaken the CSP. Keep the `e2e` cargo feature out of production builds. It exposes an unauthenticated localhost WebDriver surface.
+The renderer is a sandboxed webview with no Node in it. All privileged work runs in Rust commands, plugin permissions are capability-granted (`src-tauri/capabilities/default.json`), and a strict CSP is set in `tauri.conf.json`. Never bypass the `desktopApi` wrapper, never expose a command that accepts free-form paths or shell input, and never weaken the CSP. Keep the `e2e` cargo feature out of production builds. It opens an unauthenticated localhost Chrome DevTools surface.
 
 ## 5. Build and package commands
 
@@ -155,7 +155,7 @@ Artifacts land in `target/release/bundle/{appimage,deb,nsis}/` (the Cargo worksp
 
 ## 6. Automated end-to-end test (`pnpm test:e2e`)
 
-The harness lives at `apps/server/src/e2e-test.ts` and orchestrates two automation phases: a WebdriverIO presenter phase driving the real Tauri binary (embedded WebDriver via the `e2e` cargo feature, spec at `apps/desktop/tests/e2e/presenter.spec.ts`) and a Playwright Chromium spectator phase. It runs one full presenter-to-spectator pass per codec (`E2E_CODECS`, default `h264,h265,vp8,vp9,av1`).
+The harness lives at `apps/server/src/e2e-test.ts` and orchestrates two automation phases: a Playwright presenter phase driving the real Tauri binary over CEF's remote-debugging protocol (the `e2e` cargo feature adds the `--remote-debugging-port` flag, script at `apps/desktop/tests/e2e/presenter.playwright.ts`) and a Playwright Chromium spectator phase. It runs one full presenter-to-spectator pass per codec (`E2E_CODECS`, default `h264,h265,vp8,vp9,av1`).
 
 Prerequisites:
 
@@ -173,29 +173,29 @@ What it validates:
 | :--- | :--- |
 | Config and setup | Parses `slopcast.config.json`, kills conflicting port processes, spawns the API server and Web dev server with health polling (30 s timeout). Optionally detects and launches Spotify. |
 | LiveKit preflight | TCP-checks the configured `livekitUrl`. For localhost endpoints the harness always runs its own `livekit-server --dev`. A listener on the port is not enough; containerized SFUs often relay signaling but fail ICE/DTLS on the media plane. Anything else fails fast with an actionable error. Also kills stray app instances (`pkill -f target/release/slopcast`) so `tauri-plugin-single-instance` cannot silently hijack the launch. |
-| Presenter (WebdriverIO + Tauri) | Runs the WDIO spec against the `--features e2e` binary with an isolated app config dir (`XDG_CONFIG_HOME` set to `test-output/e2e-userdata`) so real persisted settings cannot leak in. The spec asserts the Wayland gate (portal mode only). It clicks "Create Live Room", extracts the room code from `span.font-mono`, starts the screenshare, checks that the preview canvas appears, clicks Go Live, and finds the `[role="status"]` LIVE badge. In synthetic mode (`SLOPCAST_E2E_CAPTURE=synthetic`, the default) the backend feeds a test pattern through the real publish path. No portal picker or Wayland session is needed, and `stream-settings.json` (1080p@60, 20 Mbps, the pass codec) is pre-written for each pass. Telemetry and capture stats are sampled about 2 s apart. `videoFramesEncoded` and `videoBytesSent` must advance, the reported outbound codec must match the pass codec, `previewFramesSent > 0` (the raw-BGRA preview emitter ran), and a published-fps floor is enforced. After the spectator subscribes, a five-second native byte-counter sample must report positive bitrate without exceeding the configured limit by more than the VBR tolerance. GPU diagnostics come from `probe_gpu_info` (a dlopen'd EGL probe replacing `app.getGPUInfo`). `softwareRasterizer` must be false and `eglVendor` must be present. Progress is written to `presenter-phase.json`. The harness polls it and only hands off to the spectator once `handoffReady` flips, then writes a release flag so the spec's hold test (which keeps the app alive during the spectator phase) ends gracefully. |
+| Presenter (Playwright + CEF CDP) | Runs the Playwright script against the `--features e2e` binary with an isolated app config dir (`XDG_CONFIG_HOME` set to `test-output/e2e-userdata`) so real persisted settings cannot leak in. The script asserts the Wayland gate (portal mode only). It clicks "Create Live Room", extracts the room code from `span.font-mono`, starts the screenshare, checks that the preview canvas appears, clicks Go Live, and finds the `[role="status"]` LIVE badge. In synthetic mode (`SLOPCAST_E2E_CAPTURE=synthetic`, the default) the backend feeds a test pattern through the real publish path. No portal picker or Wayland session is needed, and `stream-settings.json` (1080p@60, 20 Mbps, the pass codec) is pre-written for each pass. Telemetry and capture stats are sampled about 2 s apart. `videoFramesEncoded` and `videoBytesSent` must advance, the reported outbound codec must match the pass codec, `previewFramesSent > 0` (the raw-BGRA preview emitter ran), and a published-fps floor is enforced. After the spectator subscribes, a five-second native byte-counter sample must report positive bitrate without exceeding the configured limit by more than the VBR tolerance. GPU diagnostics come from `probe_gpu_info` (a dlopen'd EGL probe replacing `app.getGPUInfo`). `softwareRasterizer` must be false and `eglVendor` must be present. Progress is written to `presenter-phase.json`. The harness polls it and only hands off to the spectator once `handoffReady` flips, then writes a release flag so the script's hold loop (which keeps the app alive during the spectator phase) ends gracefully. |
 | Spectator (Chromium) | Headless Chromium via Playwright navigates to the room URL. Asserts the connection badge (`[role="status"]`), a `<video>` element with non-zero dimensions that is actively playing, and in synthetic mode that the received stream is exactly the published 1920x1080 single layer (a halved simulcast layer fails the run). Three receiver `framesDecoded` telemetry samples must have a median of at least 80% of the configured 60 fps. |
 | Video capture malfunction checks | Presenter-side: native telemetry must advance and `framesPushed > 0` (catches black-keepalive publishing, where the track is up but capture has died). Spectator-side: two consecutive `requestVideoFrameCallback` frames must arrive (continuous flow, not a single-frame stall) and the decoded pixels must not be uniformly black (64x64 canvas luma/variation check). A `[data-decoder-stalled]` UI flag (codec/profile mismatch) is an error. All of this lands in `e2e-result.json`. |
 | Presenter-stop propagation | Mid-hold the harness requests a stop (the harness sets `E2E_STOP_FLAG`; the spec clicks Stop Screenshare, confirms, and acks `E2E_STOPPED_FLAG`). The spectator's `[role="status"]` badge must leave "Live" and report the stream ended while the presenter stays connected. Its room-lifetime audio track keeps the publication alive. The web spectator keys stream liveness off video publications, so a stale "Live" badge fails the run. |
 | Diagnostic validation | Parses all console logs for fatal patterns (SEGV, uncaught exceptions, ICE failure, GPU process crash, decoder stall, `framesDecoded=0`). GPU feature status comes from the probe report. Fails if software-rendered. Writes a structured JSON result with pass/fail and per-codec outcomes. |
-| Retry and cleanup | `try/finally` guarantees the spectator browser, the WDIO session (release flag, graceful teardown, SIGTERM), and spawned servers are shut down and ports reaped even when a step throws. Console logs and the result JSON are written on every outcome. The whole run retries up to 2 attempts with a root-cause summary after all attempts are exhausted, and exits non-zero if every attempt fails. |
+| Retry and cleanup | `try/finally` guarantees the spectator browser, the presenter session (release flag, graceful teardown, SIGTERM), and spawned servers are shut down and ports reaped even when a step throws. Console logs and the result JSON are written on every outcome. The whole run retries up to 2 attempts with a root-cause summary after all attempts are exhausted, and exits non-zero if every attempt fails. |
 
 Output artifacts (written to `test-output/`):
 
 | File | Content |
 | :--- | :--- |
-| `desktop-console.log` | All captured console entries from every source (server, web, wdio/tauri backend logs, livekit, spectator) |
+| `desktop-console.log` | All captured console entries from every source (server, web, presenter script/tauri backend logs, livekit, spectator) |
 | `web-console.log` | All DevTools console output from the Chromium spectator |
 | `desktop-gpu-report.json` | Raw `probe_gpu_info` output: EGL vendor, GL renderer/version, software-rasterizer flag |
-| `presenter-phase.json` | Structured presenter-phase result (room code, telemetry, GPU report, errors) written by the WDIO spec |
+| `presenter-phase.json` | Structured presenter-phase result (room code, telemetry, GPU report, errors) written by the Playwright presenter script |
 | `e2e-result.json` | Structured `TestResult`: room code, video dimensions, per-codec results, GPU status, errors, duration, retries |
 | `e2e-userdata/` | Isolated app config dir (stream-settings.json per pass, onboarding state) |
 
 Agent rules for the e2e test:
 
-1. The test scripts (`apps/server/src/e2e-test.ts`, `apps/desktop/tests/e2e/presenter.spec.ts`) must pass `pnpm check` before being considered complete.
+1. The test scripts (`apps/server/src/e2e-test.ts`, `apps/desktop/tests/e2e/presenter.playwright.ts`) must pass `pnpm check` before being considered complete.
 2. The `biome.json` override for `e2e-test.ts` allows `noExplicitAny` for Playwright locator chains. Don't remove it without verifying the test still passes Biome CI.
-3. When adding new UI elements to the desktop or web app, update the WebdriverIO selectors in `presenter.spec.ts` and the Playwright assertions in `e2e-test.ts` to match (`span.font-mono` room code, `[role="status"]` badges, `[data-decoder-stalled]`, preview canvas).
+3. When adding new UI elements to the desktop or web app, update the Playwright selectors in `presenter.playwright.ts` and the assertions in `e2e-test.ts` to match (`span.font-mono` room code, `[role="status"]` badges, `[data-decoder-stalled]`, preview canvas).
 
 ## 7. Manual walkthrough for room creation and web spectators
 
@@ -243,7 +243,7 @@ pactl list sources | grep -A 6 "Name: Slopcast-Window-Audio"
 | pipewire (Rust crate) | 0.10.0 |
 | zbus | 5 |
 | windows / windows-core (WASAPI) | 0.62.2 |
-| WebdriverIO + @wdio/tauri-service | ^9.30.1 / ^1.3.0 |
+| Playwright | ^1.55.0 |
 | Playwright | ^1.55.0 |
 | Node.js (required) | >= 24.0.0 (pnpm 9.15.4, `.nvmrc`) |
 

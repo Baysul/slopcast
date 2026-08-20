@@ -24,13 +24,9 @@ import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
 import './index.css';
 
-// E2E-only: the WDIO frontend plugin snapshots the raw Tauri
-// core (`window.__wdio_original_core__`) that `browser.tauri.execute` needs
-// and forwards console logs. Bundled in every build but only executed when
-// the e2e build sets VITE_E2E=1, so production runs never touch it.
-if (import.meta.env.VITE_E2E === '1') {
-  await import('@wdio/tauri-plugin');
-}
+// E2E-only: nothing to import. The Playwright presenter phase drives the
+// app over CEF's DevTools protocol and calls `window.__TAURI__.core.invoke`
+// directly (withGlobalTauri is on), so no in-page plugin shim is needed.
 
 /** Parses one raw preview channel payload (16-byte little-endian header —
  * `u64 pts_us`, `u32 width`, `u32 height` — followed by tightly packed BGRA
