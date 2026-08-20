@@ -158,8 +158,8 @@ fn meter_process_quantum(stream: &pipewire::stream::Stream, level: &Arc<MeterLev
                 }
             }
         } else {
-            for sample in slice.chunks_exact(4) {
-                let s = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+            for sample in slice.as_chunks::<4>().0 {
+                let s = f32::from_le_bytes(*sample);
                 if level.samples.push(s).is_err() {
                     return;
                 }

@@ -288,8 +288,10 @@ pub(crate) fn start_audio_ring_with_capacity(
                                 // format upstream by capture.rs, so every pair
                                 // of bytes decodes exactly to one i16 sample.
                                 let samples: Vec<i16> = chunk
-                                    .chunks_exact(2)
-                                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                    .as_chunks::<2>()
+                                    .0
+                                    .iter()
+                                    .map(|c| i16::from_le_bytes(*c))
                                     .collect();
                                 cb(samples);
                             }

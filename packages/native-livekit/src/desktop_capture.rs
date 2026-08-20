@@ -1412,11 +1412,11 @@ fn synthetic_frame(width: u32, height: u32, frame_index: u64, bgra: &mut [u8]) {
     let height = usize::try_from(height).unwrap_or(0);
     let bar_width = width.div_ceil(BARS.len());
     for row in bgra.chunks_exact_mut(width * 4).take(height) {
-        for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let bar = (x / bar_width).min(BARS.len() - 1);
             // BGRA byte order, alpha forced to 255.
             let [red, green, blue] = BARS[bar];
-            pixel.copy_from_slice(&[blue, green, red, 255]);
+            *pixel = [blue, green, red, 255];
         }
     }
     // Moving white box: 1/8 of the frame, wrapping at the right edge.
@@ -1430,8 +1430,8 @@ fn synthetic_frame(width: u32, height: u32, frame_index: u64, bgra: &mut [u8]) {
     let y0 = height / 8;
     for y in y0..(y0 + box_h).min(height) {
         let row = &mut bgra[(y * width + x0) * 4..(y * width + x0 + box_w) * 4];
-        for pixel in row.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&[255, 255, 255, 255]);
+        for pixel in row.as_chunks_mut::<4>().0 {
+            *pixel = [255, 255, 255, 255];
         }
     }
 }
@@ -2084,7 +2084,13 @@ mod probe {
             "frame contents must move with the index"
         );
         // Alpha is fully opaque everywhere.
-        assert!(first_frame.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(
+            first_frame
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        );
     }
 
     /// The preview pipeline (I420 stash → libyuv scale → BGRA payload)
@@ -2096,11 +2102,11 @@ mod probe {
         const W: u32 = 128;
         const H: u32 = 96;
         let mut bgra = vec![0u8; (W * H * 4) as usize];
-        for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
+        for (i, pixel) in bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             if i / (W as usize) < (H as usize) / 2 {
-                pixel.copy_from_slice(&[0, 0, 255, 255]); // BGRA: red
+                *pixel = [0, 0, 255, 255]; // BGRA: red
             } else {
-                pixel.copy_from_slice(&[255, 0, 0, 255]); // BGRA: blue
+                *pixel = [255, 0, 0, 255]; // BGRA: blue
             }
         }
 
@@ -2167,11 +2173,11 @@ mod probe {
         const W: u32 = 128;
         const H: u32 = 96;
         let mut bgra = vec![0u8; (W * H * 4) as usize];
-        for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
+        for (i, pixel) in bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             if i % (W as usize) < (W as usize) / 2 {
-                pixel.copy_from_slice(&[0, 0, 255, 255]); // BGRA: red — left half
+                *pixel = [0, 0, 255, 255]; // BGRA: red — left half
             } else {
-                pixel.copy_from_slice(&[255, 0, 0, 255]); // BGRA: blue — right half
+                *pixel = [255, 0, 0, 255]; // BGRA: blue — right half
             }
         }
 

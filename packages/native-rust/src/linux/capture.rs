@@ -289,8 +289,7 @@ fn run_capture_session(
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
         if shared
             .lock()
-            .ok()
-            .is_some_and(|s| s.capture_node_id.is_some_and(|id| id != 0))
+            .is_ok_and(|s| s.capture_node_id.is_some_and(|id| id != 0))
         {
             node_found = true;
             break;
@@ -663,8 +662,8 @@ fn invoke_audio_data_callback(data: &[u8]) {
         let out_bytes = num_samples * 2;
         i16_bytes.resize(out_bytes, 0);
 
-        for (i, chunk) in data.chunks_exact(4).enumerate() {
-            let bits = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for (i, chunk) in data.as_chunks::<4>().0.iter().enumerate() {
+            let bits = u32::from_le_bytes(*chunk);
             let f = f32::from_bits(bits);
             let sample = (f.clamp(-1.0, 1.0) * 32767.0).round() as i16;
             let sample_bytes = sample.to_le_bytes();
