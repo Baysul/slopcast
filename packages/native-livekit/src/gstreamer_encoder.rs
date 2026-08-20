@@ -1,20 +1,26 @@
 //! Linux video encoder branch attached to `livekitwebrtcsink`.
 //!
-//! `vah264enc` runs CBR at the configured ceiling: the `bitrate` is applied
+//! The encoder is selected per codec from a fixed preference chain
+//! (`codec_chains`): NVENC → VA-API → software, probed in order by
+//! `can_initialize_element`. NVENC branches prepend
+//! `cudaupload ! cudaconvertscale` so the GPU converts the captured I420 to
+//! NV12; VA-API and software branches keep system-memory `videoconvert`.
+//!
+//! `nvh264enc` runs CBR at the configured ceiling: the `bitrate` is applied
 //! verbatim as the encoder's target for predictable output under the
-//! real-time requirement; `vah265enc` keeps VBR with the same ceiling
-//! pinning via `target-percentage`. The software
-//! encoders run CBR (`VPx` in automatic mode, libaom `av1enc` always) or
-//! the ceiling-capped VBR quality target (manual-mode `VPx`,
-//! `x264enc`/`x265enc` always). The publisher's congestion controller
-//! re-targets each encoder at runtime through
-//! `GstreamerEncoder::set_ceiling_kbps`.
+//! real-time requirement. `nvh265enc` and `vah265enc` keep VBR: the target
+//! is 80% of the ceiling, pinned onto the ceiling via `max-bitrate` (NVENC)
+//! or `target-percentage` (VA-API). The software encoders run CBR (`VPx` in
+//! automatic mode, libaom `av1enc` always) or the ceiling-capped VBR
+//! quality target (manual-mode `VPx`, `x264enc`/`x265enc` always). The
+//! publisher's congestion controller re-targets each encoder at runtime
+//! through `GstreamerEncoder::set_ceiling_kbps`.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::CaptureConfig;
@@ -47,9 +53,11 @@ const H264_QVBR_QUALITY: u32 = 26;
 /// property on the `va` plugin's encoder), so target 80% of the ceiling
 /// with percentage 80 pins the maximum exactly onto the ceiling while the
 /// average stays below it: static screens encode well under the ceiling and
-/// busy scenes may burst up to it — never past. A percentage of 100 would
-/// degenerate to CBR (the driver sets minimum = maximum), so it is never
-/// used here.
+/// busy scenes may burst up to it — never past. NVENC encoders expose a
+/// real `max-bitrate` property instead (`configure_nvenc`), so the 80%
+/// discount is their VBR target and the ceiling is passed through
+/// separately. A percentage of 100 would degenerate to CBR (the driver sets
+/// minimum = maximum), so it is never used here.
 const VBR_TARGET_PERCENTAGE: u32 = 80;
 
 /// Rate-control mode for the software encoders. CBR pins the output to the
@@ -57,8 +65,9 @@ const VBR_TARGET_PERCENTAGE: u32 = 80;
 /// predictable output is worth more than VBR quality bursts, and the
 /// congestion controller's ceiling step is directly observable as bits/s.
 /// VBR keeps the ceiling-capped quality-target behavior for manual/high
-/// bitrate sessions and for the `vah265enc` hardware path (`vah264enc`
-/// runs QVBR, whose `bitrate` semantics match VBR's).
+/// bitrate sessions and for the H.265 hardware paths (`nvh265enc` and
+/// `vah265enc`). H.264 always runs CBR, on `nvh264enc` and `vah264enc`
+/// alike (`bitrate` is the ceiling in both, never a VBR target).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RateMode {
     Cbr,
@@ -80,6 +89,110 @@ pub(crate) fn reset_encoded_frames() {
 
 pub(crate) fn encoded_frames() -> u64 {
     VIDEO_FRAMES_ENCODED.load(Ordering::Relaxed)
+}
+
+/// One preference chain per codec: the encoder factory plus the elements
+/// between appsrc and the encoder, in link order, tried in order until a
+/// probe (`can_initialize_element`) initializes. NVENC branches prepend
+/// `cudaupload ! cudaconvertscale` so the GPU converts the captured I420 to
+/// NV12 in device memory; VA-API and software branches keep system-memory
+/// `videoconvert`. The publisher (`available_video_codecs`,
+/// `selected_encoder_name`) and `attach`/`select_chain` all derive from
+/// this table — it is the single source of truth for per-codec encoders.
+pub(crate) struct EncoderChain {
+    pub(crate) encoder: &'static str,
+    pub(crate) pre_chain: &'static [&'static str],
+}
+
+pub(crate) fn codec_chains(codec: &str) -> Result<&'static [EncoderChain], String> {
+    match codec {
+        "h264" => Ok(&[
+            EncoderChain {
+                encoder: "nvh264enc",
+                pre_chain: &["cudaupload", "cudaconvertscale"],
+            },
+            EncoderChain {
+                encoder: "vah264enc",
+                pre_chain: &["videoconvert"],
+            },
+            EncoderChain {
+                encoder: "x264enc",
+                pre_chain: &["videoconvert"],
+            },
+        ]),
+        "h265" => Ok(&[
+            EncoderChain {
+                encoder: "nvh265enc",
+                pre_chain: &["cudaupload", "cudaconvertscale"],
+            },
+            EncoderChain {
+                encoder: "vah265enc",
+                pre_chain: &["videoconvert"],
+            },
+            EncoderChain {
+                encoder: "x265enc",
+                pre_chain: &["videoconvert"],
+            },
+        ]),
+        "av1" => Ok(&[
+            EncoderChain {
+                encoder: "nvav1enc",
+                pre_chain: &["cudaupload", "cudaconvertscale"],
+            },
+            EncoderChain {
+                encoder: "vaav1enc",
+                pre_chain: &["videoconvert"],
+            },
+            EncoderChain {
+                encoder: "av1enc",
+                pre_chain: &["videoconvert"],
+            },
+        ]),
+        "vp9" => Ok(&[EncoderChain {
+            encoder: "vp9enc",
+            pre_chain: &["videoconvert"],
+        }]),
+        "vp8" => Ok(&[EncoderChain {
+            encoder: "vp8enc",
+            pre_chain: &["videoconvert"],
+        }]),
+        other => Err(format!("Unsupported GStreamer video codec: {other}")),
+    }
+}
+
+/// Selects the encoder for `codec` against `probe`: the first chain whose
+/// encoder probes OK wins. No winner falls back to the last chain's encoder
+/// (the software encoder), matching the old hardware-else-software behavior.
+/// Unknown codecs default to `vp8enc` — parity with the old `_ =>` arm.
+pub(crate) fn select_encoder(codec: &str, probe: impl Fn(&str) -> bool) -> &'static str {
+    let Ok(chains) = codec_chains(codec) else {
+        return "vp8enc";
+    };
+    chains
+        .iter()
+        .find(|chain| probe(chain.encoder))
+        .unwrap_or(&chains[chains.len() - 1])
+        .encoder
+}
+
+/// The first chain in `codec_chains(codec)` whose encoder `probe` accepts;
+/// `Err` lists every tried encoder so a failure names the whole chain.
+fn select_chain(
+    codec: &str,
+    probe: impl Fn(&str) -> bool,
+) -> Result<&'static EncoderChain, String> {
+    let chains = codec_chains(codec)?;
+    chains
+        .iter()
+        .find(|chain| probe(chain.encoder))
+        .ok_or_else(|| {
+            let tried = chains
+                .iter()
+                .map(|chain| chain.encoder)
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            format!("GStreamer encoder unavailable for {codec}: tried {tried}")
+        })
 }
 
 /// Live GstBaseSrc/AppSrc statistics (all present on the appsrc element
@@ -250,17 +363,21 @@ pub(crate) struct GstreamerEncoder {
 }
 
 impl GstreamerEncoder {
-    /// Re-targets the encoder at runtime: VA-API takes `bitrate` (the VBR
-    /// target, `ceiling × target-percentage / 100`) and `VPx` takes
+    /// Re-targets the encoder at runtime: NVENC and VA-API take `bitrate`
+    /// (the VBR target, `ceiling × target-percentage / 100`), NVENC VBR
+    /// additionally re-pins `max-bitrate` to the ceiling, and `VPx` takes
     /// `target-bitrate` (the ceiling itself in CBR, the VBR target in VBR
     /// mode). libaom `av1enc`'s CBR rate path is not verified to accept
     /// mid-stream `target-bitrate` reconfiguration, so it reports `false`
     /// and leaves `ceiling_kbps` untouched (the encoder keeps its configured
     /// cap; a `true`/`false` return keeps the caller's state from pretending
-    /// the change landed). The VA-API and `VPx` rate controllers pick the
-    /// new rate up on the next encoded frame — no pipeline rebuild, so this
-    /// is safe to call from the publisher's ~1 s congestion control tick
-    /// even mid-stream.
+    /// the change landed). NVENC mid-stream re-targeting is likewise
+    /// unverified on hardware (docs/adr/0001-nvenc-bitrate-retarget.md);
+    /// `apply_encoder_ceiling` still attempts it, warns once, and reports
+    /// `true` so the ceiling bookkeeping matches the attempt. The NVENC,
+    /// VA-API and `VPx` rate controllers pick the new rate up on the next
+    /// encoded frame — no pipeline rebuild, so this is safe to call from the
+    /// publisher's ~1 s congestion control tick even mid-stream.
     ///
     /// Returns `true` when the new ceiling was actually applied (or was
     /// already in effect), `false` when the encoder cannot change it live.
@@ -301,7 +418,8 @@ impl GstreamerEncoder {
         let codec = config.video_codec.as_deref().unwrap_or("vp8");
         let ceiling_kbps = crate::gstreamer_publisher::configured_ceiling_kbps(config);
         crate::gstreamer_publisher::verify_codec_elements(codec)?;
-        let encoder_name = codec_pipeline(codec)?;
+        let chain = select_chain(codec, crate::gstreamer_publisher::can_initialize_element)?;
+        let encoder_name = chain.encoder;
 
         let fps = i32::try_from(config.fps).map_err(|_| "GStreamer encoder fps exceeds i32")?;
         let input_info = gst_video::VideoInfo::builder(
@@ -332,17 +450,24 @@ impl GstreamerEncoder {
         // for live screen share stale frames are worthless, so freshness
         // wins (leaky-upstream would instead keep the oldest frame queued
         // and reject the newest, trailing real time).
-        let convert = make_element("videoconvert")?;
+        let pre_chain_elements = chain
+            .pre_chain
+            .iter()
+            .map(|name| make_element(name))
+            .collect::<Result<Vec<_>, _>>()?;
         // Rate mode: VP8/VP9 run CBR in automatic mode (predictable output
         // beats VBR bursts under a real-time requirement) and keep the
         // ceiling-capped VBR quality target in manual mode; libaom av1enc
-        // always runs CBR at the ceiling; H.264 runs QVBR with the ceiling
-        // as the encoder maximum and H.265 keeps VBR with the ceiling
-        // pinned by `target-percentage` (see VBR_TARGET_PERCENTAGE).
-        let rate_mode = match codec {
-            "av1" => RateMode::Cbr,
-            "h264" if encoder_name == "vah264enc" => RateMode::Cbr,
-            "h264" | "h265" => RateMode::Vbr,
+        // always runs CBR at the ceiling; H.264 runs CBR at the ceiling on
+        // its hardware encoders (nvh264enc/vah264enc) and ceiling-capped VBR
+        // on x264enc; H.265 keeps VBR on every encoder, with the ceiling
+        // pinned by `max-bitrate` (nvh265enc) or `target-percentage`
+        // (vah265enc); NVENC AV1 (nvav1enc) runs CBR like av1enc, while
+        // vaav1enc mirrors the vah265enc VBR pinning (see
+        // VBR_TARGET_PERCENTAGE).
+        let rate_mode = match (codec, encoder_name) {
+            ("av1", "nvav1enc" | "av1enc") | ("h264", "nvh264enc" | "vah264enc") => RateMode::Cbr,
+            ("av1", "vaav1enc") | ("h264" | "h265", _) => RateMode::Vbr,
             _ if config.auto_bitrate => RateMode::Cbr,
             _ => RateMode::Vbr,
         };
@@ -357,7 +482,14 @@ impl GstreamerEncoder {
                 format!("Failed to create GStreamer element {encoder_name}: {error}")
             })?;
         let encoder_rate = encoder_target_kbps(rate_mode, ceiling_kbps);
-        configure_encoder(&encoder, codec, encoder_rate, key_int_max, rate_mode);
+        configure_encoder(
+            &encoder,
+            codec,
+            encoder_rate,
+            ceiling_kbps,
+            key_int_max,
+            rate_mode,
+        );
         // On the bundled livekitwebrtcsink (gst-plugin-webrtc 0.15.3) we
         // observed the sink inserting its own codec parser (vp9parse/av1parse)
         // internally before its payloader and rejecting caps renegotiation on
@@ -401,29 +533,37 @@ impl GstreamerEncoder {
         // AV1 encoder, and audit whether each request actually produces a
         // keyframe.
         if codec == "av1" {
-            log_force_key_unit_events(&encoder_src, "av1enc");
-            log_av1_encode_diagnostics(&encoder_src, "av1enc");
+            log_force_key_unit_events(&encoder_src, encoder_name);
+            log_av1_encode_diagnostics(&encoder_src, encoder_name);
         }
-        let elements = vec![
-            appsrc.clone().upcast(),
-            convert,
-            encoder.clone(),
-            output_queue.clone(),
-        ];
+        let mut elements = vec![appsrc.clone().upcast::<gst::Element>()];
+        elements.extend(pre_chain_elements);
+        elements.extend([encoder.clone(), output_queue.clone()]);
 
         // Diagnostic: attribute a `not-negotiated` to the stage where
-        // downstream CAPS negotiation stopped.
-        if let Some(pad) = appsrc.static_pad("src") {
-            log_caps_events(&pad, "appsrc -> videoconvert");
+        // downstream CAPS negotiation stopped. The assembled element list is
+        // chain-dependent (NVENC branches carry cudaupload/cudaconvertscale
+        // between appsrc and the encoder), so label each hop from the
+        // element factory names instead of hardcoding videoconvert.
+        for pair in elements.windows(2) {
+            let label = format!(
+                "{} -> {}",
+                pair[0].factory().map_or_else(
+                    || "unknown".to_string(),
+                    |factory| factory.name().to_string()
+                ),
+                pair[1].factory().map_or_else(
+                    || "unknown".to_string(),
+                    |factory| factory.name().to_string()
+                ),
+            );
+            if let Some(pad) = pair[0].static_pad("src") {
+                log_caps_events(&pad, label);
+            }
         }
-        if let Some(pad) = elements[1].static_pad("src") {
-            log_caps_events(&pad, "videoconvert -> encoder");
-        }
-        if let Some(pad) = encoder.static_pad("src") {
-            log_caps_events(&pad, "encoder -> queue");
-        }
+        // The sink is not part of `elements`, so its hop is logged explicitly.
         if let Some(pad) = output_queue.static_pad("src") {
-            log_caps_events(&pad, "queue -> sink");
+            log_caps_events(&pad, "queue -> sink".to_string());
         }
 
         pipeline
@@ -534,24 +674,6 @@ impl GstreamerEncoder {
     }
 }
 
-fn codec_pipeline(codec: &str) -> Result<&'static str, String> {
-    let (software, hardware) = match codec {
-        "h264" => ("x264enc", "vah264enc"),
-        "h265" => ("x265enc", "vah265enc"),
-        "vp9" => ("vp9enc", "vavp9enc"),
-        "av1" => ("av1enc", "vaav1enc"),
-        "vp8" => ("vp8enc", ""),
-        other => return Err(format!("Unsupported GStreamer video codec: {other}")),
-    };
-    let encoder = crate::gstreamer_publisher::selected_encoder_name(codec);
-    if !crate::gstreamer_publisher::can_initialize_element(encoder) {
-        return Err(format!(
-            "GStreamer encoder unavailable for {codec}: {software} or {hardware}"
-        ));
-    }
-    Ok(encoder)
-}
-
 #[allow(
     clippy::too_many_lines,
     reason = "per-codec VP8/VP9/H.264/H.265 encoder property profiles stay in one table"
@@ -560,12 +682,25 @@ fn configure_encoder(
     encoder: &gst::Element,
     codec: &str,
     bitrate: u32,
+    ceiling_kbps: u32,
     key_int_max: u32,
     rate_mode: RateMode,
 ) {
-    if codec == "av1" {
+    // Factory dispatch first: the codec alone cannot route — `codec ==
+    // "av1"` covers three very different encoders (NVENC CBR, VA-API VBR
+    // pinning, libaom CBR), and `codec == "h265"` covers NVENC VBR and
+    // VA-API VBR besides x265enc.
+    let factory_name = encoder.factory().map(|factory| factory.name().to_string());
+    let is_va_av1 = codec == "av1" && factory_name.as_deref() == Some("vaav1enc");
+    if is_nvenc(encoder) {
+        configure_nvenc(encoder, bitrate, ceiling_kbps, key_int_max, rate_mode);
+        return;
+    }
+    if codec == "av1" && !is_va_av1 {
         configure_libaom_av1(encoder, bitrate);
     } else if encoder.find_property("bitrate").is_some() {
+        // Shared kbps bitrate application: x264/x265/VPx-in-VBR-mode,
+        // vah264enc/vah265enc, and vaav1enc all take `bitrate` in kbps.
         encoder.set_property_from_str("bitrate", &bitrate.to_string());
     } else if encoder.find_property("target-bitrate").is_some() {
         // `target-bitrate` units differ by plugin: VPx (vp8enc/vp9enc) take
@@ -586,11 +721,23 @@ fn configure_encoder(
     }
     if codec == "h265" {
         configure_h265(encoder);
+    } else if is_va_av1 {
+        // VA-API AV1 mirrors the vah265enc VBR pinning exactly: the shared
+        // block above applied the kbps `bitrate` target, this pins the
+        // driver maximum onto the ceiling.
+        configure_va_vbr(encoder);
     } else if codec == "h264" {
         let is_vah264 = encoder
             .factory()
             .is_some_and(|factory| factory.name() == "vah264enc");
-        if !is_vah264 && encoder.find_property("target-percentage").is_some() {
+        if is_vah264 {
+            // CBR at the ceiling: predictable output, no VBR/qvbr
+            // window-averaged overshoot that burst multi-megabit I-frames
+            // into the non-leaky output queue.
+            if encoder.find_property("rate-control").is_some() {
+                encoder.set_property_from_str("rate-control", "cbr");
+            }
+        } else if encoder.find_property("target-percentage").is_some() {
             encoder.set_property_from_str("target-percentage", &VBR_TARGET_PERCENTAGE.to_string());
         }
         if encoder.find_property("target-usage").is_some() {
@@ -608,14 +755,7 @@ fn configure_encoder(
         if encoder.find_property("dct8x8").is_some() {
             encoder.set_property("dct8x8", false);
         }
-        if is_vah264 {
-            // CBR at the ceiling: predictable output, no VBR/qvbr
-            // window-averaged overshoot that burst multi-megabit I-frames
-            // into the non-leaky output queue.
-            if encoder.find_property("rate-control").is_some() {
-                encoder.set_property_from_str("rate-control", "cbr");
-            }
-        } else if encoder.find_property("rate-control").is_some() {
+        if !is_vah264 && encoder.find_property("rate-control").is_some() {
             // The x264enc fallback has no QVBR mode; keep ceiling-capped VBR.
             encoder.set_property_from_str("rate-control", "vbr");
         }
@@ -808,32 +948,24 @@ fn configure_libaom_av1(encoder: &gst::Element, bitrate: u32) {
     }
 }
 
-/// Applies the H.265 low-latency VBR configuration shared by the VA-API
-/// `vah265enc` hardware path and the `x265enc` software fallback. Both
-/// encoders expose `bitrate` (kbps), which the congestion controller also
-/// re-targets live (`apply_encoder_ceiling`), so H.265 inherits the
-/// ceiling-capped VBR behavior of the H.264 branch.
+/// Applies the low-latency VBR configuration shared by the VA-API
+/// `vah265enc` and `vaav1enc` hardware paths. Both encoders expose
+/// `bitrate` (kbps), which the congestion controller also re-targets live
+/// (`apply_encoder_ceiling`), so they inherit the ceiling-capped VBR
+/// behavior of the H.264 branch.
 ///
-/// `vah265enc`: `rate-control=vbr` + `target-percentage=80` pins the
-/// driver-computed maximum exactly onto the presenter's ceiling (the
-/// encoder maximum is `bitrate × 100 / target-percentage`), the same
-/// ceiling-pinning trick as `vah264enc` (`VBR_TARGET_PERCENTAGE`).
-/// `b-frames=0` and `ref-frames=1` minimize decode latency — B-frames pack
-/// out of order (reordering delay) and single-reference decoding is the
-/// low-latency norm for realtime WebRTC; the quality cost is small at
-/// high bitrates and screenshare content. `target-usage=7` is the fastest
-/// VA encode preset (range 1–7). `aud=false` is the default (unset):
-/// webrtcsink's `rtph265pay` runs zero-latency with `config-interval=-1`,
-/// so per-frame AUDs are unnecessary overhead.
-///
-/// `x265enc` (the no-VA fallback): `tune=zerolatency` zeroes lookahead,
-/// B-frames and sliced-threads latency at once, `speed-preset=veryfast`
-/// keeps the worst-case encode time under the frame interval, and the VBR
-/// target is the 80% bitrate — mirroring the `x264enc` fallback. The
-/// plugin exposes no `bframes`/`ref`/`rc-lookahead` properties (they are
-/// x265 CLI options, not element properties; gst-inspect 1.28.6), so the
-/// latency knobs are the tune preset, never `option-string`.
-fn configure_h265(encoder: &gst::Element) {
+/// `rate-control=vbr` + `target-percentage=80` pins the driver-computed
+/// maximum exactly onto the presenter's ceiling (the encoder maximum is
+/// `bitrate × 100 / target-percentage`), the same ceiling-pinning trick as
+/// `vah264enc` (`VBR_TARGET_PERCENTAGE`). `b-frames=0` and `ref-frames=1`
+/// minimize decode latency — B-frames pack out of order (reordering delay)
+/// and single-reference decoding is the low-latency norm for realtime
+/// WebRTC; the quality cost is small at high bitrates and screenshare
+/// content. `target-usage=7` is the fastest VA encode preset (range 1–7).
+/// `aud=false` is the default (unset): webrtcsink's `rtph265pay` runs
+/// zero-latency with `config-interval=-1`, so per-frame AUDs are
+/// unnecessary overhead.
+fn configure_va_vbr(encoder: &gst::Element) {
     if encoder.find_property("target-percentage").is_some() {
         encoder.set_property_from_str("target-percentage", &VBR_TARGET_PERCENTAGE.to_string());
     }
@@ -849,6 +981,20 @@ fn configure_h265(encoder: &gst::Element) {
     if encoder.find_property("rate-control").is_some() {
         encoder.set_property_from_str("rate-control", "vbr");
     }
+}
+
+/// Applies the H.265 low-latency VBR configuration shared by the VA-API
+/// hardware paths (`configure_va_vbr`) and the `x265enc` software fallback:
+///
+/// `x265enc` (the no-VA fallback): `tune=zerolatency` zeroes lookahead,
+/// B-frames and sliced-threads latency at once, `speed-preset=veryfast`
+/// keeps the worst-case encode time under the frame interval, and the VBR
+/// target is the 80% bitrate — mirroring the `x264enc` fallback. The
+/// plugin exposes no `bframes`/`ref`/`rc-lookahead` properties (they are
+/// x265 CLI options, not element properties; gst-inspect 1.28.6), so the
+/// latency knobs are the tune preset, never `option-string`.
+fn configure_h265(encoder: &gst::Element) {
+    configure_va_vbr(encoder);
     // The x265enc fallback (no VA display) pins the low-latency tune and
     // the fast preset so the software path behaves like the VA path
     // instead of holding frames (x264enc does the same).
@@ -865,6 +1011,64 @@ fn configure_h265(encoder: &gst::Element) {
     }
 }
 
+/// Applies the NVENC low-latency screen-share profile (nvh264enc,
+/// nvh265enc, nvav1enc). All properties are `find_property`-guarded so a
+/// plugin-version difference degrades by skipping a knob instead of
+/// failing the pipeline: `tune` and `multi-pass` only exist on `GStreamer`
+/// 1.24+, so their presence doubles as the version guard.
+///
+/// `bitrate` (kbps) is the ceiling itself in CBR and the 80% VBR target in
+/// VBR; `max-bitrate` re-pins the VBR maximum exactly onto the ceiling
+/// (NVENC exposes a real max-bitrate property, unlike the `va` plugin,
+/// which needs the `target-percentage` trick). `preset=p1` is the fastest
+/// (lowest-quality) NVENC preset — screenshare motion dominates over
+/// intra-frame quality at realtime cadence. `bframes=0`, `zerolatency`,
+/// `rc-lookahead=0` and `multi-pass=disabled` remove every buffered
+/// lookahead pass; `gop-size` in frames follows the shared `key_int_max`
+/// interval (2 s for H.264, 1 s otherwise, capped at 1024 frames).
+fn configure_nvenc(
+    encoder: &gst::Element,
+    bitrate: u32,
+    ceiling_kbps: u32,
+    key_int_max: u32,
+    rate_mode: RateMode,
+) {
+    if encoder.find_property("bitrate").is_some() {
+        encoder.set_property_from_str("bitrate", &bitrate.to_string());
+    }
+    if encoder.find_property("rc-mode").is_some() {
+        let rc_mode = match rate_mode {
+            RateMode::Cbr => "cbr",
+            RateMode::Vbr => "vbr",
+        };
+        encoder.set_property_from_str("rc-mode", rc_mode);
+    }
+    if rate_mode == RateMode::Vbr && encoder.find_property("max-bitrate").is_some() {
+        encoder.set_property_from_str("max-bitrate", &ceiling_kbps.to_string());
+    }
+    if encoder.find_property("bframes").is_some() {
+        encoder.set_property("bframes", 0_u32);
+    }
+    if encoder.find_property("zerolatency").is_some() {
+        encoder.set_property("zerolatency", true);
+    }
+    if encoder.find_property("preset").is_some() {
+        encoder.set_property_from_str("preset", "p1");
+    }
+    if encoder.find_property("rc-lookahead").is_some() {
+        encoder.set_property("rc-lookahead", 0_u32);
+    }
+    if encoder.find_property("gop-size").is_some() {
+        encoder.set_property("gop-size", key_int_max);
+    }
+    if encoder.find_property("tune").is_some() {
+        encoder.set_property_from_str("tune", "ultra-low-latency");
+    }
+    if encoder.find_property("multi-pass").is_some() {
+        encoder.set_property_from_str("multi-pass", "disabled");
+    }
+}
+
 fn make_element(name: &str) -> Result<gst::Element, String> {
     gst::ElementFactory::make(name)
         .build()
@@ -873,7 +1077,7 @@ fn make_element(name: &str) -> Result<gst::Element, String> {
 
 /// Logs every downstream CAPS event crossing a pad so a `not-negotiated`
 /// failure can be attributed to the exact stage where negotiation stopped.
-fn log_caps_events(pad: &gst::Pad, label: &'static str) {
+fn log_caps_events(pad: &gst::Pad, label: String) {
     pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
         if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref()
             && let gst::EventView::Caps(caps) = event.view()
@@ -891,7 +1095,9 @@ fn log_caps_events(pad: &gst::Pad, label: &'static str) {
 /// downstream event is the notification the encoder pushes ahead of the
 /// keyframe it actually produced — so a "HANDLED" with no following "KEYFRAME
 /// OUTPUT" (see `log_av1_encode_diagnostics`) means the encoder acknowledged
-/// the request but did not emit an intra frame.
+/// the request but did not emit an intra frame. `label` is the active AV1
+/// encoder's factory name (av1enc, vaav1enc, or nvav1enc), so log lines stay
+/// truthful whichever encoder the probe chain selected.
 fn log_force_key_unit_events(pad: &gst::Pad, label: &'static str) {
     pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, move |_, info| {
         if let Some(gst::PadProbeData::Event(event)) = info.data.as_ref()
@@ -944,6 +1150,8 @@ impl Default for EncodeTelemetry {
 /// `DELTA_UNIT` is the encoder's own keyframe (decodable standalone); its byte
 /// size plus the `KEYFRAME REQUEST`/`KEYFRAME HANDLED` events above answer
 /// whether libaom actually produces a keyframe for every PLI it receives.
+/// `label` is the active AV1 encoder's factory name (av1enc, vaav1enc, or
+/// nvav1enc).
 fn log_av1_encode_diagnostics(pad: &gst::Pad, label: &'static str) {
     let telemetry = Arc::new(Mutex::new(EncodeTelemetry::default()));
     pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
@@ -996,6 +1204,17 @@ fn is_libaom_av1(encoder: &gst::Element) -> bool {
         .is_some_and(|factory| factory.name() == "av1enc")
 }
 
+/// Whether `encoder` is one of the NVENC hardware encoders
+/// (nvh264enc/nvh265enc/nvav1enc).
+fn is_nvenc(encoder: &gst::Element) -> bool {
+    encoder
+        .factory()
+        .is_some_and(|factory| factory.name().starts_with("nv"))
+}
+
+/// Whether the NVENC mid-stream re-target warning has already been logged.
+static NVENC_RETARGET_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// Applies `ceiling_kbps` to `encoder`'s runtime rate knob. Returns `false`
 /// when the encoder cannot change its ceiling live: libaom `av1enc`'s CBR
 /// `target-bitrate` reconfiguration mid-stream is unverified, and a codec
@@ -1006,6 +1225,23 @@ fn apply_encoder_ceiling(encoder: &gst::Element, ceiling_kbps: u32, rate_mode: R
     if is_libaom_av1(encoder) {
         log::warn!("GStreamer libaom av1enc cannot change its bitrate mid-stream");
         return false;
+    }
+    if is_nvenc(encoder) {
+        let target = encoder_target_kbps(rate_mode, ceiling_kbps);
+        if encoder.find_property("bitrate").is_some() {
+            encoder.set_property_from_str("bitrate", &target.to_string());
+        }
+        if rate_mode == RateMode::Vbr && encoder.find_property("max-bitrate").is_some() {
+            encoder.set_property_from_str("max-bitrate", &ceiling_kbps.to_string());
+        }
+        if !NVENC_RETARGET_WARNED.swap(true, Ordering::Relaxed) {
+            log::warn!(
+                "GStreamer NVENC mid-stream bitrate re-targeting is unverified \
+                 (docs/adr/0001-nvenc-bitrate-retarget.md): attempting it and \
+                 bookkeeping it as applied"
+            );
+        }
+        return true;
     }
     let target = encoder_target_kbps(rate_mode, ceiling_kbps);
     if encoder.find_property("bitrate").is_some() {
@@ -1101,32 +1337,116 @@ mod tests {
     }
 
     #[test]
-    fn vp9_and_av1_use_software_encoders() {
+    fn selection_chain_prefers_nvenc_then_vaapi_then_software() {
+        let probe_all = |_name: &str| true;
+        let probe_va_only = |name: &str| name.starts_with("va");
+        let probe_none = |_name: &str| false;
+        for codec in ["h264", "h265", "av1"] {
+            assert!(
+                select_encoder(codec, probe_all).starts_with("nv"),
+                "{codec}"
+            );
+            assert!(
+                select_encoder(codec, probe_va_only).starts_with("va"),
+                "{codec}"
+            );
+        }
+        assert_eq!(select_encoder("h264", probe_none), "x264enc");
+        assert_eq!(select_encoder("h265", probe_none), "x265enc");
+        assert_eq!(select_encoder("av1", probe_none), "av1enc");
+        // Chain order pinned: NVENC, then VA-API, then the software encoder.
         assert_eq!(
-            crate::gstreamer_publisher::selected_encoder_name("vp9"),
-            "vp9enc"
-        );
-        assert_eq!(
-            crate::gstreamer_publisher::selected_encoder_name("av1"),
-            "av1enc"
+            codec_chains("av1")
+                .unwrap_or(&[])
+                .iter()
+                .map(|chain| chain.encoder)
+                .collect::<Vec<_>>(),
+            ["nvav1enc", "vaav1enc", "av1enc"]
         );
     }
 
     #[test]
-    fn h265_probes_vah265enc_then_falls_back_to_x265enc() -> Result<(), String> {
+    fn selection_chain_vp8_vp9_single_software_chain() {
+        let probe_all = |_name: &str| true;
+        for codec in ["vp8", "vp9"] {
+            let chains = codec_chains(codec).unwrap_or(&[]);
+            assert_eq!(chains.len(), 1, "{codec} must have one chain");
+            assert_eq!(chains[0].pre_chain, ["videoconvert"], "{codec}");
+            assert_eq!(
+                select_encoder(codec, probe_all),
+                chains[0].encoder,
+                "{codec}"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_chain_unknown_codec_defaults_to_vp8enc() {
+        assert_eq!(select_encoder("nope", |_| true), "vp8enc");
+    }
+
+    #[test]
+    fn codec_chain_pre_chains_match_the_branch() {
+        // NVENC branches carry the CUDA upload/convert pair (GPU-side
+        // I420 -> NV12); VA-API and software branches stay on system-memory
+        // videoconvert.
+        for codec in ["h264", "h265", "av1"] {
+            let chains = codec_chains(codec).unwrap_or(&[]);
+            assert_eq!(
+                chains[0].pre_chain,
+                ["cudaupload", "cudaconvertscale"],
+                "{codec}"
+            );
+            assert_eq!(chains[1].pre_chain, ["videoconvert"], "{codec}");
+            assert_eq!(chains[2].pre_chain, ["videoconvert"], "{codec}");
+        }
+    }
+
+    #[test]
+    fn h265_probes_nvh265enc_then_vah265enc_then_x265enc() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
-        // The VA-API H.265 path is probe-gated exactly like H.264: when the
-        // hardware element initializes (VA display + driver encode support)
-        // it wins; otherwise the software x265enc fallback is selected.
-        let expected = if crate::gstreamer_publisher::can_initialize_element("vah265enc") {
+        // The H.265 hardware paths are probe-gated in preference order:
+        // NVENC first, then VA-API (VA display + driver encode support),
+        // then the software x265enc fallback. On a non-NVIDIA box the
+        // nvh265enc factory is absent, so the probe fails it immediately.
+        let expected = if crate::gstreamer_publisher::can_initialize_element("nvh265enc") {
+            "nvh265enc"
+        } else if crate::gstreamer_publisher::can_initialize_element("vah265enc") {
             "vah265enc"
         } else {
             "x265enc"
         };
-        assert_eq!(codec_pipeline("h265")?, expected);
+        let chain = select_chain("h265", crate::gstreamer_publisher::can_initialize_element)?;
+        assert_eq!(chain.encoder, expected);
         assert_eq!(
             crate::gstreamer_publisher::selected_encoder_name("h265"),
+            expected
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn av1_selection_matches_the_first_probe_win() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        // av1enc always initializes (software libaom), so it is the
+        // guaranteed fallback; nvav1enc/vaav1enc win only when their
+        // factories exist and initialize on this machine.
+        let expected = if crate::gstreamer_publisher::can_initialize_element("nvav1enc") {
+            "nvav1enc"
+        } else if crate::gstreamer_publisher::can_initialize_element("vaav1enc") {
+            "vaav1enc"
+        } else {
+            "av1enc"
+        };
+        assert_eq!(
+            select_chain("av1", crate::gstreamer_publisher::can_initialize_element)?.encoder,
+            expected
+        );
+        assert_eq!(
+            crate::gstreamer_publisher::selected_encoder_name("av1"),
             expected
         );
 
@@ -1150,6 +1470,7 @@ mod tests {
             &encoder,
             "h264",
             encoder_target_kbps(RateMode::Cbr, ceiling_kbps),
+            ceiling_kbps,
             120,
             RateMode::Cbr,
         );
@@ -1180,7 +1501,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("x264enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "h264", 16_000, 120, RateMode::Vbr);
+        configure_encoder(&encoder, "h264", 16_000, 20_000, 120, RateMode::Vbr);
 
         // The software fallback has no QVBR mode, so it keeps VBR at the
         // 80% target.
@@ -1224,6 +1545,7 @@ mod tests {
             &encoder,
             "h265",
             encoder_target_kbps(RateMode::Vbr, ceiling_kbps),
+            ceiling_kbps,
             60,
             RateMode::Vbr,
         );
@@ -1257,7 +1579,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("x265enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "h265", 16_000, 60, RateMode::Vbr);
+        configure_encoder(&encoder, "h265", 16_000, 20_000, 60, RateMode::Vbr);
 
         // VBR target is the 80% ceiling discount (the shared
         // VBR_TARGET_PERCENTAGE), the same as the H.264 VA path. x265enc's
@@ -1291,7 +1613,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("x265enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "h265", 16_000, 60, RateMode::Vbr);
+        configure_encoder(&encoder, "h265", 16_000, 20_000, 60, RateMode::Vbr);
 
         // Unlike libaom av1enc, x265enc's `bitrate` is mutable mid-stream,
         // so the congestion controller can step the ceiling live (the same
@@ -1303,19 +1625,22 @@ mod tests {
     }
 
     #[test]
-    fn vp9_selects_software_encoder() -> Result<(), String> {
+    fn vp9_selection_probe_returns_vp9enc() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
-        assert_eq!(codec_pipeline("vp9")?, "vp9enc");
+        assert_eq!(select_chain("vp9", |_| true)?.encoder, "vp9enc");
 
         Ok(())
     }
 
     #[test]
-    fn av1_selects_av1enc() -> Result<(), String> {
+    fn av1_chain_prefers_nvav1enc_when_available() -> Result<(), String> {
         gst::init().map_err(|error| error.to_string())?;
 
-        assert_eq!(codec_pipeline("av1")?, "av1enc");
+        assert_eq!(
+            select_chain("av1", |name| name == "av1enc")?.encoder,
+            "av1enc"
+        );
 
         Ok(())
     }
@@ -1329,7 +1654,14 @@ mod tests {
             .map_err(|error| error.to_string())?;
         let ceiling_kbps = 8_000;
         let target_kbps = encoder_target_kbps(RateMode::Cbr, ceiling_kbps);
-        configure_encoder(&encoder, "av1", target_kbps, 60, RateMode::Cbr);
+        configure_encoder(
+            &encoder,
+            "av1",
+            target_kbps,
+            ceiling_kbps,
+            60,
+            RateMode::Cbr,
+        );
 
         assert_eq!(target_kbps, 8_000);
         // av1enc `target-bitrate` is kilobits/sec: the ceiling is applied
@@ -1387,7 +1719,7 @@ mod tests {
         assert_eq!(encoder.property::<u32>("max-quantizer"), 0);
 
         let target_kbps = encoder_target_kbps(RateMode::Cbr, 8_000);
-        configure_encoder(&encoder, "av1", target_kbps, 60, RateMode::Cbr);
+        configure_encoder(&encoder, "av1", target_kbps, 8_000, 60, RateMode::Cbr);
 
         // WebRTC's libaom AV1 wrapper: rc_min_quantizer 10, qpMax 56.
         assert_eq!(encoder.property::<u32>("min-quantizer"), 10);
@@ -1404,7 +1736,7 @@ mod tests {
             .build()
             .map_err(|error| error.to_string())?;
         let target_kbps = encoder_target_kbps(RateMode::Cbr, 8_000);
-        configure_encoder(&encoder, "av1", target_kbps, 60, RateMode::Cbr);
+        configure_encoder(&encoder, "av1", target_kbps, 8_000, 60, RateMode::Cbr);
         let target_before = encoder.property::<u32>("target-bitrate");
 
         // The CBR rate path is not verified to accept mid-stream changes:
@@ -1422,7 +1754,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("vp9enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "vp9", 6_400, 60, RateMode::Vbr);
+        configure_encoder(&encoder, "vp9", 6_400, 8_000, 60, RateMode::Vbr);
 
         assert!(apply_encoder_ceiling(&encoder, 10_000, RateMode::Vbr));
         // VPx `target-bitrate` is bits/sec of the VBR target (80% of 10 Mbps).
@@ -1438,7 +1770,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("vp9enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "vp9", 6_400, 60, RateMode::Cbr);
+        configure_encoder(&encoder, "vp9", 6_400, 6_400, 60, RateMode::Cbr);
 
         assert_eq!(encoder.property::<i32>("target-bitrate"), 6_400_000);
         assert_eq!(
@@ -1465,7 +1797,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("vp9enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "vp9", 8_000, 60, RateMode::Cbr);
+        configure_encoder(&encoder, "vp9", 8_000, 8_000, 60, RateMode::Cbr);
 
         // Realtime libvpx knobs (screen-share profile): CBR deadline 1,
         // cpu-used 10, row/tile parallelism over 8 threads. `error-resilient`
@@ -1506,7 +1838,7 @@ mod tests {
         let encoder = gst::ElementFactory::make("vp8enc")
             .build()
             .map_err(|error| error.to_string())?;
-        configure_encoder(&encoder, "vp8", 10_000, 60, RateMode::Cbr);
+        configure_encoder(&encoder, "vp8", 10_000, 10_000, 60, RateMode::Cbr);
 
         assert_eq!(encoder.property::<i32>("cpu-used"), 6);
         assert_eq!(encoder.property::<i32>("static-threshold"), 100);
@@ -1518,6 +1850,189 @@ mod tests {
                 .nick(),
             "cbr"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_nvenc_and_is_libaom_av1_match_their_factories() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+
+        let av1enc = gst::ElementFactory::make("av1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        assert!(!is_nvenc(&av1enc));
+        assert!(is_libaom_av1(&av1enc));
+        let vp8enc = gst::ElementFactory::make("vp8enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        assert!(!is_nvenc(&vp8enc));
+        assert!(!is_libaom_av1(&vp8enc));
+
+        Ok(())
+    }
+
+    #[test]
+    fn nvenc_configures_cbr_or_vbr_with_max_bitrate() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+        // The NVENC factories exist only with the nvcodec plugin
+        // (gstreamer1.0-plugins-bad), so these are no-ops on non-NVIDIA
+        // machines — the fake-probe selection tests above cover the
+        // NVENC-first chain without hardware.
+        if gst::ElementFactory::find("nvh264enc").is_none() {
+            return Ok(());
+        }
+        let ceiling_kbps = 20_000;
+
+        let h264 = gst::ElementFactory::make("nvh264enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(
+            &h264,
+            "h264",
+            encoder_target_kbps(RateMode::Cbr, ceiling_kbps),
+            ceiling_kbps,
+            120,
+            RateMode::Cbr,
+        );
+        assert_eq!(h264.property::<u32>("bitrate"), 20_000);
+        assert_eq!(
+            h264.property_value("rc-mode")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "cbr"
+        );
+        assert_eq!(h264.property::<u32>("bframes"), 0);
+        assert!(h264.property::<bool>("zerolatency"));
+        assert_eq!(
+            h264.property_value("preset")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "p1"
+        );
+        assert_eq!(h264.property::<u32>("rc-lookahead"), 0);
+        assert_eq!(h264.property::<u32>("gop-size"), 120);
+
+        let h265 = gst::ElementFactory::make("nvh265enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(
+            &h265,
+            "h265",
+            encoder_target_kbps(RateMode::Vbr, ceiling_kbps),
+            ceiling_kbps,
+            60,
+            RateMode::Vbr,
+        );
+        assert_eq!(h265.property::<u32>("bitrate"), 16_000);
+        assert_eq!(h265.property::<u32>("max-bitrate"), 20_000);
+        assert_eq!(
+            h265.property_value("rc-mode")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "vbr"
+        );
+        assert_eq!(h265.property::<u32>("gop-size"), 60);
+
+        let av1 = gst::ElementFactory::make("nvav1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(
+            &av1,
+            "av1",
+            encoder_target_kbps(RateMode::Cbr, ceiling_kbps),
+            ceiling_kbps,
+            60,
+            RateMode::Cbr,
+        );
+        assert_eq!(av1.property::<u32>("bitrate"), 20_000);
+        assert_eq!(
+            av1.property_value("rc-mode")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "cbr"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn nvenc_ceiling_retarget_sets_bitrate_and_max_bitrate_and_warns_once() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+        if gst::ElementFactory::find("nvh265enc").is_none() {
+            return Ok(());
+        }
+        let encoder = gst::ElementFactory::make("nvh265enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(
+            &encoder,
+            "h265",
+            encoder_target_kbps(RateMode::Vbr, 20_000),
+            20_000,
+            60,
+            RateMode::Vbr,
+        );
+        NVENC_RETARGET_WARNED.store(false, Ordering::Relaxed);
+
+        assert!(apply_encoder_ceiling(&encoder, 10_000, RateMode::Vbr));
+        assert_eq!(encoder.property::<u32>("bitrate"), 8_000);
+        assert_eq!(encoder.property::<u32>("max-bitrate"), 10_000);
+
+        // The CBR branch re-targets the ceiling verbatim and re-pins only
+        // the target, never a max-bitrate.
+        let h264 = gst::ElementFactory::make("nvh264enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        configure_encoder(&h264, "h264", 20_000, 20_000, 120, RateMode::Cbr);
+        assert!(apply_encoder_ceiling(&h264, 10_000, RateMode::Cbr));
+        assert_eq!(h264.property::<u32>("bitrate"), 10_000);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vaav1enc_configures_vbr_pinning() -> Result<(), String> {
+        gst::init().map_err(|error| error.to_string())?;
+        // vaav1enc ships with gstreamer1.0-vaapi 1.26+; older or
+        // non-Intel-VA machines do not expose it.
+        if gst::ElementFactory::find("vaav1enc").is_none() {
+            return Ok(());
+        }
+
+        let encoder = gst::ElementFactory::make("vaav1enc")
+            .build()
+            .map_err(|error| error.to_string())?;
+        let ceiling_kbps = 20_000;
+        configure_encoder(
+            &encoder,
+            "av1",
+            encoder_target_kbps(RateMode::Vbr, ceiling_kbps),
+            ceiling_kbps,
+            60,
+            RateMode::Vbr,
+        );
+
+        // The VA-API AV1 path mirrors the vah265enc VBR pinning exactly:
+        // 80% bitrate target, driver maximum pinned to the ceiling via
+        // target-percentage, low-latency profile.
+        assert_eq!(encoder.property::<u32>("bitrate"), 16_000);
+        assert_eq!(encoder.property::<u32>("target-percentage"), 80);
+        assert_eq!(
+            encoder
+                .property_value("rate-control")
+                .get::<&gst::glib::EnumValue>()
+                .map_err(|error| error.to_string())?
+                .nick(),
+            "vbr"
+        );
+        assert_eq!(encoder.property::<u32>("ref-frames"), 1);
+        assert_eq!(encoder.property::<u32>("b-frames"), 0);
+        assert_eq!(encoder.property::<u32>("target-usage"), 7);
 
         Ok(())
     }

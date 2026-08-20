@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::gstreamer_encoder::{
     APPSRC_MAX_BUFFERS, GstreamerEncoder, VideoInput, bitrate_bps_to_kbps, encoded_frames,
-    reset_encoded_frames,
+    reset_encoded_frames, select_encoder,
 };
 use crate::{CHANNELS, CaptureConfig, NativeTelemetry, SAMPLE_RATE};
 use gst::glib::translate::{ToGlibPtr, from_glib_full};
@@ -405,12 +405,16 @@ pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
     bitrate_bps_to_kbps(bps)
 }
 
-/// Whether the active codec supports in-place ceiling changes. VPx/VA rate
-/// knobs change mid-stream — including `vah264enc` QVBR, whose `bitrate`/
-/// `target-percentage` re-derive the driver maximum in PLAYING state;
-/// libaom `av1enc`'s CBR `target-bitrate` reconfiguration mid-stream is
-/// unverified, so AV1 is pinned to its configured ceiling for now. The
-/// default codec (no `video_codec`) is VP8, which can adapt.
+/// Whether the active codec supports in-place ceiling changes. `VPx` and
+/// VA-API rate knobs change mid-stream — including `vah264enc` CBR, whose
+/// `bitrate` re-derives the driver target in PLAYING state. NVENC
+/// mid-stream re-targeting is attempted and bookkept as applied but is
+/// unverified on hardware (docs/adr/0001-nvenc-bitrate-retarget.md;
+/// `apply_encoder_ceiling` warns once per process). libaom `av1enc`'s CBR
+/// `target-bitrate` reconfiguration mid-stream is unverified, so AV1 is
+/// pinned to its configured ceiling for now — regardless of which AV1
+/// encoder won the selection chain. The default codec (no `video_codec`)
+/// is VP8, which can adapt.
 fn can_adapt(codec: Option<&str>) -> bool {
     !matches!(codec.unwrap_or("vp8"), "av1")
 }
@@ -1418,6 +1422,9 @@ fn make_element(name: &str) -> Result<gst::Element, String> {
 }
 
 fn verify_required_elements() -> Result<(), String> {
+    // `videoconvert` stays required: the VA-API and software encoder chains
+    // need it (base plugin, always installed) even though NVENC branches
+    // build cudaupload/cudaconvertscale instead.
     const REQUIRED: &[&str] = &[
         "appsrc",
         "queue",
@@ -1484,15 +1491,25 @@ pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
     // after the encoder (see `gstreamer_encoder::attach`), so no external
     // parser factories are required in our branch — but that observation is
     // specific to the bundled 0.15.3 build, not asserted for every runtime.
-    let encoder = match codec {
-        "h264" | "h265" | "vp8" | "vp9" | "av1" => selected_encoder_name(codec),
-        other => return Err(format!("Unsupported GStreamer video codec: {other}")),
-    };
+    // The whole preference chain is probed (NVENC → VA-API → software), so
+    // the error names every tried encoder.
+    if !matches!(codec, "h264" | "h265" | "vp8" | "vp9" | "av1") {
+        return Err(format!("Unsupported GStreamer video codec: {codec}"));
+    }
+    let encoder = selected_encoder_name(codec);
     if can_initialize_element(encoder) {
         return Ok(());
     }
+    let chain = match crate::gstreamer_encoder::codec_chains(codec) {
+        Ok(chains) => chains
+            .iter()
+            .map(|chain| chain.encoder)
+            .collect::<Vec<_>>()
+            .join(" -> "),
+        Err(error) => error,
+    };
     Err(format!(
-        "GStreamer encoder unavailable for {codec}: {encoder}"
+        "GStreamer encoder unavailable for {codec}: tried {chain}"
     ))
 }
 
@@ -1516,36 +1533,10 @@ fn connect_payloader_setup(sink: &gst::Element) {
 }
 
 pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
-    if codec == "vp9" {
-        return "vp9enc";
-    }
-    if codec == "av1" {
-        return "av1enc";
-    }
-
-    let hardware = match codec {
-        "h264" => "vah264enc",
-        "h265" => "vah265enc",
-        _ => "",
-    };
-    let software = match codec {
-        "h264" => "x264enc",
-        "h265" => "x265enc",
-        "vp9" => "vp9enc",
-        "av1" => "av1enc",
-        _ => "vp8enc",
-    };
-    if hardware.is_empty() {
-        return software;
-    }
-    // Factory presence does not guarantee instantiation (missing VA display
-    // or driver encode support), so probe before selecting H.264/H.265
-    // hardware.
-    if can_initialize_element(hardware) {
-        hardware
-    } else {
-        software
-    }
+    // Factory presence does not guarantee instantiation (no CUDA device, or
+    // a missing VA display / driver encode support), so the whole chain is
+    // probed in preference order before a hardware encoder is selected.
+    select_encoder(codec, can_initialize_element)
 }
 
 fn supported_video_caps() -> gst::Caps {
@@ -1623,29 +1614,60 @@ fn sink_video_caps(codec: &str) -> Result<gst::Caps, String> {
     Ok(caps)
 }
 
-pub(crate) fn available_video_codecs() -> Vec<(&'static str, &'static str, bool)> {
+pub(crate) fn available_video_codecs() -> Vec<(&'static str, String, bool)> {
+    codec_chains_list()
+        .into_iter()
+        .filter(|(codec, _, _)| verify_codec_elements(codec).is_ok())
+        .map(|(codec, label, _)| {
+            let selected_encoder = selected_encoder_name(codec);
+            (
+                codec,
+                codec_label(label, selected_encoder),
+                is_hardware_encoder(selected_encoder),
+            )
+        })
+        .collect()
+}
+
+/// The codec table in picker order. Each entry lists the chain's encoders
+/// so a codec is offered when any of its encoders exist; the actual
+/// selection (and the hardware flag) comes from the probed chain in
+/// `gstreamer_encoder::codec_chains`, which is the single source of truth.
+fn codec_chains_list() -> [(&'static str, &'static str, [&'static str; 3]); 5] {
     [
-        ("vp8", "VP8", "vp8enc", ""),
-        ("h264", "H.264", "x264enc", "vah264enc"),
-        ("h265", "H.265", "x265enc", "vah265enc"),
-        ("vp9", "VP9", "vp9enc", "vavp9enc"),
-        ("av1", "AV1", "av1enc", "vaav1enc"),
+        ("vp8", "VP8", ["vp8enc", "", ""]),
+        ("h264", "H.264", ["nvh264enc", "vah264enc", "x264enc"]),
+        ("h265", "H.265", ["nvh265enc", "vah265enc", "x265enc"]),
+        ("vp9", "VP9", ["vp9enc", "", ""]),
+        ("av1", "AV1", ["nvav1enc", "vaav1enc", "av1enc"]),
     ]
-    .into_iter()
-    .filter(|(codec, _, software, hardware)| {
-        let encoder_available = gst::ElementFactory::find(software).is_some()
-            || (!hardware.is_empty() && gst::ElementFactory::find(hardware).is_some());
-        encoder_available && verify_codec_elements(codec).is_ok()
-    })
-    .map(|(codec, label, _software, hardware)| {
-        let selected_encoder = selected_encoder_name(codec);
-        (
-            codec,
-            label,
-            !hardware.is_empty() && selected_encoder == hardware,
-        )
-    })
-    .collect()
+}
+
+/// `NativeCodecInfo.hardware` flag: the encoder that won the selection
+/// chain is a hardware encoder factory.
+fn is_hardware_encoder(encoder: &str) -> bool {
+    encoder.starts_with("nv") || encoder.starts_with("va")
+}
+
+/// Suffix the display label with the winning encoder's hardware vendor so
+/// the picker can show e.g. "H.264 (NVENC)"; software labels stay
+/// unchanged.
+fn codec_label(label: &str, encoder: &str) -> String {
+    if let Some(suffix) = encoder_suffix(encoder) {
+        format!("{label} ({suffix})")
+    } else {
+        label.to_string()
+    }
+}
+
+fn encoder_suffix(encoder: &str) -> Option<&'static str> {
+    if encoder.starts_with("nv") {
+        Some("NVENC")
+    } else if encoder.starts_with("va") {
+        Some("VA-API")
+    } else {
+        None
+    }
 }
 
 fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> NativeTelemetry {
@@ -1661,8 +1683,9 @@ fn fold_telemetry(stats: &gst::Structure, config: Option<&CaptureConfig>) -> Nat
     // codec each RTP stream references: codec structures expose their
     // `clock-rate` (video is always 90 kHz, Opus 48 kHz) under their
     // `id`, which the RTP stream structures reference via `codec-id`. The
-    // pipeline fixes the codecs (vah264enc + opusenc), so the clock rate
-    // is unambiguous. Structure *names* also differ by version — 1.28.6
+    // pipeline's only audio codec is opusenc, so the clock rate is
+    // unambiguous regardless of which video encoder won the selection
+    // chain. Structure *names* also differ by version — 1.28.6
     // still uses `outbound-rtp` / `remote-inbound-rtp` / `codec`, while
     // master renamed them to `rtp-outbound-stream-stats_<ssrc>` /
     // `rtp-remote-inbound-stream-stats_<ssrc>` / `codec-stats-<pad>` —
@@ -1758,10 +1781,11 @@ fn is_codec_stats(name: &str) -> bool {
 
 /// The RTP stream's media kind, recovered through the codec it references
 /// (gst-webrtc-bin's `kind` field is present in 1.28.6 but was removed
-/// again on master). The pipeline fixes the codecs — vah264enc at 90 kHz,
-/// opusenc at 48 kHz — so the clock rate is unambiguous. `None` when the
-/// codec cannot be resolved; such streams are ignored rather than
-/// guessed.
+/// again on master). The pipeline's only audio codec — opusenc at 48 kHz —
+/// fixes the audio clock rate; video runs at 90 kHz regardless of which
+/// video encoder won the selection chain, so the split is unambiguous.
+/// `None` when the codec cannot be resolved; such streams are ignored
+/// rather than guessed.
 fn stream_is_video(
     structure: &gst::Structure,
     codec_clock_rates: &HashMap<String, u32>,
@@ -2585,5 +2609,28 @@ mod tests {
         assert!(can_adapt(Some("vp8")));
         assert!(can_adapt(Some("vp9")));
         assert!(can_adapt(None));
+    }
+
+    #[test]
+    fn available_video_codecs_derives_labels_and_hardware_from_the_selection_chain() {
+        init_gst();
+        let codecs = available_video_codecs();
+        assert!(!codecs.is_empty());
+        for (codec, label, hardware) in &codecs {
+            let selected = selected_encoder_name(codec);
+            let is_hardware = selected.starts_with("nv") || selected.starts_with("va");
+            assert_eq!(*hardware, is_hardware, "{codec} via {selected}");
+            if is_hardware {
+                assert!(
+                    label.contains("NVENC") || label.contains("VA-API"),
+                    "{codec} label must carry the encoder suffix: {label}"
+                );
+            } else {
+                assert!(
+                    !label.contains('('),
+                    "{codec} label must stay bare: {label}"
+                );
+            }
+        }
     }
 }

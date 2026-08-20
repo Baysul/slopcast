@@ -39,7 +39,7 @@ test('sortByCodecPreference does not mutate its input', () => {
   );
 });
 
-test('codecOptionSuffix marks only the recommended codec (groups convey hardware/software)', () => {
+test('codecOptionSuffix marks only the recommended codec (labels carry the encoder suffix)', () => {
   assert.equal(codecOptionSuffix(info('vp9', true, true)), ' - Recommended');
   assert.equal(codecOptionSuffix(info('vp9', true, false)), '');
   assert.equal(codecOptionSuffix(info('vp9', false, true)), ' - Recommended');
@@ -80,7 +80,20 @@ test('fromNativeCodecInfo keeps h265 and drops unknown codecs', () => {
   assert.deepEqual(fromNativeCodecInfo([]), []);
 });
 
-test('recommendCodec hoists the shipped default codec (vp8) first', () => {
+test('recommendCodec hoists the shipped default codec (vp8) when no hardware H.264 exists', () => {
+  const input = sortByCodecPreference([
+    { ...info('h264', false) },
+    { ...info('vp8', false) },
+    { ...info('vp9', false) },
+    { ...info('av1', false) },
+  ]);
+  const recommended = recommendCodec(input);
+  assert.equal(recommended[0]?.codec, 'vp8');
+  assert.equal(recommended[0]?.recommended, true);
+  assert.ok(recommended.slice(1).every((c) => !c.recommended));
+});
+
+test('recommendCodec hoists hardware H.264 over the vp8 default', () => {
   const input = sortByCodecPreference([
     { ...info('h264', true) },
     { ...info('vp8', false) },
@@ -88,7 +101,7 @@ test('recommendCodec hoists the shipped default codec (vp8) first', () => {
     { ...info('av1', false) },
   ]);
   const recommended = recommendCodec(input);
-  assert.equal(recommended[0]?.codec, 'vp8');
+  assert.equal(recommended[0]?.codec, 'h264');
   assert.equal(recommended[0]?.recommended, true);
   assert.ok(recommended.slice(1).every((c) => !c.recommended));
 });
@@ -119,8 +132,8 @@ test('recommendCodec returns an empty list unchanged', () => {
 test('groupCodecsByHardware puts hardware first, preserving order within each group', () => {
   const codecs = recommendCodec(
     fromNativeCodecInfo([
-      { codec: 'h264', label: 'H.264', hardware: true },
-      { codec: 'h265', label: 'H.265', hardware: true },
+      { codec: 'h264', label: 'H.264 (NVENC)', hardware: true },
+      { codec: 'h265', label: 'H.265 (NVENC)', hardware: true },
       { codec: 'vp8', label: 'VP8', hardware: false },
       { codec: 'vp9', label: 'VP9', hardware: false },
       { codec: 'av1', label: 'AV1', hardware: false },
@@ -131,12 +144,12 @@ test('groupCodecsByHardware puts hardware first, preserving order within each gr
     hardware.map((c) => c.codec),
     ['h264', 'h265'],
   );
-  // The recommended codec (vp8) stays first within its group.
+  // The recommended codec (hardware h264) stays first within its group.
+  assert.equal(hardware[0]?.recommended, true);
   assert.deepEqual(
     software.map((c) => c.codec),
     ['vp8', 'vp9', 'av1'],
   );
-  assert.equal(software[0]?.recommended, true);
 });
 
 test('groupCodecsByHardware handles an all-software and an empty list', () => {
