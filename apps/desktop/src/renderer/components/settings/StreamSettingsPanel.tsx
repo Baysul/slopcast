@@ -1,5 +1,4 @@
 import type { MotionMode, ResolutionPreset, VideoCodec } from '@slopcast/shared-types';
-import { fmtBitrate } from '@slopcast/shared-types';
 import { ChevronDown } from 'lucide-react';
 import type React from 'react';
 import { memo } from 'react';
@@ -14,10 +13,62 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
-import { manualBitrateOptions } from '@/utils/bitrate';
+import { manualBitrateOptions, recommendedBitrateRange } from '@/utils/bitrate';
 import type { CodecInfo } from '@/utils/codecs';
 import { groupCodecsByHardware } from '@/utils/codecs';
+
+const BITS_PER_MEGABIT = 1_000_000;
+
+const formatMegabits = (bitrate: number): string => (bitrate / BITS_PER_MEGABIT).toFixed(1).replace(/\.0$/, '');
+
+interface BitrateGuidanceInput {
+  autoBitrate: boolean;
+  bitrateLimit: number;
+  recommendedMinimum: number;
+  recommendedMaximum: number;
+  recommendedRangeLabel: string;
+  streamProfile: string;
+}
+
+interface BitrateGuidance {
+  message: string;
+  needsAttention: boolean;
+}
+
+const getBitrateGuidance = ({
+  autoBitrate,
+  bitrateLimit,
+  recommendedMinimum,
+  recommendedMaximum,
+  recommendedRangeLabel,
+  streamProfile,
+}: BitrateGuidanceInput): BitrateGuidance => {
+  if (autoBitrate) {
+    return {
+      message: `Automatic bitrate targets ${recommendedRangeLabel} for ${streamProfile}.`,
+      needsAttention: false,
+    };
+  }
+  if (bitrateLimit < recommendedMinimum) {
+    return {
+      message: `Below the recommended ${recommendedRangeLabel} range for ${streamProfile} — quality may suffer.`,
+      needsAttention: true,
+    };
+  }
+  if (bitrateLimit > recommendedMaximum) {
+    return {
+      message: `Above the recommended ${recommendedRangeLabel} range for ${streamProfile} — this may use more bandwidth without improving quality.`,
+      needsAttention: true,
+    };
+  }
+
+  return {
+    message: `Within the recommended ${recommendedRangeLabel} range for ${streamProfile}.`,
+    needsAttention: false,
+  };
+};
 
 export interface StreamSettingsPanelProps {
   streamSettingsOpen: boolean;
@@ -67,6 +118,22 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
     const containerClass = streamSettingsOpen ? 'max-h-[800px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden';
     const { hardware: hardwareCodecs, software: softwareCodecs } = groupCodecsByHardware(availableCodecs);
     const bitrateOptions = manualBitrateOptions(videoCodec);
+    const bitrateMaximum = Math.max(...bitrateOptions);
+    const [recommendedMinimum, recommendedMaximum] = recommendedBitrateRange({
+      codec: videoCodec,
+      resolution,
+      fps: streamFps,
+      motionTier: 'static',
+    });
+    const recommendedRangeLabel = `${formatMegabits(recommendedMinimum)}–${formatMegabits(recommendedMaximum)} Mbps`;
+    const bitrateGuidance = getBitrateGuidance({
+      autoBitrate,
+      bitrateLimit,
+      recommendedMinimum,
+      recommendedMaximum,
+      recommendedRangeLabel,
+      streamProfile: `${resolution}${streamFps}`,
+    });
 
     return (
       <Card className="border-border/60 bg-card/60 backdrop-blur-sm shadow-xl">
@@ -173,32 +240,59 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 </Select>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <label
-                  htmlFor="select-bitrate"
+                  htmlFor="input-bitrate"
                   className="text-xs font-semibold uppercase tracking-wider text-muted-foreground block"
                 >
                   Bitrate Limit
                 </label>
-                <Select
-                  value={String(autoBitrate ? effectiveBitrate : bitrateLimit)}
-                  onValueChange={(v) => setBitrateLimit(Number(v))}
-                  disabled={autoBitrate}
+                <div className="flex items-center gap-3">
+                  <Input
+                    id="input-bitrate"
+                    type="number"
+                    min={1}
+                    max={bitrateMaximum / BITS_PER_MEGABIT}
+                    step={0.5}
+                    value={formatMegabits(autoBitrate ? effectiveBitrate : bitrateLimit)}
+                    onChange={(event) => {
+                      const megabits = Number(event.currentTarget.value);
+                      if (!Number.isFinite(megabits)) return;
+
+                      const boundedMegabits = Math.min(
+                        bitrateMaximum / BITS_PER_MEGABIT,
+                        Math.max(1, Math.round(megabits * 2) / 2),
+                      );
+                      setBitrateLimit(boundedMegabits * BITS_PER_MEGABIT);
+                    }}
+                    disabled={autoBitrate}
+                    className="w-20 shrink-0 bg-secondary text-center font-mono tabular-nums text-foreground"
+                  />
+                  <span className="shrink-0 text-sm text-muted-foreground">Mbps</span>
+                  <Slider
+                    aria-label="Bitrate limit"
+                    aria-describedby="bitrate-guidance"
+                    min={BITS_PER_MEGABIT}
+                    max={bitrateMaximum}
+                    step={500_000}
+                    value={[autoBitrate ? effectiveBitrate : bitrateLimit]}
+                    onValueChange={(values) => {
+                      const nextBitrate = values[0];
+                      if (nextBitrate == null) return;
+
+                      setBitrateLimit(nextBitrate);
+                    }}
+                    disabled={autoBitrate}
+                  />
+                </div>
+                <p
+                  id="bitrate-guidance"
+                  role="status"
+                  aria-live="polite"
+                  className={`text-xs leading-relaxed ${bitrateGuidance.needsAttention ? 'text-safelight' : 'text-muted-foreground'}`}
                 >
-                  <SelectTrigger id="select-bitrate">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {autoBitrate && !bitrateOptions.includes(effectiveBitrate) && (
-                      <SelectItem value={String(effectiveBitrate)}>{fmtBitrate(effectiveBitrate)}</SelectItem>
-                    )}
-                    {bitrateOptions.map((bps) => (
-                      <SelectItem key={bps} value={String(bps)}>
-                        {fmtBitrate(bps)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  {bitrateGuidance.message}
+                </p>
               </div>
             </div>
 

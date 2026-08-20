@@ -79,8 +79,13 @@ export const recommendBitrateCap = (input: BitrateInput): number => {
   return Math.max(1_000_000, Math.round(raw / 500_000) * 500_000);
 };
 
-/**
- * Manual bitrate options for a codec, used by the settings dropdown when
- * automatic bitrate is disabled.
- */
+/** A quality-efficient manual bitrate band around the automatic ceiling. */
+export const recommendedBitrateRange = (input: BitrateInput): readonly [number, number] => {
+  const maximum = recommendBitrateCap(input);
+  const minimum = Math.max(1_000_000, Math.round((maximum * 2) / 3 / 500_000) * 500_000);
+
+  return [minimum, maximum];
+};
+
+/** Manual bitrate bounds for a codec's slider. */
 export const manualBitrateOptions = (codec: VideoCodec): number[] => MANUAL_OPTIONS[codec];

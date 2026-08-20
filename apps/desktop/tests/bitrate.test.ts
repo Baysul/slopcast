@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { manualBitrateOptions, recommendBitrateCap } from '../src/renderer/utils/bitrate.ts';
+import { manualBitrateOptions, recommendBitrateCap, recommendedBitrateRange } from '../src/renderer/utils/bitrate.ts';
 
 test('recommendBitrateCap picks the static 1080p60 AV1 sweet spot (8 Mbps)', () => {
   assert.equal(
@@ -91,6 +91,13 @@ test('recommendBitrateCap snaps to an allowed option', () => {
     motionTier: 'static',
   });
   assert.ok(manualBitrateOptions('av1').includes(cap));
+});
+
+test('recommendedBitrateRange gives 1080p60 H.264 an 8–12 Mbps band', () => {
+  assert.deepEqual(
+    recommendedBitrateRange({ codec: 'h264', resolution: '1080p', fps: 60, motionTier: 'static' }),
+    [8_000_000, 12_000_000],
+  );
 });
 
 test('manualBitrateOptions keeps AV1 below the H.264 20+ Mbps band', () => {
