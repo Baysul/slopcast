@@ -1881,6 +1881,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         configure_encoder(&encoder, "vp8", 10_000, 10_000, 60, RateMode::Cbr);
 
+        assert_eq!(encoder.property::<i32>("target-bitrate"), 10_000_000);
         assert_eq!(encoder.property::<i64>("deadline"), 1);
         assert_eq!(encoder.property::<i32>("cpu-used"), 6);
         assert_eq!(encoder.property::<i32>("static-threshold"), 100);
