@@ -1352,8 +1352,8 @@ fn push_pcm(appsrc: &gst_app::AppSrc, samples: &[i16]) -> Result<(), String> {
         let mut mapped = buffer_ref
             .map_writable()
             .map_err(|_| "Failed to map GStreamer audio buffer writable".to_string())?;
-        for (sample, destination) in samples.iter().zip(mapped.chunks_exact_mut(2)) {
-            destination.copy_from_slice(&sample.to_le_bytes());
+        for (sample, destination) in samples.iter().zip(mapped.as_chunks_mut::<2>().0) {
+            *destination = sample.to_le_bytes();
         }
         drop(mapped);
 
