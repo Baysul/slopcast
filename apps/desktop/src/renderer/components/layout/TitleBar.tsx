@@ -1,4 +1,5 @@
 import { Copy, Minus, ScreenShare, Square, X } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 import React, { useEffect, useState } from 'react';
 import { windowControls } from '@/api/windowControls';
 
@@ -16,15 +17,7 @@ export interface TitleBarProps {
   isPreviewing?: boolean;
 }
 
-function getCenterSignal(isLive: boolean, isPreviewing: boolean): React.ReactNode {
-  if (isLive) {
-    return (
-      <span role="status" aria-live="polite" className="inline-flex items-center gap-2">
-        <span className="size-1.5 rounded-full bg-safelight motion-safe:animate-pulse" aria-hidden="true" />
-        <span className="text-xs font-medium uppercase tracking-widest text-safelight leading-none">Live</span>
-      </span>
-    );
-  }
+function getCenterSignal(isPreviewing: boolean): React.ReactNode {
   if (isPreviewing) {
     return (
       <span className="inline-flex items-center gap-2">
@@ -75,8 +68,29 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
     // biome-ignore lint/a11y/noStaticElementInteractions: window drag region is a pointer-only interaction; keyboard users use the window's native controls.
     <header
       onMouseDown={handleMouseDown}
-      className="h-10 shrink-0 flex items-stretch border-b border-border bg-background select-none"
+      className="relative isolate h-10 shrink-0 flex items-stretch border-b border-border bg-background select-none"
     >
+      {/* Amberlight wash behind the chrome while live. Motion fades it in
+          on go-live and out on stop (outer); the CSS loop does the breathing
+          (inner) — separate elements, or the keyframes would override the
+          fade's inline opacity. -z-10 + isolate keeps the wash above the
+          bar's background but under the content; motion-safe honors
+          prefers-reduced-motion with a static glow. */}
+      <AnimatePresence>
+        {isLive && (
+          <motion.div
+            key="live-glow"
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 -z-10"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+          >
+            <div className="size-full bg-live-glow motion-safe:animate-live-breathe" />
+          </motion.div>
+        )}
+      </AnimatePresence>
       <div className="flex items-center gap-2.5 pl-4 pr-3">
         <ScreenShare className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
         <span className="text-sm font-semibold tracking-tight text-foreground/90">Slopcast</span>
@@ -84,7 +98,7 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
 
       {/* Center signal — pointer-events-none so the drag region stays live. */}
       <div className="flex-1 flex items-center justify-center pointer-events-none select-none">
-        {getCenterSignal(isLive, isPreviewing)}
+        {getCenterSignal(isPreviewing)}
       </div>
 
       <div className="ml-auto flex items-stretch">
