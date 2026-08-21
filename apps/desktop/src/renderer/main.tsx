@@ -476,6 +476,7 @@ export const PresenterApp: React.FC = () => {
       lastVideoConfigKeyRef.current = videoConfigKey();
       setCaptureStage('live');
       setTelemetry({ ...idleTelemetry(), live: true });
+      notify('success', 'Stream started', 'Your screen is now live.');
       startTelemetryPolling(getTelemetryInputs);
       // Debug aid for auto-resolve misses: a full PipeWire enumeration +
       // per-node JSON dump on every go-live. Dev and e2e builds only — in
