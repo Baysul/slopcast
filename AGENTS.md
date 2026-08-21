@@ -221,9 +221,12 @@ pw-cli list-objects Node | grep "Slopcast-Window-Audio"
 #    into the capture node (and it must also stay linked to the physical sink)
 pw-link -l
 
-# 4. Confirm the capture node is exposed as a real source, not a sink monitor
-#    ("Monitor of Sink: n/a"), otherwise Chromium will never enumerate it
-pactl list sources | grep -A 6 "Name: Slopcast-Window-Audio"
+# 4. Confirm the capture bus is invisible to device enumeration: it is a
+#    Stream/Input/Audio node (the OBS app-capture design), so Chromium apps
+#    like Discord never see a device change when a share starts. NEITHER
+#    command may print anything:
+pactl list sources | grep "Slopcast-Window-Audio"
+pactl list sinks | grep "Slopcast-Window-Audio"
 ```
 
 ## 8. Key dependency versions
