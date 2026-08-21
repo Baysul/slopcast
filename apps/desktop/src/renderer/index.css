@@ -12,6 +12,7 @@
   --color-safelight-hover: oklch(0.6036 0.1044 57);
   --color-safelight-foreground: oklch(0.1596 0.0203 265.6);
   --color-safelight-glow: oklch(0.6594 0.1096 57.8 / 0.15);
+  --color-safelight-glow-strong: oklch(0.6594 0.1096 57.8 / 0.35);
   --color-primary: oklch(0.6594 0.1096 57.8);
   --color-primary-foreground: oklch(0.1596 0.0203 265.6);
   --radius: 0.625rem;
@@ -28,6 +29,32 @@
   --color-ring: oklch(0.6594 0.1096 57.8);
   --color-body-text: oklch(0.8717 0.0093 258.3);
   --color-caption-text: oklch(0.64 0.02 260);
+}
+
+/* Titlebar live indicator: an amberlight wash. The TitleBar fades it in/out
+   via Motion; this loop does the breathing. Keyframes live in @theme so they
+   ship only when the animate-live-breathe utility is used. */
+@theme {
+  --animate-live-breathe: live-breathe 4s ease-in-out infinite;
+
+  /* Slow amber breath, in place. The widened gradient keeps the glow
+     present along the full bar length. */
+  @keyframes live-breathe {
+    0%,
+    100% {
+      opacity: 0.5;
+    }
+    50% {
+      opacity: 0.85;
+    }
+  }
+}
+
+@utility bg-live-glow {
+  /* Top-down wash spanning the full bar width (no horizontal mask). The
+     fade endpoint sits past the element's bottom edge (150%), so the tint
+     still reaches the bottom of the bar instead of dying out midway. */
+  background-image: linear-gradient(180deg, var(--color-safelight-glow-strong), transparent 150%);
 }
 
 @layer base {
