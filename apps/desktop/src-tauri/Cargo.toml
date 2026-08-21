@@ -7,6 +7,8 @@ license = "MIT"
 
 [lints.rust]
 unused = "warn"
+unreachable_pub = "warn"
+unused_crate_dependencies = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -14,6 +16,8 @@ unwrap_used = "deny"
 expect_used = "deny"
 undocumented_unsafe_blocks = "deny"
 allow_attributes_without_reason = "deny"
+redundant_clone = "warn"
+clone_on_ref_ptr = "warn"
 
 [lib]
 name = "slopcast_lib"
