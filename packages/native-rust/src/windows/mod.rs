@@ -1123,7 +1123,9 @@ impl CaptureSession {
                                 let out_slice = &mut self.pcm_buffer[start..];
 
                                 for (i, frame_chunk) in raw_bytes
-                                    .chunks_exact(STEREO_F32_BYTES_PER_FRAME)
+                                    .as_chunks::<STEREO_F32_BYTES_PER_FRAME>()
+                                    .0
+                                    .iter()
                                     .enumerate()
                                 {
                                     let l_bits = u32::from_le_bytes([
@@ -1165,8 +1167,11 @@ impl CaptureSession {
                                 self.pcm_buffer.resize(start + added, 0);
                                 let out_slice = &mut self.pcm_buffer[start..];
 
-                                for (i, frame_chunk) in
-                                    raw_bytes.chunks_exact(MONO_F32_BYTES_PER_FRAME).enumerate()
+                                for (i, frame_chunk) in raw_bytes
+                                    .as_chunks::<MONO_F32_BYTES_PER_FRAME>()
+                                    .0
+                                    .iter()
+                                    .enumerate()
                                 {
                                     let bits = u32::from_le_bytes([
                                         frame_chunk[0],
