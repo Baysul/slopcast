@@ -104,11 +104,15 @@ pub(super) fn port_channel_from_name(port_name: Option<&str>) -> Option<String> 
 
 /// Creates the virtual node the target application's audio is linked into.
 ///
-/// It is a virtual *source*, not a null sink: Chromium's `PulseAudio` backend
-/// drops every source that is a sink monitor (`monitor_of_sink` set) when
-/// enumerating input devices, so a null sink's `.monitor` can never reach
-/// `enumerateDevices()` in the renderer. A virtual source is a first-class
-/// `PulseAudio` source and still exposes input ports to link into.
+/// It is a stream-class node, never a device: a device media.class
+/// (`Audio/Source/Virtual`, `Audio/Sink`) makes `pipewire-pulse` expose it as
+/// a real input/output device, so every Chromium/Electron app on the system
+/// (Discord, browsers) sees a device appear mid-call and reacts to the
+/// `devicechange` — Discord re-inits or auto-switches its input device and
+/// the call breaks. A `Stream/Input/Audio` node is invisible to device
+/// enumeration while the `support.null-audio-sink` adapter still provides
+/// input ports to link app streams into and monitor ports for our recording
+/// stream. Same design as OBS's `obs-pipewire-audio-capture` plugin.
 fn create_capture_node(
     core: &pipewire::core::Core,
     layout: &ChannelLayout,
@@ -119,7 +123,8 @@ fn create_capture_node(
             "factory.name" => "support.null-audio-sink",
             "node.name" => CAPTURE_NODE_NAME,
             "node.description" => CAPTURE_NODE_DESCRIPTION,
-            "media.class" => "Audio/Source/Virtual",
+            "media.class" => "Stream/Input/Audio",
+            "node.virtual" => "true",
             "audio.position" => layout.position.as_str(),
             "object.linger" => "false",
         },
