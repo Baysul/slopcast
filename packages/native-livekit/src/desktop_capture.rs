@@ -389,6 +389,7 @@ pub(crate) fn trace_frame(
     );
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn trace_encoder_output(gstreamer_pts_ns: Option<u64>, encoded_count: u64) {
     if !*FRAME_TRACE_ENABLED {
         return;
@@ -2288,6 +2289,9 @@ mod probe {
     #[test]
     #[ignore = "probe: runs the synthetic capture thread for a few seconds"]
     fn synthetic_capture_probe() {
+        // OwnedI420's layout asserts gst::init has run; Windows has no gst
+        // dependency at all.
+        #[cfg(target_os = "linux")]
         init_gst();
         let config = CaptureConfig {
             width: 1280,
