@@ -7,7 +7,10 @@
     "beforeDevCommand": "pnpm --filter @slopcast/shared-types build && pnpm --filter desktop dev:renderer",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "pnpm --filter @slopcast/shared-types build && pnpm --filter desktop build:renderer",
-    "frontendDist": "../dist/renderer"
+    "frontendDist": "../dist/renderer",
+    "windows": {
+      "staticVCRuntime": false
+    }
   },
   "app": {
     "withGlobalTauri": true,
