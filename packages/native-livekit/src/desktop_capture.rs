@@ -37,7 +37,6 @@ use livekit::webrtc::prelude::{I420Buffer, VideoBuffer};
 #[cfg(not(target_os = "linux"))]
 use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
 use std::collections::VecDeque;
-#[cfg(target_os = "linux")]
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
