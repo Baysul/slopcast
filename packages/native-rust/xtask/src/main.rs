@@ -33,9 +33,10 @@ fn check_targets() {
     }
 
     for &target in cross_targets {
-        let mut cmd = Command::new("cargo");
-        cmd.arg("check").arg("--target").arg(target);
-        let status = cmd.status().expect("failed to run cargo check");
+        let status = Command::new("cargo")
+            .args(["clippy", "--target", target, "--all-targets", "--", "-D", "warnings"])
+            .status()
+            .expect("failed to run cargo clippy");
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }

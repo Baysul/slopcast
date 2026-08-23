@@ -128,7 +128,7 @@ The `packages/native-rust/rustfmt.toml` and `packages/native-livekit/rustfmt.tom
 5. Never deviate the `rustfmt.toml` config from the Rust Style Guide defaults. Don't add `unstable_features = true` or any configuration that requires nightly.
 6. Clippy is enforced by the `check` scripts (`cargo clippy --all-targets -- -D warnings`, inheriting the `[lints.clippy]` config in each Rust crate). Prefer a real fix (renaming, restructure, `// SAFETY:` comment, targeted `#[allow(..., reason = "...")]`) over broad suppressions. Every `unsafe` block needs a `// SAFETY:` comment.
 
-`packages/native-rust` runs `cargo xtask check-targets`, a lightweight Rust binary at `xtask/`, which type-checks the `#[cfg(target_os)]` platform modules the host build cannot see (`cargo check --target ...`). This makes shared-struct/API drift in the Windows module (e.g. E0063) fail locally instead of in CI. Linux hosts check the Windows target (`x86_64-pc-windows-msvc`); Windows hosts check only their own module. The linux target is never cross-checked because `pipewire-sys` and `x11` bind against Linux system headers at build time.
+`packages/native-rust` runs `cargo xtask check-targets`, a lightweight Rust binary at `xtask/`, which runs Clippy with warnings denied for the `#[cfg(target_os)]` platform modules the host build cannot see (`cargo clippy --target ... --all-targets -- -D warnings`). This makes shared-struct/API drift and target-specific lint failures in the Windows module fail locally instead of in CI. Linux hosts check the Windows target (`x86_64-pc-windows-msvc`); Windows hosts check only their own module. The Linux target is never cross-checked because `pipewire-sys` and `x11` bind against Linux system headers at build time.
 
 ## 4. Tauri security model
 

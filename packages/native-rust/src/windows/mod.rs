@@ -311,6 +311,19 @@ fn validate_target_pid(pid: i32) -> Result<u32, String> {
     }
 }
 
+fn resolve_target_pid(target: &AudioTarget) -> Result<u32, String> {
+    match target {
+        AudioTarget::Label(label) => {
+            let pid = label
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid PID string: '{label}'"))?;
+
+            validate_target_pid(pid)
+        }
+        AudioTarget::Id(pid) => validate_target_pid(*pid),
+    }
+}
+
 impl WasapiManager {
     const fn new() -> Self {
         Self {
@@ -381,15 +394,7 @@ impl WasapiManager {
     }
 
     pub(crate) fn start_audio_capture(&self, target: &AudioTarget) -> Result<bool, String> {
-        let target_pid = match target {
-            AudioTarget::Label(label) => {
-                let p = label
-                    .parse::<i32>()
-                    .map_err(|_| format!("Invalid PID string: '{label}'"))?;
-                validate_target_pid(p)?
-            }
-            AudioTarget::Id(pid) => validate_target_pid(*pid)?,
-        };
+        let target_pid = resolve_target_pid(target)?;
         let generation = NEXT_CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed);
         let stop_event = OwnedHandle::new(
             // SAFETY: standard event-object creation; the returned handle is
@@ -415,29 +420,17 @@ impl WasapiManager {
             .map_err(|e| format!("Failed to spawn WASAPI thread: {e}"))?;
         let stop_raw = stop_event.into_raw();
 
-        let mut guard = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(error) => {
-                return Err(cleanup_failed_startup(
-                    run_tx,
-                    stop_raw,
-                    join,
-                    error.to_string(),
-                ));
-            }
-        };
-        if let Some(state) = guard.as_mut() {
-            Self::stop_capture_locked(state);
-        }
-        *guard = Some(WasapiState {
+        let pending_state = WasapiState {
             generation,
             is_active: false,
             target_pid: Some(target_pid),
             stop_event: Some(SendHandle(stop_raw)),
             capture_thread: None,
             mode: None,
-        });
-        drop(guard);
+        };
+        if let Err(error) = self.set_pending_start(pending_state) {
+            return Err(cleanup_failed_startup(run_tx, stop_raw, join, error));
+        }
 
         let mode = match startup_rx.recv_timeout(STARTUP_TIMEOUT) {
             Ok(Ok(mode)) => mode,
@@ -509,6 +502,17 @@ impl WasapiManager {
         }
 
         Ok(true)
+    }
+
+    fn set_pending_start(&self, pending_state: WasapiState) -> Result<(), String> {
+        let mut guard = self.state.lock().map_err(|error| error.to_string())?;
+        if let Some(state) = guard.as_mut() {
+            Self::stop_capture_locked(state);
+        }
+
+        *guard = Some(pending_state);
+
+        Ok(())
     }
 
     fn clear_pending_start(&self, generation: u64) {
