@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -45,7 +46,7 @@ use windows::core::{Error, GUID, HRESULT, IUnknown, Interface, PCSTR, Ref, imple
 
 const KSDATAFORMAT_SUBTYPE_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 const PROCESS_LOOPBACK_MIN_BUILD: u32 = 20348;
-const RPC_E_CHANGED_MODE: i32 = -2_147_410_682;
+const RPC_E_CHANGED_MODE: i32 = -2_147_417_850;
 const WASAPI_BUFFER_DURATION_100NS: i64 = 200_000; // 20 ms
 const KSAUDIO_SPEAKER_STEREO: u32 = 0x3;
 const TARGET_OUTPUT_SAMPLE_RATE: u32 = 48_000;
@@ -89,6 +90,12 @@ struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
 // SAFETY: see `Send` impl above — handles are freely shareable across threads.
 unsafe impl Sync for SendHandle {}
+
+fn close_send_handle(SendHandle(handle): SendHandle) {
+    // SAFETY: callers transfer ownership of a valid open kernel handle and
+    // invoke this helper exactly once after its final user has stopped.
+    let _ = unsafe { CloseHandle(handle) };
+}
 
 struct CoTaskMemPtr<T>(*mut T);
 
@@ -273,6 +280,7 @@ impl StereoResampler {
 }
 
 struct WasapiState {
+    generation: u64,
     is_active: bool,
     target_pid: Option<u32>,
     stop_event: Option<SendHandle>,
@@ -285,6 +293,11 @@ pub(crate) struct WasapiManager {
 }
 
 static MANAGER: WasapiManager = WasapiManager::new();
+static NEXT_CAPTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn supports_process_loopback(build_number: u32) -> bool {
+    build_number >= PROCESS_LOOPBACK_MIN_BUILD
+}
 
 fn validate_target_pid(pid: i32) -> Result<u32, String> {
     if pid == -1 || pid == 0 {
@@ -380,74 +393,136 @@ impl WasapiManager {
             }
             AudioTarget::Id(pid) => validate_target_pid(*pid)?,
         };
-
+        let generation = NEXT_CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed);
         let stop_event = OwnedHandle::new(
             // SAFETY: standard event-object creation; the returned handle is
             // wrapped in OwnedHandle, which closes it exactly once.
             unsafe { CreateEventA(None, false, false, PCSTR::null()) }
                 .map_err(|e| format!("CreateEventA: {e}"))?,
         )?;
-
         let (startup_tx, startup_rx) = channel::<Result<CaptureMode, String>>();
         let (run_tx, run_rx) = channel::<()>();
-
         let stop_send_handle = SendHandle(stop_event.handle());
+
         let join = std::thread::Builder::new()
             .name("wasapi-loopback-capture".into())
             .spawn(move || {
-                let _ = run_capture(target_pid, stop_send_handle, &startup_tx, &run_rx);
+                let _ = run_capture(
+                    target_pid,
+                    generation,
+                    stop_send_handle,
+                    &startup_tx,
+                    &run_rx,
+                );
             })
             .map_err(|e| format!("Failed to spawn WASAPI thread: {e}"))?;
-
         let stop_raw = stop_event.into_raw();
 
-        match startup_rx.recv_timeout(STARTUP_TIMEOUT) {
-            Ok(Ok(mode)) => {
-                let mut guard = match self.state.lock() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        return Err(cleanup_failed_startup(
-                            run_tx,
-                            stop_raw,
-                            join,
-                            e.to_string(),
-                        ));
-                    }
-                };
-                let state = guard.get_or_insert_with(|| WasapiState {
-                    is_active: false,
-                    target_pid: None,
-                    stop_event: None,
-                    capture_thread: None,
-                    mode: None,
-                });
-                Self::stop_capture_locked(state);
-
-                if let Err(e) = crate::audio_ring::start_audio_ring() {
-                    return Err(cleanup_failed_startup(run_tx, stop_raw, join, e));
-                }
-
-                state.is_active = true;
-                state.mode = Some(mode);
-                state.target_pid = Some(target_pid);
-                state.stop_event = Some(SendHandle(stop_raw));
-                state.capture_thread = Some(join);
-
-                let _ = run_tx.send(());
-                Ok(true)
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                return Err(cleanup_failed_startup(
+                    run_tx,
+                    stop_raw,
+                    join,
+                    error.to_string(),
+                ));
             }
-            Ok(Err(e)) => Err(cleanup_failed_startup(
+        };
+        if let Some(state) = guard.as_mut() {
+            Self::stop_capture_locked(state);
+        }
+        *guard = Some(WasapiState {
+            generation,
+            is_active: false,
+            target_pid: Some(target_pid),
+            stop_event: Some(SendHandle(stop_raw)),
+            capture_thread: None,
+            mode: None,
+        });
+        drop(guard);
+
+        let mode = match startup_rx.recv_timeout(STARTUP_TIMEOUT) {
+            Ok(Ok(mode)) => mode,
+            Ok(Err(error)) => {
+                self.clear_pending_start(generation);
+                return Err(cleanup_failed_startup(
+                    run_tx,
+                    stop_raw,
+                    join,
+                    format!("WASAPI startup: {error}"),
+                ));
+            }
+            Err(_) => {
+                self.clear_pending_start(generation);
+                return Err(cleanup_failed_startup(
+                    run_tx,
+                    stop_raw,
+                    join,
+                    "WASAPI startup timed out".into(),
+                ));
+            }
+        };
+
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                return Err(cleanup_failed_startup(
+                    run_tx,
+                    stop_raw,
+                    join,
+                    error.to_string(),
+                ));
+            }
+        };
+        let is_matching_pending = guard.as_ref().is_some_and(|state| {
+            state.generation == generation && state.stop_event.is_some() && !state.is_active
+        });
+        if !is_matching_pending {
+            drop(guard);
+            return Err(cleanup_failed_startup(
                 run_tx,
                 stop_raw,
                 join,
-                format!("WASAPI startup: {e}"),
-            )),
-            Err(_) => Err(cleanup_failed_startup(
+                "WASAPI startup cancelled".into(),
+            ));
+        }
+        if let Err(error) = crate::audio_ring::start_audio_ring_for_generation(generation) {
+            *guard = None;
+            drop(guard);
+            return Err(cleanup_failed_startup(run_tx, stop_raw, join, error));
+        }
+
+        let Some(state) = guard.as_mut() else {
+            crate::audio_ring::stop_audio_ring();
+            drop(guard);
+            return Err(cleanup_failed_startup(
                 run_tx,
                 stop_raw,
                 join,
-                "WASAPI startup timed out".into(),
-            )),
+                "WASAPI pending state disappeared during startup".into(),
+            ));
+        };
+        state.is_active = true;
+        state.mode = Some(mode);
+        state.capture_thread = Some(join);
+        if run_tx.send(()).is_err() {
+            Self::stop_capture_locked(state);
+            return Err("WASAPI capture thread stopped before startup completed".into());
+        }
+
+        Ok(true)
+    }
+
+    fn clear_pending_start(&self, generation: u64) {
+        let Ok(mut guard) = self.state.lock() else {
+            return;
+        };
+        let is_matching_pending = guard
+            .as_ref()
+            .is_some_and(|state| state.generation == generation && !state.is_active);
+        if is_matching_pending {
+            *guard = None;
         }
     }
 }
@@ -460,12 +535,23 @@ fn cleanup_failed_startup(
 ) -> String {
     drop(run_tx);
     // SAFETY: `stop_raw` is a valid CreateEventA handle; signalling it lets a
-    // capture thread blocked on the event exit before we join it.
+    // capture thread blocked on the event exit before the detached reaper
+    // closes the handle.
     let _ = unsafe { SetEvent(stop_raw) };
-    let _ = join.join();
-    // SAFETY: the capture thread has joined, so `stop_raw` is no longer
-    // referenced and can be closed exactly once here.
-    let _ = unsafe { CloseHandle(stop_raw) };
+    let stop_handle = SendHandle(stop_raw);
+    let reaper = std::thread::Builder::new()
+        .name("wasapi-startup-reaper".into())
+        .spawn(move || {
+            let _ = join.join();
+            // The capture thread has joined, so `stop_handle` is no longer
+            // referenced and can be closed exactly once here.
+            close_send_handle(stop_handle);
+        });
+    if let Err(error) = reaper {
+        // The capture thread is detached when its JoinHandle is dropped. The
+        // event must stay open because that thread may still reference it.
+        eprintln!("[wasapi] failed to spawn startup reaper; leaking stop event: {error}");
+    }
     msg
 }
 
@@ -749,6 +835,11 @@ fn snapshot_process_names() -> HashMap<u32, String> {
 }
 
 pub(crate) fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
+    let build_number = os_build_number().unwrap_or(0);
+    if !supports_process_loopback(build_number) {
+        return Ok(Vec::new());
+    }
+
     // SAFETY: standard per-thread COM initialization; balanced below on success.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let com_ok = hr == S_OK || hr == S_FALSE;
@@ -1040,6 +1131,7 @@ struct CaptureSession {
     format: AudioFormat,
     resampler: StereoResampler,
     pcm_buffer: Vec<u8>,
+    generation: u64,
 }
 
 impl CaptureSession {
@@ -1048,6 +1140,7 @@ impl CaptureSession {
         capture_client: IAudioCaptureClient,
         audio_event: HANDLE,
         format: AudioFormat,
+        generation: u64,
     ) -> Self {
         let resampler = StereoResampler::new(format.sample_rate, TARGET_OUTPUT_SAMPLE_RATE);
         Self {
@@ -1057,6 +1150,7 @@ impl CaptureSession {
             format,
             resampler,
             pcm_buffer: Vec::with_capacity(INITIAL_PCM_BUFFER_CAPACITY),
+            generation,
         }
     }
 
@@ -1281,7 +1375,7 @@ impl CaptureSession {
         }
 
         if !self.pcm_buffer.is_empty() {
-            crate::audio_ring::push_pcm_bytes(&self.pcm_buffer);
+            crate::audio_ring::push_pcm_bytes_for_generation(&self.pcm_buffer, self.generation);
         }
         Ok(())
     }
@@ -1320,6 +1414,7 @@ impl Drop for CaptureSession {
 
 fn build_capture_session(
     target_pid: u32,
+    generation: u64,
     stop_event: Option<HANDLE>,
 ) -> Result<(CaptureSession, CaptureMode), String> {
     let is_system_audio =
@@ -1331,7 +1426,7 @@ fn build_capture_session(
         (c, CaptureMode::SystemLoopback, Some(fmt))
     } else {
         let build_num = os_build_number().unwrap_or(0);
-        if build_num < PROCESS_LOOPBACK_MIN_BUILD {
+        if !supports_process_loopback(build_num) {
             return Err(format!(
                 "Process loopback requires Windows 10 build {PROCESS_LOOPBACK_MIN_BUILD} or higher (current build: {build_num})"
             ));
@@ -1383,13 +1478,20 @@ fn build_capture_session(
     }?;
 
     Ok((
-        CaptureSession::new(client, capture_client, audio_event, audio_format),
+        CaptureSession::new(
+            client,
+            capture_client,
+            audio_event,
+            audio_format,
+            generation,
+        ),
         mode,
     ))
 }
 
 fn run_capture(
     target_pid: u32,
+    generation: u64,
     stop_handle: SendHandle,
     startup_tx: &Sender<Result<CaptureMode, String>>,
     run_rx: &std::sync::mpsc::Receiver<()>,
@@ -1404,7 +1506,7 @@ fn run_capture(
     }
     let com_ok = hr == S_OK || hr == S_FALSE;
 
-    let mut session = match build_capture_session(target_pid, Some(stop_handle.0)) {
+    let mut session = match build_capture_session(target_pid, generation, Some(stop_handle.0)) {
         Ok((session, mode)) => {
             let _ = startup_tx.send(Ok(mode));
             if run_rx.recv().is_err() {
@@ -1827,6 +1929,13 @@ mod tests {
         assert_eq!(extract_stereo_f32(&nan_frame, &fmt), (0.0, 0.0));
 
         assert_eq!(extract_stereo_f32(&[0u8; 4], &fmt), (0.0, 0.0));
+    }
+
+    #[test]
+    fn process_loopback_support_starts_after_windows_10_22h2() {
+        assert!(!supports_process_loopback(19_045));
+        assert!(supports_process_loopback(PROCESS_LOOPBACK_MIN_BUILD));
+        assert!(supports_process_loopback(22_000));
     }
 
     #[test]

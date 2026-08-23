@@ -1,7 +1,7 @@
 //! Windows desktop capture engine: libwebrtc's `DesktopCapturer` with the
 //! WGC backend, driven through the livekit crate's bundled bindings
-//! (`livekit::webrtc::desktop_capturer` — libwebrtc 0.3.44 over
-//! webrtc-sys 0.3.41, already in the dependency tree; the vendored
+//! (`livekit::webrtc::desktop_capturer` — libwebrtc 0.3.45 over
+//! webrtc-sys 0.3.42, already in the dependency tree; the vendored
 //! webrtc-sys carries the cursor-compositing shim patch, Windows-arm
 //! unchanged).
 //!
@@ -245,18 +245,37 @@ impl WgcCapture {
                     STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-                let row_bytes = usize::try_from(width * 4).unwrap_or(0);
+                let Some(row_bytes) = usize::try_from(width)
+                    .ok()
+                    .and_then(|frame_width| frame_width.checked_mul(4))
+                else {
+                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
                 let frame_rows = usize::try_from(height).unwrap_or(0);
                 let stride = usize::try_from(frame.stride()).unwrap_or(0);
+                let Some(packed_len) = row_bytes.checked_mul(frame_rows) else {
+                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
+                let Some(source_len) = stride.checked_mul(frame_rows) else {
+                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
                 let data = frame.data();
+                if stride < row_bytes || data.len() < source_len {
+                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+
                 let bgra = if stride == row_bytes {
-                    &data[..row_bytes * frame_rows]
+                    &data[..packed_len]
                 } else {
                     packed.clear();
-                    packed.resize(row_bytes * frame_rows, 0);
+                    packed.resize(packed_len, 0);
                     for (dst, src) in packed
                         .chunks_exact_mut(row_bytes)
-                        .zip(data.chunks_exact(stride))
+                        .zip(data[..source_len].chunks_exact(stride))
                     {
                         dst.copy_from_slice(&src[..row_bytes]);
                     }

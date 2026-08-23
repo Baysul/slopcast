@@ -123,6 +123,16 @@ fn start_real_capture(
 /// no queue — the renderer fetches at its own pace.
 pub static LATEST_FRAME: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
+fn clear_latest_frame() -> Result<(), String> {
+    let mut frame = LATEST_FRAME
+        .lock()
+        .map_err(|error| format!("latest preview frame lock poisoned: {error}"))?;
+
+    *frame = None;
+
+    Ok(())
+}
+
 /// Registers the preview callback: stashes each raw BGRA payload in `LATEST_FRAME`.
 pub fn register_preview_frame_callback() {
     native_livekit::set_preview_callback(Box::new(move |bytes, _pts_us| {
@@ -209,6 +219,9 @@ pub async fn start_native_capture(
         };
     }
     tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = clear_latest_frame() {
+            return CaptureStartResult::failed(error);
+        }
         if let Err(e) = native_livekit::start_video_track(config.clone()) {
             return CaptureStartResult::failed(e);
         }
@@ -260,6 +273,8 @@ pub async fn stop_native_capture() -> Result<(), String> {
         return Err("Failed to stop audio capture".into());
     }
 
+    clear_latest_frame()?;
+
     Ok(())
 }
 
@@ -278,6 +293,8 @@ pub async fn stop_video_capture() -> Result<(), String> {
     if !capture_stopped {
         return Err("Failed to stop desktop capture".into());
     }
+
+    clear_latest_frame()?;
 
     Ok(())
 }
@@ -327,6 +344,7 @@ pub async fn start_capture_preview(
         return Err("Screen capture is not supported on this platform".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
+        clear_latest_frame()?;
         if e2e_capture_mode() {
             // Drive the synthetic source from the persisted stream settings
             // (resolution + fps) so e2e passes exercise the configured
@@ -376,6 +394,10 @@ pub async fn start_capture_preview(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_synthetic_capture(config: CaptureConfig) -> CaptureStartResult {
     tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = clear_latest_frame() {
+            return CaptureStartResult::failed(error);
+        }
+
         let mut result = CaptureStartResult {
             ok: true,
             ..CaptureStartResult::default()
@@ -412,6 +434,8 @@ pub async fn go_live(
         if native_livekit::is_desktop_capture_active() {
             return native_livekit::start_video_track(config);
         }
+
+        clear_latest_frame()?;
         native_livekit::start_video_track(config.clone())?;
         let capture_result = if e2e_capture_mode() {
             native_livekit::start_synthetic_capture(&config).map(|_| ())
