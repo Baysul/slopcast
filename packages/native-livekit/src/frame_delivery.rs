@@ -1339,6 +1339,7 @@ mod tests {
         now: Mutex<Duration>,
         changed: Condvar,
         waiters: AtomicU64,
+        delivery_deadline: Mutex<Duration>,
     }
 
     impl ManualClock {
@@ -1358,14 +1359,18 @@ mod tests {
             assert!(self.waiters.load(Ordering::Relaxed) >= 2);
         }
 
-        fn wait_for_next_deadline(&self, previous_waiters: u64) {
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while self.waiters.load(Ordering::Relaxed) <= previous_waiters
-                && Instant::now() < deadline
-            {
+        fn delivery_deadline(&self) -> Duration {
+            self.delivery_deadline
+                .lock()
+                .map_or(Duration::ZERO, |deadline| *deadline)
+        }
+
+        fn wait_for_next_delivery_deadline(&self, previous_deadline: Duration) {
+            let timeout = Instant::now() + Duration::from_secs(1);
+            while self.delivery_deadline() <= previous_deadline && Instant::now() < timeout {
                 thread::yield_now();
             }
-            assert!(self.waiters.load(Ordering::Relaxed) > previous_waiters);
+            assert!(self.delivery_deadline() > previous_deadline);
         }
     }
 
@@ -1375,6 +1380,11 @@ mod tests {
         }
 
         fn wait_until(&self, deadline: Duration, stop: &AtomicBool) {
+            if thread::current().name() == Some("frame-delivery")
+                && let Ok(mut delivery_deadline) = self.delivery_deadline.lock()
+            {
+                *delivery_deadline = deadline;
+            }
             self.waiters.fetch_add(1, Ordering::Relaxed);
             self.changed.notify_all();
             let Ok(mut now) = self.now.lock() else {
@@ -1701,10 +1711,10 @@ mod tests {
                 .unwrap_or_else(|error| panic!("delivery start failed: {error}"));
         clock.wait_for_workers();
         submit_color_frame(&ingress, 11);
-        let previous_waiters = clock.waiters.load(Ordering::Relaxed);
+        let delivery_deadline = clock.delivery_deadline();
         clock.advance(Duration::from_millis(20));
         output.wait_for(1);
-        clock.wait_for_next_deadline(previous_waiters);
+        clock.wait_for_next_delivery_deadline(delivery_deadline);
         clock.advance(Duration::from_millis(20));
         output.wait_for(2);
         let frames = output
