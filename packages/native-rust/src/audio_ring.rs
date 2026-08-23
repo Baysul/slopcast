@@ -41,6 +41,7 @@ struct AudioProducer {
     free_slots: Arc<crossbeam_queue::ArrayQueue<Vec<u8>>>,
     slot_capacity: usize,
     frame_size: usize,
+    generation: u64,
     worker_thread: thread::Thread,
 }
 
@@ -153,7 +154,20 @@ fn acquire_slot_for(
 /// Accepts packed 48 kHz stereo S16LE PCM bytes.
 /// Platform capture code is responsible for normalizing/converting
 /// its native format before calling `push_pcm_bytes`.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn push_pcm_bytes(bytes: &[u8]) {
+    push_pcm_bytes_inner(bytes, None);
+}
+
+/// Pushes PCM only when `generation` still owns the active ring. Windows
+/// capture sessions use this to keep a detached old producer from writing
+/// into a replacement session after an audio-target switch.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn push_pcm_bytes_for_generation(bytes: &[u8], generation: u64) {
+    push_pcm_bytes_inner(bytes, Some(generation));
+}
+
+fn push_pcm_bytes_inner(bytes: &[u8], generation: Option<u64>) {
     if bytes.is_empty() {
         return;
     }
@@ -162,6 +176,9 @@ pub(crate) fn push_pcm_bytes(bytes: &[u8]) {
     let Some(producer) = producer_guard.as_ref() else {
         return;
     };
+    if generation.is_some_and(|expected| producer.generation != expected) {
+        return;
+    }
 
     let frame_size = if producer.frame_size > 0 {
         producer.frame_size
@@ -220,7 +237,12 @@ pub(crate) fn push_pcm_bytes(bytes: &[u8]) {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn start_audio_ring() -> Result<(), String> {
+    start_audio_ring_for_generation(0)
+}
+
+pub(crate) fn start_audio_ring_for_generation(generation: u64) -> Result<(), String> {
     // Slot sized from the `PipeWire` ~10 ms quantum (×2 headroom ⇒ ~20 ms),
     // not a 100 ms × 2 = ~200 ms slot — drop-oldest eviction discards whole
     // slots, so a coarse slot would turn a single eviction into an audible
@@ -232,12 +254,21 @@ pub(crate) fn start_audio_ring() -> Result<(), String> {
         10,
         2,
     );
-    start_audio_ring_with_capacity(calculated_capacity, PCM_FRAME_SIZE)
+    start_audio_ring_with_capacity_and_generation(calculated_capacity, PCM_FRAME_SIZE, generation)
 }
 
+#[cfg(test)]
 pub(crate) fn start_audio_ring_with_capacity(
     slot_capacity: usize,
     frame_size: usize,
+) -> Result<(), String> {
+    start_audio_ring_with_capacity_and_generation(slot_capacity, frame_size, 0)
+}
+
+fn start_audio_ring_with_capacity_and_generation(
+    slot_capacity: usize,
+    frame_size: usize,
+    generation: u64,
 ) -> Result<(), String> {
     let mut guard = AUDIO_RING_LIFECYCLE
         .lock()
@@ -317,6 +348,7 @@ pub(crate) fn start_audio_ring_with_capacity(
         free_slots,
         slot_capacity,
         frame_size,
+        generation,
         worker_thread: worker.thread().clone(),
     };
 
@@ -494,6 +526,21 @@ mod tests {
         assert_eq!(stats.captured_chunks, 0);
         assert_eq!(stats.captured_bytes, 0);
         assert_eq!(stats.truncated_bytes, 2);
+        stop_audio_ring();
+    }
+
+    #[test]
+    fn stale_generation_cannot_write_to_replacement_ring() {
+        let _guard = lock_ring_tests();
+        start_audio_ring_with_capacity_and_generation(8192, 4, 7)
+            .unwrap_or_else(|e| panic!("ring start: {e}"));
+        reset_audio_ring_stats();
+
+        push_pcm_bytes_for_generation(&[0u8; 64], 6);
+        assert_eq!(get_audio_ring_stats().captured_chunks, 0);
+
+        push_pcm_bytes_for_generation(&[0u8; 64], 7);
+        assert_eq!(get_audio_ring_stats().captured_chunks, 1);
         stop_audio_ring();
     }
 

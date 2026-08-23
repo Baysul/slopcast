@@ -353,9 +353,9 @@ export const PresenterApp: React.FC = () => {
     setAutoDetectFailed,
   ]);
 
-  // A compositor-ended capture stops only the video publication. Audio and
-  // the room connection remain active until the presenter explicitly closes
-  // them.
+  // A source-ended capture stops video and native audio capture. The room
+  // connection and its lifetime audio publication remain available for the
+  // next share, but no captured audio continues after the UI returns idle.
   useEffect(() => {
     const unlistenPromise = desktopApi.onCaptureEnded(() => {
       notify('info', 'Stream ended', 'The captured window was closed, so sharing stopped.');
@@ -368,13 +368,9 @@ export const PresenterApp: React.FC = () => {
       setSelectedAudioAppId(null);
       setAudioAppExplicitlySet(false);
       setAutoDetectedApp(null);
-      void desktopApi.stopVideoCapture().then((stopped) => {
+      void desktopApi.stopNativeCapture().then((stopped) => {
         if (!stopped) {
-          notify(
-            'error',
-            'Video stop failed',
-            'The room remains open, but the video share could not be stopped cleanly.',
-          );
+          notify('error', 'Capture stop failed', 'The room remains open, but capture could not be stopped cleanly.');
         }
       });
     });
@@ -388,7 +384,8 @@ export const PresenterApp: React.FC = () => {
     const ctx = await desktopApi.getCaptureContext();
     setCaptureContext(ctx);
 
-    if (ctx?.sourceType !== 'monitor') {
+    const canUseDesktopAudio = platformInfo?.platform === 'windows' || ctx?.sourceType === 'monitor';
+    if (!canUseDesktopAudio) {
       notify('info', 'No audio detected', 'Sharing video only. Select an audio app and restart to include audio.');
       return false;
     }
@@ -400,7 +397,14 @@ export const PresenterApp: React.FC = () => {
     }
     console.log('[Presenter] No specific app resolved — using system audio (desktop audio fallback)');
     return true;
-  }, [audioAppExplicitlySet, setAutoDetectFailed, setCaptureContext, setSelectedAudioAppId, setAutoDetectedApp]);
+  }, [
+    audioAppExplicitlySet,
+    platformInfo?.platform,
+    setAutoDetectFailed,
+    setCaptureContext,
+    setSelectedAudioAppId,
+    setAutoDetectedApp,
+  ]);
 
   const resolveAudioTarget = useCallback(async (): Promise<number | null> => {
     let targetAudioId: number | null = selectedAudioAppId;

@@ -105,6 +105,12 @@ pub(crate) fn reset_stats() {
     STATS_PACER_DEPTH.store(0, Ordering::Relaxed);
     STATS_PACER_MAX_DEPTH.store(0, Ordering::Relaxed);
     NEXT_FRAME_SEQUENCE.store(0, Ordering::Relaxed);
+    PREVIEW_GENERATION.store(0, Ordering::Relaxed);
+    if let Ok(mut history) = PREVIEW_I420.lock() {
+        *history = None;
+    } else {
+        log::warn!("Preview history lock poisoned; stale frames could not be cleared");
+    }
     CAPTURE_ENDED_EMITTED.store(false, Ordering::Relaxed);
 }
 
@@ -2533,6 +2539,28 @@ mod probe {
     fn history_ring_is_empty_before_first_push() {
         let ring = HistoryRing::new(2);
         assert!(ring.newest().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reset_stats_clears_stale_frame_history() {
+        let _guard = capture_statics_guard();
+        let mut ring = HistoryRing::new(2);
+        ring.push_planes(1920, 1080, 42, &[1], &[2], &[3]);
+        *PREVIEW_I420
+            .lock()
+            .unwrap_or_else(|_| panic!("preview history lock poisoned")) = Some(ring);
+        PREVIEW_GENERATION.store(7, Ordering::Relaxed);
+
+        reset_stats();
+
+        assert!(
+            PREVIEW_I420
+                .lock()
+                .unwrap_or_else(|_| panic!("preview history lock poisoned"))
+                .is_none()
+        );
+        assert_eq!(PREVIEW_GENERATION.load(Ordering::Relaxed), 0);
     }
 
     /// Ring B (keepalive, Windows): consecutive submissions never reuse the
