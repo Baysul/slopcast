@@ -1,6 +1,3 @@
-//! `slopcast.config.json` parsing — a serde mirror of
-//! `packages/shared-types/src/config.ts` (`loadConfig`): same defaults, same
-//! env-override precedence, same upward file search, same production assert.
 #![allow(
     clippy::needless_pass_by_value,
     reason = "Tauri command arguments (State and owned payloads) must be taken by value for the #[tauri::command] macro"
@@ -8,8 +5,6 @@
 
 use std::path::PathBuf;
 
-/// Fully resolved app configuration (internal state; the command surface
-/// exposes only `apiEndpoint` + `livekitUrl`).
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub server_port: u16,
@@ -21,7 +16,6 @@ pub struct AppConfig {
     pub livekit_api_secret: String,
 }
 
-/// Per-field optional mirror of `AppConfig` for the JSON file and env vars.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialConfig {
@@ -56,8 +50,6 @@ fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// Walks the current directory upward looking for `slopcast.config.json`,
-/// mirroring `findConfigFile` in `config.ts`.
 fn find_config_file() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
@@ -72,14 +64,8 @@ fn find_config_file() -> Option<PathBuf> {
 }
 
 impl AppConfig {
-    /// Loads the config with the TS precedence: env wins over file, file wins
-    /// over defaults; `apiEndpoint`/`websiteUrl` fall back to the chosen
-    /// ports.
-    ///
     /// # Errors
-    ///
-    /// Returns an error when the production assert fails (dev `LiveKit`
-    /// credentials in a production build).
+    /// Returns an error if the production configuration is invalid.
     pub fn load() -> Result<Self, String> {
         let env = PartialConfig::from_env();
         let defaults = Self::defaults(&env);
@@ -174,8 +160,6 @@ impl AppConfig {
     }
 }
 
-/// Mirrors `assertProductionConfig` in `config.ts`: production builds must
-/// not ship the dev `LiveKit` credentials.
 fn assert_production_config(config: &AppConfig) -> Result<(), String> {
     let production = std::env::var("NODE_ENV").is_ok_and(|v| v == "production")
         && !std::env::var("ALLOW_DEV_KEYS").is_ok_and(|v| v == "true");
@@ -187,23 +171,16 @@ fn assert_production_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Managed state holding the config, loaded once at startup
-/// (`loadConfig()` at module scope).
 pub struct AppConfigState(pub AppConfig);
 
 impl AppConfigState {
-    /// Loads the app config once at startup.
-    ///
     /// # Errors
-    ///
-    /// Returns an error when the production assert fails (dev `LiveKit`
-    /// credentials in a production build).
+    /// Returns an error if the application configuration is invalid.
     pub fn load() -> Result<Self, String> {
         AppConfig::load().map(Self)
     }
 }
 
-/// The subset the renderer consumes via the `get_app_config` command.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicAppConfig {
@@ -211,7 +188,6 @@ pub struct PublicAppConfig {
     pub livekit_url: String,
 }
 
-/// Returns the app config subset (`apiEndpoint`, `livekitUrl`).
 #[must_use]
 #[tauri::command]
 pub fn get_app_config(state: tauri::State<'_, AppConfigState>) -> PublicAppConfig {

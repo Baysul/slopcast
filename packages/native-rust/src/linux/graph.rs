@@ -53,21 +53,14 @@ impl TargetSpec {
     }
 
     fn matches(&self, node_id: u32, info: &AppNodeInfo) -> bool {
-        // An explicitly selected PipeWire node is authoritative. Do not widen
-        // it to every stream from the same browser/process: that can capture
-        // the spectator's playback and feed the published audio back into
-        // itself.
         if let Some(target_node) = self.node_id {
             return node_id == target_node;
         }
 
         self.client_id.is_some_and(|c| info.client_id == Some(c))
-            // Exact PID match, or the audio stream's process is a descendant
-            // of the target process (e.g. a browser window's audio utility
-            // process). Descendant-only on purpose: siblings that merely
-            // share a launcher (two Steam games) must never be linked.
             || self.pid.is_some_and(|p| {
-                info.pid.is_some_and(|i| i == p || is_same_or_descendant(i, p))
+                info.pid
+                    .is_some_and(|i| i == p || is_same_or_descendant(i, p))
             })
             || self.app_name.as_deref().is_some_and(|a| {
                 info.app_name
@@ -124,7 +117,6 @@ impl AppNodeInfo {
     }
 }
 
-/// Channel layout of the capture node, as an `audio.position` property value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ChannelLayout {
     pub(super) position: String,
@@ -160,11 +152,7 @@ impl ChannelLayout {
     }
 }
 
-/// Short names from SPA's static `spa_type_audio_channel` table
-/// (`spa/param/audio/raw.h`). The table is ABI-stable across `PipeWire`
-/// versions, but the `spa_type_audio_channel_to_short_name` lookup function is
-/// only exported by libspa >= 1.4, so it is replicated here to keep the crate
-/// buildable against older `PipeWire` (Ubuntu 24.04 ships 1.0.5).
+// Older libspa versions do not export the channel-name lookup helper.
 fn channel_short_name(channel: u32) -> String {
     if (SPA_AUDIO_CHANNEL_AUX0..=SPA_AUDIO_CHANNEL_AUX63).contains(&channel) {
         return format!("AUX{}", channel - SPA_AUDIO_CHANNEL_AUX0);
@@ -589,7 +577,6 @@ mod tests {
     use super::*;
     use pipewire::spa::param::audio::{AudioInfoRaw, AudioInfoRawFlags};
 
-    // Values from the SPA audio channel enum (spa/param/audio/raw.h).
     const CH_NA: u32 = 1;
     const CH_FL: u32 = 3;
     const CH_FR: u32 = 4;
@@ -682,29 +669,21 @@ mod tests {
         let parent = unsafe { libc::getppid() }
             .try_into()
             .unwrap_or_else(|e| panic!("parent pid fits u32: {e}"));
-        // A window pid target captures audio from its own process…
         let target = TargetSpec {
             pid: Some(parent),
             ..TargetSpec::default()
         };
         assert!(target.matches(1, &app_node_info(Some(parent), None, None, None)));
-        // …and from descendant processes (browser audio utilities are
-        // children of the window process)…
         assert!(target.matches(1, &app_node_info(Some(our_pid), None, None, None)));
-        // …but never from unrelated processes.
         assert!(!target.matches(1, &app_node_info(Some(our_pid + 5000), None, None, None)));
     }
 
     #[test]
     fn pid_target_never_matches_through_a_shared_launcher_ancestor() {
-        // Two Steam games share the steam launcher as an ancestor; a pid
-        // target for one game must not capture the other's audio.
         let target = TargetSpec {
             pid: Some(std::process::id()),
             ..TargetSpec::default()
         };
-        // A process two thousand pids away cannot share our ancestor chain
-        // (our chain ends at the session shell, which is excluded).
         let unrelated = std::process::id() + 2000;
         assert!(!target.matches(1, &app_node_info(Some(unrelated), None, None, None)));
     }
@@ -724,9 +703,6 @@ mod tests {
 
     #[test]
     fn system_audio_is_not_part_of_matches() {
-        // `system_audio` is honored one level up in `is_linkable_app`
-        // (`self.target.system_audio || ...`); `matches` itself only compares
-        // the learned target fields.
         let target = TargetSpec {
             system_audio: true,
             ..TargetSpec::default()
@@ -754,7 +730,6 @@ mod tests {
         };
         target.learn(5, &app_node_info(Some(9), Some("bin"), None, Some("name")));
         target.learn(5, &app_node_info(Some(10), Some("bin2"), Some(7), None));
-        // First values win: the second learn must not overwrite pid/binary/name.
         assert_eq!(target.pid, Some(9));
         assert_eq!(target.binary.as_deref(), Some("bin"));
         assert_eq!(target.app_name.as_deref(), Some("name"));
@@ -798,8 +773,6 @@ mod tests {
 
     #[test]
     fn layout_from_audio_info_keeps_na_channel_position() {
-        // NA ("N/A, silent") is a valid position token in the SPA table and
-        // passes through as "NA" rather than rejecting the layout.
         let na = info_with_position(2, &[CH_NA, CH_FC]);
         let layout =
             ChannelLayout::from_audio_info(&na).unwrap_or_else(|| panic!("layout with NA"));
@@ -817,11 +790,8 @@ mod tests {
 
     #[test]
     fn channel_short_name_defaults_unknown_channels_to_unk() {
-        // The SPA C table returns "UNK" (a non-null string) for values outside
-        // the channel enum; document that so callers do not expect a failure.
         assert_eq!(channel_short_name(99), "UNK");
         assert_eq!(channel_short_name(u32::MAX), "UNK");
-        // The AUX range ends at AUX63; anything beyond falls through to "UNK".
         assert_eq!(channel_short_name(SPA_AUDIO_CHANNEL_AUX63 + 1), "UNK");
     }
 

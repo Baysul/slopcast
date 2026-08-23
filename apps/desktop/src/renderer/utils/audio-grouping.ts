@@ -47,13 +47,6 @@ export function groupAudioApps(apps: AudioApp[]): AudioAppGroup[] {
   return groups;
 }
 
-/**
- * True when two polled audio-app lists carry the same user-visible payload.
- * `loadAudioApps` keeps the previous array identity when this holds so
- * memoized consumers don't re-render on unchanged data — but MPRIS media
- * titles and PipeWire window titles change while ids/names stay identical,
- * so they must participate in the comparison or titles go stale.
- */
 export function audioAppsEqual(a: readonly AudioApp[], b: readonly AudioApp[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((app, i) => {

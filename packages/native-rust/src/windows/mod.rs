@@ -47,7 +47,7 @@ use windows::core::{Error, GUID, HRESULT, IUnknown, Interface, PCSTR, Ref, imple
 const KSDATAFORMAT_SUBTYPE_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 const PROCESS_LOOPBACK_MIN_BUILD: u32 = 20348;
 const RPC_E_CHANGED_MODE: i32 = -2_147_417_850;
-const WASAPI_BUFFER_DURATION_100NS: i64 = 200_000; // 20 ms
+const WASAPI_BUFFER_DURATION_100NS: i64 = 200_000;
 const KSAUDIO_SPEAKER_STEREO: u32 = 0x3;
 const TARGET_OUTPUT_SAMPLE_RATE: u32 = 48_000;
 const WIN32_ERROR_TIMEOUT: u32 = 1460;
@@ -365,9 +365,6 @@ impl WasapiManager {
         state.mode = None;
         state.target_pid = None;
         if let Some(join) = join {
-            // Reap off-thread: a stalled WASAPI capture read must never block
-            // the Electron main process. The stop event is closed only after
-            // the thread has joined, keeping its reference valid.
             let _ = std::thread::Builder::new()
                 .name("wasapi-reaper".into())
                 .spawn(move || {
@@ -543,13 +540,9 @@ fn cleanup_failed_startup(
         .name("wasapi-startup-reaper".into())
         .spawn(move || {
             let _ = join.join();
-            // The capture thread has joined, so `stop_handle` is no longer
-            // referenced and can be closed exactly once here.
             close_send_handle(stop_handle);
         });
     if let Err(error) = reaper {
-        // The capture thread is detached when its JoinHandle is dropped. The
-        // event must stay open because that thread may still reference it.
         eprintln!("[wasapi] failed to spawn startup reaper; leaking stop event: {error}");
     }
     msg
@@ -968,12 +961,6 @@ fn wait_for_activation(
     Ok(())
 }
 
-/// Leaks activation params when activation times out or is unresponsive.
-///
-/// # Rationale
-/// `ActivateAudioInterfaceAsync` runs asynchronously on a system thread pool.
-/// If the call times out waiting for `ActivationCompleted`, COM may still access
-/// the params buffer later. Leaking the `Box` prevents a use-after-free.
 fn leak_activation_params(params: Box<AUDIOCLIENT_ACTIVATION_PARAMS>) {
     std::mem::forget(params);
 }
@@ -1640,10 +1627,8 @@ mod tests {
     fn test_resampler_initialization() {
         let mut resampler = StereoResampler::new(44_100, 48_000);
         let mut outputs = Vec::new();
-        // First frame: 1.0, 1.0
         resampler.process_frame((1.0, 1.0), |frame| outputs.push(frame));
         assert!(!outputs.is_empty());
-        // The first output frame should NOT be silence (0.0, 0.0)
         assert_eq!(outputs[0], (1.0, 1.0));
     }
 
@@ -1669,8 +1654,6 @@ mod tests {
         for _i in 0..441 {
             resampler.process_frame((1.0, 1.0), |f| outputs.push(f));
         }
-        // 441 input frames must produce at least 480 output frames; the
-        // phase accumulator must not drop or duplicate the last frame.
         assert!(outputs.len() >= 480, "got {} outputs", outputs.len());
         assert_eq!(outputs[0], (1.0, 1.0));
     }
@@ -1689,8 +1672,6 @@ mod tests {
     fn resampler_phase_accumulates_across_frames_without_reset() {
         let mut resampler = StereoResampler::new(44_100, 48_000);
         let mut outputs = Vec::new();
-        // 1 input frame per call; the while-loop phase must keep advancing
-        // so the total output count matches a single bulk pass.
         for _ in 0..882 {
             resampler.process_frame((1.0, 1.0), |f| outputs.push(f));
         }
@@ -1753,7 +1734,7 @@ mod tests {
     #[test]
     fn parse_wave_format_rejects_block_align_below_minimum() {
         let mut fmt = pcm16(2, 48_000, 16);
-        fmt.nBlockAlign = 2; // minimum is 4 (2ch * 2 bytes)
+        fmt.nBlockAlign = 2;
         assert!(parse(&fmt).is_err());
     }
 
@@ -1888,7 +1869,6 @@ mod tests {
             sample_type: SampleType::Int,
             channel_mask: None,
         };
-        // 0x0800 = 2048 with only 12 valid bits: shifted up to 0x8000, i.e. -1.0.
         let frame = [0x00, 0x08, 0x00, 0x08];
         let (l, r) = extract_stereo_f32(&frame, &fmt);
         assert!((l - (-1.0)).abs() < 1e-4, "l = {l}");
@@ -1906,7 +1886,6 @@ mod tests {
             sample_type: SampleType::Int,
             channel_mask: None,
         };
-        // -0.5 in 24-bit: 0xFFC00000 >> 8 = 0xFFC000.
         let frame = [0x00, 0xC0, 0xFF];
         let (l, _r) = extract_stereo_f32(&frame, &fmt);
         assert!((l - (-0.5)).abs() < 1e-4, "l = {l}");

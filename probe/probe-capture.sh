@@ -1,25 +1,13 @@
 #!/usr/bin/env bash
-# Permanent regression gate for the libwebrtc `pw_*` dlopen-shim collision
-# (SCREEN-CAPTURE-INHOUSE.md §7.3). Linux-only: the collision is a PipeWire
-# link-time phenomenon, so there is nothing to pin on other platforms.
-#
-# The probe pair pins the two facts that must never drift:
-#   probe_a (no `DesktopCapturer` reference) -> must exit 0 AND enumerate apps
-#     (proves our code no longer pulls the hook in at the minimal-binary level)
-#   probe_b (deliberate `DesktopCapturer` reference) -> must still SIGSEGV
-#     (proves the app must never reintroduce the reference; a future edit that
-#     does pulls the 14-byte shim and crashes at startup unless re-armed)
-#
-# The app-binary readelf report is informational: as of Phase E, libwebrtc's
-# peer connection factory keeps the PipeWire video-capture module (and with it
-# `pipewire_stubs.o`) linked, so `arm_pipewire_shims()` must stay and the
-# binary is expected to carry the shim (verified deviation, §1). The report
-# flips to "SHIM-FREE" automatically once upstream ships a build without the
-# module, which is the signal to delete `arm_pipewire_shims()` (§7.1/§7.2).
 set -euo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  grep '^#' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'HELP'
+Builds and runs the PipeWire shim regression probes.
+
+probe_a must enumerate audio apps without crashing.
+probe_b must exit with SIGSEGV after referencing DesktopCapturer.
+HELP
   exit 0
 fi
 
@@ -51,8 +39,6 @@ fi
 
 echo "== probe_b: must SIGSEGV (exit 139) with the capturer reference =="
 set +e
-# The SIGSEGV is intentional — don't leave a core dump behind on systems that
-# write them into the cwd.
 ulimit -c 0
 ./target/debug/probe_b >/dev/null 2>&1
 code_b=$?
@@ -70,9 +56,6 @@ for binary in "$ROOT/target/debug/slopcast" "$ROOT/target/release/slopcast"; do
     continue
   fi
   found_app=1
-  # `grep -c` (not `grep -q`): the symbol table is huge, so `-q` exits on the
-  # first match, readelf gets SIGPIPE mid-stream and pipefail turns the whole
-  # pipeline into a failure, silently misreporting the shim state.
   if ! readelf -S "$binary" 2>/dev/null | grep -q ".symtab"; then
     echo "  $binary: stripped (no .symtab) — shim state not inspectable; gate uses target/debug/slopcast (§7.2)"
   elif [[ "$(readelf -Ws "$binary" 2>/dev/null | grep -c "_ZL11pw_init_ptr" || true)" -gt 0 ]]; then

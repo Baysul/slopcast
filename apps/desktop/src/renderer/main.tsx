@@ -24,14 +24,6 @@ import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
 import './index.css';
 
-// E2E-only: nothing to import. The Playwright presenter phase drives the
-// app over CEF's DevTools protocol and calls `window.__TAURI__.core.invoke`
-// directly (withGlobalTauri is on), so no in-page plugin shim is needed.
-
-/** Parses one raw preview channel payload (16-byte little-endian header —
- * `u64 pts_us`, `u32 width`, `u32 height` — followed by tightly packed BGRA
- * rows) into a frame. Null when malformed; a malformed payload must never
- * crash the preview pipeline. */
 function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
   if (!(payload instanceof ArrayBuffer)) return null;
   if (payload.byteLength < 16) return null;
@@ -47,15 +39,9 @@ function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
     return null;
   }
   if (width === 0 || height === 0) return null;
-  // Zero-copy view over the payload (header stripped): the IPC buffer is
-  // fresh per message and never reused, so the view is safe. The old
-  // `payload.slice(16)` copied the whole frame — at 60 fps that was
-  // 122-514 MB/s of main-thread allocation + GC.
   return { ptsUs, width, height, data: new Uint8Array(payload, 16) };
 }
 
-/** Fetch the latest preview frame from the CEF custom protocol and render it
- * if the pts changed. */
 async function fetchAndRender(
   lastPts: number,
   onNewFrame: (pts: number) => void,
@@ -71,16 +57,10 @@ async function fetchAndRender(
     onNewFrame(frame.ptsUs);
     renderFrame(frame);
   } catch (err) {
-    // Transient (e.g. no frame stashed yet); the poll loop self-heals on
-    // the next tick.
     console.debug('[preview] frame fetch failed:', err);
   }
 }
 
-// Debug aid: print every live PipeWire audio stream node's full property
-// dictionary (the same view pw-dump shows) when a capture starts, so a missed
-// auto-resolve can be matched against the real nodes. Fire-and-forget: never
-// blocks share start on PipeWire enumeration.
 async function logLiveAudioSources(): Promise<void> {
   const sources = await desktopApi.dumpAudioSources();
   console.log(`[Presenter] live audio sources: ${sources.length}`);
@@ -89,9 +69,6 @@ async function logLiveAudioSources(): Promise<void> {
   }
 }
 
-// Debug aid: print a fresh capture-context introspection carrying the
-// xdg-desktop-portal screencast metadata (portal.screencast.*) for the picked
-// window, KWin window PID/caption, and the best-matched audio app. Fire-and-forget.
 async function logSelectedApplication(label: string | null): Promise<void> {
   const context = await desktopApi.inspectCaptureContext();
   console.log(`[Presenter] selected application (trackLabel="${label}"):`, JSON.stringify(context, null, 2));
@@ -103,11 +80,7 @@ export const PresenterApp: React.FC = () => {
   const [previewFrame, setPreviewFrame] = useState<PreviewFrame | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [copied, setCopied] = useState<'link' | 'code' | null>(null);
-  // Windows-only: the in-app WGC source picker embedded in the Screenshare
-  // Source card while open.
   const [pickerOpen, setPickerOpen] = useState(false);
-  // The picker's last selection; the combined-start fallback and go-live
-  // pass it to the backend (Linux ignores it — the portal picker decides).
   const selectedCaptureSourceRef = useRef<CaptureSourceSelection | null>(null);
 
   const {
@@ -172,21 +145,8 @@ export const PresenterApp: React.FC = () => {
 
   const activeVideoCodecRef = useRef<VideoCodec>(videoCodec);
   const captureSessionRef = useRef(0);
-  // The encoder config actually applied to the native track; share start seeds
-  // it so the settings effect never restarts the track on mount.
   const lastVideoConfigKeyRef = useRef<string | null>(null);
 
-  // The bitrate actually sent to the encoder. In auto mode it is derived from
-  // the codec/resolution/fps; in manual mode it is the user's selection.
-  // `bitrateLimit` stays the persisted/manual value either way.
-  //
-  // Content motion is deliberately NOT part of this ceiling: the native
-  // publisher's loss-driven `RateController` already adapts the encoder rate
-  // to live congestion (~1 s cadence). Folding motion in here would recompute
-  // this value every time the 2 s motion poll reclassifies the tier, which
-  // restarts the video track mid-stream and breaks negotiation with the
-  // livekitwebrtcsink — freezing the video while audio keeps flowing. The
-  // ceiling therefore changes only on codec/resolution/fps changes.
   const effectiveBitrate = useMemo(
     () =>
       autoBitrate
@@ -238,10 +198,6 @@ export const PresenterApp: React.FC = () => {
     if (window.__PREVIEW_BENCH__) {
       window.__PREVIEW_BENCH_DATA__ = [];
     }
-    // The preview frame pull: CEF exposes the backend's custom `frame` handler
-    // at `http://frame.localhost` — no tauri IPC, no channel, no ordering.
-    // The renderer fetches at its own pace via requestAnimationFrame, dedupes
-    // by pts (drop-oldest), and self-heals on any fetch failure.
     const pollFrame = (): void => {
       let lastPts = 0;
       const poll = async (): Promise<void> => {
@@ -265,9 +221,6 @@ export const PresenterApp: React.FC = () => {
     };
   }, [disconnectRoom]);
 
-  // Live encoder settings (fps, bitrate, codec, resolution): restart the
-  // native video track with the new config. Debounced so rapid changes
-  // coalesce into one track restart.
   useEffect(() => {
     if (captureStage !== 'live') {
       lastVideoConfigKeyRef.current = null;
@@ -353,9 +306,6 @@ export const PresenterApp: React.FC = () => {
     setAutoDetectFailed,
   ]);
 
-  // A source-ended capture stops video and native audio capture. The room
-  // connection and its lifetime audio publication remain available for the
-  // next share, but no captured audio continues after the UI returns idle.
   useEffect(() => {
     const unlistenPromise = desktopApi.onCaptureEnded(() => {
       notify('info', 'Stream ended', 'The captured window was closed, so sharing stopped.');
@@ -467,8 +417,6 @@ export const PresenterApp: React.FC = () => {
     };
   }, [resolutionRef, streamFpsRef, audioAppIdRef]);
 
-  // Shared tail of both go-live paths: resolve and start audio, mark the
-  // applied encoder config, flip the stage to live and start telemetry.
   const activateLive = useCallback(
     async (session: number): Promise<void> => {
       if (captureSessionRef.current !== session) return;
@@ -482,9 +430,6 @@ export const PresenterApp: React.FC = () => {
       setTelemetry({ ...idleTelemetry(), live: true });
       notify('success', 'Stream started', 'Your screen is now live.');
       startTelemetryPolling(getTelemetryInputs);
-      // Debug aid for auto-resolve misses: a full PipeWire enumeration +
-      // per-node JSON dump on every go-live. Dev and e2e builds only — in
-      // production this stalls the main thread and floods the console.
       if (import.meta.env.DEV || import.meta.env.VITE_E2E === '1') {
         void logLiveAudioSources();
       }
@@ -501,9 +446,6 @@ export const PresenterApp: React.FC = () => {
     ],
   );
 
-  // Combined start: publishes the track immediately. Used when the pre-roll
-  // backend isn't available, matching the pre-migration behavior. On Windows
-  // the picker's source selection rides along (required for real capture).
   const startCombinedShare = useCallback(
     async (source?: CaptureSourceSelection): Promise<void> => {
       const session = captureSessionRef.current + 1;
@@ -517,9 +459,6 @@ export const PresenterApp: React.FC = () => {
     [buildCaptureConfig, activateLive],
   );
 
-  // Starts the pre-roll capture (the portal picker opens on Wayland; the WGC
-  // source runs on Windows) and moves to the previewing stage. Falls back to
-  // the combined start when the pre-roll backend is unavailable.
   const startPreviewCapture = useCallback(
     async (source?: CaptureSourceSelection): Promise<void> => {
       primeAudioContext();
@@ -530,8 +469,6 @@ export const PresenterApp: React.FC = () => {
           setCaptureStage('previewing');
           return;
         }
-        // Pre-roll unavailable (preview backend not merged yet):
-        // degrade to the combined start.
         await startCombinedShare(source);
       } catch (err: unknown) {
         console.error('Failed to capture screen:', err);
@@ -544,9 +481,6 @@ export const PresenterApp: React.FC = () => {
     [startCombinedShare, cleanupFailedShare],
   );
 
-  // Windows has no system picker: the in-app source picker opens first and
-  // its selection drives the pre-roll capture. On Wayland the portal dialog
-  // opens inside `start_capture_preview` as before.
   const handleStartShare = useCallback(async () => {
     if (platformInfo?.platform === 'windows') {
       setPickerOpen(true);
@@ -555,8 +489,6 @@ export const PresenterApp: React.FC = () => {
     await startPreviewCapture();
   }, [platformInfo, startPreviewCapture]);
 
-  // The picker's confirm: remember the selection (the combined-start
-  // fallback and go-live need it) and start the pre-roll capture.
   const handleSourceSelected = useCallback(
     (selection: CaptureSourceSelection): void => {
       selectedCaptureSourceRef.current = selection;
@@ -575,7 +507,6 @@ export const PresenterApp: React.FC = () => {
       const source = selectedCaptureSourceRef.current ?? undefined;
       const published = await desktopApi.goLive(config, source);
       if (!published) {
-        // Backend without the preview backend: fall back to the combined start.
         const res = await desktopApi.startNativeCapture(config, source);
         if (!res.ok) {
           throw new Error(res.error ?? 'Native capture failed to start');
@@ -624,8 +555,6 @@ export const PresenterApp: React.FC = () => {
   };
   const disabledReason = startDisabledReason();
 
-  // The shell (titlebar) always renders so the undecorated window stays
-  // draggable and closable on every screen, including the platform gate.
   let content: React.ReactNode = null;
   if (platformInfo && !platformInfo.videoCaptureAvailable) {
     content = (

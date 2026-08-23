@@ -18,9 +18,6 @@ use std::time::Duration;
 
 type ReadySenderCell = Rc<RefCell<Option<mpsc::Sender<Result<(), String>>>>>;
 
-/// A parsed capture target: a `PipeWire` stream node id, a process id (for
-/// apps with no active stream yet — their audio is linked the moment they
-/// start playing), or system audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParsedTarget {
     Node(u32),
@@ -47,8 +44,6 @@ impl ParsedTarget {
     }
 }
 
-/// `-1` selects system audio; any value below `-1` is a process id target
-/// (`-pid`); non-negative ids are `PipeWire` node ids.
 fn parse_target(target: &AudioTarget) -> Result<ParsedTarget, String> {
     match target {
         AudioTarget::Id(n) if *n == -1 => Ok(ParsedTarget::SystemAudio),
@@ -102,21 +97,11 @@ pub(super) fn port_channel_from_name(port_name: Option<&str>) -> Option<String> 
     }
 }
 
-/// Creates the virtual node the target application's audio is linked into.
-///
-/// It is a stream-class node, never a device: a device media.class
-/// (`Audio/Source/Virtual`, `Audio/Sink`) makes `pipewire-pulse` expose it as
-/// a real input/output device, so every Chromium/Electron app on the system
-/// (Discord, browsers) sees a device appear mid-call and reacts to the
-/// `devicechange` — Discord re-inits or auto-switches its input device and
-/// the call breaks. A `Stream/Input/Audio` node is invisible to device
-/// enumeration while the `support.null-audio-sink` adapter still provides
-/// input ports to link app streams into and monitor ports for our recording
-/// stream. Same design as OBS's `obs-pipewire-audio-capture` plugin.
 fn create_capture_node(
     core: &pipewire::core::Core,
     layout: &ChannelLayout,
 ) -> Result<pipewire::node::Node, String> {
+    // Keep the capture bus a stream, not a device, so PulseAudio clients do not see a new input.
     core.create_object::<pipewire::node::Node>(
         ADAPTER_FACTORY,
         &properties! {
@@ -332,9 +317,6 @@ fn run_capture_session(
                 "node.description" => "Slopcast Audio Capture",
                 "node.dont-move" => "true",
                 "node.dont-reconnect" => "true",
-                // Align the graph quantum with the 10 ms PCM frames we
-                // emit, so per-quantum delivery stays in step with the
-                // ring/channel cadence.
                 "node.latency" => format!("{}/{CAPTURE_SAMPLE_RATE}", CAPTURE_SAMPLE_RATE / 100),
             },
         )
@@ -564,8 +546,6 @@ fn spawn_capture_session(target: TargetSpec) -> Result<CaptureSession, String> {
             return Err("Timed out waiting for PipeWire session".into());
         }
     }
-    // The worker thread only sends ready after confirming capture_node_id,
-    // so the node is guaranteed available at this point. No need to poll.
 
     Ok(CaptureSession {
         stop,
@@ -578,10 +558,6 @@ fn stop_session(state: &mut CaptureState) {
     crate::audio_ring::stop_audio_ring();
     if let Some(session) = state.session.take() {
         session.stop.store(true, Ordering::SeqCst);
-        // Reap on a detached thread: the capture worker's shutdown flush can
-        // take up to 2.5 s (50 × 50 ms core-sync iterations), which must never
-        // block the Electron main process. The worker holds no shared state
-        // after stop_audio_ring, so a restarted session is unaffected.
         let _ = thread::Builder::new()
             .name("pw-capture-reaper".into())
             .spawn(move || {
@@ -654,8 +630,6 @@ pub(crate) fn is_audio_capture_active() -> bool {
     reason = "samples are clamped to [-1, 1] before scaling by 32767, so the product always fits in i16"
 )]
 fn invoke_audio_data_callback(data: &[u8]) {
-    // PipeWire delivers f32 LE frames; we downmix to packed i16 LE bytes so the
-    // N-API boundary transfers one binary buffer instead of ~960 JS numbers.
     thread_local! {
         static I16_SCRATCH: std::cell::RefCell<Vec<u8>> =
             std::cell::RefCell::new(Vec::with_capacity(MAX_AUDIO_FRAME_BYTES / 2));
@@ -679,16 +653,11 @@ fn invoke_audio_data_callback(data: &[u8]) {
     });
 }
 
-/// The capture stream always negotiates this exact format; every downstream
-/// stage (ring, PCM channel, libwebrtc fast path) assumes 48 kHz stereo, and
-/// the libwebrtc fast path forwards frames verbatim without resampling. Left
-/// unconstrained, `PipeWire` negotiates the app stream's native rate (e.g.
-/// 44.1 kHz), which the 48 kHz contract then plays back ~8.8% fast — pops
-/// and out-of-tune audio.
 const CAPTURE_SAMPLE_RATE: u32 = 48_000;
 const CAPTURE_CHANNELS: u32 = 2;
 
 fn create_audio_capture_format() -> Option<Vec<u8>> {
+    // Keep the native capture contract at 48 kHz stereo for every downstream consumer.
     let mut audio_info = AudioInfoRaw::new();
     audio_info.set_format(AudioFormat::F32LE);
     audio_info.set_rate(CAPTURE_SAMPLE_RATE);
@@ -731,7 +700,6 @@ mod tests {
             parse_target(&AudioTarget::Id(-1234)).unwrap_or_else(|e| panic!("pid: {e}")),
             ParsedTarget::Pid(1234)
         );
-        // i32::MIN (a valid negative id) maps to a u32 pid without overflow.
         assert_eq!(
             parse_target(&AudioTarget::Id(i32::MIN)).unwrap_or_else(|e| panic!("pid: {e}")),
             ParsedTarget::Pid(2_147_483_648)
@@ -779,7 +747,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("node 123: {e}")),
             ParsedTarget::Node(123)
         );
-        // Whitespace is trimmed before parsing.
         assert_eq!(
             parse_target(&AudioTarget::Label(" 7 ".into()))
                 .unwrap_or_else(|e| panic!("node 7: {e}")),
@@ -789,8 +756,6 @@ mod tests {
 
     #[test]
     fn parse_string_minus_one_is_not_system_audio() {
-        // Only the numeric -1 selects system audio; a "-1" string is an
-        // invalid node id, not a mode switch.
         assert!(parse_target(&AudioTarget::Label("-1".into())).is_err());
     }
 

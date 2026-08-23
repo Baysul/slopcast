@@ -8,15 +8,8 @@ export interface AppConfig {
   livekitApiSecret: string;
 }
 
-/// The canonical room-code format, validated identically by the server and the
-/// web join form: `abc-123-xyz`.
 export const ROOM_CODE_RE = /^[a-z]{3}-[0-9]{3}-[a-z]{3}$/;
 
-/** Upgrades a LiveKit signaling URL for spectators on HTTPS pages: browsers
- * block `ws://` WebSocket connections from HTTPS origins as mixed content,
- * so the server-advertised `ws://` URL must become `wss://`. Plain HTTP
- * pages (and localhost dev) stay on `ws://`. Non-`ws://` URLs pass through.
- */
 export function normalizeLivekitUrl(url: string, pageIsHttps: boolean): string {
   if (pageIsHttps && url.startsWith('ws://')) {
     return `wss://${url.slice('ws://'.length)}`;
@@ -36,13 +29,9 @@ export interface AudioApp {
 
 export interface AudioAppWave {
   id: number;
-  /** 96 interleaved (min, max) amplitude pairs of the last ~85 ms of audio. */
   columns: number[];
 }
 
-/// Waveform columns below this amplitude delta are not worth re-rendering;
-/// shared by the main-process push filter and the renderer meter store so the
-/// two epsilons can never drift apart.
 export const WAVE_EPSILON = 0.002;
 
 export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1' | 'h265';
@@ -51,9 +40,6 @@ export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['h264', 'h265', 'vp8', 'vp9',
 
 export type ResolutionPreset = '480p' | '720p' | '1080p' | '1440p' | '2160p';
 
-// Content motion class. `auto` lets the renderer detect motion from the
-// capture engine's keepalive-vs-real-frame counters while streaming; the
-// concrete tiers force a fixed bitrate factor.
 export type MotionMode = 'auto' | 'static' | 'mixed' | 'dynamic';
 
 export const RESOLUTION_DIMENSIONS: Record<ResolutionPreset, { width: number; height: number }> = {
@@ -64,8 +50,6 @@ export const RESOLUTION_DIMENSIONS: Record<ResolutionPreset, { width: number; he
   '2160p': { width: 3840, height: 2160 },
 };
 
-// User-configurable encoder parameters, persisted by the desktop app to a
-// JSON file in the per-platform user-data directory.
 export interface StreamSettings {
   fps: number;
   bitrateLimit: number;
@@ -76,18 +60,6 @@ export interface StreamSettings {
   motionMode: MotionMode;
 }
 
-// TS↔Rust sync rule: `DEFAULT_STREAM_SETTINGS` and `sanitizeStreamSettings`
-// are mirrored field-for-field by `default_stream_settings` and
-// `sanitize_stream_settings` in apps/desktop/src-tauri/src/settings.rs
-// (same defaults, clamps and whitelists). Update both files together; the
-// Rust `defaults_match_ts_table` conformance test enforces these values.
-//
-// `videoCodec` defaults to vp8: the bundled libwebrtc's VA-API H264 path
-// has proven unreliable on Linux (the encoder collapses to ~1-3 fps shortly
-// after publish, which reads as a ~1 kbps, super-pixelated stream), while
-// VP8 holds the requested framerate in every platform test. H264 remains
-// selectable for hardware-encode setups where it works (NVENC/Media
-// Foundation/VideoToolbox).
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   fps: 60,
   bitrateLimit: 20_000_000,
@@ -129,7 +101,6 @@ export const fmtLoss = (pct: number | null): string => {
 
 export function sanitizeStreamSettings(raw: unknown): StreamSettings {
   if (typeof raw !== 'object' || raw === null) {
-    // Defensive copy: callers could otherwise mutate the shared default.
     return { ...DEFAULT_STREAM_SETTINGS };
   }
   const o = raw as Record<string, unknown>;
@@ -143,10 +114,6 @@ export function sanitizeStreamSettings(raw: unknown): StreamSettings {
   const motionMode = (v: unknown): MotionMode =>
     v === 'auto' || v === 'static' || v === 'mixed' || v === 'dynamic' ? v : d.motionMode;
   return {
-    // fps is capped at 60: the capture pacer (PREVIEW_MAX_FPS) and the
-    // preview emitter both clamp to 60 regardless, so higher values would
-    // silently run the stream at 60 fps with a 120 fps SDP claim. Mirrors
-    // `sanitize_stream_settings` in apps/desktop/src-tauri/src/settings.rs.
     fps: num(o.fps, 1, 60, d.fps),
     bitrateLimit: num(o.bitrateLimit, 100_000, 200_000_000, d.bitrateLimit),
     videoCodec: codec(o.videoCodec),

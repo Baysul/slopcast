@@ -82,19 +82,15 @@ export function useStreamSettings(): UseStreamSettingsReturn {
     autoBitrateRef.current = autoBitrate;
   }, [autoBitrate]);
 
-  // Initial config and settings load
   useEffect(() => {
     (async () => {
       const config = await desktopApi.getAppConfig();
       if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
       if (config.livekitUrl) setLivekitUrl(config.livekitUrl);
 
-      // The native encoder stack is the only one that matters; the webview's
-      // WebRTC stack is never used for encoding.
       const codecs = recommendCodec(fromNativeCodecInfo(await desktopApi.getNativeSupportedCodecs()));
       setAvailableCodecs(codecs);
 
-      // Persisted settings take precedence over config-file defaults.
       const saved = await desktopApi.getStreamSettings();
       const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
       const bestCodec = codecs[0] ? codecs[0].codec : 'vp8';
@@ -112,7 +108,6 @@ export function useStreamSettings(): UseStreamSettingsReturn {
     })();
   }, []);
 
-  // Persist stream settings to disk (debounced).
   useEffect(() => {
     if (!settingsHydratedRef.current) return;
     const current: StreamSettings = {

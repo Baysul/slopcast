@@ -1,14 +1,6 @@
 import { MonitorX } from 'lucide-react';
 import React from 'react';
 
-// Full-height gate rendered when the backend reports no video capture route
-// (gated behind the platform video check): no share controls render at all, since the backend is
-// in `unsupported` state and every capture command errors. On Linux that
-// means a non-Wayland session (X11); on other platforms (macOS) screen
-// capture is not implemented yet. Windows never renders this — WGC is a
-// capture route. Styling reuses the WelcomeBanner card treatment; `h-full`
-// (not `min-h-screen`) because it renders inside the app shell below the
-// titlebar.
 export const PlatformNotice: React.FC<{ platform: string }> = React.memo(({ platform }) => {
   const waylandRequired = platform === 'linux';
   return (

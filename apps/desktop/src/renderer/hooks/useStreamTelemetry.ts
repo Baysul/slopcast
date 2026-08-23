@@ -44,10 +44,6 @@ const applyVideoDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPre
   if (!prev.vInit || t.timestampMs <= prev.vTs) return;
   const dt = (t.timestampMs - prev.vTs) / 1000;
   const db = t.videoBytesSent - prev.vBytes;
-  // Strictly-positive deltas only: a zero delta is "no movement this poll",
-  // not a measured 0 bps/fps — showing a confident 0 (e.g. "0 fps") during
-  // any stall is what made the bar read as broken. Null keeps the last
-  // known value on screen.
   if (db > 0) snap.videoBps = (db * 8) / dt;
   if (t.videoFramesEncoded != null) {
     const df = t.videoFramesEncoded - prev.vFrames;
@@ -63,8 +59,6 @@ const applyAudioDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPre
   if (db > 0) snap.audioBps = (db * 8) / dt;
 };
 
-/** Capture-side rate: frames dequeued from the source since the last poll.
- * The capture stats carry no timestamp, so the poll cadence is the clock. */
 async function sampleCaptureFps(prev: {
   dequeued: number;
   at: number;
@@ -84,14 +78,9 @@ async function sampleCaptureFps(prev: {
   };
 }
 
-// Native-livekit reports cumulative libwebrtc counters; deltas are computed
-// here exactly like the old renderer-side getStats() path did.
 const foldNativeTelemetry = (t: NativeTelemetry, prev: StatsPrev): StatsSnapshot => {
   const snap: StatsSnapshot = {
     videoMime: t.videoCodec,
-    // The outbound-rtp `encoderImplementation` stat: "VAAPI H264 Encoder"
-    // (hardware) vs "OpenH264"/"libvpx" (software) — surfaces whether the
-    // hardware encoder is actually in use.
     videoEnc: t.encoderImplementation,
     audioMime: t.audioCodec,
     videoBps: null,

@@ -9,10 +9,6 @@ pub(super) struct ProcEntry {
     cmdline: String,
 }
 
-// iter_proc scans /proc for every process (2 file reads each) and is hit on
-// every 3 s renderer poll plus each capture session start. Cache the scan for
-// a second; a freshly launched app being invisible for <1 s is irrelevant to
-// both callers.
 const PROC_CACHE_TTL: Duration = Duration::from_secs(1);
 static PROC_CACHE: Mutex<Option<(Instant, Vec<ProcEntry>)>> = Mutex::new(None);
 
@@ -135,12 +131,6 @@ pub(super) fn are_processes_related(pid_a: u32, pid_b: u32) -> bool {
     ancestors_a.iter().any(|a| ancestors_b.contains(a))
 }
 
-/// True when `descendant` is `ancestor` itself or a descendant of it (walking
-/// the `/proc` parent chain). Unlike `are_processes_related` this never
-/// matches siblings that merely share a launcher ancestor — two games under
-/// the same Steam instance must not be conflated — so capture-by-PID links
-/// only the targeted process and its own children (e.g. a browser's audio
-/// utility process).
 pub(super) fn is_same_or_descendant(descendant: u32, ancestor: u32) -> bool {
     if descendant <= 1 || ancestor <= 1 {
         return false;
@@ -316,7 +306,8 @@ mod tests {
             },
             ProcEntry {
                 pid: 200,
-                comm: "ZenlessZoneZero".into(), // 15-char kernel truncation
+                // Linux limits `/proc/<pid>/stat` comm values to 15 characters.
+                comm: "ZenlessZoneZero".into(),
                 cmdline:
                     "Z:\\SteamLibrary\\steamapps\\common\\ZenlessZoneZero\\ZenlessZoneZero.exe\0"
                         .into(),
@@ -330,7 +321,6 @@ mod tests {
             },
         ];
 
-        // Should match exact binary name despite backslashes and .exe
         assert_eq!(
             resolve_pid_by_binary(&procs, "ZenlessZoneZero.exe"),
             Some(200)
@@ -362,7 +352,6 @@ mod tests {
             comm: "firefox".into(),
             cmdline: "/usr/bin/firefox\0".into(),
         }];
-        // The first whitespace-separated word is the search key.
         assert_eq!(resolve_pid_by_name(&procs, "  firefox"), Some(100));
     }
 
@@ -448,8 +437,6 @@ mod tests {
     #[test]
     fn unrelated_pids_are_not_related() {
         let our_pid = std::process::id();
-        // A pid a few thousand above ours cannot share an ancestor chain with
-        // us: our chain ends at the shell (a session daemon, excluded).
         assert!(!are_processes_related(our_pid, our_pid + 5000));
         assert!(!are_processes_related(our_pid + 5000, our_pid));
     }

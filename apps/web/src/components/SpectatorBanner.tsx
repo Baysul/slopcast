@@ -8,8 +8,6 @@ interface SpectatorBannerProps {
   fadeDelayMs?: number;
 }
 
-// Web clients are spectator-only by design: no capture APIs exist in this app,
-// and this banner makes the restriction (and the desktop path) explicit.
 export const SpectatorBanner: React.FC<SpectatorBannerProps> = ({ compact, autoFade = true, fadeDelayMs = 10000 }) => {
   const [isVisible, setIsVisible] = useState(true);
 

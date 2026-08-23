@@ -57,11 +57,6 @@ fi
 install -m 0755 "$WEBRTC_TARGET/release/libgstrswebrtc.so" "$PLUGIN_DIR/libgstrswebrtc.so"
 install -m 0755 "$RTP_TARGET/release/libgstrsrtp.so" "$PLUGIN_DIR/libgstrsrtp.so"
 
-# Elements that must exist on the host and be bundled. VA-API hardware
-# encoders are handled separately below: the `va` plugin only registers its
-# elements when a VA device (a /dev/dri/renderD* node) is present, so
-# headless build hosts never expose them — and the publisher falls back to
-# x264enc/x265enc at runtime when they are absent.
 REQUIRED_ELEMENTS=(
   appsrc
   queue
@@ -96,8 +91,6 @@ REQUIRED_ELEMENTS=(
   rtph265pay
 )
 
-# Bundled only when this host has a usable VA device; skipped otherwise so
-# headless CI runners (no /dev/dri) can still prepare the runtime.
 OPTIONAL_ELEMENTS=(
   vah264enc
   vah265enc
@@ -112,11 +105,6 @@ for element in "${OPTIONAL_ELEMENTS[@]}"; do
   fi
 done
 
-# Resolve each element's plugin on the host first; when the host lacks an
-# element that the bundled runtime ships (e.g. rtpav1pay from gst-plugin-rtp
-# on hosts whose gst-plugins-bad predates it), fall back to the bundled
-# plugin dir. The isolated registry pins the scan to $PLUGIN_DIR so a stale
-# system registry cannot mask a missing plugin.
 REGISTRY_FILE="$BUILD_DIR/isolated-registry.bin"
 rm -f "$REGISTRY_FILE"
 for element in "${BUNDLED_ELEMENTS[@]}"; do
@@ -142,8 +130,6 @@ for element in "${BUNDLED_ELEMENTS[@]}"; do
     printf 'Unable to locate the GStreamer plugin supplying %s\n' "$element" >&2
     exit 1
   fi
-  # Never copy a file onto itself: bundled-only elements are already in the
-  # plugin dir from the Rust crate install above or a previous run.
   if [[ "$plugin_path" != "$PLUGIN_DIR"/* ]]; then
     install -m 0755 "$plugin_path" "$PLUGIN_DIR/$(basename "$plugin_path")"
   fi
@@ -162,8 +148,6 @@ stock gst-plugin-webrtc $WEBRTC_VERSION $WEBRTC_SHA256
 stock gst-plugin-rtp $RTP_VERSION $RTP_SHA256
 EOF
 
-# Reuse the isolated registry populated by the element-resolution loop above;
-# resetting it here would force a full rescan and hide nothing new.
 for element in livekitwebrtcsink rtpgccbwe "${BUNDLED_ELEMENTS[@]}"; do
   GST_PLUGIN_SYSTEM_PATH_1_0= \
     GST_PLUGIN_PATH_1_0="$PLUGIN_DIR" \

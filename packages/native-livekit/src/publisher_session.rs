@@ -1,5 +1,3 @@
-//! Linux publisher lifecycle state machine and bounded owner interface.
-
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
@@ -161,8 +159,6 @@ pub(crate) enum InPlaceChange {
     RequiresRebuild,
 }
 
-/// One grouped seam for the concrete `GStreamer` lifecycle. Frame and PCM data
-/// use generation-scoped handles outside this command interface.
 pub(crate) trait LifecycleEffects: Send {
     fn is_generation_current(&self) -> bool;
     fn build(&mut self, intent: Option<&VideoIntent>) -> Result<(), EffectError>;
@@ -622,8 +618,6 @@ impl<E: LifecycleEffects> SessionMachine<E> {
         let is_stale = error.kind == SessionErrorKind::StaleGeneration;
         self.last_error = Some(error);
         if is_stale {
-            // A stale generation may tear down only its own concrete effects;
-            // it must never install dormant over the next session's binding.
             self.effects.teardown();
             self.phase = SessionPhase::Shutdown;
             self.queued = None;
@@ -653,9 +647,6 @@ struct RateObservation {
     ceiling_kbps: Option<u32>,
 }
 
-/// Congestion policy state. The session owns the authoritative instance and
-/// only commits a proposed copy after the grouped effects seam accepts the
-/// corresponding encoder update.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RateController {
     pub(crate) enabled: bool,

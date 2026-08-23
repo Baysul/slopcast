@@ -65,7 +65,6 @@ test('token identities are embedded verbatim', async () => {
 test('tokens are signed so a tampered grant fails verification', async () => {
   const token = await spectatorToken(API_KEY, API_SECRET, 'abc-123-xyz', 'spectator-tamper');
   const verifier = new TokenVerifier(API_KEY, API_SECRET);
-  // Flipping the publish grant in the JWT payload must invalidate the signature.
   const [header, payload, signature] = token.split('.');
   if (header === undefined || payload === undefined || signature === undefined) {
     throw new Error('Unexpected JWT format');
@@ -84,8 +83,6 @@ test('an unverifiable key pair is rejected', async () => {
 });
 
 test('AccessToken can still be constructed like production code', async () => {
-  // Guards against the SDK surface drifting (the production token.ts depends
-  // on the AccessToken constructor + addGrant + toJwt contract).
   const at = new AccessToken(API_KEY, API_SECRET, { identity: 'probe', ttl: '6h' });
   at.addGrant({ roomJoin: true, room: 'abc-123-xyz', canPublish: true });
   assert.equal(typeof at.toJwt, 'function');

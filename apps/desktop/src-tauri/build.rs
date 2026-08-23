@@ -1,30 +1,11 @@
-//! Build script for the Slopcast Tauri desktop app.
-//!
-//! In addition to the standard `tauri_build::build()`, this tracks every file
-//! under the renderer `dist/` and forces `slopcast_lib` to recompile — and
-//! therefore re-run `generate_context!`, which embeds the frontend at compile
-//! time — whenever the bundle changes. Cargo's own `include_bytes!` tracking
-//! only covers assets from the *previous* build, so a Vite bundle that emits
-//! new content-hashed filenames would otherwise leave the app embedding a
-//! stale frontend (a blank window). The stamp file the crate includes below
-//! makes any dist change propagate to a fresh embed.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Path to the built renderer bundle, relative to this crate directory
-/// (mirrors `frontendDist` in `tauri.conf.json`).
 const FRONTEND_DIST: &str = "../dist/renderer";
 
 fn main() {
-    // The Tauri CLI 2.11.x still exports STATIC_VCRUNTIME=true on every cargo
-    // invocation. Our tauri-build (feat/cef) deprecated that variable, and any
-    // CLI-set value silently overrides `build.windows.staticVCRuntime` in
-    // tauri.conf.json, so drop it and let the config (default true) decide.
-    // The variable only affects MSVC linking, so this is safe on any host.
-    // Remove once the npm CLI stops setting it (tauri-apps/tauri#15372).
-    // SAFETY: this build script is single-threaded and nothing else touches
-    // the environment before tauri_build::build() runs below.
+    // Tauri CLI sets this deprecated variable and overrides tauri.conf.json.
+    // SAFETY: Cargo runs this build script single-threaded before other build work.
     unsafe { std::env::remove_var("STATIC_VCRUNTIME") };
     tauri_build::build();
 
@@ -36,11 +17,6 @@ fn main() {
 
     let dist = Path::new(FRONTEND_DIST);
     if !dist.is_dir() {
-        // No renderer bundle (bare `cargo check`/`clippy` on a fresh checkout,
-        // e.g. CI before any Vite build): still write a placeholder stamp so
-        // the crate's `include_bytes!` always resolves; there are no assets to
-        // track yet. tauri_codegen panics with a precise message when the
-        // bundle is required for an embedded build.
         let _ = fs::write(&stamp_path, "no-frontend");
         return;
     }
@@ -49,15 +25,11 @@ fn main() {
     collect_files(dist, &mut files);
     files.sort();
 
-    // Re-run this script whenever any asset changes, including assets that
-    // appear after the first build (new hashed filenames).
     for file in &files {
         println!("cargo:rerun-if-changed={}", file.display());
     }
     println!("cargo:rerun-if-changed={}", dist.display());
 
-    // Persist a fingerprint of every asset; the crate includes this file, so a
-    // content change here forces `slopcast_lib` to recompile and re-embed.
     let stamp = format!("{:016x}", hash_files(&files));
     if fs::read_to_string(&stamp_path).ok().as_deref() != Some(stamp.as_str()) {
         let _ = fs::write(&stamp_path, stamp);
@@ -78,8 +50,6 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Stable FNV-1a over every asset's path and content (std hashers are
-/// randomized per process, so they cannot be persisted across builds).
 fn hash_files(files: &[PathBuf]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for file in files {

@@ -1,13 +1,6 @@
 services:
   livekit:
     image: livekit/livekit-server:latest
-    # Rootless port forwarding drops and reorders 1080p60 RTP on this path.
-    # Host networking lets the SFU own UDP 7882 directly instead of sending
-    # packets through rootlessport. This local stack is Linux-only.
-    #
-    # `--node-ip` makes the SFU advertise a host-reachable ICE candidate.
-    # Defaults to the local host used by the desktop client. Set a LAN address
-    # when remote spectators need to join.
     network_mode: host
     command: --dev --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
     restart: unless-stopped
@@ -20,12 +13,7 @@ services:
       - "3001:3001"
     environment:
       - SERVER_PORT=3001
-      # LiveKit uses the host network so it can receive UDP directly.
       - LIVEKIT_URL=ws://host.containers.internal:7880
-      # Client-facing URL, advertised to browsers / the desktop app in token
-      # responses. ws://localhost:7880 works when the browser runs on the same
-      # machine as the stack; set wss://livekit.example.com for remote
-      # spectators. Defaults to LIVEKIT_URL when unset.
       - LIVEKIT_CLIENT_URL=ws://localhost:7880
       - LIVEKIT_API_KEY=devkey
       - LIVEKIT_API_SECRET=secret
@@ -51,7 +39,6 @@ services:
       - "3000:3000"
     environment:
       - WEB_PORT=3000
-      # Browsers reach the API through the nginx entry point on port 80.
       - API_ENDPOINT=http://localhost
     depends_on:
       slopcast-server:
@@ -70,32 +57,3 @@ services:
       slopcast-server:
         condition: service_started
     restart: unless-stopped
-
-  # Optional: replace the nginx entry point above with Caddy (automatic TLS via
-  # Let's Encrypt / ZeroSSL). Uncomment this block, comment out the `nginx`
-  # service, and place a Caddyfile in the repo root targeting the container
-  # service names:
-  #
-  #   app.example.com {
-  #     reverse_proxy /api/* slopcast-server:3001
-  #     reverse_proxy /health slopcast-server:3001
-  #     reverse_proxy /ws slopcast-server:3001
-  #
-  #     handle {
-  #       reverse_proxy slopcast-web:3000
-  #     }
-  #   }
-  #
-  # caddy:
-  #   image: caddy:latest
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   volumes:
-  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
-  #   depends_on:
-  #     slopcast-web:
-  #       condition: service_started
-  #     slopcast-server:
-  #       condition: service_started
-  #   restart: unless-stopped

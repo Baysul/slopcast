@@ -10,9 +10,6 @@ import {
   sanitizeStreamSettings,
 } from './index.js';
 
-// sanitizeStreamSettings: corrupted or hand-edited files must never
-// crash the app; every field falls back to a default individually.
-
 test('non-object input yields the defaults (defensive copy)', () => {
   for (const raw of [null, undefined, 42, 'fps:60', [], true]) {
     assert.deepEqual(sanitizeStreamSettings(raw), DEFAULT_STREAM_SETTINGS);
@@ -53,9 +50,6 @@ test('non-numeric and non-finite numbers fall back', () => {
   assert.equal(sanitizeStreamSettings({ fps: '60' }).fps, DEFAULT_STREAM_SETTINGS.fps);
   assert.equal(sanitizeStreamSettings({ fps: Number.NaN }).fps, DEFAULT_STREAM_SETTINGS.fps);
   assert.equal(sanitizeStreamSettings({ fps: Number.POSITIVE_INFINITY }).fps, DEFAULT_STREAM_SETTINGS.fps);
-  // Boundary values themselves are accepted (fps is capped at 60 — the
-  // capture pacer and preview emitter clamp there regardless, and higher
-  // values would run 60 fps with a 120 fps SDP claim).
   assert.equal(sanitizeStreamSettings({ fps: 1 }).fps, 1);
   assert.equal(sanitizeStreamSettings({ fps: 240 }).fps, 60);
   assert.equal(sanitizeStreamSettings({ fps: 60 }).fps, 60);
@@ -82,7 +76,6 @@ test('empty or non-string apiEndpoint falls back', () => {
 });
 
 test('apiEndpoint is kept verbatim (not trimmed or normalized)', () => {
-  // Documenting the current contract: the value is stored as given.
   assert.equal(sanitizeStreamSettings({ apiEndpoint: '  http://x  ' }).apiEndpoint, '  http://x  ');
 });
 
@@ -112,9 +105,6 @@ test('codecLabel maps known mime types and falls back to stripped mime', () => {
   assert.equal(codecLabel(null), null);
   assert.equal(codecLabel(undefined), null);
 });
-
-// normalizeLivekitUrl: ws:// URLs are mixed content on HTTPS pages and must
-// upgrade to wss://; plain HTTP/localhost dev keeps ws://.
 
 test('normalizeLivekitUrl upgrades ws:// to wss:// on HTTPS pages', () => {
   assert.equal(normalizeLivekitUrl('ws://livekit.example.com:7880', true), 'wss://livekit.example.com:7880');

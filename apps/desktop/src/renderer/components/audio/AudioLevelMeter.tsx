@@ -5,15 +5,8 @@ import { audioWaveStore, silentWave, WAVE_COLUMN_COUNT, waveIsActive } from '../
 const DEFAULT_WIDTH = 96;
 const DEFAULT_HEIGHT = 20;
 
-// After the last active column the meter keeps drawing for this cooldown
-// before detaching from the ticker, so a wave that dips to silence between
-// two updates cannot sleep/wake the meter mid-audio. The same grace period
-// gates hiding the meter on a paused stream, so brief dips can't flicker it.
 const SLEEP_COOLDOWN_MS = 300;
 
-// Draw cadence cap. The native meter already delivers a live waveform, so
-// the canvas only needs to repaint it; an uncapped rAF loop would starve
-// the GPU process that screen capture and video encode depend on.
 const FRAME_INTERVAL_MS = 1000 / 30;
 
 export interface AudioLevelMeterProps {
@@ -30,14 +23,8 @@ function resolveIds(appId?: number, memberIds?: number[]): number[] {
   return [];
 }
 
-// A draw returns true while its meter is still animating.
 type MeterDraw = (now: number) => boolean;
 
-// One rAF loop drives every active meter. Without this each meter spins its own
-// loop at the (possibly uncapped) display rate, and the combined canvas damage
-// of N loops starves the GPU process that screen capture and video encode
-// depend on. Meters register while animating and are dropped once they decay
-// to silence, so an idle app pays zero rendering cost.
 const activeMeters = new Set<MeterDraw>();
 let tickerFrame: number | null = null;
 let lastTickTime = 0;
@@ -57,7 +44,7 @@ const tick = (now: number) => {
 function wakeMeter(draw: MeterDraw): void {
   activeMeters.add(draw);
   if (tickerFrame === null) {
-    lastTickTime = 0; // draw immediately on the first tick
+    lastTickTime = 0;
     tickerFrame = requestAnimationFrame(tick);
   }
 }
@@ -70,9 +57,6 @@ function sleepMeter(draw: MeterDraw): void {
   }
 }
 
-// Sizes the canvas for the device pixel ratio (re-checks every call so a DPR
-// change mid-session rescales) and returns a cleared context, or null when 2d
-// rendering is unavailable.
 function prepareCanvas(canvas: HTMLCanvasElement, width: number, height: number): CanvasRenderingContext2D | null {
   const dpr = window.devicePixelRatio || 1;
   if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
@@ -87,17 +71,9 @@ function prepareCanvas(canvas: HTMLCanvasElement, width: number, height: number)
   return ctx;
 }
 
-// Peak bar waveform in the Apple Voice Memos / iMessage voice-note style: one
-// rounded bar per time bucket, symmetric around the center baseline, height =
-// the bucket's peak amplitude. 96 native columns decimate 2:1 into ~1.5px
-// bars with visible gaps.
 const DISPLAY_BARS = 48;
 const BAR_GAP = 0.5;
 
-// Bar height maps the peak through a dB window: full height at 0 dBFS,
-// vanishing at PEAK_FLOOR_DB below it. Raw-linear scaling makes quiet sources
-// (apps below 100% volume) shrink to near-invisible bars; the dB window keeps
-// them readable while preserving relative loudness.
 const PEAK_FLOOR_DB = 48;
 
 function peakToHeight(peak: number): number {
@@ -108,8 +84,6 @@ function peakToHeight(peak: number): number {
   return (db + PEAK_FLOOR_DB) / PEAK_FLOOR_DB;
 }
 
-// Per-bar scaled heights (0..1) for the (min, max) column envelope: each bar
-// is the dB-mapped peak of two adjacent native columns.
 function columnPeaks(columns: number[]): number[] {
   const pairs = Math.min(Math.floor(columns.length / 2), WAVE_COLUMN_COUNT);
   const bars = Math.max(1, Math.min(DISPLAY_BARS, Math.floor(pairs / 2)));
@@ -131,11 +105,6 @@ function columnPeaks(columns: number[]): number[] {
   return peaks;
 }
 
-// Per-bar envelope follower (leaky integrator), the classic peak-falloff
-// technique used by SoundCloud-style waveforms and audio meters: attack is
-// instant — the data already updates every 33 ms, so a time constant would
-// only smear transients — while release decays exponentially at
-// BAR_RELEASE_RATE per second so bars fall smoothly instead of hopping.
 const BAR_RELEASE_RATE = 3.5;
 
 function advanceEnvelope(peaks: number[], envelope: number[], dt: number): void {
@@ -154,8 +123,6 @@ function advanceEnvelope(peaks: number[], envelope: number[], dt: number): void 
   }
 }
 
-// Rounded peak bars from the smoothed envelope, symmetric around the center
-// baseline.
 function paintPeakBars(ctx: CanvasRenderingContext2D, envelope: number[], width: number, height: number): void {
   const bars = envelope.length;
   const barWidth = (width - BAR_GAP * (bars - 1)) / bars;
@@ -179,8 +146,6 @@ function paintPeakBars(ctx: CanvasRenderingContext2D, envelope: number[], width:
   }
 }
 
-// Union of the (min, max) column envelopes across the stored members of one
-// app group: min-of-mins and max-of-maxes per column.
 function unionColumns(merged: number[], columns: number[]): void {
   const pairs = Math.min(Math.floor(columns.length / 2), WAVE_COLUMN_COUNT);
   for (let i = 0; i < pairs * 2; i++) {
@@ -213,7 +178,6 @@ function mergeWaves(members: Map<number, number[]>): number[] {
   return merged;
 }
 
-// Live waveform columns for a group of member ids, driven by the wave store.
 function useWaveTarget(idsKey: string, onWave: (columns: number[]) => void): void {
   const memberWavesRef = useRef<Map<number, number[]>>(new Map());
   const onWaveRef = useRef(onWave);
@@ -239,8 +203,6 @@ function useWaveTarget(idsKey: string, onWave: (columns: number[]) => void): voi
   }, [idsKey]);
 }
 
-// Registers one stable draw wrapper per meter so prop changes never desync
-// the animation, and detaches from the shared ticker on unmount.
 function useMeterDraw(draw: MeterDraw): { wake: () => void } {
   const drawImplRef = useRef<MeterDraw>(() => false);
   useEffect(() => {
@@ -266,15 +228,6 @@ function useMeterDraw(draw: MeterDraw): { wake: () => void } {
   return { wake };
 }
 
-// Zero-lag peak bar waveform meter: the native side decimates the mono signal
-// into per-bucket (min, max) amplitude pairs; bars run through a per-bar
-// envelope follower (instant attack, exponential release) so motion stays
-// accurate yet smooth.
-//
-// The meter starts hidden and only appears once its stream produces audio, so
-// a silent app never shows a flat waveform strip. Paused streams publish
-// all-zero columns; once the wave has been silent past the sleep cooldown,
-// `signalActivity(false)` drops the meter instead of painting a flat line.
 function useMeterVisibility(): { hidden: boolean; signalActivity: (active: boolean) => void } {
   const [hidden, setHidden] = useState(true);
   const hiddenRef = useRef(true);

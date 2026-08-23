@@ -1,4 +1,3 @@
-//! Cached capture context (managed state).
 #![allow(
     clippy::needless_pass_by_value,
     reason = "Tauri command arguments (State and owned payloads) must be taken by value for the #[tauri::command] macro"
@@ -11,9 +10,6 @@ use tauri::Manager;
 use crate::AppHandle;
 use crate::dto::CaptureContextDto;
 
-/// Managed state: the last successful `PipeWire` video-graph introspection,
-/// refreshed by `inspect_capture_context` and the `resolve_audio_source`
-/// cascade (mirroring how `video.ts` updated `lastCaptureContext`).
 #[derive(Default)]
 pub struct CaptureContextCache(Mutex<Option<CaptureContextDto>>);
 
@@ -29,8 +25,6 @@ impl CaptureContextCache {
     }
 }
 
-/// Returns the cached capture context (or `null` before the first
-/// introspection).
 #[must_use]
 #[tauri::command]
 pub fn get_capture_context(
@@ -39,12 +33,9 @@ pub fn get_capture_context(
     state.snapshot()
 }
 
-/// Runs a fresh `PipeWire` video-graph introspection and caches the result.
-///
-/// # Errors
-///
-/// Returns an error if `PipeWire` video node introspection fails.
 #[tauri::command]
+/// # Errors
+/// Returns an error if capture context inspection fails.
 pub async fn inspect_capture_context(app: AppHandle) -> Result<Option<CaptureContextDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let context = native_rust::get_capture_context()?;

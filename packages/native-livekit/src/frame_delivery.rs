@@ -1,5 +1,3 @@
-//! Cross-platform captured-frame delivery.
-
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -19,20 +17,13 @@ use livekit::webrtc::prelude::{I420Buffer, VideoBuffer, VideoFrame, VideoRotatio
 static FRAME_TRACE_ENABLED: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("SLOPCAST_FRAME_TRACE").is_some());
 
-/// `GStreamer` pipeline returns each one here when it releases the wrapping
-/// buffer, and `OwnedI420::new` pops it back for the next frame.
 #[cfg(target_os = "linux")]
 const I420_FREELIST_CAP: usize = 24;
 
-/// Recycled `OwnedI420` plane allocations (see `OwnedI420::new`/`Drop`).
 #[cfg(target_os = "linux")]
 static I420_FREELIST: LazyLock<Mutex<Vec<Vec<u8>>>> =
     LazyLock::new(|| Mutex::new(Vec::with_capacity(I420_FREELIST_CAP)));
 
-/// Discards the cached `OwnedI420` plane allocations. Called on every video
-/// pipeline attach: the previous session's pipeline returns its buffers to
-/// the freelist during teardown, and this frees them once the new pipeline
-/// is in place — mirroring the old input pool's lifetime.
 #[cfg(target_os = "linux")]
 pub(crate) fn clear_i420_freelist() {
     if let Ok(mut freelist) = I420_FREELIST.lock() {
@@ -40,10 +31,6 @@ pub(crate) fn clear_i420_freelist() {
     }
 }
 
-/// I420 plane layout for `OwnedI420`, derived from `gst_video::VideoInfo` so
-/// it always matches the layout the encoder's appsrc caps describe (same
-/// builder call, same default alignment). The plane `Vec` is sized exactly
-/// to `size`.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy)]
 struct I420Layout {
@@ -52,15 +39,6 @@ struct I420Layout {
     size: usize,
 }
 
-/// An owned, contiguous I420 frame whose plane allocation is handed straight
-/// to `GStreamer` as the input buffer (`gst::Buffer::from_mut_slice`, zero
-/// copy): the capture engine converts BGRA directly into the allocation, the
-/// encoder's buffer wraps the *same* allocation, and `OwnedI420::drop`
-/// returns it to `I420_FREELIST` when `GStreamer` releases the buffer — one
-/// copy total per frame, where the old path copied `I420Buffer` → pool buffer.
-///
-/// This is the Linux publish interchange type; Windows keeps the libwebrtc
-/// `I420Buffer` path (`SampleBuffer` below).
 #[cfg(target_os = "linux")]
 pub(crate) struct OwnedI420 {
     width: u32,
@@ -71,9 +49,6 @@ pub(crate) struct OwnedI420 {
 
 #[cfg(target_os = "linux")]
 impl OwnedI420 {
-    /// The I420 `VideoInfo` this frame's layout derives from. The fps is
-    /// left unset, so `VideoConverter::new` accepts it as both source and
-    /// destination (see `scale`).
     fn video_info(width: u32, height: u32) -> Result<gst_video::VideoInfo, String> {
         gst_video::VideoInfo::builder(gst_video::VideoFormat::I420, width, height)
             .build()
@@ -91,9 +66,6 @@ impl OwnedI420 {
         })
     }
 
-    /// Allocates a frame's plane buffer, reusing a cached allocation from
-    /// `I420_FREELIST` when one is available (a static screen's keepalive
-    /// path reuses them back-to-back).
     fn new(width: u32, height: u32) -> Self {
         let layout = Self::layout(width, height).unwrap_or_else(|error| {
             unreachable!("I420 VideoInfo for {width}x{height} cannot fail to build: {error}")
@@ -113,8 +85,6 @@ impl OwnedI420 {
         }
     }
 
-    /// Plane strides as `u32`, matching the `argb_to_i420`/`i420_to_argb`
-    /// signatures. `GStreamer` reports I420 strides as positive `i32` values.
     fn strides(&self) -> (u32, u32, u32) {
         (
             u32::try_from(self.layout.strides[0]).unwrap_or(0),
@@ -143,23 +113,7 @@ impl OwnedI420 {
         (y_plane, u_plane, v_plane)
     }
 
-    /// Zero-copy I420 scaling via `GStreamer`'s `VideoConverter`: it maps the
-    /// plane allocation directly (no copy), and the scaled destination
-    /// allocation is recovered from the buffer it wrapped. Consumes the
-    /// source frame.
-    ///
-    /// The converter is cached by (src, dst) dimensions so steady-state
-    /// 1080p60 pays for `VideoConverter::new` only once per resolution
-    /// change — the delivery hot path already drops frames when it slips
-    /// 16 ms (the fixed-deadline `next_delivery_at` skips a missed tick),
-    /// so a per-frame converter construction was measured as a recurring
-    /// frame-interval overrun that directly surfaced as presenter stutter
-    /// at high capture sizes.
     fn scale(self, width: u32, height: u32) -> Result<Self, String> {
-        // Fast path: identical dimensions are handled upstream
-        // (`scale_to_target`), but `keepalive_sample` still routes 1:1
-        // through here when the capture and target resolutions already
-        // match — avoid all VideoInfo allocation in that case.
         if self.width == width && self.height == height {
             return Ok(self);
         }
@@ -193,12 +147,6 @@ impl OwnedI420 {
         src: &gst_video::VideoInfo,
         dst: &gst_video::VideoInfo,
     ) -> Option<Arc<gst_video::VideoConverter>> {
-        // `VideoConverter` wraps a non-clonable GStreamer object (no Clone/Copy),
-        // so cache the boxed instance behind an `Arc` keyed on dimensions.
-        // A `Mutex` protects the singleton; the hot path only pays for an
-        // `Arc::clone` after the first hit. A `LazyLock` would complicate
-        // invalidation (resolution changes), and dimensions are small enough
-        // to compare cheaply.
         #[allow(
             clippy::type_complexity,
             reason = "single cache entry keyed on four small dimensions; extracted type would obscure the tuple shape"
@@ -206,9 +154,6 @@ impl OwnedI420 {
         static CACHE: std::sync::Mutex<
             Option<(u32, u32, u32, u32, Arc<gst_video::VideoConverter>)>,
         > = std::sync::Mutex::new(None);
-        // Dimensions fully qualify the conversion (format is always I420,
-        // fps is unset — see `video_info`). Two sw/u32 pairs are cheaper to
-        // compare than two `VideoInfo` values.
         let key = (src.width(), src.height(), dst.width(), dst.height());
         #[allow(
             clippy::collapsible_if,
@@ -238,10 +183,6 @@ impl AsMut<[u8]> for OwnedI420 {
 
 #[cfg(target_os = "linux")]
 impl OwnedI420 {
-    /// Hands the plane allocation straight to the freelist, skipping the
-    /// `Drop` push (which would return it again on drop). Used by the
-    /// keepalive warm-up, which wants the allocation resident *without*
-    /// an owning buffer instance.
     fn into_planes(mut self) -> Vec<u8> {
         std::mem::take(&mut self.planes)
     }
@@ -250,9 +191,6 @@ impl OwnedI420 {
 #[cfg(target_os = "linux")]
 impl Drop for OwnedI420 {
     fn drop(&mut self) {
-        // A `std::mem::take`d allocation (the keepalive warm-up's
-        // `into_planes`) leaves an empty shell; never push it back — the
-        // freelist must only ever hold real plane allocations.
         if self.planes.is_empty() {
             return;
         }
@@ -264,11 +202,6 @@ impl Drop for OwnedI420 {
     }
 }
 
-/// The frame handed to the publish path: capture dimensions, the capture
-/// clock timestamp, and the I420 plane buffer. On Linux the buffer is an
-/// `OwnedI420` allocation that becomes the `GStreamer` input buffer itself; on
-/// other platforms it is a libwebrtc `I420Buffer` wrapped in a `VideoFrame`
-/// at publish time.
 pub(crate) struct VideoSample {
     pub(crate) sequence: u64,
     pub(crate) width: u32,
@@ -277,9 +210,6 @@ pub(crate) struct VideoSample {
     pub(crate) buffer: SampleBuffer,
 }
 
-/// Emits one structured, monotonic-clock record per sender boundary when the
-/// temporary real-path diagnostic is enabled. Keeping it opt-in avoids adding
-/// logging work to normal capture.
 pub(crate) fn trace_frame(
     stage: &str,
     sequence: u64,
@@ -321,9 +251,6 @@ const PREVIEW_FALLBACK_FPS: u32 = 30;
 const PREVIEW_MAX_FPS: u32 = 60;
 const PACER_CAPACITY: usize = 4;
 const HISTORY_CAPACITY: usize = 2;
-/// m144 may retain ten submitted frame buffers while encoding. Holding the
-/// latest sixteen `VideoFrame`s keeps both captured and keepalive buffers alive
-/// until they are outside that asynchronous window.
 #[cfg(not(target_os = "linux"))]
 const PUBLICATION_RETENTION_CAPACITY: usize = 16;
 
@@ -349,9 +276,6 @@ struct QueuedSample {
     output: Option<PublicationOutput>,
 }
 
-/// Mutable state local to the sole publication worker. Windows owns submitted
-/// frames here because `NativeVideoSource::capture_frame` only borrows them and
-/// exposes no release callback; Linux transfers allocation ownership to Gst.
 #[derive(Default)]
 struct PublicationState {
     #[cfg(not(target_os = "linux"))]
@@ -585,9 +509,6 @@ impl Stats {
     }
 }
 
-/// Capture-resolution I420 with only active row bytes packed contiguously.
-/// Canonical packing lets Gst and libwebrtc consumers reconstruct their own
-/// different plane strides without treating source padding as pixels.
 struct HistoryFrame {
     width: u32,
     height: u32,

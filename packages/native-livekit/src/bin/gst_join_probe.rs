@@ -2,14 +2,6 @@
     unused_crate_dependencies,
     reason = "temporary scratch probe; the lib's dependencies are used transitively"
 )]
-// Scratch diagnostic: drives the GStreamer LiveKit publisher directly
-// against a live SFU and reports what the room state + telemetry look
-// like, so a "presenter never appears in the room" report can be
-// reproduced without the Tauri shell. TEMPORARY — deleted after use.
-//
-// Env: PROBE_URL, PROBE_TOKEN, PROBE_ROOM, PROBE_IDENTITY,
-// PROBE_CODEC, PROBE_WIDTH, PROBE_HEIGHT, PROBE_FPS, PROBE_BITRATE,
-// PROBE_PLUGIN_DIR (optional; defaults to the repo's prepared runtime).
 
 use std::{
     path::{Path, PathBuf},
@@ -29,8 +21,6 @@ fn plugin_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("PROBE_PLUGIN_DIR") {
         return PathBuf::from(dir);
     }
-    // Scratch probe; resolving from the manifest instead of the CWD keeps
-    // it runnable from any directory on any checkout.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins")
 }
@@ -68,10 +58,6 @@ fn main() {
         Ok(()) => println!("[probe] connect() returned Ok"),
         Err(error) => panic!("[probe] connect failed: {error}"),
     }
-    // The sink's codec-discovery gate waits until EVERY stream (audio and
-    // video) is discovered, and audio discovery only starts when real PCM
-    // flows on the audio pad. The app streams continuously from connect;
-    // the probe must too, so feed 10 ms of silence every 10 ms.
     std::thread::spawn(|| {
         let silence = vec![0i16; 480];
         loop {

@@ -1,5 +1,3 @@
-//! Desktop capture acquisition coordinator.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, mpsc};
 use std::thread;

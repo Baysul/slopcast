@@ -3,15 +3,6 @@ import { AnimatePresence, motion } from 'motion/react';
 import React, { useEffect, useState } from 'react';
 import { windowControls } from '@/api/windowControls';
 
-// Custom window chrome (Tauri window-customization guide): the native titlebar
-// is disabled (`decorations: false`), so this bar owns the drag region and the
-// minimize/maximize/close controls. Dragging is wired manually with
-// `windowControls.startDragging()` (the guide's manual-implementation path)
-// instead of the `data-tauri-drag-region` attribute: that attribute only
-// drags on direct click targets, so the header's covered surface would be
-// dead, and the injected drag-region script is unreliable in the CEF runtime.
-// Control-button targets are excluded so the buttons keep receiving clicks,
-// and double-click on the bar maximizes (mirroring the native drag path).
 export interface TitleBarProps {
   isLive?: boolean;
   isPreviewing?: boolean;
@@ -70,12 +61,6 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
       onMouseDown={handleMouseDown}
       className="relative isolate h-10 shrink-0 flex items-stretch border-b border-border bg-background select-none"
     >
-      {/* Amberlight wash behind the chrome while live. Motion fades it in
-          on go-live and out on stop (outer); the CSS loop does the breathing
-          (inner) — separate elements, or the keyframes would override the
-          fade's inline opacity. -z-10 + isolate keeps the wash above the
-          bar's background but under the content; motion-safe honors
-          prefers-reduced-motion with a static glow. */}
       <AnimatePresence>
         {isLive && (
           <motion.div
@@ -96,7 +81,6 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
         <span className="text-sm font-semibold tracking-tight text-foreground/90">Slopcast</span>
       </div>
 
-      {/* Center signal — pointer-events-none so the drag region stays live. */}
       <div className="flex-1 flex items-center justify-center pointer-events-none select-none">
         {getCenterSignal(isPreviewing)}
       </div>

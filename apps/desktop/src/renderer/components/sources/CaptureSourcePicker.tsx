@@ -4,11 +4,6 @@ import { Button } from '@/components/ui/button';
 import { desktopApi } from '../../api/desktop';
 import type { CaptureSourceInfo, CaptureSourceSelection } from '../../types';
 
-// In-app source picker for Windows WGC capture. Windows has no system
-// picker (unlike the Linux portal dialog), so the renderer lists the screens
-// and windows reported by `get_capture_sources` and the user picks one; the
-// selection drives the pre-roll capture. Rendered inside the Screenshare
-// Source card while `pickerOpen` is set.
 interface CaptureSourcePickerProps {
   onSelect: (selection: CaptureSourceSelection) => void;
   onCancel: () => void;

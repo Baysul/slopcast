@@ -37,8 +37,6 @@ export interface SourcePickerProps {
   canStartShare: boolean;
   canGoLive: boolean;
   disabledReason: string | null;
-  /// Windows-only: the in-app WGC source picker is embedded in this card
-  /// while open (there is no Windows system picker).
   pickerOpen: boolean;
   setPickerOpen: (open: boolean) => void;
   onSourceSelected: (selection: CaptureSourceSelection) => void;
@@ -60,8 +58,6 @@ interface RoomControlsProps {
   onCopyLink: () => void;
 }
 
-// Room lifecycle controls that used to live in the presenter header: create
-// the room when none exists, otherwise show the share code and copy actions.
 const RoomControls: React.FC<RoomControlsProps> = React.memo(
   ({ roomCode, isCreatingRoom, copied, spectatorCount, onCreateRoom, onCopyCode, onCopyLink }) => {
     if (!roomCode) {
@@ -201,7 +197,6 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
                 aria-describedby={disabledReason ? 'start-screenshare-hint' : 'start-screenshare-ready-hint'}
                 className="group relative w-full font-bold overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.14)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] active:shadow-[inset_0_1px_1px_rgba(0,0,0,0.2)] active:scale-[0.99] transition-[transform,box-shadow,background-color] duration-200 ease-out disabled:shadow-none disabled:active:scale-100"
               >
-                {/* Idle shimmer — motion.dev loop, just enough to draw the eye. Hidden when disabled or reduced-motion. */}
                 {canStartShare && !shouldReduceMotion && (
                   <motion.span
                     aria-hidden="true"
@@ -218,12 +213,10 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
                     style={{ willChange: 'transform' }}
                   />
                 )}
-                {/* Hover wash — quick darkroom sweep on interaction. */}
                 <span
                   aria-hidden="true"
                   className={`pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/[0.1] to-transparent opacity-0 transition-[transform,opacity] duration-[520ms] ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-full group-hover:opacity-100 group-focus-visible:translate-x-full group-focus-visible:opacity-100 motion-reduce:hidden ${!canStartShare ? 'hidden' : ''}`}
                 />
-                {/* Viewfinder brackets — capture frame at the edges. */}
                 <span
                   aria-hidden="true"
                   className={`pointer-events-none absolute inset-[5px] rounded-[7px] border transition-colors duration-200 ${!canStartShare ? 'border-transparent' : 'border-transparent group-hover:border-white/10 group-focus-visible:border-white/10'}`}

@@ -31,14 +31,9 @@
   --color-caption-text: oklch(0.64 0.02 260);
 }
 
-/* Titlebar live indicator: an amberlight wash. The TitleBar fades it in/out
-   via Motion; this loop does the breathing. Keyframes live in @theme so they
-   ship only when the animate-live-breathe utility is used. */
 @theme {
   --animate-live-breathe: live-breathe 4s ease-in-out infinite;
 
-  /* Slow amber breath, in place. The widened gradient keeps the glow
-     present along the full bar length. */
   @keyframes live-breathe {
     0%,
     100% {
@@ -51,9 +46,6 @@
 }
 
 @utility bg-live-glow {
-  /* Top-down wash spanning the full bar width (no horizontal mask). The
-     fade endpoint sits past the element's bottom edge (150%), so the tint
-     still reaches the bottom of the bar instead of dying out midway. */
   background-image: linear-gradient(180deg, var(--color-safelight-glow-strong), transparent 150%);
 }
 
@@ -78,8 +70,6 @@
     color: var(--color-foreground);
   }
 
-  /* Operate surface: labels are uppercase tracking carriers — keep them
-     tight and legible on dark at 12px. */
   label,
   [class*="tracking-wider"] {
     letter-spacing: 0.05em;

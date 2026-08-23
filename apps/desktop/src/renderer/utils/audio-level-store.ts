@@ -4,7 +4,6 @@ type WaveCallback = (columns: number[]) => void;
 
 export const WAVE_COLUMN_COUNT = 96;
 
-// Columns above this amplitude count as active (silence is exactly zero).
 const ACTIVE_AMP = 0.002;
 
 export function silentWave(): number[] {
@@ -47,15 +46,12 @@ class AudioWaveStore {
   private waves = new Map<number, number[]>();
   private listeners = new Map<number, Set<WaveCallback>>();
 
-  // Update waveforms silently in memory without triggering React DOM re-renders
   public updateWave(apps: Array<{ id: number; columns: number[] }>): void {
     const seen = new Set<number>();
     const maxPerColumn = silentWave();
 
     for (const { id, columns } of apps) {
       seen.add(id);
-      // Paused/silent streams (all-zero columns) must not drive the Desktop
-      // Audio meter, so only live streams are accumulated into its max.
       if (waveIsActive(columns)) {
         accumulateMax(maxPerColumn, columns);
       }
@@ -67,14 +63,12 @@ class AudioWaveStore {
       }
     }
 
-    // Desktop Audio (id -1) mirrors the max column pair across all apps
     const prevMax = this.waves.get(-1);
     if (!prevMax || waveChanged(prevMax, maxPerColumn)) {
       this.waves.set(-1, maxPerColumn);
       this.notify(-1, maxPerColumn);
     }
 
-    // Reset apps that stopped emitting
     for (const [id, prev] of this.waves.entries()) {
       if (id !== -1 && !seen.has(id)) {
         const silence = silentWave();
@@ -90,7 +84,6 @@ class AudioWaveStore {
     return this.waves.get(id) ?? silentWave();
   }
 
-  // Subscribe directly per app ID
   public subscribe(id: number, callback: WaveCallback): () => void {
     let set = this.listeners.get(id);
     if (!set) {
@@ -99,7 +92,6 @@ class AudioWaveStore {
     }
     set.add(callback);
 
-    // Emit initial columns immediately
     callback(this.getWave(id));
 
     return () => {
