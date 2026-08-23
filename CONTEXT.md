@@ -23,3 +23,15 @@ _Avoid_: codec badge, vendor label
 **Encoder plan**:
 The probe-gated result for a codec: its selected encoder chain and rate-control behavior.
 _Avoid_: selected encoder, encoder configuration
+
+**Frame delivery**:
+The cross-platform behavior that turns captured frames into publication frames and renderer previews at the active delivery target.
+_Avoid_: frame processing, capture pipeline
+
+**Delivery target**:
+The width, height, frame rate, and live state that govern frame delivery.
+_Avoid_: publication target, stream target, scale target
+
+**Publisher session**:
+The lifetime of one presenter publication connection through dormant, connected, recovery, and shutdown states.
+_Avoid_: publisher worker, lifecycle loop

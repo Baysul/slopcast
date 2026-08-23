@@ -23,9 +23,6 @@ livekit = { version = "0.8", features = ["rustls-tls-native-roots"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 
-[dev-dependencies]
-base64 = "0.22"
-
 [target.'cfg(target_os = "linux")'.dependencies]
 # Portal GDBus dispatch: the PipeWire desktop capturer's async handshake
 # dispatches on the capture thread's thread-default GMainContext.
