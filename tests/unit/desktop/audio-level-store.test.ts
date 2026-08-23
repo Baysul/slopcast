@@ -6,7 +6,7 @@ import {
   silentWave,
   WAVE_COLUMN_COUNT,
   waveIsActive,
-} from '../src/renderer/utils/audio-level-store.ts';
+} from '../../../apps/desktop/src/renderer/utils/audio-level-store.ts';
 
 const SILENT = silentWave();
 

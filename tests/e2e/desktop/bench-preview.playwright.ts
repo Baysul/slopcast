@@ -2,6 +2,29 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { type Browser, chromium, type Page } from 'playwright';
 
+type PreviewBenchEntry = [number, number, number | null];
+type DrawnPreviewBenchEntry = [number, number, number];
+
+interface TauriInvokeArguments {
+  channel?: object;
+  count?: number;
+  size?: number;
+  intervalMs?: number;
+}
+
+declare global {
+  interface Window {
+    __TAURI__?: {
+      core?: {
+        Channel: new (callback: (raw: ArrayBuffer) => void) => object;
+        invoke: <T>(command: string, args?: TauriInvokeArguments) => Promise<T>;
+      };
+    };
+    __PREVIEW_BENCH__?: boolean;
+    __PREVIEW_BENCH_DATA__?: PreviewBenchEntry[];
+  }
+}
+
 interface BenchResult {
   transport: Record<string, TransportRun>;
   previewEndToEnd: {
@@ -61,17 +84,14 @@ function writeResult(): void {
   console.log(`[bench] wrote ${BENCH_OUT}`);
 }
 
-function tauriInvoke<T>(page: Page, command: string, args?: Record<string, unknown>): Promise<T> {
+function tauriInvoke<T>(page: Page, command: string): Promise<T> {
   return page.evaluate(
-    ({ cmd, invokeArgs }) => {
-      const tauriWindow = window as unknown as {
-        __TAURI__?: { core?: { invoke?: (c: string, a?: Record<string, unknown>) => Promise<unknown> } };
-      };
-      if (!tauriWindow.__TAURI__?.core?.invoke) throw new Error('window.__TAURI__.core.invoke unavailable');
-      return tauriWindow.__TAURI__.core.invoke(cmd, invokeArgs);
+    ({ cmd }) => {
+      if (!window.__TAURI__?.core?.invoke) throw new Error('window.__TAURI__.core.invoke unavailable');
+      return window.__TAURI__.core.invoke<T>(cmd);
     },
-    { cmd: command, invokeArgs: args },
-  ) as Promise<T>;
+    { cmd: command },
+  );
 }
 
 async function transportRun(
@@ -89,20 +109,14 @@ async function transportRun(
         const index = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
         return sorted[Math.max(0, index)];
       };
-      const tauriWindow = window as unknown as {
-        __TAURI__: {
-          core: {
-            Channel: new (cb: (raw: ArrayBuffer) => void) => unknown;
-            invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
-          };
-        };
-      };
-      const Channel = tauriWindow.__TAURI__.core.Channel;
+      const core = window.__TAURI__?.core;
+      if (!core) throw new Error('window.__TAURI__.core unavailable');
+      const Channel = core.Channel;
       const channel = new Channel((raw: ArrayBuffer) => {
         arrivals.push({ t: performance.now(), len: raw?.byteLength ?? 0 });
       });
-      await tauriWindow.__TAURI__.core.invoke('bench_register_channel', { channel });
-      await tauriWindow.__TAURI__.core.invoke('bench_push_frames', { count, size, intervalMs: cadenceMs });
+      await core.invoke('bench_register_channel', { channel });
+      await core.invoke('bench_push_frames', { count, size, intervalMs: cadenceMs });
       const deadline = Date.now() + timeoutMs;
       while (arrivals.length < count && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -126,7 +140,7 @@ async function transportRun(
           p99: percentile(gaps, 99),
           max: gaps.length > 0 ? gaps[gaps.length - 1] : 0,
         },
-      } as TransportRun;
+      };
     },
     { size: payloadBytes, count: frames, cadenceMs: intervalMs, timeoutMs: PUSH_TIMEOUT_MS },
   );
@@ -150,14 +164,8 @@ async function main(): Promise<void> {
     writeResult();
 
     await page.evaluate(() => {
-      (
-        window as unknown as {
-          __PREVIEW_BENCH__: boolean;
-          __PREVIEW_BENCH_DATA__: Array<[number, number, number | null]>;
-        }
-      ).__PREVIEW_BENCH__ = true;
-      (window as unknown as { __PREVIEW_BENCH_DATA__: Array<[number, number, number | null]> }).__PREVIEW_BENCH_DATA__ =
-        [];
+      window.__PREVIEW_BENCH__ = true;
+      window.__PREVIEW_BENCH_DATA__ = [];
     });
 
     await page.getByRole('button', { name: 'Create Live Room', exact: true }).click();
@@ -177,19 +185,16 @@ async function main(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, sampleMs));
     await tauriInvoke<boolean>(page, 'stop_native_capture');
 
-    const data = await page.evaluate(() => {
-      const w = window as unknown as { __PREVIEW_BENCH_DATA__?: Array<[number, number, number | null]> };
-      return w.__PREVIEW_BENCH_DATA__ ?? [];
-    });
+    const data = await page.evaluate(() => window.__PREVIEW_BENCH_DATA__ ?? []);
     const stats = await tauriInvoke<{ previewFramesSent: number }>(page, 'get_video_capture_stats');
 
-    const drawn = data.filter((entry) => entry[2] !== null);
+    const drawn = data.filter((entry): entry is DrawnPreviewBenchEntry => entry[2] !== null);
     const arrivalToDraw = drawn
-      .map(([, arrivalMs, drawMs]) => (drawMs as number) - arrivalMs)
-      .filter((v) => v >= 0)
+      .map(([, arrivalMs, drawMs]) => drawMs - arrivalMs)
+      .filter((value) => value >= 0)
       .sort((a, b) => a - b);
-    const first = drawn.length > 0 ? (drawn[0][1] as number) : 0;
-    const last = drawn.length > 0 ? (drawn[drawn.length - 1][1] as number) : 0;
+    const first = drawn[0]?.[1] ?? 0;
+    const last = drawn.at(-1)?.[1] ?? 0;
 
     result.previewEndToEnd = {
       framesDrawn: drawn.length,

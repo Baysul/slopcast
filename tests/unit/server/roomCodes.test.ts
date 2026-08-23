@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ROOM_CODE_RE } from '@slopcast/shared-types';
 
-import { generateRoomCode } from './roomCodes.js';
+import { generateRoomCode } from '../../../apps/server/src/roomCodes.js';
 
 test('generated codes match the shared room-code format', () => {
   for (let i = 0; i < 200; i++) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { NativeCodecInfo } from '../src/renderer/types/index.ts';
+import type { NativeCodecInfo } from '../../../apps/desktop/src/renderer/types/index.ts';
 import {
   type CodecInfo,
   codecOptionSuffix,
@@ -8,7 +8,7 @@ import {
   groupCodecsByHardware,
   recommendCodec,
   sortByCodecPreference,
-} from '../src/renderer/utils/codecs.ts';
+} from '../../../apps/desktop/src/renderer/utils/codecs.ts';
 
 function info(codec: CodecInfo['codec'], hardware = false, recommended = false): CodecInfo {
   return { codec, label: codec.toUpperCase(), hardware, recommended };

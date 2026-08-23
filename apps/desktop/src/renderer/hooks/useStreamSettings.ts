@@ -133,8 +133,8 @@ export function useStreamSettings(): UseStreamSettingsReturn {
           lastSavedSettingsRef.current = current;
           notify('success', 'Stream settings saved');
         })
-        .catch((err: unknown) => {
-          console.error('[useStreamSettings] saveStreamSettings IPC failed:', err);
+        .catch((cause: unknown) => {
+          console.error('[useStreamSettings] saveStreamSettings IPC failed:', cause);
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);

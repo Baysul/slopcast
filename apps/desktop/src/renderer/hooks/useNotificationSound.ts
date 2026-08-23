@@ -1,9 +1,13 @@
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
+
 let audioCtx: AudioContext | null = null;
 
 const getAudioCtx = (): AudioContext | null => {
-  if (typeof window === 'undefined') return null;
-  const Ctor =
-    window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  const Ctor = window.AudioContext ?? window.webkitAudioContext;
   if (!Ctor) return null;
   try {
     if (!audioCtx) audioCtx = new Ctor();

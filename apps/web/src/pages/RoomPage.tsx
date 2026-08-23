@@ -13,6 +13,10 @@ type StatusVariant = 'live' | 'disconnected' | 'info';
 declare global {
   interface Window {
     __slopcastReceiverStats?: () => Promise<RTCStatsReport | null>;
+    __SLOPCAST_CONFIG__?: {
+      apiEndpoint?: string;
+      livekitUrl?: string;
+    };
   }
 }
 
@@ -44,6 +48,7 @@ const STREAM_END_GRACE_MS = 500;
 
 const logH264Sdp = (room: Room): void => {
   try {
+    // SAFETY: this diagnostic reads LiveKit's current internal subscriber shape without mutating it.
     const sub = (
       room as { engine?: { pcManager?: { subscriber?: { getRemoteDescription(): RTCSessionDescription | null } } } }
     ).engine?.pcManager?.subscriber;
@@ -146,6 +151,7 @@ const attachExistingTracks = (
 const firstVideoReceiver = (room: Room): RTCRtpReceiver | undefined => {
   for (const participant of room.remoteParticipants.values()) {
     for (const publication of participant.videoTrackPublications.values()) {
+      // SAFETY: subscribed LiveKit remote tracks expose the underlying WebRTC receiver at runtime.
       const receiver = (publication.track as { receiver?: RTCRtpReceiver } | undefined)?.receiver;
       if (receiver) return receiver;
     }
@@ -179,6 +185,7 @@ const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapsh
 
   const snapshot: VideoStatSnapshot = { ...empty };
   for (const reportRaw of stats.values()) {
+    // SAFETY: browser RTCStatsReport entries use the standardized inbound RTP fields below.
     const report = reportRaw as {
       type: string;
       kind?: string;
@@ -194,6 +201,7 @@ const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapsh
       snapshot.framesDecoded = report.framesDecoded ?? 0;
       snapshot.decoderImpl = report.decoderImplementation ?? null;
       if (report.codecId) {
+        // SAFETY: codecId references a codec stats entry in the same RTCStatsReport.
         const codec = stats.get(report.codecId) as { mimeType?: string } | undefined;
         snapshot.codecMime = codec?.mimeType ?? null;
       }
@@ -483,9 +491,7 @@ export const RoomPage: React.FC = () => {
           const mime = pub.mimeType?.toUpperCase();
           if (!mime) return false;
           const receiverCodecs =
-            typeof RTCRtpReceiver !== 'undefined' && RTCRtpReceiver.getCapabilities
-              ? (RTCRtpReceiver.getCapabilities('video')?.codecs.map((c) => c.mimeType.toUpperCase()) ?? [])
-              : [];
+            RTCRtpReceiver.getCapabilities('video')?.codecs.map((codec) => codec.mimeType.toUpperCase()) ?? [];
           return !receiverCodecs.some((m) => m.includes(mime.replace(/^VIDEO\//, '')));
         });
       if (!unsupported) return;
@@ -508,9 +514,8 @@ export const RoomPage: React.FC = () => {
       }
     });
 
-    const apiEndpoint = (window as { __SLOPCAST_CONFIG__?: { apiEndpoint?: string } }).__SLOPCAST_CONFIG__?.apiEndpoint;
-    const injectedLivekitUrl = (window as { __SLOPCAST_CONFIG__?: { livekitUrl?: string } }).__SLOPCAST_CONFIG__
-      ?.livekitUrl;
+    const apiEndpoint = window.__SLOPCAST_CONFIG__?.apiEndpoint;
+    const injectedLivekitUrl = window.__SLOPCAST_CONFIG__?.livekitUrl;
 
     let baseUrl = `${window.location.protocol}//${window.location.hostname}:3001`;
     if (apiEndpoint) {
@@ -527,9 +532,11 @@ export const RoomPage: React.FC = () => {
           signal: controller.signal,
         });
         if (!res.ok) {
+          // SAFETY: room token errors use the server's JSON error contract.
           const errData = (await res.json().catch(() => ({}))) as { error?: string };
           throw new Error(errData.error || `Failed to fetch spectator token (${res.status})`);
         }
+        // SAFETY: a successful token response is produced by the colocated server route.
         const data = (await res.json()) as { token: string; livekitUrl: string };
         return data;
       } finally {

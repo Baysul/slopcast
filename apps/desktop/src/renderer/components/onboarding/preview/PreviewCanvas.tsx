@@ -156,7 +156,10 @@ class WebGpuPreview {
   constructor(device: GPUDevice, canvas: HTMLCanvasElement) {
     this.device = device;
     this.format = navigator.gpu.getPreferredCanvasFormat();
-    this.context = canvas.getContext('webgpu') as GPUCanvasContext;
+    const context = canvas.getContext('webgpu');
+    if (!context) throw new Error('WebGPU canvas context unavailable');
+    // SAFETY: the webgpu context identifier returns GPUCanvasContext in WebGPU-enabled renderers.
+    this.context = context as GPUCanvasContext;
     this.context.configure({ device, format: this.format, alphaMode: 'opaque' });
   }
 

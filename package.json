@@ -9,15 +9,15 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "check": "biome ci && pnpm --recursive check",
+    "check": "biome ci && oxlint && pnpm --recursive check",
     "check:fix": "biome check --write",
-    "lint": "biome lint",
+    "lint": "biome lint && oxlint",
     "lint:fix": "biome lint --write",
     "lint:anti-slop": "oxlint",
     "format": "biome format --write && pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:fmt": "pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:check": "pnpm --filter @slopcast/native-rust rust:check",
-    "probe:capture": "bash probe/probe-capture.sh",
+    "probe:capture": "bash tests/probes/probe-capture.sh",
     "dev": "pnpm --parallel --recursive dev",
     "dev:desktop": "pnpm desktop:prepare-gstreamer && pnpm --filter desktop dev",
     "dev:web": "pnpm --filter web dev",

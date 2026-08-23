@@ -166,7 +166,13 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 >
                   Video Codec
                 </label>
-                <Select value={videoCodec} onValueChange={(v) => setVideoCodec(v as VideoCodec)}>
+                <Select
+                  value={videoCodec}
+                  onValueChange={(value) => {
+                    // SAFETY: every item value comes from a CodecInfo codec.
+                    setVideoCodec(value as VideoCodec);
+                  }}
+                >
                   <SelectTrigger id="select-video-codec">
                     <SelectValue />
                   </SelectTrigger>
@@ -204,7 +210,13 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 >
                   Resolution
                 </label>
-                <Select value={resolution} onValueChange={(v) => setResolution(v as ResolutionPreset)}>
+                <Select
+                  value={resolution}
+                  onValueChange={(value) => {
+                    // SAFETY: the items below exhaust the ResolutionPreset values.
+                    setResolution(value as ResolutionPreset);
+                  }}
+                >
                   <SelectTrigger id="select-resolution">
                     <SelectValue />
                   </SelectTrigger>
@@ -321,7 +333,10 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
                 </label>
                 <Select
                   value={motionMode}
-                  onValueChange={(v) => setMotionMode(v as MotionMode)}
+                  onValueChange={(value) => {
+                    // SAFETY: the items below exhaust the MotionMode values.
+                    setMotionMode(value as MotionMode);
+                  }}
                   disabled={!autoBitrate}
                 >
                   <SelectTrigger id="select-motion">

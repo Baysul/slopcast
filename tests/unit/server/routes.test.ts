@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import express from 'express';
 
-import { initRoutes, toHttpUrl, toWsUrl } from './routes.js';
+import { initRoutes, toHttpUrl, toWsUrl } from '../../../apps/server/src/routes.js';
 
 test('toWsUrl passes ws/wss through unchanged', () => {
   assert.equal(toWsUrl('ws://localhost:7880'), 'ws://localhost:7880');
@@ -36,6 +36,7 @@ async function startTestServer(): Promise<{ base: string; close: () => Promise<v
   const server: Server = await new Promise((resolve) => {
     const srv = app.listen(0, '127.0.0.1', () => resolve(srv));
   });
+  // SAFETY: this TCP server listens on an ephemeral IP port, so address() returns AddressInfo.
   const { port } = server.address() as AddressInfo;
   return {
     base: `http://127.0.0.1:${port}`,
@@ -52,6 +53,7 @@ test('POST /api/rooms without the desktop header is forbidden', async () => {
   try {
     const res = await fetch(`${server.base}/api/rooms`, { method: 'POST' });
     assert.equal(res.status, 403);
+    // SAFETY: this route's 403 response has the colocated JSON error contract.
     const body = (await res.json()) as { error: string };
     assert.match(body.error, /desktop clients/i);
   } finally {
@@ -76,6 +78,7 @@ test('spectator token route mints a usable token for a valid code', async () => 
   try {
     const res = await fetch(`${server.base}/api/rooms/abc-123-xyz/token`);
     assert.equal(res.status, 200);
+    // SAFETY: this successful route response has the colocated token JSON contract.
     const body = (await res.json()) as {
       token: string;
       identity: string;

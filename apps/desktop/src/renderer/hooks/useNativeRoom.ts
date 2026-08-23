@@ -9,8 +9,9 @@ async function fetchSpectatorCount(apiEndpoint: string, roomCode: string): Promi
     const response = await fetch(`${apiEndpoint}/api/rooms/${roomCode}/spectators`);
     if (!response.ok) return null;
 
-    const body = (await response.json()) as { count?: unknown };
-    if (typeof body.count !== 'number') return null;
+    // SAFETY: the spectator-count endpoint returns this contract from the colocated server.
+    const body = (await response.json()) as { count?: number };
+    if (body.count == null || !Number.isFinite(body.count)) return null;
 
     return body.count;
   } catch (err) {
@@ -66,10 +67,12 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
       });
 
       if (!res.ok) {
+        // SAFETY: error responses from the room endpoint use the server's JSON error contract.
         const err = (await res.json().catch(() => ({ error: 'Unknown server error' }))) as { error?: string };
         throw new Error(err.error ?? `Server returned ${res.status}`);
       }
 
+      // SAFETY: a successful room response is produced by the colocated room route.
       const room = (await res.json()) as {
         code: string;
         shareUrl: string;

@@ -166,6 +166,7 @@ function foldInboundVideo(acc: VideoStats, report: RTCStatLike, stats: RTCStatsR
   const ts = report.timestamp ?? 0;
 
   if (report.codecId) {
+    // SAFETY: codecId references a codec stats entry in the same RTCStatsReport.
     const codec = stats.get(report.codecId) as RTCStatLike | undefined;
     acc.videoCodec = codecLabel(codec?.mimeType);
   }
@@ -227,6 +228,7 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
   let decoderImplementation: string | null = null;
 
   for (const reportRaw of stats.values()) {
+    // SAFETY: browser RTCStatsReport entries use the standardized RTC stats fields we read.
     const report = reportRaw as RTCStatLike;
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
       video.hasVideo = true;
@@ -272,6 +274,7 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: snapshot extraction mirrors the stats schema.
 export function createStatsPrev(stats: RTCStatsReport): StatsPrev | null {
   for (const reportRaw of stats.values()) {
+    // SAFETY: browser RTCStatsReport entries use the standardized RTC stats fields we read.
     const report = reportRaw as RTCStatLike;
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
       return {

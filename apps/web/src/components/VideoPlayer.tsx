@@ -169,11 +169,15 @@ const applyPlayResult = (
   }
 };
 
+interface SpectatorTelemetryState {
+  telemetry: SpectatorTelemetry | null;
+}
+
 const useSpectatorTelemetry = (
   isLive: boolean,
   getStatsFn: (() => Promise<RTCStatsReport | null>) | undefined,
   mediaStream: MediaStream | null,
-): { telemetry: SpectatorTelemetry | null } => {
+): SpectatorTelemetryState => {
   const [telemetry, setTelemetry] = useState<SpectatorTelemetry | null>(null);
   const statsPrevRef = useRef<ReturnType<typeof createStatsPrev>>(null);
   const telemetryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -229,7 +233,7 @@ const fullscreenTarget = (container: HTMLDivElement | null, fullBleed: boolean):
   if (!fullBleed) {
     return container || document.documentElement;
   }
-  return (container?.closest('.min-h-screen') as HTMLElement) || container || document.documentElement;
+  return container?.closest<HTMLElement>('.min-h-screen') || container || document.documentElement;
 };
 
 const usePlaybackControls = (mediaStream: MediaStream | null, fullBleed?: boolean): PlaybackControls => {

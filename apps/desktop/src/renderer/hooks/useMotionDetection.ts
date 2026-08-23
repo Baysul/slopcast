@@ -29,15 +29,22 @@ interface MotionDetection {
   detected: boolean;
 }
 
-const snapshot = (stats: DesktopCaptureStats): { real: number; keepalive: number } => ({
+interface MotionSnapshot {
+  real: number;
+  keepalive: number;
+}
+
+interface MotionSample {
+  tier: MotionTier | null;
+  prev: MotionSnapshot;
+}
+
+const snapshot = (stats: DesktopCaptureStats): MotionSnapshot => ({
   real: stats.framesPushed,
   keepalive: stats.keepalivePushed,
 });
 
-async function sampleMotion(
-  prev: { real: number; keepalive: number } | null,
-  currentTier: MotionTier,
-): Promise<{ tier: MotionTier | null; prev: { real: number; keepalive: number } }> {
+async function sampleMotion(prev: MotionSnapshot | null, currentTier: MotionTier): Promise<MotionSample> {
   const stats = await desktopApi.getVideoCaptureStats();
   const current = snapshot(stats);
   if (!prev) {

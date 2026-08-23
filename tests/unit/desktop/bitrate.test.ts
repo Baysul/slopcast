@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { manualBitrateOptions, recommendBitrateCap, recommendedBitrateRange } from '../src/renderer/utils/bitrate.ts';
+import {
+  manualBitrateOptions,
+  recommendBitrateCap,
+  recommendedBitrateRange,
+} from '../../../apps/desktop/src/renderer/utils/bitrate.ts';
 
 test('recommendBitrateCap picks the static 1080p60 AV1 sweet spot (8 Mbps)', () => {
   assert.equal(

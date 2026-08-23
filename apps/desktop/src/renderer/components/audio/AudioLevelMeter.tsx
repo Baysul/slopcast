@@ -203,7 +203,11 @@ function useWaveTarget(idsKey: string, onWave: (columns: number[]) => void): voi
   }, [idsKey]);
 }
 
-function useMeterDraw(draw: MeterDraw): { wake: () => void } {
+interface MeterDrawControls {
+  wake: () => void;
+}
+
+function useMeterDraw(draw: MeterDraw): MeterDrawControls {
   const drawImplRef = useRef<MeterDraw>(() => false);
   useEffect(() => {
     drawImplRef.current = draw;
@@ -228,7 +232,12 @@ function useMeterDraw(draw: MeterDraw): { wake: () => void } {
   return { wake };
 }
 
-function useMeterVisibility(): { hidden: boolean; signalActivity: (active: boolean) => void } {
+interface MeterVisibility {
+  hidden: boolean;
+  signalActivity: (active: boolean) => void;
+}
+
+function useMeterVisibility(): MeterVisibility {
   const [hidden, setHidden] = useState(true);
   const hiddenRef = useRef(true);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
