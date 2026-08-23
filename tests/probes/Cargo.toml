@@ -6,7 +6,7 @@ publish = false
 description = "Probe: does livekit's bundled libwebrtc pull the pw_* dlopen shims even when our code never uses DesktopCapturer?"
 
 [dependencies]
-native-rust = { path = "../packages/native-rust" }
+native-rust = { path = "../../packages/native-rust" }
 livekit = { version = "0.8", features = ["glib-main-loop", "rustls-tls-native-roots"] }
 livekit-api = "0.6"
 tokio = { version = "1", features = ["rt", "macros", "time"] }

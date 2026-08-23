@@ -34,21 +34,33 @@ export interface AudioAppWave {
 
 export const WAVE_EPSILON = 0.002;
 
-export type VideoCodec = 'vp8' | 'h264' | 'vp9' | 'av1' | 'h265';
+export const VIDEO_CODECS = [
+  { id: 'h264', label: 'H.264' },
+  { id: 'h265', label: 'H.265' },
+  { id: 'vp8', label: 'VP8' },
+  { id: 'vp9', label: 'VP9' },
+  { id: 'av1', label: 'AV1' },
+] as const;
+export type VideoCodec = (typeof VIDEO_CODECS)[number]['id'];
 
-export const VIDEO_CODEC_PRIORITY: VideoCodec[] = ['h264', 'h265', 'vp8', 'vp9', 'av1'];
-
-export type ResolutionPreset = '480p' | '720p' | '1080p' | '1440p' | '2160p';
-
-export type MotionMode = 'auto' | 'static' | 'mixed' | 'dynamic';
-
-export const RESOLUTION_DIMENSIONS: Record<ResolutionPreset, { width: number; height: number }> = {
+export const RESOLUTION_DIMENSIONS = {
   '480p': { width: 854, height: 480 },
   '720p': { width: 1280, height: 720 },
   '1080p': { width: 1920, height: 1080 },
   '1440p': { width: 2560, height: 1440 },
   '2160p': { width: 3840, height: 2160 },
-};
+} as const;
+export type ResolutionPreset = keyof typeof RESOLUTION_DIMENSIONS;
+
+export const MOTION_MODES = ['auto', 'static', 'mixed', 'dynamic'] as const;
+export type MotionMode = (typeof MOTION_MODES)[number];
+
+export const isVideoCodec = (value: string): value is VideoCodec => VIDEO_CODECS.some((codec) => codec.id === value);
+
+export const isResolutionPreset = (value: string): value is ResolutionPreset =>
+  Object.hasOwn(RESOLUTION_DIMENSIONS, value);
+
+export const isMotionMode = (value: string): value is MotionMode => MOTION_MODES.some((mode) => mode === value);
 
 export interface StreamSettings {
   fps: number;
@@ -70,21 +82,29 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   motionMode: 'auto',
 };
 
-export const VIDEO_CODEC_LABEL: Record<string, string> = {
-  'VIDEO/H264': 'H.264',
-  'VIDEO/H265': 'H.265',
-  'VIDEO/VP8': 'VP8',
-  'VIDEO/VP9': 'VP9',
-  'VIDEO/AV1': 'AV1',
-  'AUDIO/OPUS': 'Opus',
-  'AUDIO/RED': 'RED',
-  'AUDIO/G722': 'G.722',
-  'AUDIO/TELEPHONEEVENT': 'DTMF',
-};
+const AUDIO_CODEC_LABELS = {
+  OPUS: 'Opus',
+  RED: 'RED',
+  G722: 'G.722',
+  TELEPHONEEVENT: 'DTMF',
+} as const;
+
+type AudioCodec = keyof typeof AUDIO_CODEC_LABELS;
+
+const isAudioCodec = (value: string): value is AudioCodec => Object.hasOwn(AUDIO_CODEC_LABELS, value);
 
 export const codecLabel = (mime: string | null | undefined): string | null => {
   if (!mime) return null;
-  return VIDEO_CODEC_LABEL[mime.toUpperCase()] ?? mime.replace(/^(VIDEO|AUDIO)\//i, '');
+
+  const normalized = mime.toUpperCase();
+  const [kind, name] = normalized.split('/');
+  if (kind === 'VIDEO' && name) {
+    const codec = VIDEO_CODECS.find((candidate) => candidate.id.toUpperCase() === name);
+    if (codec) return codec.label;
+  }
+  if (kind === 'AUDIO' && name && isAudioCodec(name)) return AUDIO_CODEC_LABELS[name];
+
+  return mime.replace(/^(VIDEO|AUDIO)\//i, '');
 };
 
 export const fmtBitrate = (bps: number | null): string => {
@@ -99,27 +119,46 @@ export const fmtLoss = (pct: number | null): string => {
   return `${pct.toFixed(1)}%`;
 };
 
-export function sanitizeStreamSettings(raw: unknown): StreamSettings {
-  if (typeof raw !== 'object' || raw === null) {
+type StreamSettingValue = string | number | boolean | null | undefined;
+type StreamSettingsInputFields = Partial<Record<keyof StreamSettings, StreamSettingValue>>;
+type StreamSettingsInput = StreamSettingsInputFields | StreamSettingValue | readonly StreamSettingValue[];
+
+const isSettingsInputFields = (input: StreamSettingsInput): input is StreamSettingsInputFields =>
+  input != null && !Array.isArray(input) && input.constructor === Object;
+
+const isFiniteNumber = (value: StreamSettingValue): value is number =>
+  value != null && value.constructor === Number && Number.isFinite(Number(value));
+
+const isString = (value: StreamSettingValue): value is string => value != null && value.constructor === String;
+
+const stringValueOr = <Value extends string>(
+  input: StreamSettingValue,
+  isValue: (value: string) => value is Value,
+  fallback: Value,
+): Value => {
+  if (!isString(input) || !isValue(input)) return fallback;
+  return input;
+};
+
+export function sanitizeStreamSettings(input: StreamSettingsInput): StreamSettings {
+  if (!isSettingsInputFields(input)) {
     return { ...DEFAULT_STREAM_SETTINGS };
   }
-  const o = raw as Record<string, unknown>;
-  const d = DEFAULT_STREAM_SETTINGS;
-  const num = (v: unknown, min: number, max: number, fallback: number): number =>
-    typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : fallback;
-  const codec = (v: unknown): VideoCodec =>
-    v === 'h264' || v === 'h265' || v === 'vp8' || v === 'vp9' || v === 'av1' ? v : d.videoCodec;
-  const resolution = (v: unknown): ResolutionPreset =>
-    v === '480p' || v === '720p' || v === '1080p' || v === '1440p' || v === '2160p' ? v : d.resolution;
-  const motionMode = (v: unknown): MotionMode =>
-    v === 'auto' || v === 'static' || v === 'mixed' || v === 'dynamic' ? v : d.motionMode;
+
+  const defaults = DEFAULT_STREAM_SETTINGS;
+  const numberInRange = (value: StreamSettingValue, min: number, max: number, fallback: number): number => {
+    if (!isFiniteNumber(value) || value < min || value > max) return fallback;
+    return value;
+  };
+  const endpoint = input.apiEndpoint;
+
   return {
-    fps: num(o.fps, 1, 60, d.fps),
-    bitrateLimit: num(o.bitrateLimit, 100_000, 200_000_000, d.bitrateLimit),
-    videoCodec: codec(o.videoCodec),
-    resolution: resolution(o.resolution),
-    apiEndpoint: typeof o.apiEndpoint === 'string' && o.apiEndpoint.trim() !== '' ? o.apiEndpoint : d.apiEndpoint,
-    autoBitrate: typeof o.autoBitrate === 'boolean' ? o.autoBitrate : d.autoBitrate,
-    motionMode: motionMode(o.motionMode),
+    fps: numberInRange(input.fps, 1, 60, defaults.fps),
+    bitrateLimit: numberInRange(input.bitrateLimit, 100_000, 200_000_000, defaults.bitrateLimit),
+    videoCodec: stringValueOr(input.videoCodec, isVideoCodec, defaults.videoCodec),
+    resolution: stringValueOr(input.resolution, isResolutionPreset, defaults.resolution),
+    apiEndpoint: isString(endpoint) && endpoint.trim() !== '' ? endpoint : defaults.apiEndpoint,
+    autoBitrate: input.autoBitrate === true || input.autoBitrate === false ? input.autoBitrate : defaults.autoBitrate,
+    motionMode: stringValueOr(input.motionMode, isMotionMode, defaults.motionMode),
   };
 }

@@ -155,7 +155,7 @@ Artifacts land in `target/release/bundle/{appimage,deb,nsis}/` (the Cargo worksp
 
 ## 6. Automated end-to-end test (`pnpm test:e2e`)
 
-The harness lives at `apps/server/src/e2e-test.ts` and orchestrates two automation phases: a Playwright presenter phase driving the real Tauri binary over CEF's remote-debugging protocol (the `e2e` cargo feature adds the `--remote-debugging-port` flag, script at `apps/desktop/tests/e2e/presenter.playwright.ts`) and a Playwright Chromium spectator phase. It runs one full presenter-to-spectator pass per codec (`E2E_CODECS`, default `h264,h265,vp8,vp9,av1`).
+The harness lives at `tests/e2e/e2e-test.ts` and orchestrates two automation phases: a Playwright presenter phase driving the real Tauri binary over CEF's remote-debugging protocol (the `e2e` cargo feature adds the `--remote-debugging-port` flag, script at `tests/e2e/desktop/presenter.playwright.ts`) and a Playwright Chromium spectator phase. It runs one full presenter-to-spectator pass per codec (`E2E_CODECS`, default `h264,h265,vp8,vp9,av1`).
 
 Prerequisites:
 
@@ -193,7 +193,7 @@ Output artifacts (written to `test-output/`):
 
 Agent rules for the e2e test:
 
-1. The test scripts (`apps/server/src/e2e-test.ts`, `apps/desktop/tests/e2e/presenter.playwright.ts`) must pass `pnpm check` before being considered complete.
+1. The test scripts (`tests/e2e/e2e-test.ts`, `tests/e2e/desktop/presenter.playwright.ts`) must pass `pnpm check` before being considered complete.
 2. The `biome.json` override for `e2e-test.ts` allows `noExplicitAny` for Playwright locator chains. Don't remove it without verifying the test still passes Biome CI.
 3. When adding new UI elements to the desktop or web app, update the Playwright selectors in `presenter.playwright.ts` and the assertions in `e2e-test.ts` to match (`span.font-mono` room code, `[role="status"]` badges, `[data-decoder-stalled]`, preview canvas).
 

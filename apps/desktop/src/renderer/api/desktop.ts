@@ -16,15 +16,17 @@ import type {
   PlatformInfo,
 } from '../types';
 
+type TauriInvokeArguments = Parameters<typeof invoke>[1];
+
 const unavailableCommands = new Set<string>();
 
-const warnUnavailable = (cmd: string, err: unknown): void => {
+const warnUnavailable = (cmd: string, cause: unknown): void => {
   if (unavailableCommands.has(cmd)) return;
   unavailableCommands.add(cmd);
-  console.warn(`[desktop] command "${cmd}" unavailable, using fallback:`, err);
+  console.warn(`[desktop] command "${cmd}" unavailable, using fallback:`, cause);
 };
 
-async function invokeOr<T>(cmd: string, args: Record<string, unknown> | undefined, fallback: T): Promise<T> {
+async function invokeOr<T>(cmd: string, args: TauriInvokeArguments, fallback: T): Promise<T> {
   try {
     return await invoke<T>(cmd, args);
   } catch (err) {
@@ -33,7 +35,7 @@ async function invokeOr<T>(cmd: string, args: Record<string, unknown> | undefine
   }
 }
 
-async function invokeOk(cmd: string, args: Record<string, unknown> | undefined): Promise<boolean> {
+async function invokeOk(cmd: string, args: TauriInvokeArguments): Promise<boolean> {
   try {
     await invoke(cmd, args);
     return true;
@@ -43,13 +45,17 @@ async function invokeOk(cmd: string, args: Record<string, unknown> | undefined):
   }
 }
 
-async function invokeErr(cmd: string, args: Record<string, unknown> | undefined): Promise<string | null> {
+async function invokeErr(cmd: string, args: TauriInvokeArguments): Promise<string | null> {
   try {
     await invoke(cmd, args);
     return null;
-  } catch (err) {
-    warnUnavailable(cmd, err);
-    return typeof err === 'string' && err.length > 0 ? err : `Command ${cmd} unavailable`;
+  } catch (cause) {
+    warnUnavailable(cmd, cause);
+    if (Object.prototype.toString.call(cause) === '[object String]') {
+      const message = String(cause);
+      if (message.length > 0) return message;
+    }
+    return `Command ${cmd} unavailable`;
   }
 }
 

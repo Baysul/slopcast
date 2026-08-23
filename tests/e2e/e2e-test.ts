@@ -6,15 +6,20 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 
-import { RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
+import { isResolutionPreset, RESOLUTION_DIMENSIONS, type ResolutionPreset } from '@slopcast/shared-types';
 import { type AppConfig, loadConfig } from '@slopcast/shared-types/config';
 import { RoomServiceClient } from 'livekit-server-sdk';
 
 import type { Browser, Page } from 'playwright';
 
+const parseResolution = (value: string): ResolutionPreset => {
+  if (!isResolutionPreset(value)) throw new Error(`Unsupported E2E resolution: ${value}`);
+  return value;
+};
+
 const passFps = Number(process.env.E2E_FPS ?? 60);
 const passBitrate = Number(process.env.E2E_BITRATE_LIMIT ?? 20_000_000);
-const passResolution = (process.env.E2E_RESOLUTION ?? '1080p') as keyof typeof RESOLUTION_DIMENSIONS;
+const passResolution = parseResolution(process.env.E2E_RESOLUTION ?? '1080p');
 
 const passBitrateFor = (codec: string): number => (codec === 'av1' ? 8_000_000 : passBitrate);
 
@@ -123,7 +128,7 @@ interface TestResult {
   errors: string[];
 }
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
+const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'test-output');
 const DESKTOP_CONSOLE_LOG = path.join(OUTPUT_DIR, 'desktop-console.log');
 const WEB_CONSOLE_LOG = path.join(OUTPUT_DIR, 'web-console.log');
@@ -224,7 +229,12 @@ async function pollHealth(url: string, timeoutMs: number, label: string): Promis
   throw new Error(`${label} did not become healthy within ${timeoutMs}ms`);
 }
 
-function spawnLogging(command: string, args: string[], label: string, logEntries: LogEntry[]): ChildProcess {
+function spawnLogging(
+  command: string,
+  args: string[],
+  label: LogEntry['source'],
+  logEntries: LogEntry[],
+): ChildProcess {
   const proc = spawn(command, args, {
     cwd: REPO_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -235,14 +245,14 @@ function spawnLogging(command: string, args: string[], label: string, logEntries
   proc.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
-      logEntries.push({ source: label as LogEntry['source'], message: line, timestamp: Date.now() });
+      logEntries.push({ source: label, message: line, timestamp: Date.now() });
     }
   });
 
   proc.stderr?.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
-      logEntries.push({ source: label as LogEntry['source'], message: line, timestamp: Date.now() });
+      logEntries.push({ source: label, message: line, timestamp: Date.now() });
     }
   });
 
@@ -488,6 +498,7 @@ async function waitForPresenterPhase(presenterProc: ChildProcess, timeoutMs: num
   while (Date.now() < deadline) {
     if (existsSync(PRESENTER_PHASE_JSON)) {
       try {
+        // SAFETY: the presenter writes this file from the PresenterPhase object in its Playwright script.
         phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
         if (phase.handoffReady || phase.errors.length > 0) break;
       } catch (error) {
@@ -539,37 +550,41 @@ async function runPresenterPhase(
     env: sharedEnv,
   });
   ownProcess(appProc);
-  const attachOutput = (stream: NodeJS.ReadableStream | null): void => {
-    stream?.on('data', (data: Buffer) => {
+  const attachOutput = (stream: NodeJS.ReadableStream): void => {
+    stream.on('data', (data: Buffer) => {
       for (const line of data.toString().split('\n').filter(Boolean)) {
         logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
       }
     });
   };
-  attachOutput(appProc.stdout);
-  attachOutput(appProc.stderr);
+  if (appProc.stdout) attachOutput(appProc.stdout);
+  if (appProc.stderr) attachOutput(appProc.stderr);
   appProc.on('error', (err) => {
     log('PROCESS', `presenter binary spawn error: ${err.message}`);
   });
 
-  const presenterProc = spawn('pnpm', ['--filter', 'desktop', 'exec', 'node', './tests/e2e/presenter.playwright.ts'], {
-    cwd: REPO_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...sharedEnv,
-      E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
-      E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
-      E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
-      E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
-      E2E_SPECTATOR_READY_FLAG: PRESENTER_SPECTATOR_READY_FLAG,
-      E2E_WEBSITE_URL: config.websiteUrl,
-      E2E_CODEC: codec,
-      E2E_EXPECTED_FPS: String(passFps),
-      E2E_EXPECTED_BITRATE: String(passBitrateFor(codec)),
-      E2E_CAPTURE: captureMode,
-      FORCE_COLOR: '0',
+  const presenterProc = spawn(
+    'pnpm',
+    ['--filter', 'desktop', 'exec', 'node', '../../tests/e2e/desktop/presenter.playwright.ts'],
+    {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...sharedEnv,
+        E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
+        E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
+        E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
+        E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
+        E2E_SPECTATOR_READY_FLAG: PRESENTER_SPECTATOR_READY_FLAG,
+        E2E_WEBSITE_URL: config.websiteUrl,
+        E2E_CODEC: codec,
+        E2E_EXPECTED_FPS: String(passFps),
+        E2E_EXPECTED_BITRATE: String(passBitrateFor(codec)),
+        E2E_CAPTURE: captureMode,
+        FORCE_COLOR: '0',
+      },
     },
-  });
+  );
   ownProcess(presenterProc);
 
   attachOutput(presenterProc.stdout);
@@ -959,6 +974,7 @@ async function runSpectatorPhase(
     while (Date.now() < telemetryDeadline) {
       let phase: PresenterPhase;
       try {
+        // SAFETY: the presenter writes this file from the PresenterPhase object in its Playwright script.
         phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 100));

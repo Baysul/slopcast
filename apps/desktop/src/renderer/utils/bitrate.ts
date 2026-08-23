@@ -3,35 +3,35 @@ import type { ResolutionPreset, VideoCodec } from '@slopcast/shared-types';
 export type MotionMode = 'auto' | 'static' | 'mixed' | 'dynamic';
 export type MotionTier = Exclude<MotionMode, 'auto'>;
 
-const AV1_SOFTWARE_CEILING_BPS: Record<ResolutionPreset, number> = {
+const AV1_SOFTWARE_CEILING_BPS = {
   '480p': 2_000_000,
   '720p': 4_000_000,
   '1080p': 8_000_000,
   '1440p': 12_000_000,
   '2160p': 20_000_000,
-};
+} satisfies Record<ResolutionPreset, number>;
 
-const CODEC_SCALE: Record<VideoCodec, number> = {
+const CODEC_SCALE = {
   av1: 1.0,
   vp9: 1.4,
   h265: 1.4,
   vp8: 1.7,
   h264: 1.5,
-};
+} satisfies Record<VideoCodec, number>;
 
-const MOTION_FACTOR: Record<MotionTier, number> = {
+const MOTION_FACTOR = {
   static: 1.0,
   mixed: 1.25,
   dynamic: 1.5,
-};
+} satisfies Record<MotionTier, number>;
 
-const MANUAL_OPTIONS: Record<VideoCodec, number[]> = {
+const MANUAL_OPTIONS = {
   h264: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
   h265: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
   vp8: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
   vp9: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 10_000_000, 20_000_000, 30_000_000, 50_000_000],
   av1: [1_000_000, 2_000_000, 4_000_000, 6_000_000, 8_000_000, 12_000_000, 16_000_000, 20_000_000],
-};
+} satisfies Record<VideoCodec, number[]>;
 
 export interface BitrateInput {
   codec: VideoCodec;

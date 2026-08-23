@@ -1,5 +1,5 @@
 import { ROOM_CODE_RE } from '@slopcast/shared-types';
-import { Router as createRouter, type Router } from 'express';
+import { Router as createRouter, type Request, type Response, type Router } from 'express';
 import { RoomServiceClient } from 'livekit-server-sdk';
 
 import { generateRoomCode } from './roomCodes.js';
@@ -104,16 +104,13 @@ export function initRoutes(
     }
   };
 
-  const health = async (
-    _req: unknown,
-    res: { json: (o: object) => void; status: (code: number) => { json: (o: object) => void } },
-  ) => {
+  const health = async (_request: Request, response: Response) => {
     try {
       const rooms = await roomClient.listRooms();
-      res.json({ status: 'ok', activeRooms: rooms.length });
-    } catch (err) {
-      console.error('Health check failed:', err);
-      res.status(503).json({ status: 'degraded', activeRooms: 0, error: 'LiveKit unreachable' });
+      response.json({ status: 'ok', activeRooms: rooms.length });
+    } catch (error) {
+      console.error('Health check failed:', error);
+      response.status(503).json({ status: 'degraded', activeRooms: 0, error: 'LiveKit unreachable' });
     }
   };
 

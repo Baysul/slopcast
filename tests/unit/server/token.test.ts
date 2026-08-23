@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AccessToken, TokenVerifier } from 'livekit-server-sdk';
 
-import { presenterToken, spectatorToken } from './token.js';
+import { presenterToken, spectatorToken } from '../../../apps/server/src/token.js';
 
 const API_KEY = 'devkey';
 const API_SECRET = 'secret';
@@ -24,6 +24,7 @@ interface ClaimGrants {
 
 async function verifyToken(token: string): Promise<ClaimGrants> {
   const verifier = new TokenVerifier(API_KEY, API_SECRET);
+  // SAFETY: TokenVerifier validated the JWT before exposing its typed claims.
   return (await verifier.verify(token)) as ClaimGrants;
 }
 
@@ -85,6 +86,6 @@ test('an unverifiable key pair is rejected', async () => {
 test('AccessToken can still be constructed like production code', async () => {
   const at = new AccessToken(API_KEY, API_SECRET, { identity: 'probe', ttl: '6h' });
   at.addGrant({ roomJoin: true, room: 'abc-123-xyz', canPublish: true });
-  assert.equal(typeof at.toJwt, 'function');
-  assert.equal(typeof (await at.toJwt()), 'string');
+  assert.equal(at.toJwt instanceof Function, true);
+  assert.equal((await at.toJwt()).split('.').length, 3);
 });

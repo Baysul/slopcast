@@ -8,7 +8,7 @@ import {
   fmtLoss,
   normalizeLivekitUrl,
   sanitizeStreamSettings,
-} from './index.js';
+} from '../../../packages/shared-types/src/index.js';
 
 test('non-object input yields the defaults (defensive copy)', () => {
   for (const raw of [null, undefined, 42, 'fps:60', [], true]) {

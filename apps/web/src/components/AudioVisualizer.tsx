@@ -1,6 +1,12 @@
 import type React from 'react';
 import { useEffect, useRef } from 'react';
 
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
+
 interface AudioVisualizerProps {
   mediaStream: MediaStream | null;
   showStatus?: boolean;
@@ -16,7 +22,7 @@ export function unlockAudioContexts() {
 }
 
 const createAudioContext = (): AudioContext | null => {
-  const ACtor = window.AudioContext ?? (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  const ACtor = window.AudioContext ?? window.webkitAudioContext;
   if (!ACtor) return null;
   const audioCtx = new ACtor();
   if (audioCtx.state === 'suspended') {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { type AudioAppGroup, audioAppsEqual, groupAudioApps } from '../src/renderer/utils/audio-grouping.ts';
+import { audioAppsEqual, groupAudioApps } from '../../../apps/desktop/src/renderer/utils/audio-grouping.ts';
 
 interface App {
   id: number;
@@ -82,7 +82,8 @@ test('representative is promoted to the member with a media title', () => {
   ];
   const groups = groupAudioApps(apps);
   assert.equal(groups.length, 1);
-  const group = groups[0] as AudioAppGroup;
+  const group = groups[0];
+  assert.ok(group);
   assert.equal(group.representative.id, 2);
 });
 
@@ -92,7 +93,8 @@ test('representative keeps first window title when no media title exists', () =>
     app({ id: 2, name: 'Firefox', windowTitle: 'Tab Two', mediaTitle: null }),
   ];
   const groups = groupAudioApps(apps);
-  const group = groups[0] as AudioAppGroup;
+  const group = groups[0];
+  assert.ok(group);
   assert.equal(group.representative.id, 1);
 });
 
@@ -102,7 +104,8 @@ test('existing media title is never replaced by a later member', () => {
     app({ id: 2, name: 'Spotify', mediaTitle: 'Second', windowTitle: 'T' }),
   ];
   const groups = groupAudioApps(apps);
-  const group = groups[0] as AudioAppGroup;
+  const group = groups[0];
+  assert.ok(group);
   assert.equal(group.representative.id, 1);
 });
 

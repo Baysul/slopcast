@@ -82,7 +82,7 @@
       }
     },
     {
-      "includes": ["apps/server/src/e2e-test.ts"],
+      "includes": ["tests/e2e/e2e-test.ts"],
       "linter": {
         "rules": {
           "suspicious": {
@@ -107,7 +107,7 @@
       }
     },
     {
-      "includes": ["apps/desktop/src/renderer/**", "apps/desktop/tests/**", "apps/web/src/**"],
+      "includes": ["apps/desktop/src/renderer/**", "apps/web/src/**", "tests/e2e/desktop/**", "tests/unit/desktop/**"],
       "linter": {
         "rules": {
           "correctness": {

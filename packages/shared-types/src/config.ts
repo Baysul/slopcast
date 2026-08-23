@@ -74,6 +74,7 @@ export function loadConfig(): AppConfig {
 
   if (configPath) {
     try {
+      // SAFETY: mergeConfig validates every optional config field against environment-backed defaults.
       const fileConfig = JSON.parse(readFileSync(configPath, 'utf-8')) as Partial<AppConfig>;
       config = mergeConfig(env, defaults, fileConfig);
     } catch {

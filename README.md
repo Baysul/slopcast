@@ -194,7 +194,10 @@ app.example.com {
 
 ## Testing
 
+Tests live under [`tests/`](tests/). Unit tests are grouped by package in `unit/`, cross-application browser tests live in `e2e/`, and native regression probes live in `probes/`.
+
 ```bash
+pnpm test:unit
 pnpm exec playwright install chromium
 pnpm build:desktop   # one-time prerequisite
 pnpm test:e2e

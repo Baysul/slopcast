@@ -27,7 +27,7 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
 
   const handleMouseDown = (event: React.MouseEvent<HTMLElement>): void => {
     if (event.button !== 0) return;
-    if ((event.target as Element).closest('button')) return;
+    if (event.target instanceof Element && event.target.closest('button')) return;
     if (event.detail === 2) {
       void windowControls.toggleMaximize();
     } else {

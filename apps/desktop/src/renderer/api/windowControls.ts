@@ -3,10 +3,10 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const unavailableOps = new Set<string>();
 
-const warnUnavailable = (op: string, err: unknown): void => {
+const warnUnavailable = (op: string, cause: unknown): void => {
   if (unavailableOps.has(op)) return;
   unavailableOps.add(op);
-  console.warn(`[window] "${op}" unavailable, using fallback:`, err);
+  console.warn(`[window] "${op}" unavailable, using fallback:`, cause);
 };
 
 const currentWindow = (): ReturnType<typeof getCurrentWindow> | null => {

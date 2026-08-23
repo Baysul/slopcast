@@ -1,6 +1,16 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { type Browser, chromium, type Page } from 'playwright';
 
+declare global {
+  interface Window {
+    __TAURI__?: {
+      core?: {
+        invoke?: <T>(command: string) => Promise<T>;
+      };
+    };
+  }
+}
+
 interface PlatformInfo {
   platform: string;
   isWayland: boolean;
@@ -156,17 +166,14 @@ async function clickElement(page: Page, selector: string): Promise<void> {
   await locatorFor(page, selector).click();
 }
 
-function tauriInvoke<T>(page: Page, command: string, args?: Record<string, unknown>): Promise<T> {
+function tauriInvoke<T>(page: Page, command: string): Promise<T> {
   return page.evaluate(
-    ({ cmd, invokeArgs }) => {
-      const tauriWindow = window as unknown as {
-        __TAURI__?: { core?: { invoke?: (c: string, a?: Record<string, unknown>) => Promise<unknown> } };
-      };
-      if (!tauriWindow.__TAURI__?.core?.invoke) throw new Error('window.__TAURI__.core.invoke unavailable');
-      return tauriWindow.__TAURI__.core.invoke(cmd, invokeArgs);
+    ({ cmd }) => {
+      if (!window.__TAURI__?.core?.invoke) throw new Error('window.__TAURI__.core.invoke unavailable');
+      return window.__TAURI__.core.invoke<T>(cmd);
     },
-    { cmd: command, invokeArgs: args },
-  ) as Promise<T>;
+    { cmd: command },
+  );
 }
 
 function assertCodecTelemetry(phaseResult: PhaseResult): void {
@@ -195,7 +202,7 @@ async function samplePreviewCanvas(
       horizontal: false,
       barChannels: '',
     };
-    const canvas = document.querySelector('canvas[aria-label="Live screenshare preview"]') as HTMLCanvasElement | null;
+    const canvas = document.querySelector<HTMLCanvasElement>('canvas[aria-label="Live screenshare preview"]');
     if (!canvas) return empty;
     await new Promise((resolve) => setTimeout(resolve, 500));
     const copy = document.createElement('canvas');

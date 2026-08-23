@@ -4,6 +4,7 @@
   "homepage": "https://github.com/Baysul/slopcast",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "check": "tsc -p tsconfig.renderer.json --noEmit && cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings",
     "dev": "tauri dev",
@@ -11,7 +12,7 @@
     "build": "pnpm --filter @slopcast/shared-types build && vite build",
     "build:renderer": "vite build",
     "tauri": "tauri",
-    "test": "node --test \"tests/*.test.ts\""
+    "test": "node --test \"../../tests/unit/desktop/*.test.ts\""
   },
   "dependencies": {
     "@radix-ui/react-select": "^2.3.7",
