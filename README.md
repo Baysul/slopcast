@@ -4,7 +4,7 @@
   <img src="apps/desktop/resources/icon.svg" alt="Slopcast" width="128">
 </p>
 
-Cross-platform room-based screen and audio sharing — present from the desktop app, spectate from any browser[^1].
+Cross-platform screen and audio sharing. Present from the desktop app and watch from any browser.[^1]
 
 <p align="center">
   <img src="screenshot.png" alt="Slopcast screenshot" width="720">
@@ -12,18 +12,18 @@ Cross-platform room-based screen and audio sharing — present from the desktop 
 
 ## What is Slopcast?
 
-Slopcast is a room-based screen and audio sharing app. The presenter launches the desktop app, creates a room, and shares their screen together with exactly one application's audio. Spectators open the room link in any browser — no download or registration required.
+Slopcast is a room-based screen and audio sharing app. The presenter creates a room in the desktop app, then shares a screen with audio from one selected application. Spectators open the room link in a browser. They do not need an account or an app.
 
-- **Desktop app (Linux, Windows)** — Tauri 2 + React UI with a Rust backend for presenting.
-- **Exclusive per-application audio capture** — PipeWire on Linux (Wayland/X11), WASAPI process loopback on Windows. Only the selected app's audio is streamed; no other sound ever leaks into the stream.
-- **Browser spectators** — a lightweight React web app, strictly receive-only. No capture APIs; spectator tokens cannot publish.
-- **LiveKit SFU** — the Selective Forwarding Unit fans out video and audio to any number of spectators without loading the presenter.
-- **Hardware-accelerated video encoding** when available.
+- **Desktop presenter for Linux and Windows.** A Tauri 2 and React interface backed by Rust.
+- **Per-application audio capture.** PipeWire handles capture on Linux under Wayland or X11. Windows uses WASAPI process loopback. The stream includes only the selected application's audio.
+- **Receive-only browser client.** The web app has no capture controls, and spectator tokens cannot publish.
+- **LiveKit SFU.** LiveKit distributes video and audio to spectators without sending a separate stream from the presenter to each viewer.
+- **Hardware-accelerated video encoding** when the system supports it.
 
 ## How it works
 
-1. **Present** — Launch the desktop app, create a room, and share your screen with per-application audio capture.
-2. **Spectate** — Share the room link. Anyone opens it in a browser and watches the stream instantly — no install, no account.
+1. **Present.** Launch the desktop app, create a room, and share your screen with audio from one application.
+2. **Spectate.** Send the room link to your viewers. They open it in a browser without installing anything or creating an account.
 
 ## Development
 
@@ -39,13 +39,13 @@ docker run --rm -p 7880:7880 -p 7881:7881 -p 7882:7882/udp \
   livekit/livekit-server --dev --bind 0.0.0.0
 #    (or install the binary: curl -sSL https://get.livekit.io | bash)
 
-# 3. Terminal 1 — signaling server
+# 3. Terminal 1: API server
 pnpm dev:server
 
-# 4. Terminal 2 — web spectator
+# 4. Terminal 2: web spectator
 pnpm dev:web
 
-# 5. Terminal 3 — desktop presenter
+# 5. Terminal 3: desktop presenter
 pnpm dev:desktop
 ```
 
@@ -53,9 +53,7 @@ Click **Create Live Room** in the desktop app, copy the room link, and open it i
 
 ## Configuration
 
-For local development, configuration is loaded from `slopcast.config.json` at the project root
-with LiveKit defaults pointing to `ws://localhost:7880`. In production, set the environment
-variables below to override each value — they take precedence over the config file.
+For local development, Slopcast reads `slopcast.config.json` from the project root. Its LiveKit defaults point to `ws://localhost:7880`. In production, use the environment variables below. Environment variables take precedence over the config file.
 
 ### Environment variables
 
@@ -74,29 +72,30 @@ variables below to override each value — they take precedence over the config 
 
 ### Docker Compose
 
-The repository includes a `docker-compose.yml` that runs the full stack on the default Docker bridge network: a **LiveKit dev server**, the **API server**, the **web client**, and **nginx** as the public entry point (HTTP on port 80, proxying `/` to the web client and `/api/*`, `/health`, `/ws` to the server — see `nginx.conf`).
+The included `docker-compose.yml` runs a LiveKit development server, the API server, the web client, and nginx on the default Docker bridge network. Nginx listens on port 80. It sends `/` to the web client and proxies `/api/*`, `/health`, and `/ws` to the API server. See `nginx.conf` for the full configuration.
 
 ```bash
 docker compose up -d
 ```
 
-Published ports: `80` (nginx), `3000` (web), `3001` (API), `7880` (LiveKit signaling), `7881` (LiveKit ICE/TCP fallback), `7882/udp` (LiveKit WebRTC media — dev mode muxes all media onto a single UDP port). No credentials are needed: the compose file starts LiveKit in `--dev` mode, whose default `devkey`/`secret` match the server's environment. For same-machine testing, open `http://localhost` — everything works out of the box.
+The stack publishes ports `80` for nginx, `3000` for the web client, `3001` for the API, `7880` for LiveKit signaling, `7881` for LiveKit ICE/TCP fallback, and `7882/udp` for WebRTC media. In development mode, LiveKit sends all media through the single UDP port. The compose file uses LiveKit's default `devkey` and `secret`, which match the API server environment. For same-machine testing, open `http://localhost`.
 
 ### LiveKit URLs in containers
 
 Two LiveKit URLs exist, and under Docker they differ:
 
-- `LIVEKIT_URL` — how the **API server** reaches the SFU. Inside the compose network this is the container hostname: `ws://livekit:7880`. Only the server can resolve this.
-- `LIVEKIT_CLIENT_URL` — the URL **advertised to clients** (browser spectators and the desktop app) in room-create and token responses. It must be reachable from the browser, so it can never be the container hostname. It defaults to `LIVEKIT_URL` when unset. The compose file sets it to `ws://localhost:7880`, which is right when the browser runs on the same machine as the stack; for remote spectators, set it to a public endpoint such as `wss://livekit.example.com`.
+- `LIVEKIT_URL` tells the API server how to reach the SFU. Inside the compose network, use the container hostname `ws://livekit:7880`. Only containers on that network can resolve it.
+- `LIVEKIT_CLIENT_URL` is the LiveKit URL returned to browser spectators and the desktop app. Clients must be able to reach it, so do not use the container hostname. When unset, it falls back to `LIVEKIT_URL`. The compose file uses `ws://localhost:7880` for same-machine testing. For remote spectators, set a public endpoint such as `wss://livekit.example.com`.
 
 ### LiveKit without `--dev`
 
-`--dev` is for local development and evaluation only — with it, anyone can mint tokens using the default `devkey`/`secret`. For production, run a LiveKit server with real credentials (set `LIVEKIT_KEYS=api-key:api-secret` or pass a keys file via `livekit-server --keys keys.yaml`), then point Slopcast's `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` at that server and its key pair. Outside dev mode LiveKit uses the UDP range 50000–60000 for media (plus TCP 7881 for ICE/TCP fallback) — publish/expose those ports, and set `rtc.use_external_ip: true` (or `--node-ip`) so the SFU advertises an address clients can actually reach. In the compose file, drop `--dev` from the `livekit` service and set `LIVEKIT_KEYS` in its environment.
+Use `--dev` only for local development and evaluation. Its default `devkey` and `secret` let anyone mint tokens. In production, configure LiveKit with real credentials. Set `LIVEKIT_KEYS=api-key:api-secret` or pass a key file with `livekit-server --keys keys.yaml`. Then point Slopcast's `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` to that server and key pair.
+
+Outside development mode, LiveKit uses UDP ports 50000 through 60000 for media and TCP port 7881 for ICE/TCP fallback. Publish those ports and set `rtc.use_external_ip: true` or `--node-ip` so the SFU advertises an address clients can reach. In `docker-compose.yml`, remove `--dev` from the `livekit` service and set `LIVEKIT_KEYS` in its environment.
 
 ### Reverse proxy (production)
 
-For production, put a reverse proxy in front to serve both the web SPA (static files) and the API
-server. The examples below use a single domain like `app.example.com`.
+In production, use a reverse proxy to serve the web app and API from one domain. The examples below use `app.example.com`.
 
 #### Nginx
 
@@ -175,8 +174,7 @@ app.example.com {
 }
 ```
 
-Caddy provisions TLS certificates automatically via Let's Encrypt / ZeroSSL when the
-domain's DNS points to the server. No extra HTTPS configuration is needed.
+When the domain's DNS points to the server, Caddy automatically provisions TLS certificates through Let's Encrypt or ZeroSSL. No extra HTTPS configuration is needed.
 
 To use Caddy instead of the default nginx entry point, uncomment the `caddy` service in
 `docker-compose.yml` (and comment out the `nginx` service), then place a `Caddyfile`
@@ -206,7 +204,7 @@ The end-to-end test launches the desktop app, creates a room, starts a screensha
 
 ## Background
 
-This is a vibe-coded, personal project of mine that I plan to maintain until the day *an actually good app* for sharing your screen on Linux/Wayland appears.
+Slopcast is a vibe-coded personal project. I plan to maintain it until *an actually good app* for sharing a screen on Linux and Wayland appears.
 
 ### Why not use other apps?
 
@@ -215,19 +213,20 @@ This is a vibe-coded, personal project of mine that I plan to maintain until the
 - **Element:** As of now has no support for screen sharing with audio, and lacks settings to adjust the bitrate, resolution and framerate of the stream. [There's a pending pull request that was made in February of this year](https://github.com/element-hq/element-call/pull/3736#issuecomment-4845070478), but a merge is nowhere in sight. That's not to mention the possible overhead investment of [setting up a homeserver](https://element-hq.github.io/synapse/latest/welcome_and_overview.html) with Element Call - which means a well-configured, resource-hungry Synapse server (+ web server, + PostgreSQL server), a TURN server and LiveKit deployment .. that you then have to convince your friends to register on and use.
 - **Jitsi Meet:** Honestly, it's not terrible. The bitrate is good and it's fairly straightforward to create a room and have your friends join. I don't remember what exactly the issue was, but I think it could only share tabs or something, and the audio and latency weren't great in general.
 
-### What makes a good screensharing app, anyway?
+### What makes a good screen-sharing app?
 
-Well first of all, native Linux desktop support is a must. The app should:
-- Run natively on Wayland
-  - This usually means being PipeWire-aware and making use of PipeWire introspection and other techniques **to automatically capture a single application's audio**, rather than the entire desktop's. Just like how Discord does on Windows.
-  - Usage of [XDG Desktop Portal's](https://docs.flatpak.org/en/latest/desktop-integration.html#portals) application picker for a smooth experience across different environments.
-- Make use of hardware-accelerated video encoding when available.
-  - So far this has only been tested on a system with an RDNA2 GPU with the open-source driver.
-  - If you use NVIDIA: [let me know if you run into any issues](https://github.com/Baysul/slopcast/issues). Install whatever driver makes sense for your GPU[^3] and then install `nvidia-utils`.
-- Be free and open-source.
-- Be easy to use. You and your friends should be able to watch a movie together with as little friction as possible. The UI must also be relatively simple and approachable while still looking good enough.
-- Not require registration or a download for people who just need to watch.[^2]
-- A cross-platform desktop app (Linux, Windows)
+Native Linux desktop support is non-negotiable. A good app should:
+
+- Run natively on Wayland.
+  - Use PipeWire introspection to capture one application's audio instead of the entire desktop, as Discord does on Windows.
+  - Use the [XDG Desktop Portal](https://docs.flatpak.org/en/latest/desktop-integration.html#portals) picker across desktop environments.
+- Use hardware-accelerated video encoding when available.
+  - Slopcast has been tested on an RDNA2 GPU with the open-source driver.
+  - NVIDIA users should install the appropriate driver for their GPU[^3] and `nvidia-utils`. [Open an issue](https://github.com/Baysul/slopcast/issues) if you run into problems.
+- Be free and open source.
+- Make it easy for friends to watch a movie together. The interface should stay simple and approachable.
+- Let spectators watch without registering or downloading an app.[^2]
+- Provide desktop apps for Linux and Windows.
 
 ## Project structure
 
@@ -235,14 +234,14 @@ Well first of all, native Linux desktop support is a must. The app should:
 apps/
 ├── desktop/     Tauri 2 + React + Rust (presenter)
 ├── web/         React browser app (spectator-only)
-└── server/      Express + WebSocket signaling server
+└── server/      Express room and token API
 packages/
 ├── native-livekit/ Rust LiveKit room + publishing crate (libwebrtc)
 ├── native-rust/    Rust capture engine (PipeWire/WASAPI audio, video)
 └── shared-types/   Shared TypeScript interfaces
 ```
 
-Room codes, ports, and LiveKit credentials are read from `slopcast.config.json` at the repo root (overridable via environment variables, see [Configuration](#configuration)).
+Slopcast reads room code settings, ports, and LiveKit credentials from `slopcast.config.json` at the repository root. Environment variables can override these values. See [Configuration](#configuration).
 
 ## Requirements
 
@@ -263,9 +262,9 @@ Linux H.264 publishing uses the system GStreamer `vah264enc` element; H.265 uses
 
 The native Rust crates (`packages/native-rust`, `packages/native-livekit`) are linked directly into the Tauri backend (`apps/desktop/src-tauri`). A C++20-capable toolchain is required (gcc >= 10, clang >= 10, or MSVC 2022+) for libwebrtc.
 
-### Server & Web
+### Server and web
 
-Both run on Node.js with no additional native dependencies. Playwright (Chromium) is required for running the end-to-end test suite:
+Both run on Node.js without additional native dependencies. The end-to-end test suite requires Playwright and Chromium:
 
 ```bash
 pnpm exec playwright install chromium
