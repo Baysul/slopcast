@@ -41,9 +41,6 @@ const allowedOrigins = new Set([
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://[::1]:5173',
-  // Tauri v2 production/webkit registrations: the packaged desktop renderer
-  // is served from the `tauri://localhost` custom protocol, so its API fetch
-  // carries that origin, so its API fetches go through the CORS allowlist.
   'tauri://localhost',
   'http://tauri.localhost',
 ]);
@@ -63,8 +60,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Mounted on the POST path only: a prefix-mount would also rate-limit
-// /api/rooms/:code/token, capping spectators at the create limit.
 app.post('/api/rooms', roomCreateLimiter);
 app.use('/api/rooms/:code/token', spectatorTokenLimiter);
 app.use('/api/rooms/:code/spectators', spectatorCountLimiter);

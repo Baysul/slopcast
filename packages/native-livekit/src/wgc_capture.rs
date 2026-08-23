@@ -1,42 +1,3 @@
-//! Windows desktop capture engine: libwebrtc's `DesktopCapturer` with the
-//! WGC backend, driven through the livekit crate's bundled bindings
-//! (`livekit::webrtc::desktop_capturer` — libwebrtc 0.3.45 over
-//! webrtc-sys 0.3.42, already in the dependency tree; the vendored
-//! webrtc-sys carries the cursor-compositing shim patch, Windows-arm
-//! unchanged).
-//!
-//! Why WGC via libwebrtc instead of the `windows` crate's `GraphicsCapture`
-//! APIs directly: the shim (`webrtc-sys` `desktop_capturer.cpp`, `_WIN64`)
-//! already wires the options — `allow_wgc_screen_capturer` /
-//! `allow_wgc_window_capturer`, `allow_directx_capturer` as the pre-2004
-//! fallback, `set_enumerate_current_process_windows(false)` so our own
-//! windows never appear in the picker, and `prefer_cursor_embedded` so the
-//! cursor is painted into the frames (WGC embeds the cursor natively, so the
-//! `DesktopAndCursorComposer` shim wrapper is Linux-only) — and the prebuilt
-//! libwebrtc ships the whole `modules/desktop_capture` module. The engine
-//! only has to poll.
-//!
-//! Capture semantics (verified against the webrtc-sdk fork's m144 line —
-//! `webrtc-sdk/webrtc@m144_release`, tags `libwebrtc.m144.7559.xx` —
-//! `wgc_capturer_win.cc` / `wgc_capture_session.cc`):
-//! - `capture_frame()` is a *non-blocking poll*: the WGC session keeps the
-//!   last `Direct3D11CaptureFramePool` frame in an internal queue and
-//!   re-delivers it when the screen is static, so polling at the encoder
-//!   target fps yields a steady stream even for static content (no
-//!   keepalive hack needed).
-//! - The callback fires synchronously on the polling thread; `DesktopFrame`
-//!   must be consumed inside it (`data()` is `stride × height` bytes of
-//!   BGRA with a lifetime tied to the frame).
-//! - `ERROR_PERMANENT` means the source is gone (window closed, D3D device
-//!   lost, no frame within ~200 ms at startup) — mapped to the existing
-//!   `capture-ended` event once per session, mirroring the portal
-//!   `session_closed` semantics.
-//! - The capture thread must be COM-initialized (MTA) before the first
-//!   `capture_frame()` — WGC is WinRT-based and the shim expects the thread
-//!   to already own an apartment.
-//!
-//! Feeds packed-BGRA `CapturedFrame` values into Frame delivery.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -51,13 +12,8 @@ use windows::core::HRESULT;
 use crate::desktop_capture::{capture_poll_fps, fire_capture_ended_once};
 use crate::frame_delivery::{CapturedFrame, FrameIngress, SourceIssue, monotonic_us};
 
-/// The thread was already initialized in a different COM apartment; the WGC
-/// session may still work, so it is tolerated (same policy as the WASAPI
-/// capture thread in native-rust).
 const RPC_E_CHANGED_MODE: i32 = -2_147_417_850;
 
-/// What kind of source a WGC capture session targets. Serialized camelCase
-/// for the renderer's source picker (`"screen"` / `"window"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WgcSourceKind {
@@ -65,10 +21,6 @@ pub enum WgcSourceKind {
     Window,
 }
 
-/// One capturable source as reported by libwebrtc's `GetSourceList`:
-/// screens (monitors) and windows. `id` is the monitor/source id (Windows)
-/// or HWND-derived id; `display_id` is the monitor's `DISPLAY_DEVICE`
-/// id for screens (0 for windows).
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureSourceInfo {
@@ -78,11 +30,6 @@ pub struct CaptureSourceInfo {
     pub kind: WgcSourceKind,
 }
 
-/// RAII guard for the calling thread's COM apartment (MTA). WGC is
-/// WinRT-based and libwebrtc's capturer requires the thread to own an
-/// apartment before the first `capture_frame`. `CoUninitialize` runs only
-/// when this guard actually initialized the apartment (`S_OK`/`S_FALSE`); an
-/// already-initialized thread (`RPC_E_CHANGED_MODE`) is left untouched.
 struct ComApartment {
     uninit: bool,
 }
@@ -111,7 +58,6 @@ impl Drop for ComApartment {
     }
 }
 
-/// Maps the public source kind to libwebrtc's capturer type.
 impl From<WgcSourceKind> for DesktopCaptureSourceType {
     fn from(kind: WgcSourceKind) -> Self {
         match kind {
@@ -121,15 +67,6 @@ impl From<WgcSourceKind> for DesktopCaptureSourceType {
     }
 }
 
-/// Enumerates every screen (monitor) and window capturable through WGC on a
-/// short-lived COM-initialized thread. The renderer's picker consumes the
-/// result; the chosen `(kind, id)` is passed back into
-/// [`WgcCapture::start`].
-///
-/// # Errors
-///
-/// Returns an error when the worker thread cannot be spawned, COM fails to
-/// initialize, or no capturer of either kind can be created.
 pub(crate) fn get_windows_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     let (tx, rx) = mpsc::channel();
     let handle = thread::Builder::new()
@@ -182,35 +119,15 @@ fn enumerate_kind(
         .collect())
 }
 
-/// The WGC capture engine: owns the libwebrtc capturer (created, started and
-/// polled on the capture thread) and maps its callback into the shared
-/// typed Frame delivery ingress. Created by the acquisition coordinator;
-/// `poll` is driven by its source worker at the encoder target
-/// fps (or the fallback preview cadence before a track is live).
 pub(crate) struct WgcCapture {
-    /// Declared before `_com` so it drops first (fields drop in declaration
-    /// order): the libwebrtc capturer must be destroyed while the COM
-    /// apartment is still alive.
+    // `_com` must remain last so the capturer drops before COM uninitializes.
     capturer: DesktopCapturer,
-    /// Set on the first `ERROR_PERMANENT`; polling stops so the shared loop
-    /// keeps running (preview stays idle) until the renderer calls `stop()`
-    /// — the same lifecycle as a closed portal session.
     ended: Arc<AtomicBool>,
-    /// Next `capture_frame` tick; paced so the pipeline never sees more
-    /// polls than the encoder target.
     next_poll_at: Instant,
     _com: ComApartment,
 }
 
 impl WgcCapture {
-    /// Creates the capturer, resolves `id` against the live source list (the
-    /// chosen window may have closed between the picker and this call) and
-    /// starts the capture session. Runs on the capture thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when COM cannot be initialized, no capturer can be
-    /// created, or the chosen source no longer exists.
     pub(crate) fn start(
         kind: WgcSourceKind,
         id: u64,
@@ -229,8 +146,6 @@ impl WgcCapture {
 
         let ended = Arc::new(AtomicBool::new(false));
         let ended_cb = Arc::clone(&ended);
-        // Scratch buffer to re-pack stride-padded rows into the packed-BGRA
-        // contract (WGC rows pad to a D3D11 row pitch).
         let mut packed: Vec<u8> = Vec::new();
         capturer.start_capture(Some(source), move |result| match result {
             Ok(frame) => {
@@ -284,7 +199,6 @@ impl WgcCapture {
                 });
             }
             Err(CaptureError::Temporary) => {
-                // Transient WGC drop (frame pool raced the poll); keep going.
                 ingress.record_issue(SourceIssue::CaptureError);
             }
             Err(CaptureError::Permanent) => {
@@ -303,9 +217,6 @@ impl WgcCapture {
         })
     }
 
-    /// Paces and issues one `capture_frame` poll when due. The callback runs
-    /// synchronously inside the call; `ERROR_PERMANENT` flips `ended` so
-    /// later polls are no-ops until the session is stopped.
     pub(crate) fn poll(&mut self) {
         if self.ended.load(Ordering::Relaxed) {
             return;

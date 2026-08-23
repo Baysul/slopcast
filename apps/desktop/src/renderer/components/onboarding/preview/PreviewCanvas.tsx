@@ -1,36 +1,12 @@
 import { useEffect, useRef } from 'react';
 import type { PreviewFrame } from '../../../types';
 
-// Live preview renderer: raw BGRA frames (tightly packed, native DMA-BUF
-// readback byte order) are uploaded into a persistent GPU texture and drawn
-// to the card — no per-frame decode, no channel shuffling.
-//
-// Pipeline preference:
-// 1. WebGPU — the intended path: a persistent `bgra8unorm` texture updated
-//    per frame with `queue.writeTexture` (pixels land in GPU memory as-is).
-//    The Linux webview (WebKitGTK 2.52.x) builds with `ENABLE_WEBGPU=OFF`
-//    and exposes no runtime toggle, so `navigator.gpu` is undefined there —
-//    this path activates automatically wherever a future webview enables it.
-// 2. WebGL2 — the equivalent in the shipped webview: the raw BGRA bytes are
-//    uploaded with `texImage2D`/`texSubImage2D` labeled as RGBA, and the
-//    channel order is corrected at sample time in the fragment shader
-//    (`.bgra`). WebKitGTK's WebGL2 rejects `TEXTURE_SWIZZLE` (INVALID_ENUM)
-//    and does not expose `EXT_texture_format_BGRA8888`, so the shader is
-//    the only zero-copy place for the swap. Same persistent-texture +
-//    per-frame-upload shape as WebGPU.
-// 3. Canvas2D — last resort: JS-side R/B swap into an ImageData.
-//
-// The native side already scales frames to fit the card (OBS-style), so the
-// draw only needs an aspect-preserving fit of the texture quad.
-
 const PREVIEW_VERT = `#version 300 es
 layout(location = 0) in vec2 aPos;
 out vec2 vUv;
 uniform vec2 uScale;
 void main() {
   gl_Position = vec4(aPos * uScale, 0.0, 1.0);
-  // WebGL texture row 0 is the image's top row, so V must run opposite to
-  // clip space Y (screen top = +1 samples t = 0).
   vUv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
 }`;
 
@@ -40,10 +16,6 @@ in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uTex;
 void main() {
-  // The upload is labeled RGBA but the raw bytes are BGRA — the channel
-  // swap happens here at sample time (WebKitGTK's WebGL2 rejects
-  // TEXTURE_SWIZZLE and lacks EXT_texture_format_BGRA8888, so the shader
-  // is the only zero-copy place to do it).
   outColor = texture(uTex, vUv).bgra;
 }`;
 
@@ -52,9 +24,6 @@ interface GpuFit {
   scaleY: number;
 }
 
-/** Aspect-preserving fit of a `texW x texH` quad into a `canvasW x canvasH`
- * viewport (letterbox); returns the clip-space scale to apply to a
- * full-canvas quad. */
 function fitScale(texW: number, texH: number, canvasW: number, canvasH: number): GpuFit {
   if (texW === 0 || texH === 0 || canvasW === 0 || canvasH === 0) {
     return { scaleX: 1, scaleY: 1 };
@@ -67,7 +36,6 @@ function fitScale(texW: number, texH: number, canvasW: number, canvasH: number):
   return { scaleX: texAspect / canvasAspect, scaleY: 1 };
 }
 
-/** Compiles a WebGL2 program; returns null on failure (logged once). */
 function compileProgram(gl: WebGL2RenderingContext): WebGLProgram | null {
   const compile = (type: number, source: string): WebGLShader | null => {
     const shader = gl.createShader(type);
@@ -99,13 +67,11 @@ function compileProgram(gl: WebGL2RenderingContext): WebGLProgram | null {
   return program;
 }
 
-// WebGPU usage flags missing from TS's lib.dom (spec-defined bits).
 const GPU_TEXTURE_USAGE_TEXTURE_BINDING = 0x04;
 const GPU_TEXTURE_USAGE_COPY_DST = 0x02;
 const GPU_BUFFER_USAGE_UNIFORM = 0x40;
 const GPU_BUFFER_USAGE_COPY_DST = 0x08;
 
-/** WebGL2 renderer: raw BGRA upload + TEXTURE_SWIZZLE channel fix. */
 class WebGl2Preview {
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram | null;
@@ -128,7 +94,6 @@ class WebGl2Preview {
     }
     this.program = program;
     this.uScale = gl.getUniformLocation(program, 'uScale');
-    // Fullscreen triangle (clip space), covering the viewport before uScale.
     const vertices = new Float32Array([-1, -1, 3, -1, -1, 3]);
     this.vao = gl.createVertexArray();
     this.buffer = gl.createBuffer();
@@ -140,8 +105,6 @@ class WebGl2Preview {
     gl.bindVertexArray(null);
   }
 
-  /** Uploads one BGRA frame (tightly packed, `width * height * 4` bytes)
-   * into the persistent texture, recreating it when the size changes. */
   upload(frame: PreviewFrame): void {
     const gl = this.gl;
     if (!this.program) return;
@@ -156,10 +119,6 @@ class WebGl2Preview {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      // The raw bytes are BGRA; they are uploaded labeled as RGBA and the
-      // fragment shader swaps the channels at sample time (see PREVIEW_FRAG)
-      // — zero-copy, no per-frame JS swizzle. `frame.data` is already a
-      // Uint8Array view; wrapping it again would copy.
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
     } else {
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
@@ -167,7 +126,6 @@ class WebGl2Preview {
     }
   }
 
-  /** Draws the texture quad fitted into the current canvas size. */
   draw(canvasW: number, canvasH: number): void {
     const gl = this.gl;
     if (!this.program || !this.texture || !this.vao || !this.buffer) return;
@@ -184,8 +142,6 @@ class WebGl2Preview {
   }
 }
 
-/** WebGPU renderer: persistent `bgra8unorm` texture + `writeTexture` per
- * frame. Activates only when the webview exposes `navigator.gpu`. */
 class WebGpuPreview {
   private readonly device: GPUDevice;
   private readonly context: GPUCanvasContext;
@@ -261,7 +217,6 @@ class WebGpuPreview {
           var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
           var out: VsOut;
           out.pos = vec4<f32>(p[i] * u.scale, 0.0, 1.0);
-          // Texture row 0 is the image's top row; V runs opposite to clip Y.
           out.uv = vec2<f32>(p[i].x * 0.5 + 0.5, 0.5 - p[i].y * 0.5);
           return out;
         }
@@ -301,7 +256,6 @@ class WebGpuPreview {
   }
 }
 
-/** Canvas2D fallback: JS-side R/B swap into an ImageData draw. */
 function drawCanvas2d(ctx: CanvasRenderingContext2D, frame: PreviewFrame): void {
   const { width, height, data } = frame;
   const image = ctx.createImageData(width, height);
@@ -309,10 +263,10 @@ function drawCanvas2d(ctx: CanvasRenderingContext2D, frame: PreviewFrame): void 
   const out = image.data;
   for (let i = 0; i < pixels.length; i += 4) {
     const [blue = 0, green = 0, red = 0, alpha = 0] = pixels.subarray(i, i + 4);
-    out[i] = red; // R
-    out[i + 1] = green; // G
-    out[i + 2] = blue; // B
-    out[i + 3] = alpha; // A
+    out[i] = red;
+    out[i + 1] = green;
+    out[i + 2] = blue;
+    out[i + 3] = alpha;
   }
   ctx.putImageData(image, 0, 0);
 }
@@ -322,8 +276,6 @@ type PreviewRenderer = {
   draw: (width: number, height: number) => void;
 };
 
-/** Attempts the WebGPU renderer (unavailable in WebKitGTK builds as of
- * 2.52.x — the path stays for webviews that ship `navigator.gpu`). */
 async function tryWebGpu(canvas: HTMLCanvasElement): Promise<PreviewRenderer | null> {
   if (!navigator.gpu) return null;
   try {
@@ -337,16 +289,11 @@ async function tryWebGpu(canvas: HTMLCanvasElement): Promise<PreviewRenderer | n
   }
 }
 
-/** The shipped path in the WebKitGTK webview: raw BGRA upload + shader
- * channel swap. `preserveDrawingBuffer: true` keeps the last drawn frame
- * readable after compositing (the preview spec samples canvas pixels; a
- * default WebGL buffer is cleared post-composite). */
 function tryWebGl2(canvas: HTMLCanvasElement): PreviewRenderer | null {
   const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
   return gl ? new WebGl2Preview(gl) : null;
 }
 
-/** Last resort: JS-side R/B swap into an ImageData draw. */
 function tryCanvas2d(canvas: HTMLCanvasElement): PreviewRenderer | null {
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
@@ -378,10 +325,6 @@ export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
         console.info('[PreviewCanvas] preview renderer: WebGPU');
         return;
       }
-      // TEMP wedge-hunt: WebGL2 wedged the webview's JS main thread after a
-      // few frames under the channel-era transport on this stack. Keep the
-      // CPU Canvas2D path until WebGL2 is re-tested against the frame://
-      // pull transport (see the freeze investigation notes).
       const canvas2d = tryCanvas2d(canvas);
       if (canvas2d) {
         rendererRef.current = canvas2d;

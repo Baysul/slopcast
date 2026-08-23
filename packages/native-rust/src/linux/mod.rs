@@ -30,14 +30,6 @@ struct PwCtx {
     core: pipewire::core::CoreRc,
 }
 
-/// Runs the global `PipeWire` library init exactly once on the main thread,
-/// before the event loop serves IPC. libwebrtc's statically-linked `pw_*`
-/// dlopen shims (pulled by its `PipeWire` video capture module, not by our
-/// code) capture pipewire-rs's references in the same binary; the Tauri
-/// backend arms them (`native_livekit::arm_pipewire_shims`) before calling
-/// this so `pw_init` reaches the real libpipewire. Completing the once here
-/// keeps later worker-thread calls (the renderer polls `getAudioApps` every
-/// 3s) on the fast path.
 pub(crate) fn ensure_pipewire_init() {
     pipewire::init();
 }

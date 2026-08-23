@@ -144,7 +144,6 @@ test('groupCodecsByHardware puts hardware first, preserving order within each gr
     hardware.map((c) => c.codec),
     ['h264', 'h265'],
   );
-  // The recommended codec (hardware h264) stays first within its group.
   assert.equal(hardware[0]?.recommended, true);
   assert.deepEqual(
     software.map((c) => c.codec),

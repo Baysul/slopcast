@@ -1,6 +1,3 @@
-//! Audio commands: application enumeration, exclusive capture, metering and
-//! the Wayland audio-source resolution cascade.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -11,12 +8,8 @@ use crate::AppHandle;
 use crate::context::CaptureContextCache;
 use crate::dto::{AudioAppDto, AudioAppWaveDto, CaptureContextDto};
 
-/// Waveform columns below this amplitude delta are not worth re-rendering;
-/// shared with the renderer meter store (same value as `WAVE_EPSILON` in
-/// `@slopcast/shared-types`).
 const WAVE_EPSILON: f64 = 0.002;
 
-/// Registers the PCM and waveform callbacks once at startup.
 pub fn register_audio_callbacks(app: &AppHandle) {
     native_rust::set_audio_data_callback(Box::new(|pcm| {
         let _ = native_livekit::feed_pcm(pcm);
@@ -50,7 +43,6 @@ pub fn register_audio_callbacks(app: &AppHandle) {
     }));
 }
 
-/// Audio capture target as sent by the renderer: a numeric node id / PID, or a textual label.
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AudioTargetArg {
@@ -67,12 +59,9 @@ impl From<AudioTargetArg> for native_rust::AudioTarget {
     }
 }
 
-/// Lists active audio applications visible to the native layer.
-///
-/// # Errors
-///
-/// Returns an error if the platform-specific audio enumeration fails.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if audio application enumeration fails.
 pub async fn get_audio_apps() -> Result<Vec<AudioAppDto>, String> {
     tauri::async_runtime::spawn_blocking(native_rust::list_audio_applications)
         .await
@@ -80,25 +69,18 @@ pub async fn get_audio_apps() -> Result<Vec<AudioAppDto>, String> {
         .map(|apps| apps.into_iter().map(AudioAppDto::from).collect())
 }
 
-/// Dumps the full property dictionaries of every live audio stream node.
-///
-/// # Errors
-///
-/// Returns an error if `PipeWire` node enumeration fails.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if audio source enumeration fails.
 pub async fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, String> {
     tauri::async_runtime::spawn_blocking(native_rust::dump_audio_sources)
         .await
         .map_err(|e| format!("dump audio sources task failed: {e}"))?
 }
 
-/// Starts exclusive audio capture for the given application.
-///
-/// # Errors
-///
-/// Returns an error if `PipeWire` node creation / WASAPI activation or
-/// linking fails.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if audio capture cannot start.
 pub async fn start_audio_capture(target_id: AudioTargetArg) -> Result<bool, String> {
     let target = native_rust::AudioTarget::from(target_id);
     tauri::async_runtime::spawn_blocking(move || native_rust::start_audio_capture(&target))
@@ -106,24 +88,18 @@ pub async fn start_audio_capture(target_id: AudioTargetArg) -> Result<bool, Stri
         .map_err(|e| format!("start audio capture task failed: {e}"))?
 }
 
-/// Stops the active audio capture session.
-///
-/// # Errors
-///
-/// Returns an error if the capture state lock is poisoned.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if audio capture cannot stop.
 pub async fn stop_audio_capture() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(native_rust::stop_audio_capture)
         .await
         .map_err(|e| format!("stop audio capture task failed: {e}"))?
 }
 
-/// Switches the active capture to a new target application.
-///
-/// # Errors
-///
-/// Returns an error if no capture session is active or the switch fails.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if the active capture cannot switch targets.
 pub async fn switch_audio_capture(target_id: AudioTargetArg) -> Result<bool, String> {
     let target = native_rust::AudioTarget::from(target_id);
     tauri::async_runtime::spawn_blocking(move || native_rust::switch_audio_capture(&target))
@@ -131,44 +107,32 @@ pub async fn switch_audio_capture(target_id: AudioTargetArg) -> Result<bool, Str
         .map_err(|e| format!("switch audio capture task failed: {e}"))?
 }
 
-/// Starts per-app audio waveform metering.
-///
-/// # Errors
-///
-/// Returns an error if the `PipeWire` meter thread fails to start.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if audio metering cannot start.
 pub async fn start_audio_metering() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(native_rust::start_audio_metering)
         .await
         .map_err(|e| format!("start audio metering task failed: {e}"))?
 }
 
-/// Stops the active audio meter session.
-///
-/// # Errors
-///
-/// Returns an error if the meter state lock is poisoned.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if audio metering cannot stop.
 pub async fn stop_audio_metering() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(native_rust::stop_audio_metering)
         .await
         .map_err(|e| format!("stop audio metering task failed: {e}"))?
 }
 
-/// Resolves the audio application for the captured source (Wayland-only):
-/// `PipeWire` introspection first (retried as xdg-desktop-portal may lag),
-/// then a name match, then the capture context.
-///
-/// # Errors
-///
-/// Returns an error if the native introspection fails outright.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if capture context resolution fails.
 pub async fn resolve_audio_source(
     app: AppHandle,
     name_hint: Option<String>,
 ) -> Result<Option<AudioAppDto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        // Layer 1: PipeWire introspection — retry as xdg-desktop-portal may lag.
         for attempt in 0..3 {
             if let Some(app_match) = native_rust::resolve_audio_app_for_captured_window() {
                 return Ok(Some(AudioAppDto::from(app_match)));
@@ -178,14 +142,12 @@ pub async fn resolve_audio_source(
             }
         }
 
-        // Layer 2: name match.
         if let Some(hint) = name_hint.filter(|h| !h.trim().is_empty())
             && let Ok(Some(app_match)) = native_rust::resolve_audio_app_by_name(&hint)
         {
             return Ok(Some(AudioAppDto::from(app_match)));
         }
 
-        // Layer 3: capture context.
         if let Ok(context) = native_rust::get_capture_context() {
             if let Some(cache) = app.try_state::<CaptureContextCache>() {
                 cache.update(CaptureContextDto::from(&context));

@@ -12,11 +12,6 @@ use crate::linux as platform;
 #[cfg(target_os = "windows")]
 use crate::windows as platform;
 
-/// Reaps a worker `JoinHandle` on a detached thread so a wedged worker can
-/// never block its caller indefinitely. Shared by the startup-timeout paths
-/// (a worker that ignores its stop flag is detached, not joined). The handle
-/// is dropped with the closure — the worker's OS thread is reclaimed whenever
-/// it finally unwinds.
 #[cfg(target_os = "linux")]
 pub(crate) fn reap_detached(join: std::thread::JoinHandle<()>, name: &'static str) {
     if join.is_finished() {
@@ -44,26 +39,14 @@ pub struct AudioApp {
 #[derive(Debug, Clone)]
 pub struct AudioAppWave {
     pub id: i32,
-    /// 96 interleaved (min, max) amplitude pairs of the last ~85 ms of mono
-    /// audio, each in [-1, 1].
     pub columns: Vec<f64>,
 }
 
-/// Target for an exclusive audio capture session. `Id` carries the numeric
-/// target: a `PipeWire` node ID on Linux, a process ID on Windows. On Linux,
-/// `-1` selects system audio, values below `-1` select a process-id target
-/// (`-pid` — for apps with no active audio stream yet, e.g. a paused player;
-/// their audio is linked the moment it starts playing), and non-negative
-/// values are stream node ids. `Label` carries a per-platform textual target
-/// (a node ID string on Linux, a PID string on Windows).
 pub enum AudioTarget {
     Id(i32),
     Label(String),
 }
 
-/// Wayland video-capture introspection for the desktop main process: which
-/// desktop environment is streaming, whether the source is a monitor or a
-/// window, and the best-matched audio application for the captured source.
 #[derive(Debug, Clone)]
 pub struct CaptureContext {
     pub de: String,
@@ -72,17 +55,9 @@ pub struct CaptureContext {
     pub video_node_count: i32,
     pub app: Option<AudioApp>,
     pub screencast_node_id: Option<u32>,
-    /// `object.serial` of the newest `kwin-screencast-*` node — the main
-    /// process snapshots it before triggering the portal and only accepts a
-    /// node created *after* that point, so lingering or preview streams are
-    /// never mistaken for the live capture.
     pub highest_serial: Option<f64>,
-    /// xdg-desktop-portal screencast metadata (`portal.screencast.*`) for the
-    /// captured window — the portal's own record of what was picked.
     pub portal_props: Option<HashMap<String, String>>,
-    /// KWin-resolved owning window PID (KDE window captures only).
     pub window_pid: Option<i32>,
-    /// KWin-resolved window caption (KDE window captures only).
     pub window_caption: Option<String>,
 }
 
@@ -142,7 +117,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         })
         .collect();
 
-    // 1. Exact name match
     if let Some((a, _, _, _, _)) = norm_apps
         .iter()
         .find(|(_, name_lower, _, _, _)| *name_lower == lower)
@@ -150,7 +124,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         return Some((*a).clone());
     }
 
-    // 2. Cleaned name equality (handling spaces / .exe, e.g. "zenless zone zero" vs "zenlesszonezero.exe")
     if !lower_clean.is_empty()
         && let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, _, name_clean, _, _)| {
             let stem = name_clean.trim_end_matches("exe");
@@ -163,7 +136,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         return Some((*a).clone());
     }
 
-    // 3. Name contained in label
     if let Some((a, _, _, _, _)) = norm_apps
         .iter()
         .find(|(_, name_lower, _, _, _)| !name_lower.is_empty() && lower.contains(name_lower))
@@ -171,7 +143,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         return Some((*a).clone());
     }
 
-    // 4. Label contained in name
     if let Some((a, _, _, _, _)) = norm_apps
         .iter()
         .find(|(_, name_lower, _, _, _)| !name_lower.is_empty() && name_lower.contains(&lower))
@@ -179,7 +150,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         return Some((*a).clone());
     }
 
-    // 5. Acronym match (e.g. "Final Fantasy XIV" -> "ffxiv" matching "ffxiv_dx11.exe")
     if acronym.len() >= 3
         && let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
             name_lower.starts_with(&acronym) || name_lower.contains(&acronym)
@@ -188,7 +158,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         return Some((*a).clone());
     }
 
-    // 6. Cmdline match (e.g. /proc/pid/cmdline containing "final fantasy xiv")
     if lower.len() >= 3
         && let Some((a, _, _, _, _)) = norm_apps
             .iter()
@@ -197,7 +166,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         return Some((*a).clone());
     }
 
-    // 7. Significant word match (word length >= 4)
     for word in &words {
         if word.len() >= 4
             && let Some((a, _, _, _, _)) = norm_apps
@@ -208,7 +176,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         }
     }
 
-    // 8. First word match
     if !first_word.is_empty()
         && let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, name_lower, _, _, _)| {
             !name_lower.is_empty()
@@ -218,7 +185,6 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
         return Some((*a).clone());
     }
 
-    // 9. Window title match
     if let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, _, _, win_lower, _)| {
         win_lower
             .as_deref()
@@ -244,10 +210,6 @@ pub fn init_engine() -> String {
     "Native engine initialized".into()
 }
 
-/// Runs the global `PipeWire` library init exactly once on the main thread,
-/// before the event loop serves IPC. On Linux this is only safe after
-/// libwebrtc's `pw_*` dlopen shims are armed (`native_livekit::arm_pipewire_shims`)
-/// — its `PipeWire` video capture module keeps them in the link.
 #[cfg(target_os = "linux")]
 pub fn ensure_pipewire_init() {
     platform::ensure_pipewire_init();
@@ -259,119 +221,97 @@ pub fn ensure_pipewire_init() {}
 /// Lists active audio applications.
 ///
 /// # Errors
-///
-/// Returns an error if the platform-specific audio enumeration fails.
+/// Returns an error if platform enumeration fails.
 pub fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
     platform::list_audio_applications()
 }
 
-/// Dumps the full property dictionaries of every live audio stream node —
-/// registry props merged with bound-node info props, the same view `pw-dump`
-/// prints. Debugging aid for auto-resolve misses.
+/// Returns the property maps for active audio sources.
 ///
 /// # Errors
-///
-/// Returns an error if `PipeWire` node enumeration fails.
+/// Returns an error if source enumeration fails.
 pub fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, String> {
     platform::dump_audio_sources()
 }
 
-/// Starts exclusive audio capture for the given application. See
-/// [`AudioTarget`] for `target` semantics.
+/// Starts exclusive audio capture for `target`.
 ///
 /// # Errors
-///
-/// Returns an error if `PipeWire` node creation / WASAPI activation or linking
-/// fails.
+/// Returns an error if capture setup fails.
 pub fn start_audio_capture(target: &AudioTarget) -> Result<bool, String> {
     platform::start_audio_capture(target)
 }
 
-/// Stops the active audio capture session.
+/// Stops exclusive audio capture.
 ///
 /// # Errors
-///
-/// Returns an error if the capture state lock is poisoned.
+/// Returns an error if capture state cannot be accessed.
 pub fn stop_audio_capture() -> Result<bool, String> {
     Ok(platform::stop_audio_capture())
 }
 
-/// Switches the active capture to a new target application. See
-/// `start_audio_capture` for the target semantics.
+/// Switches exclusive audio capture to `target`.
 ///
 /// # Errors
-///
-/// Returns an error if no capture session is active or sending the switch
-/// command to the capture thread fails.
+/// Returns an error if the active capture cannot switch targets.
 pub fn switch_audio_capture(target: &AudioTarget) -> Result<bool, String> {
     platform::switch_audio_capture(target)
 }
 
-/// Returns `true` if an audio capture session is currently active.
+/// Reports whether exclusive audio capture is active.
 ///
 /// # Errors
-///
-/// Returns an error if the capture state lock is poisoned.
+/// Returns an error if capture state cannot be accessed.
 pub fn is_audio_capture_active() -> Result<bool, String> {
     Ok(platform::is_audio_capture_active())
 }
 
-/// Resolves the best-matching audio application for a label.
+/// Resolves the best matching audio application for `label`.
 ///
 /// # Errors
-///
 /// Returns an error if audio enumeration fails.
 pub fn resolve_audio_app_by_name(label: &str) -> Result<Option<AudioApp>, String> {
     let apps = platform::list_audio_applications()?;
     Ok(find_best_audio_match(&apps, label))
 }
 
-/// Resolves the audio application for the currently portal-captured window.
 #[must_use]
 pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     platform::resolve_audio_app_for_captured_window()
 }
 
-/// Returns a snapshot of the currently active `PipeWire` video capture context.
+/// Returns the current capture context.
 ///
 /// # Errors
-///
-/// Returns an error if `PipeWire` video node introspection fails.
+/// Returns an error if capture introspection fails.
 pub fn get_capture_context() -> Result<CaptureContext, String> {
     platform::get_capture_context()
 }
 
-/// Starts per-app audio waveform metering.
+/// Starts per-application audio metering.
 ///
 /// # Errors
-///
-/// Returns an error if the `PipeWire` meter thread fails to start.
+/// Returns an error if the meter cannot start.
 pub fn start_audio_metering() -> Result<bool, String> {
     platform::start_audio_metering()
 }
 
-/// Stops the active audio meter session.
+/// Stops per-application audio metering.
 ///
 /// # Errors
-///
-/// Returns an error if the meter state lock is poisoned.
+/// Returns an error if meter state cannot be accessed.
 pub fn stop_audio_metering() -> Result<bool, String> {
     Ok(platform::stop_audio_metering())
 }
 
-/// Registers a callback receiving waveform readings for all metered apps (see
-/// `AudioAppWave::columns` for the format). The meter worker pushes at ~33 ms
-/// cadence, non-blocking — ticks are dropped, never queued.
 pub fn set_wave_callback(callback: Box<dyn Fn(Vec<AudioAppWave>) + Send + Sync>) {
     platform::set_wave_callback(callback);
 }
 
-/// Clears the registered waveform callback.
 pub fn clear_wave_callback() {
     platform::clear_wave_callback();
 }
 
-/// Telemetry counters for the audio ring buffer.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioRingStats {
     pub captured_chunks: i64,
@@ -380,7 +320,6 @@ pub struct AudioRingStats {
     pub truncated_bytes: i64,
 }
 
-/// Returns current telemetry counters for the audio ring buffer.
 #[must_use]
 #[allow(
     clippy::cast_possible_wrap,
@@ -400,17 +339,10 @@ pub fn reset_audio_ring_stats() {
     audio_ring::reset_audio_ring_stats();
 }
 
-/// Registers a callback that receives PCM audio data as 16-bit signed
-/// integer samples (48 kHz, 2 channel). The samples are produced from the
-/// packed S16LE bytes the ring carries — the native-format to S16LE
-/// conversion (e.g. F32LE → i16) is done by the platform capture code
-/// (`linux/capture.rs`, `windows/mod.rs`) *before* the bytes reach the ring;
-/// the ring performs no F32LE → i16 conversion itself.
 pub fn set_audio_data_callback(callback: Box<dyn Fn(Vec<i16>) + Send + Sync>) {
     audio_ring::set_audio_data_callback(callback);
 }
 
-/// Clears the registered PCM audio data callback.
 pub fn clear_audio_data_callback() {
     audio_ring::clear_audio_data_callback();
 }
@@ -465,8 +397,6 @@ mod tests {
             id: 1,
             columns: vec![0.75],
         };
-        // The clone is the point: verify the derived Clone impl preserves
-        // every field. The original is intentionally unused afterwards.
         #[allow(clippy::redundant_clone, reason = "the clone under test")]
         let cloned_wave = wave.clone();
         assert_eq!(cloned_wave.id, 1);

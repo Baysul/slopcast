@@ -1,8 +1,3 @@
-//! Platform introspection: Wayland detection and the dlopen'd EGL GPU
-//! probe (D5). The probe is Linux-only: it opens a DRM render node and
-//! dlopens `libEGL.so.1`; other platforms report no GPU information (the
-//! renderer treats a null result as "unavailable").
-
 #[cfg(target_os = "linux")]
 use std::ffi::{CStr, CString, c_char, c_void};
 #[cfg(target_os = "linux")]
@@ -15,8 +10,6 @@ use std::path::PathBuf;
 pub struct PlatformInfo {
     pub platform: String,
     pub is_wayland: bool,
-    /// Whether a real video capture route exists: Wayland on Linux, WGC on
-    /// Windows. X11/macOS have none — the share degrades to audio-only.
     pub video_capture_available: bool,
 }
 
@@ -34,7 +27,6 @@ pub fn video_capture_available() -> bool {
     cfg!(target_os = "windows") || is_wayland()
 }
 
-/// Returns the platform identifier and whether the app runs on Wayland.
 #[must_use]
 #[tauri::command]
 pub fn get_platform_info() -> PlatformInfo {
@@ -51,8 +43,6 @@ pub struct GpuInfo {
     pub egl_vendor: Option<String>,
     pub gl_renderer: Option<String>,
     pub gl_version: Option<String>,
-    /// `true` when the GL renderer is a software rasterizer
-    /// (`llvmpipe`/`softpipe`/`SwiftShader`).
     pub software_rasterizer: bool,
 }
 
@@ -83,7 +73,6 @@ type EglGetProcAddress = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 #[cfg(target_os = "linux")]
 type GlGetString = unsafe extern "C" fn(u32) -> *const c_char;
 
-/// The first `/dev/dri/renderD*` node, if any.
 #[cfg(target_os = "linux")]
 fn first_render_node() -> Option<PathBuf> {
     std::fs::read_dir("/dev/dri")
@@ -98,8 +87,6 @@ fn first_render_node() -> Option<PathBuf> {
         .min()
 }
 
-/// RAII guard for the dlopen'd `libEGL.so.1` handle: every error path closes
-/// it exactly once via `Drop`.
 #[cfg(target_os = "linux")]
 struct EglLib(*mut c_void);
 
@@ -114,7 +101,6 @@ impl Drop for EglLib {
     }
 }
 
-/// The EGL entry points resolved from the dlopen'd library.
 #[cfg(target_os = "linux")]
 struct EglFunctions {
     get_platform_display: EglGetPlatformDisplay,
@@ -123,9 +109,6 @@ struct EglFunctions {
     get_proc_address: EglGetProcAddress,
 }
 
-/// Opens the first `/dev/dri/renderD*` node read-write and closes it again,
-/// proving hardware-accelerated rendering is reachable — mirrors libwebrtc's
-/// own render-node acquisition.
 #[cfg(target_os = "linux")]
 fn open_render_node() -> Result<(), String> {
     let render_node = first_render_node().ok_or_else(|| {
@@ -148,8 +131,6 @@ fn open_render_node() -> Result<(), String> {
     Ok(())
 }
 
-/// dlopens `libEGL.so.1` (the same pattern libwebrtc uses — no new crate) and
-/// resolves the four EGL entry points.
 #[cfg(target_os = "linux")]
 fn dlopen_egl() -> Result<(EglLib, EglFunctions), String> {
     let lib_cstr = CString::new("libEGL.so.1").map_err(|_| "NUL in library name".to_string())?;
@@ -198,8 +179,6 @@ fn dlopen_egl() -> Result<(EglLib, EglFunctions), String> {
     Ok((EglLib(handle), functions))
 }
 
-/// Creates and initializes a display: surfaceless-Mesa first, X11 as
-/// fallback.
 #[cfg(target_os = "linux")]
 fn create_egl_display(functions: &EglFunctions) -> Result<*mut c_void, String> {
     // SAFETY: `functions.get_platform_display` is a valid EGL function
@@ -278,14 +257,8 @@ fn gl_string(functions: &EglFunctions, name: u32) -> Option<String> {
     }
 }
 
-/// Mirrors `app.getGPUInfo('complete')` (D5): dlopens `libEGL.so.1`, opens a
-/// DRM render node, initializes a surfaceless display and reports
-/// vendor/renderer/version plus a software-rasterizer flag.
-///
 /// # Errors
-///
-/// Returns an error when no DRM render node exists, `libEGL.so.1` cannot be
-/// loaded, or EGL fails to initialize.
+/// Returns an error if the GPU probe cannot initialize EGL.
 #[tauri::command]
 #[cfg(target_os = "linux")]
 pub fn probe_gpu_info() -> Result<GpuInfo, String> {
@@ -312,14 +285,10 @@ pub fn probe_gpu_info() -> Result<GpuInfo, String> {
     })
 }
 
+/// # Errors
+/// This platform stub never returns an error.
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
-/// Reports no GPU information; the renderer treats a null result as
-/// "unavailable" on non-Linux platforms.
-///
-/// # Errors
-///
-/// Never errors.
 pub fn probe_gpu_info() -> Result<GpuInfo, String> {
     Ok(GpuInfo {
         egl_vendor: None,
@@ -334,13 +303,6 @@ pub fn probe_gpu_info() -> Result<GpuInfo, String> {
 mod tests {
     use super::*;
 
-    /// Manual GPU probe mirroring `app.getGPUInfo('complete')`. Run with:
-    ///
-    /// ```sh
-    /// cargo test -p slopcast gpu_probe -- --ignored --nocapture
-    /// ```
-    ///
-    /// Linux-only: the probe is a stub elsewhere.
     #[test]
     #[ignore = "manual diagnostic: requires a DRM render node"]
     fn gpu_probe() {

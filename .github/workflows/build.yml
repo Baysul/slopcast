@@ -86,13 +86,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # CEF replaces wry/WebKitGTK. Remaining packages are for Tauri's native
-      # windowing/bundling plus Slopcast's capture/video stack.
       - name: Install Linux system deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # cuda.h lets webrtc-sys compile NVENC encoder support
           sudo apt-get install -y \
             libgtk-3-dev \
             libdbus-1-dev \
@@ -148,7 +145,6 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/cache@v4
         with:
-          # ~ expands to C:\Users\runneradmin, i.e. LOCALAPPDATA, on Windows runners
           path: ~/AppData/Local/tauri-cef
           key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
@@ -182,13 +178,9 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             export CEF_PATH="$HOME/.cache/tauri-cef"
-            # webrtc-sys enables NVENC only when cuda.h is found at $CUDA_HOME/include;
-            # Ubuntu's nvidia-cuda-dev installs it to /usr/include.
             export CUDA_HOME=/usr
             pnpm check
             pnpm desktop:prepare-gstreamer
-            # Use the feat/cef cargo-tauri so cef_path is resolved and sharun_cef is used
-            # (npm @tauri-apps/cli 2.11.4 is the wry bundler and would hit linuxdeploy on libcef.so).
             case "${{ matrix.name }}" in
               linux-appimage) cargo tauri build --bundles appimage --verbose ;;
               linux-deb) cargo tauri build --bundles deb --verbose ;;
@@ -199,9 +191,6 @@ jobs:
                 ;;
             esac
           else
-            # Windows leg: use the cargo-installed feat/cef CLI so the NSIS
-            # bundler picks up cef_path (npm @tauri-apps/cli is the wry-era
-            # bundler and would ship an installer without libcef.dll).
             export CEF_PATH="$LOCALAPPDATA/tauri-cef"
             pnpm check
             pnpm desktop:prepare-gstreamer

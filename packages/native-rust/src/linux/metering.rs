@@ -23,20 +23,13 @@ const METER_WAVE_WINDOW: usize = 4096;
 const METER_WAVE_INTERVAL_MS: u64 = 33;
 const METER_DEFAULT_RATE: u32 = 48_000;
 const METER_DEFAULT_CHANNELS: u16 = 2;
-// Ring silent this long → paused: publish silence instead of re-decimating
-// stale audio.
 const METER_STALE_MS: u64 = 150;
-// Mono queue between the process callback and the wave pass. Over two worst-case
-// pass gaps, so a stalled pass only drops the newest samples (invisible after
-// decimation).
 const METER_RING_CAPACITY: usize = 4096;
 
-/// Per-app meter state shared between the worker thread and the JS thread.
 struct MeterLevel {
     samples: ArrayQueue<f32>,
     rate: AtomicU32,
     channels: AtomicU16,
-    /// 96 interleaved (min, max) pairs; amplitudes in [-1, 1].
     wave: Mutex<Vec<f32>>,
 }
 
@@ -55,8 +48,6 @@ struct MeterStream {
     _stream: StreamRc,
     _listener: StreamListener<Arc<MeterLevel>>,
     level: Arc<MeterLevel>,
-    /// Rolling mono window drained from `level.samples`, capped at
-    /// `METER_WAVE_WINDOW`. Worker-thread only, hence a plain `Vec`.
     window: Vec<f32>,
     last_feed: Instant,
 }
@@ -68,8 +59,6 @@ struct MeterSession {
 
 static METER_STATE: Mutex<Option<MeterSession>> = Mutex::new(None);
 
-/// The meter worker pushes each waveform snapshot here; the renderer reads
-/// them via `get_audio_wave`.
 static AUDIO_WAVE_CALLBACK: ArcSwapOption<Box<dyn Fn(Vec<AudioAppWave>) + Send + Sync>> =
     ArcSwapOption::const_empty();
 
@@ -81,8 +70,6 @@ pub(crate) fn clear_wave_callback() {
     AUDIO_WAVE_CALLBACK.store(None);
 }
 
-/// Non-destructive wave snapshot; dropped if the caller is busy — the next
-/// 33 ms tick supersedes it.
 fn invoke_wave_callback(waves: Vec<AudioAppWave>) {
     let guard = AUDIO_WAVE_CALLBACK.load();
     let Some(callback) = guard.as_ref() else {
@@ -121,17 +108,12 @@ fn meter_format_param() -> Option<Vec<u8>> {
     Some(serialized.0.into_inner())
 }
 
-/// Downmix this quantum to mono and queue it (drop-newest when full; the
-/// decimated envelope hides a few-ms gap).
 fn meter_process_quantum(stream: &pipewire::stream::Stream, level: &Arc<MeterLevel>) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
     };
     let channels = usize::from(level.channels.load(Ordering::Relaxed).max(1));
     let inv_channels = 1.0 / f32::from(level.channels.load(Ordering::Relaxed).max(1));
-    // Negotiated F32LE buffers are interleaved in a single data; the
-    // multi-data branch is a fallback that treats each data as its own mono
-    // stream.
     let interleaved = buffer.datas_mut().len() <= 1;
     for data in buffer.datas_mut() {
         let start = data.chunk().offset() as usize;
@@ -168,8 +150,6 @@ fn meter_process_quantum(stream: &pipewire::stream::Stream, level: &Arc<MeterLev
     }
 }
 
-/// Tap the app's output with a capture stream. `AUTOCONNECT` links additively —
-/// the app's existing links to the speaker are never touched.
 fn meter_stream(
     core: &pipewire::core::CoreRc,
     node_id: u32,
@@ -237,9 +217,6 @@ fn meter_stream(
     })
 }
 
-/// Decimate a mono window into 96 interleaved (min, max) pairs. NaN is
-/// treated as 0.0 — a NaN would poison both min and max, which the JS side
-/// renders directly.
 fn decimate_wave(window: &[f32], wave: &mut [f32]) {
     let len = window.len();
     let bucket = len.div_ceil(METER_WAVE_COLUMNS);
@@ -263,10 +240,6 @@ fn decimate_wave(window: &[f32], wave: &mut [f32]) {
     }
 }
 
-/// Decimate every meter's rolling window into 96 (min, max) pairs and publish
-/// them. Meters silent for `METER_STALE_MS` publish zeros — their window still
-/// holds pre-pause audio, so re-decimating would pin the bars instead of
-/// letting them flatline.
 fn run_wave_pass(meters: &mut HashMap<u32, MeterStream>) {
     for meter in meters.values_mut() {
         let level = &meter.level;
@@ -378,8 +351,6 @@ fn run_meter_session(stop: Arc<AtomicBool>, ready_tx: mpsc::Sender<Result<(), St
     let _ = ready_tx.send(Ok(()));
 
     while !stop.load(Ordering::SeqCst) {
-        // 50 ms idle bound: with live audio the loop wakes on buffer events, so
-        // metering latency is unaffected and a tighter timeout would just spin.
         pw.main_loop
             .loop_()
             .iterate(pipewire::loop_::Timeout::Finite(Duration::from_millis(50)));
@@ -440,9 +411,6 @@ pub(crate) fn stop_audio_metering() -> bool {
     };
     if let Some(session) = guard.take() {
         session.stop.store(true, Ordering::SeqCst);
-        // Reap off-thread: the meter thread only checks the stop flag between
-        // 50 ms loop iterations, so a join here would stall the main process.
-        // The streams are dropped with the session.
         let _ = thread::Builder::new()
             .name("pw-meter-reaper".into())
             .spawn(move || {
@@ -471,7 +439,6 @@ mod tests {
     fn decimate_wave_single_sample_fills_first_column_only() {
         let mut wave = fresh_wave();
         decimate_wave(&[0.25], &mut wave);
-        // bucket = ceil(1/96) = 1: only column 0 holds the sample.
         assert!((wave[0] - 0.25).abs() < f32::EPSILON);
         assert!((wave[1] - 0.25).abs() < f32::EPSILON);
         assert!(wave[2..].iter().all(|v| *v == 0.0));
@@ -484,7 +451,6 @@ mod tests {
     )]
     fn decimate_wave_captures_extrema_per_column() {
         let mut wave = fresh_wave();
-        // 96 samples over 96 columns → exactly one sample per column.
         let samples: Vec<f32> = (0..METER_WAVE_COLUMNS).map(|i| i as f32 / 10.0).collect();
         decimate_wave(&samples, &mut wave);
         for c in 0..METER_WAVE_COLUMNS {
@@ -500,15 +466,11 @@ mod tests {
         reason = "test fixtures: i32 indices converted to f32 samples"
     )]
     fn decimate_wave_buckets_oversized_windows_with_div_ceil() {
-        // 191 samples: bucket = ceil(191/96) = 2, so columns 0..94 hold two
-        // samples each and the last column holds a single trailing sample.
         let mut wave = fresh_wave();
         let samples: Vec<f32> = (0..191).map(|i| i as f32 / 191.0).collect();
         decimate_wave(&samples, &mut wave);
-        // Column 0 bucket: samples 0 and 1.
         assert!((wave[0] - 0.0).abs() < f32::EPSILON);
         assert!((wave[1] - 1.0 / 191.0).abs() < f32::EPSILON);
-        // Last column holds the final sample only.
         let last_min = wave[95 * 2];
         let last_max = wave[95 * 2 + 1];
         assert!((last_min - 190.0 / 191.0).abs() < f32::EPSILON);
@@ -518,8 +480,6 @@ mod tests {
     #[test]
     fn decimate_wave_shorter_windows_zero_pad_tail_columns() {
         let mut wave = fresh_wave();
-        // 10 samples → bucket 1; columns 10..96 must be zeroed, not retain
-        // stale data from a previous pass.
         let samples = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
         decimate_wave(&samples, &mut wave);
         assert!((wave[9 * 2] - 1.0).abs() < f32::EPSILON);
@@ -533,7 +493,6 @@ mod tests {
     fn decimate_wave_treats_nan_samples_as_silence() {
         let mut wave = fresh_wave();
         decimate_wave(&[f32::NAN, 0.5], &mut wave);
-        // Column 0 holds only the NaN (→ 0.0); column 1 holds the 0.5 sample.
         assert!(wave[0].abs() < f32::EPSILON);
         assert!(wave[1].abs() < f32::EPSILON);
         assert!((wave[2] - 0.5).abs() < f32::EPSILON);
@@ -543,7 +502,6 @@ mod tests {
     #[test]
     fn decimate_wave_mixed_sign_keeps_raw_min_max() {
         let mut wave = fresh_wave();
-        // 192 samples → bucket 2: column 0 = [-0.9, 0.4], column 1 = [-0.2, 0.8].
         let mut samples = vec![0.0; 192];
         samples[0] = -0.9;
         samples[1] = 0.4;

@@ -1,9 +1,3 @@
-//! Serde DTOs for the command/event payloads.
-//!
-//! `native-rust` types carry no serde derives; these mirrors restore the
-//! camelCase JSON shapes the preload bridge exposed, so the renderer-facing
-//! contract matches the old IPC surface exactly.
-
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -36,8 +30,6 @@ impl From<native_rust::AudioApp> for AudioAppDto {
 #[serde(rename_all = "camelCase")]
 pub struct AudioAppWaveDto {
     pub id: i32,
-    /// 96 interleaved (min, max) amplitude pairs of the last ~85 ms of mono
-    /// audio, each value in [-1, 1].
     pub columns: Vec<f64>,
 }
 
@@ -50,9 +42,6 @@ impl From<native_rust::AudioAppWave> for AudioAppWaveDto {
     }
 }
 
-/// Wayland video-capture introspection: which desktop environment is
-/// streaming, whether the source is a monitor or a window, and the
-/// best-matched audio application for the captured source.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureContextDto {
@@ -62,16 +51,9 @@ pub struct CaptureContextDto {
     pub video_node_count: i32,
     pub app: Option<AudioAppDto>,
     pub screencast_node_id: Option<u32>,
-    /// `object.serial` of the newest `kwin-screencast-*` node — snapshotted
-    /// before triggering the portal so lingering or preview streams are never
-    /// mistaken for the live capture.
     pub highest_serial: Option<f64>,
-    /// xdg-desktop-portal screencast metadata (`portal.screencast.*`) for the
-    /// captured window — the portal's own record of what was picked.
     pub portal_props: Option<HashMap<String, String>>,
-    /// KWin-resolved owning window PID (KDE window captures only).
     pub window_pid: Option<i32>,
-    /// KWin-resolved window caption (KDE window captures only).
     pub window_caption: Option<String>,
 }
 

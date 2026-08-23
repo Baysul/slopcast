@@ -1,12 +1,3 @@
-//! Persistence for `stream-settings.json` and `onboarding.json` in the app
-//! config dir (`~/.config/slopcast`).
-//!
-//! TS↔Rust sync rule: `StreamSettings`, `default_stream_settings` and
-//! `sanitize_stream_settings` mirror `DEFAULT_STREAM_SETTINGS` and
-//! `sanitizeStreamSettings` in `packages/shared-types/src/index.ts`
-//! field-for-field (same defaults, same clamps, same whitelists). Update both
-//! files together; the `defaults_match_ts_table` test below enforces the
-//! default values.
 #![allow(
     clippy::needless_pass_by_value,
     reason = "Tauri command arguments (State and owned payloads) must be taken by value for the #[tauri::command] macro"
@@ -20,9 +11,6 @@ use tauri::Manager;
 const STREAM_SETTINGS_FILE: &str = "stream-settings.json";
 const ONBOARDING_FILE: &str = "onboarding.json";
 
-/// User-configurable encoder parameters, persisted to `stream-settings.json`.
-/// Numeric fields are `f64` (like the TS `number`) so the sanitizer is a
-/// faithful port — `bitrateLimit`/`fps` stay exact up to 2^53.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamSettings {
@@ -35,11 +23,6 @@ pub struct StreamSettings {
     pub motion_mode: String,
 }
 
-/// Defensive copy on every call (mirrors the TS spread of the shared default).
-///
-/// TS↔Rust sync rule: values must match `DEFAULT_STREAM_SETTINGS` in
-/// `packages/shared-types/src/index.ts` (vp8 because the bundled libwebrtc's
-/// VA-API H264 path collapses to ~1-3 fps on Linux; see the TS comment).
 #[must_use]
 pub fn default_stream_settings() -> StreamSettings {
     StreamSettings {
@@ -57,10 +40,6 @@ const VALID_CODECS: [&str; 5] = ["vp8", "h264", "h265", "vp9", "av1"];
 const VALID_RESOLUTIONS: [&str; 5] = ["480p", "720p", "1080p", "1440p", "2160p"];
 const VALID_MOTION_MODES: [&str; 4] = ["auto", "static", "mixed", "dynamic"];
 
-/// Field-for-field port of `sanitizeStreamSettings` in shared-types: numbers
-/// must be finite and within `[min, max]`, codecs/resolutions must be
-/// whitelisted, `apiEndpoint` must be a non-blank string; anything else falls
-/// back to the default.
 #[must_use]
 pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
     let defaults = default_stream_settings();
@@ -97,10 +76,6 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
     };
 
     StreamSettings {
-        // fps is capped at 60: the capture pacer (`PREVIEW_MAX_FPS`) and the
-        // preview emitter both clamp to 60 regardless, so higher values
-        // silently ran the stream at 60 fps with a 120 fps SDP claim (and a
-        // GOP key-int-max that assumed the configured framerate).
         fps: num(o.get("fps"), 1.0, 60.0, defaults.fps),
         bitrate_limit: num(
             o.get("bitrateLimit"),
@@ -122,13 +97,9 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("failed to resolve app config dir: {e}"))
 }
 
-/// Reads `stream-settings.json`, falling back to defaults on any read/parse
-/// failure (mirrors `loadStreamSettings`).
-///
-/// # Errors
-///
-/// Returns an error if the app config dir cannot be resolved.
 #[tauri::command]
+/// # Errors
+/// Returns an error if the settings directory cannot be read.
 pub fn get_stream_settings(app: AppHandle) -> Result<StreamSettings, String> {
     let path = config_dir(&app)?.join(STREAM_SETTINGS_FILE);
     let parsed = match std::fs::read_to_string(&path) {
@@ -148,8 +119,6 @@ pub fn get_stream_settings(app: AppHandle) -> Result<StreamSettings, String> {
     Ok(sanitize_stream_settings(&parsed))
 }
 
-/// Sanitizes and persists `stream-settings.json` (2-space indented, trailing
-/// newline).
 #[must_use]
 #[tauri::command]
 pub fn save_stream_settings(app: AppHandle, settings: serde_json::Value) -> bool {
@@ -173,8 +142,6 @@ pub fn save_stream_settings(app: AppHandle, settings: serde_json::Value) -> bool
     }
 }
 
-/// Mirrors `isOnboardingCompleted`: the file must parse and carry
-/// `completed === true`.
 #[must_use]
 #[tauri::command]
 pub fn get_onboarding_completed(app: AppHandle) -> bool {
@@ -190,7 +157,6 @@ pub fn get_onboarding_completed(app: AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-/// Mirrors `setOnboardingCompleted`: writes `{ "completed": true }`.
 #[must_use]
 #[tauri::command]
 pub fn set_onboarding_completed(app: AppHandle) -> bool {
@@ -210,18 +176,12 @@ pub fn set_onboarding_completed(app: AppHandle) -> bool {
     }
 }
 
-// The conformance values are exactly representable in f64 (60.0,
-// 20_000_000.0, 59.5, …), so strict equality is the point of the tests.
 #[cfg(test)]
 #[allow(clippy::float_cmp, reason = "exact conformance values, see above")]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    // TS↔Rust sync rule: these values must match DEFAULT_STREAM_SETTINGS in
-    // packages/shared-types/src/index.ts (fps 60, bitrateLimit 20_000_000,
-    // videoCodec 'vp8', resolution '1080p', apiEndpoint 'http://localhost:3001',
-    // autoBitrate true, motionMode 'auto'; VALID_CODECS = vp8/h264/h265/vp9/av1).
     #[test]
     fn defaults_match_ts_table() {
         let defaults = default_stream_settings();
@@ -255,25 +215,23 @@ mod tests {
     #[test]
     fn sanitize_clamps_fps_like_ts() {
         let sanitize_fps = |fps: f64| sanitize_stream_settings(&json!({ "fps": fps })).fps;
-        assert_eq!(sanitize_fps(0.0), 60.0); // below min
-        assert_eq!(sanitize_fps(1.0), 1.0); // min edge
-        // Max edge: fps is capped at 60 (the capture pacer and preview
-        // emitter clamp there regardless — see the sanitizer comment).
+        assert_eq!(sanitize_fps(0.0), 60.0);
+        assert_eq!(sanitize_fps(1.0), 1.0);
         assert_eq!(sanitize_fps(60.0), 60.0);
-        assert_eq!(sanitize_fps(240.0), 60.0); // above max
-        assert_eq!(sanitize_fps(241.0), 60.0); // above max
-        assert_eq!(sanitize_fps(59.5), 59.5); // fractional kept (TS number)
-        assert_eq!(sanitize_fps(f64::NAN), 60.0); // non-finite
+        assert_eq!(sanitize_fps(240.0), 60.0);
+        assert_eq!(sanitize_fps(241.0), 60.0);
+        assert_eq!(sanitize_fps(59.5), 59.5);
+        assert_eq!(sanitize_fps(f64::NAN), 60.0);
     }
 
     #[test]
     fn sanitize_clamps_bitrate_like_ts() {
         let sanitize_bitrate =
             |b: f64| sanitize_stream_settings(&json!({ "bitrateLimit": b })).bitrate_limit;
-        assert_eq!(sanitize_bitrate(100_000.0), 100_000.0); // min edge
-        assert_eq!(sanitize_bitrate(99_999.0), 20_000_000.0); // below min
-        assert_eq!(sanitize_bitrate(200_000_000.0), 200_000_000.0); // max edge
-        assert_eq!(sanitize_bitrate(200_000_001.0), 20_000_000.0); // above max
+        assert_eq!(sanitize_bitrate(100_000.0), 100_000.0);
+        assert_eq!(sanitize_bitrate(99_999.0), 20_000_000.0);
+        assert_eq!(sanitize_bitrate(200_000_000.0), 200_000_000.0);
+        assert_eq!(sanitize_bitrate(200_000_001.0), 20_000_000.0);
     }
 
     #[test]
@@ -320,7 +278,7 @@ mod tests {
         };
         assert!(!sanitize_auto(json!(false)));
         assert!(sanitize_auto(json!(true)));
-        assert!(sanitize_auto(json!(null))); // absent/non-bool falls back to true
+        assert!(sanitize_auto(json!(null)));
         assert!(sanitize_auto(json!("false")));
     }
 
@@ -337,7 +295,6 @@ mod tests {
 
     #[test]
     fn sanitize_ignores_string_numbers() {
-        // TS `typeof v === 'number'` rejects string-typed numbers.
         let sanitized =
             sanitize_stream_settings(&json!({ "fps": "60", "bitrateLimit": "1000000" }));
         assert_eq!(sanitized, default_stream_settings());

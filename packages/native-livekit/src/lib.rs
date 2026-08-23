@@ -51,11 +51,6 @@ use std::collections::HashMap;
 #[cfg(not(target_os = "linux"))]
 use std::time::{Duration, Instant};
 
-/// Reaps a worker `JoinHandle` on a detached thread so a wedged worker can
-/// never block its caller indefinitely. Shared by the startup-timeout paths
-/// (a worker that ignores its stop flag is detached, not joined). The handle
-/// is dropped with the closure — the worker's OS thread is reclaimed whenever
-/// it finally unwinds.
 pub(crate) fn reap_detached(join: std::thread::JoinHandle<()>, name: &'static str) {
     if join.is_finished() {
         let _ = join.join();
@@ -71,10 +66,6 @@ pub(crate) fn reap_detached(join: std::thread::JoinHandle<()>, name: &'static st
 pub const SAMPLE_RATE: u32 = 48000;
 pub const CHANNELS: u32 = 2;
 
-/// Maximum audio backlog in the room worker before the oldest samples are
-/// dropped (drop-oldest): bounds how far audio content can fall behind the
-/// live video after an upstream stall, at the cost of skipping the stale
-/// tail instead of playing it out late.
 #[cfg(not(target_os = "linux"))]
 const MAX_AUDIO_BACKLOG_MS: usize = 100;
 
@@ -85,13 +76,7 @@ pub struct CaptureConfig {
     pub height: u32,
     pub fps: u32,
     pub video_codec: Option<String>,
-    /// The configured bitrate ceiling in bits/sec (`None` or a non-positive
-    /// value falls back to `DEFAULT_VIDEO_BITRATE_BPS` in the publisher).
     pub max_bitrate: Option<f64>,
-    /// Whether the publisher's congestion controller (local backpressure +
-    /// receiver loss) may step the encoder below `max_bitrate`. `false` pins
-    /// the encoder at the configured ceiling. Missing values deserialize as
-    /// `false` (manual) for backwards compatibility with older callers.
     #[serde(default)]
     pub auto_bitrate: bool,
 }
@@ -100,29 +85,14 @@ pub struct CaptureConfig {
 #[serde(rename_all = "camelCase")]
 pub struct NativeTelemetry {
     pub video_codec: Option<String>,
-    /// The actual encoder libwebrtc used for the video track, from the
-    /// `encoderImplementation` outbound-rtp stat; `None` until the stack
-    /// reports it.
     pub encoder_implementation: Option<String>,
     pub video_bytes_sent: Option<f64>,
     pub video_packets_sent: Option<f64>,
     pub video_packets_lost: Option<f64>,
-    /// `framesEncoded` from the outbound-rtp stat (m144's `framesSent`
-    /// never increments); the renderer derives fps from this. On the Linux
-    /// `GStreamer` branch this is the count of encoded access units
-    /// measured after the codec parser — the true encoder-throughput
-    /// counter.
     pub video_frames_encoded: Option<f64>,
-    /// On the Linux `GStreamer` branch: frames pushed into the video appsrc
-    /// (`push_frame` successes). Any shortfall vs. `video_frames_encoded`
-    /// is frames dropped by the leaky-appsrc / queue backpressure path
-    /// before they could be encoded; `video_appsrc_dropped` quantifies it.
     pub video_frames_submitted: Option<u64>,
     pub video_width: Option<u32>,
     pub video_height: Option<u32>,
-    /// Live video appsrc statistics — `dropped` counts buffers the appsrc
-    /// discarded (leaky downstream on a full queue), the stutter diagnostic;
-    /// the levels show how close the appsrc is to its 6-buffer cap.
     pub video_appsrc_input: Option<u64>,
     pub video_appsrc_output: Option<u64>,
     pub video_appsrc_dropped: Option<u64>,
@@ -137,27 +107,14 @@ pub struct NativeTelemetry {
     pub timestamp_ms: Option<f64>,
 }
 
-/// A codec the bundled libwebrtc can actually encode with, as exposed to the
-/// renderer's codec picker. The picker must NEVER read the webview's
-/// `RTCRtpSender.getCapabilities` — that stack is not used for encoding.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeCodecInfo {
     pub codec: String,
     pub label: String,
-    /// True when the selected encoder for this codec on this machine is a
-    /// hardware encoder factory (NVENC or VA-API on Linux, `Media
-    /// Foundation` on Windows, `VideoToolbox` on macOS). On Linux this is
-    /// computed per machine by probing the encoder chain
-    /// (`gstreamer_encoder::codec_chains`); elsewhere it is build-time.
     pub hardware: bool,
 }
 
-/// Encoder support baked into the bundled libwebrtc build
-/// (`webrtc-sys` prebuilts: `rtc_use_h264`/`rtc_use_h265` +
-/// `rtc_libvpx_build_vp9` + `enable_libaom` on every platform). The native
-/// stack hardware-encodes H264 and H265 (H265 on some platforms), so those
-/// are the only codecs that can ever use a hardware encoder off Linux.
 pub const NATIVE_VIDEO_CODECS: [(&str, &str); 5] = [
     ("h264", "H.264"),
     ("h265", "H.265"),
@@ -166,16 +123,8 @@ pub const NATIVE_VIDEO_CODECS: [(&str, &str); 5] = [
     ("av1", "AV1"),
 ];
 
-/// The codecs with a hardware encoder factory in the bundled libwebrtc build
-/// (VA-API + NVENC on Linux, `Media Foundation` on Windows,
-/// `VideoToolbox` on macOS). Actual per-platform factory availability stays
-/// a build-time property of the bundled libwebrtc; the `hardware` flag is
-/// informational for the picker's group labels, and a platform without the
-/// hardware encoder silently falls back to libwebrtc's software H.265.
 pub const NATIVE_HW_CODECS: [&str; 2] = ["h264", "h265"];
 
-/// Returns the codecs the native stack can encode with (build-time constant
-/// off Linux, probed encoder chain on Linux).
 #[must_use]
 pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
     #[cfg(target_os = "linux")]
@@ -202,10 +151,6 @@ pub fn get_native_supported_codecs() -> Vec<NativeCodecInfo> {
         .collect()
 }
 
-/// Per-stage capture counters, reset on every `startDesktopCapture`.
-/// `previewFramesSent` counts preview frames scaled to the renderer's
-/// preview card (OBS-style "scale to the window") at the stream framerate;
-/// `captureErrors` counts capturer failures.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopCaptureStats {
@@ -245,18 +190,12 @@ struct NativeLiveKit {
     _join: std::thread::JoinHandle<()>,
 }
 
-/// ~1.28 s of 10 ms chunks; full means WebRTC encoding is stalled, so the
-/// newest chunk is dropped (drop-newest; unlike `audio_ring`, which evicts
-/// the oldest chunk).
 #[cfg(not(target_os = "linux"))]
 const PCM_CHANNEL_CAPACITY: usize = 128;
 
 #[cfg(not(target_os = "linux"))]
 static LIVEKIT: Mutex<Option<NativeLiveKit>> = Mutex::new(None);
 
-/// Worker's PCM sender, kept under its own lock (not `LIVEKIT`): `feed_pcm`
-/// runs on the audio-ring worker and must never block on
-/// `connect_livekit_room`'s long lock hold — that was the original deadlock.
 #[cfg(not(target_os = "linux"))]
 static PCM_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<Vec<i16>>>> = Mutex::new(None);
 
@@ -266,28 +205,16 @@ static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
 static SPECTATOR_COUNT: AtomicU32 = AtomicU32::new(0);
 #[cfg(not(target_os = "linux"))]
 static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// The published video track's source; the desktop capturer feeds it frames.
-/// `None` while no track is active.
 #[cfg(not(target_os = "linux"))]
 pub(crate) static VIDEO_SOURCE: ArcSwapOption<NativeVideoSource> = ArcSwapOption::const_empty();
 
-// The bundled libwebrtc statically links hidden-weak `pw_*` dlopen shims
-// (`pipewire_stubs.o`, `modules::portal::*`). Our `DesktopCapturer` usage
-// (the Linux PipeWire capturer in `linux_capture`) and the peer connection
-// factory (which keeps libwebrtc's `PipeWire` *video capture module*,
-// `video_capture_pipewire.o`, in the link) both drag the shims in. The
-// shims tail-jump through static pointers that stay NULL until
-// `InitializePipewire` dlopens `libpipewire` and arms them — any earlier
-// `pw_init` call SIGSEGVs, so the app must arm them at startup.
+// libwebrtc's weak PipeWire stubs must be armed before pipewire-rs initializes.
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     #[link_name = "_ZN14modules_portal18InitializePipewireEPv"]
     fn webrtc_initialize_pipewire(module: *mut std::ffi::c_void);
 }
 
-/// Arms libwebrtc's bundled `PipeWire` dlopen shims so `pipewire-rs` calls
-/// reach the real libpipewire. Must run before any native-rust `PipeWire`
-/// usage (see the Tauri setup wiring).
 #[cfg(target_os = "linux")]
 pub fn arm_pipewire_shims() {
     // SAFETY: `InitializePipewire` only dlopens libpipewire and stores
@@ -299,12 +226,10 @@ pub fn arm_pipewire_shims() {
 #[cfg(not(target_os = "linux"))]
 pub fn arm_pipewire_shims() {}
 
-/// Scans the packaged dynamic `GStreamer` plugins before the publisher starts.
+/// Loads the packaged `GStreamer` plugins.
 ///
 /// # Errors
-///
-/// Returns an error when the directory cannot be scanned or a required
-/// publication element is unavailable.
+/// Returns an error if the plugin directory or required elements are unavailable.
 #[cfg(target_os = "linux")]
 pub fn load_gstreamer_plugins(plugin_dir: &std::path::Path) -> Result<(), String> {
     gstreamer_publisher::load_plugins(plugin_dir)
@@ -331,14 +256,10 @@ where
     f(state)
 }
 
-/// Connects to a `LiveKit` room and publishes a screenshare audio track. The
-/// worker thread runs its own tokio runtime; video tracks are published
-/// through `start_video_track` once the room is live.
+/// Connects to a `LiveKit` room.
 ///
 /// # Errors
-///
-/// Returns an error if a room is already connected or the worker thread cannot
-/// be spawned.
+/// Returns an error if the room or worker cannot be started.
 pub fn connect_livekit_room(
     url: String,
     token: String,
@@ -364,9 +285,6 @@ pub fn connect_livekit_room(
         VIDEO_SOURCE.store(None);
 
         let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(PCM_CHANNEL_CAPACITY);
-        // Publish the sender under its own tiny lock before the long `LIVEKIT`
-        // hold below, so the audio path can reach it without ever contending
-        // with `connect_livekit_room`.
         {
             let Ok(mut sender_guard) = PCM_SENDER.lock() else {
                 return Err("PCM sender lock poisoned".into());
@@ -404,11 +322,10 @@ pub fn connect_livekit_room(
     }
 }
 
-/// Disconnects the room and tears down the worker thread.
+/// Disconnects from the `LiveKit` room.
 ///
 /// # Errors
-///
-/// Returns an error if the room state lock is poisoned.
+/// Returns an error if room state cannot be accessed.
 pub fn disconnect_livekit_room() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -426,18 +343,9 @@ pub fn disconnect_livekit_room() -> Result<(), String> {
             let _ = state.stop.send(());
         }
         *guard = None;
-        // Clear the dedicated PCM sender so a stale sender can never outlive the
-        // room (a late `feed_pcm` would otherwise try_send into a closed channel
-        // and report a spurious error). Never blocks the audio path: this lock is
-        // independent of `LIVEKIT`.
         if let Ok(mut sender_guard) = PCM_SENDER.lock() {
             *sender_guard = None;
         }
-        // Release the room lock before the capture teardown below: `feed_pcm`
-        // (the audio-callback path) and every room command block on `LIVEKIT`,
-        // and `desktop_capture::stop()` joins the capture thread (~100-300 ms).
-        // Holding the lock across that join stalled the audio callback for the
-        // whole teardown on every room recreate.
         drop(guard);
         desktop_capture::stop();
         ROOM_CONNECTED.store(false, Ordering::SeqCst);
@@ -459,8 +367,6 @@ pub fn is_livekit_room_connected() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
-/// Returns whether the presenter still owns a room session, including brief
-/// reconnect and settings-rebuild windows where signaling is not connected.
 #[must_use]
 pub fn has_livekit_room_session() -> bool {
     #[cfg(target_os = "linux")]
@@ -472,8 +378,6 @@ pub fn has_livekit_room_session() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
-/// Resolves a codec string to a `VideoCodec`, defaulting to VP9 for anything
-/// unrecognized (including `None`).
 #[cfg(not(target_os = "linux"))]
 #[cfg(not(target_os = "linux"))]
 fn parse_video_codec(codec: Option<&str>) -> VideoCodec {
@@ -486,9 +390,6 @@ fn parse_video_codec(codec: Option<&str>) -> VideoCodec {
     }
 }
 
-/// Drains full `samples_per_chunk`-sized chunks from the worker's buffer,
-/// leaving a partial tail queued for the next push. Off-by-one safe: a buffer
-/// with exactly `n * samples_per_chunk` samples produces exactly `n` chunks.
 #[cfg(not(target_os = "linux"))]
 #[cfg(not(target_os = "linux"))]
 fn drain_pcm_chunks(buffer: &mut VecDeque<i16>, samples_per_chunk: usize, out: &mut Vec<Vec<i16>>) {
@@ -497,18 +398,14 @@ fn drain_pcm_chunks(buffer: &mut VecDeque<i16>, samples_per_chunk: usize, out: &
     }
 }
 
-/// Feeds one PCM chunk (48 kHz stereo `i16` samples) into the room's audio
-/// track. When the channel is full, WebRTC encoding is stalled and the newest
-/// chunk is dropped rather than queued.
-///
-/// # Errors
-///
-/// Returns an error if no room is connected or the worker's PCM channel is
-/// closed.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the non-Linux publisher transfers PCM ownership into its bounded worker channel"
 )]
+/// Feeds PCM samples to the room audio track.
+///
+/// # Errors
+/// Returns an error if the room or audio channel is unavailable.
 pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -518,11 +415,6 @@ pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        // Read the sender out under the dedicated `PCM_SENDER` lock (never
-        // `LIVEKIT`): `connect_livekit_room` holds `LIVEKIT` for the whole
-        // worker-start + Room::connect + publish_track sequence, and this runs
-        // on the audio-ring worker. Blocking on `LIVEKIT` there stalls the ring
-        // and, via its join, the whole app — the original deadlock.
         let sender = {
             let guard = PCM_SENDER
                 .lock()
@@ -532,7 +424,6 @@ pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
             };
             sender.clone()
         };
-        // Channel full: WebRTC encoding is stalled, drop the newest chunk.
         match sender.try_send(pcm) {
             Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -542,12 +433,10 @@ pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
     }
 }
 
-/// Publishes (or re-publishes) the screenshare video track with the given
-/// encoder settings, restarting the track without restarting the capture.
+/// Publishes or reconfigures the screenshare video track.
 ///
 /// # Errors
-///
-/// Returns an error if no room is connected or the worker channel is closed.
+/// Returns an error if the track cannot be started.
 pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -563,11 +452,10 @@ pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
     })
 }
 
-/// Unpublishes the screenshare video track.
+/// Stops the screenshare video track.
 ///
 /// # Errors
-///
-/// Returns an error if the room state lock is poisoned.
+/// Returns an error if room state cannot be accessed.
 pub fn stop_video_track() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -596,63 +484,45 @@ pub fn is_video_track_active() -> bool {
     VIDEO_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Starts the desktop capturer on its own thread. Returns once the capturer is
-/// running; on Wayland the native portal picker then appears and frames flow
-/// after the user selects a source.
+/// Starts desktop capture.
 ///
 /// # Errors
-///
-/// Returns an error if a capture session is already active, the thread cannot
-/// be spawned, or the capturer fails to initialize within five seconds.
+/// Returns an error if the capture worker cannot start.
 pub fn start_desktop_capture() -> Result<bool, String> {
     desktop_capture::start()
 }
 
-/// Starts the WGC desktop capturer (Windows-only) for the source the
-/// renderer's picker selected.
+/// Starts Windows capture for a selected source.
 ///
 /// # Errors
-///
-/// Returns an error if a capture session is already active or the capturer
-/// fails to initialize within five seconds.
+/// Returns an error if the source or capture worker is unavailable.
 #[cfg(target_os = "windows")]
 pub fn start_windows_capture(kind: WgcSourceKind, id: u64) -> Result<bool, String> {
     desktop_capture::start_windows(kind, id)
 }
 
-/// Enumerates the screens and windows capturable through WGC (Windows-only),
-/// for the renderer's in-app source picker. The chosen `(kind, id)` is fed
-/// back into [`start_windows_capture`].
+/// Lists Windows capture sources.
 ///
 /// # Errors
-///
-/// Returns an error when COM cannot be initialized or no capturer can be
-/// created.
+/// Returns an error if source enumeration fails.
 #[cfg(target_os = "windows")]
 pub fn get_windows_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     wgc_capture::get_windows_capture_sources()
 }
 
-/// Stops the active desktop capture session.
 #[must_use]
 pub fn stop_desktop_capture() -> bool {
     desktop_capture::stop()
 }
 
-/// Starts synthetic test-pattern capture (headless e2e / probes): generated
-/// BGRA frames feed the exact same conversion and publish path as the portal
-/// engine — no picker, no Wayland requirement.
+/// Starts the synthetic capture source used by tests.
 ///
 /// # Errors
-///
-/// Returns an error if a capture session is already active or the generator
-/// thread cannot be spawned.
+/// Returns an error if the capture worker cannot start.
 pub fn start_synthetic_capture(config: &CaptureConfig) -> Result<bool, String> {
     desktop_capture::start_synthetic_capture(config)
 }
 
-/// Returns `true` while the capturer is running (the portal picker may still
-/// be awaiting a selection).
 #[must_use]
 pub fn is_desktop_capture_active() -> bool {
     desktop_capture::is_active()
@@ -663,39 +533,22 @@ pub fn get_desktop_capture_stats() -> DesktopCaptureStats {
     desktop_capture::stats()
 }
 
-/// Registers the preview callback. Frame delivery emits a 16-byte timestamp
-/// and dimensions header followed by packed BGRA pixels while capture is
-/// active. The Tauri backend forwards the payload to the renderer. Replaces
-/// any previously registered callback.
 pub fn set_preview_callback(callback: Box<dyn Fn(Vec<u8>, i64) + Send + Sync>) {
     desktop_capture::set_preview_callback(callback);
 }
 
-/// Clears the registered preview callback.
 pub fn clear_preview_callback() {
     desktop_capture::clear_preview_callback();
 }
 
-/// Registers the capture-ended callback: invoked once per capture session
-/// when the portal closes it unexpectedly — the compositor ended the
-/// stream (e.g. the presenter closed the captured window/app). The Tauri
-/// backend forwards this to the renderer as the `capture-ended` event.
-/// Replaces any previously registered callback.
 pub fn set_capture_ended_callback(callback: Box<dyn Fn() + Send + Sync>) {
     desktop_capture::set_capture_ended_callback(callback);
 }
 
-/// Reports the renderer's preview viewport size in device pixels; the
-/// preview emitter scales every frame to fit inside it (OBS-style "scale to
-/// the window"), so the IPC channel only carries what the card can show.
 pub fn set_preview_viewport(width: u32, height: u32) {
     desktop_capture::set_preview_viewport(width, height);
 }
 
-/// Clears the reported preview viewport; the emitter skips frames until the
-/// renderer reports a size again (no mounted preview card = nothing to
-/// display — full-source-resolution fallback emission was an OOM vector
-/// into the channel queue).
 pub fn clear_preview_viewport() {
     desktop_capture::clear_preview_viewport();
 }
@@ -711,8 +564,6 @@ pub fn get_spectator_count() -> u32 {
     SPECTATOR_COUNT.load(Ordering::Relaxed)
 }
 
-/// Collects the latest native publisher stats for the local tracks and falls
-/// back to an empty snapshot if the publisher cannot answer within 500 ms.
 #[must_use]
 pub fn get_native_telemetry() -> NativeTelemetry {
     #[cfg(target_os = "linux")]
@@ -758,8 +609,6 @@ async fn collect_telemetry(room: &Room) -> NativeTelemetry {
     telemetry
 }
 
-// Byte counters and epoch-millisecond timestamps stay well below 2^53, so the
-// f64 conversion loses no precision in practice (JSON cannot carry u64).
 #[allow(
     clippy::cast_precision_loss,
     reason = "Byte counters and epoch-millisecond timestamps stay well below 2^53; f64 is exact in this range"
@@ -791,9 +640,6 @@ fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
                             Some(f64::from(outbound.outbound.frames_encoded));
                         telemetry.video_width = Some(outbound.outbound.frame_width);
                         telemetry.video_height = Some(outbound.outbound.frame_height);
-                        // libwebrtc timestamps are µs since epoch; the renderer computes
-                        // deltas from this ms field, and a µs delta read as ms made every
-                        // rate 1000x too small (28 Mbps read as 28 kbps).
                         telemetry.timestamp_ms = Some(outbound.rtc.timestamp as f64 / 1000.0);
                     }
                     "audio" => {
@@ -854,11 +700,6 @@ async fn run_worker(
 
     let samples_per_10ms = (SAMPLE_RATE / 100 * CHANNELS) as usize;
 
-    // PCM delivery runs as its own task on this current-thread runtime: the
-    // main loop must keep polling `pcm_rx` while a command handler awaits
-    // (publish/unpublish SDP+ICE negotiation, `get_stats`), or the 128-chunk
-    // channel fills in ~1.28 s and `feed_pcm` drops-newest — audible audio
-    // gaps during every go-live and encoder-settings change.
     let audio_pump = {
         let audio = audio.clone();
         tokio::spawn(async move {
@@ -866,13 +707,6 @@ async fn run_worker(
             let max_backlog_samples = MAX_AUDIO_BACKLOG_MS * samples_per_10ms;
             while let Some(pcm_chunk) = pcm_rx.recv().await {
                 buffer.extend(pcm_chunk);
-                // Drop-oldest backlog bound: a stalled upstream (ring,
-                // channel or worker) must never push audio content seconds
-                // behind the live video. Skipping the stale tail after a
-                // hiccup keeps audio near-live instead of lagging forever
-                // (the C++ audio source plays its buffer at real-time rate,
-                // so an unbound backlog would never drain faster than it
-                // grows).
                 while buffer.len() > max_backlog_samples {
                     buffer.pop_front();
                 }
@@ -935,7 +769,6 @@ async fn run_worker(
         }
     }
 
-    // Drop the pump; the channel senders are gone, so nothing further is delivered.
     drop(audio_pump);
 
     handle_stop_video(&room).await;
@@ -962,8 +795,6 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
     let codec = parse_video_codec(config.video_codec.as_deref());
 
     let encoding = config.max_bitrate.map(|bitrate| VideoEncoding {
-        // The renderer sends the bitrate limit from its settings UI as a whole
-        // number; rounding the f64 to u64 is exact for all sane values.
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -982,10 +813,6 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
                 source: TrackSource::Screenshare,
                 video_codec: codec,
                 video_encoding: encoding,
-                // livekit-rs 0.8 defaults to simulcast; its screenshare LOW/MID
-                // presets cap the lower layers at 3 FPS and a few hundred kbps
-                // (half resolution), which is what spectators then receive.
-                // One layer at the user's configured fps/bitrate instead.
                 simulcast: false,
                 ..Default::default()
             },
@@ -1136,8 +963,6 @@ mod tests {
 
     #[test]
     fn fold_stats_reports_the_actual_hardware_encoder_implementation() {
-        // "VAAPI H264 Encoder" proves the VA-API hardware path was taken
-        // instead of OpenH264; empty strings stay None (stack never reported).
         let stats = [outbound_stats(
             "video",
             11,
@@ -1183,9 +1008,6 @@ mod tests {
         {
             assert!(!codec.hardware, "{} must be software", codec.codec);
         }
-        // The picker contract: every codec has a non-empty display label.
-        // Off Linux the labels are the bare codec names (the encoder-suffix
-        // labels only exist on the probed GStreamer chain).
         for codec in &codecs {
             assert!(!codec.label.is_empty());
             assert!(!codec.codec.is_empty());
@@ -1208,7 +1030,6 @@ mod tests {
         ];
         let mut t = NativeTelemetry::default();
         fold_stats(&mut t, &stats);
-        // Negative lost values clamp to 0; RTT of 0.0 (unmeasured) is ignored.
         assert_eq!(t.video_packets_lost, Some(0.0));
         assert_eq!(t.audio_packets_lost, Some(7.0));
         assert_eq!(t.rtt_ms, Some(50.0));
@@ -1271,7 +1092,6 @@ mod tests {
         drain_pcm_chunks(&mut buffer, 960, &mut chunks);
         assert_eq!(chunks.len(), 1);
         assert_eq!(buffer.len(), 40);
-        // The next push fills the tail to a full chunk.
         buffer.extend(1000..1920);
         drain_pcm_chunks(&mut buffer, 960, &mut chunks);
         assert_eq!(chunks.len(), 2);
@@ -1280,8 +1100,6 @@ mod tests {
 
     #[test]
     fn with_guard_errors_when_no_room_is_connected() {
-        // The singleton is empty in a fresh test binary; the guard must fail
-        // with the "Room not connected" reason, not poison or hang.
         let Err(err) = with_guard(|_| Ok(())) else {
             panic!("expected an error without a connected room");
         };

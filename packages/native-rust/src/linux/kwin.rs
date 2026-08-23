@@ -1,16 +1,3 @@
-//! KDE window lookup via the `KWin` scripting D-Bus interface.
-//!
-//! `KWin` names its screencast streams `kwin-screencast-<objectName>`, where
-//! the object name is the window's `desktopFileName` for window captures and
-//! the output name (`DP-1`, `HDMI-A-1`, …) for monitor captures — never the
-//! window UUID (see `ScreencastManager::streamWindow`/`streamOutput`).
-//! Window metadata (PID, caption) is only exposed to `KWin`'s own scripts, so
-//! we load a one-shot script that finds the window by desktop file name
-//! (falling back to resource class for X11/XWayland clients) and reports the
-//! PID and caption back through a D-Bus method call to an object registered
-//! on our own bus name — the same mechanism `kdotool` uses, without the
-//! external binary dependency.
-
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -60,7 +47,6 @@ if (found) {
 }
 "#;
 
-/// A `KWin` window matched by desktop file name or resource class.
 pub(crate) struct WindowMatch {
     pub pid: u32,
     pub caption: String,
@@ -72,8 +58,6 @@ struct Helper {
 
 #[interface(name = "org.slopcast.KWinHelper")]
 impl Helper {
-    // PID and caption travel as one string: KWin's `callDBus` maps JS numbers
-    // to varying D-Bus integer types, while a string always arrives as 's'.
     #[zbus(name = "report")]
     fn report(&self, payload: &str) {
         let Some((pid, caption)) = payload.split_once('\n') else {
@@ -85,8 +69,6 @@ impl Helper {
     }
 }
 
-/// Removes the temporary `KWin` script file when the resolution attempt ends,
-/// however it ends.
 struct ScriptFile(std::path::PathBuf);
 
 impl Drop for ScriptFile {
@@ -95,12 +77,7 @@ impl Drop for ScriptFile {
     }
 }
 
-/// Resolve the `KWin` window whose desktop file name (or resource class)
-/// equals `key`. Best-effort: `None` on any D-Bus, scripting, or timeout
-/// failure.
 pub(crate) fn resolve_window(key: &str) -> Option<WindowMatch> {
-    // The key is interpolated into JavaScript, so reject anything that could
-    // break out of the string literal.
     if key.is_empty()
         || !key
             .chars()
@@ -133,8 +110,6 @@ pub(crate) fn resolve_window(key: &str) -> Option<WindowMatch> {
 
 fn load_and_run_script(conn: &Connection, path: &std::path::Path) -> Option<()> {
     let path_str = path.to_str()?;
-    // Replies are ignored on purpose: the loadScript return type differs
-    // between KWin 5 and 6, and a failure surfaces as a missing report.
     conn.call_method(
         Some("org.kde.KWin"),
         "/Scripting",

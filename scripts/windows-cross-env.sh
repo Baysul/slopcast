@@ -1,29 +1,4 @@
 #!/usr/bin/env bash
-# Windows cross-compilation environment for the Slopcast Rust workspace.
-#
-# Sources this file to make plain `cargo build --target x86_64-pc-windows-msvc`
-# work from a Linux host using the clang-cl/LLVM toolchain plus the xwin SDK
-# cache (no Visual Studio, no mingw). Requires:
-#   - clang / clang-cl / lld-link / llvm-lib / llvm-ar  (LLVM >= 18)
-#   - cargo-xwin (installed via `cargo install cargo-xwin`), which provides
-#     the cached MSVC CRT + Windows SDK under ~/.cache/cargo-xwin
-#   - rustup target add x86_64-pc-windows-msvc
-#
-# Usage:
-#   source scripts/windows-cross-env.sh
-#   cargo build -p slopcast --target x86_64-pc-windows-msvc
-#
-# Why these env vars:
-#   - CC/CXX/AR/RANLIB_<target>   point cc-rs, cxx-build and cmake at the
-#     LLVM tools (clang-cl understands MSVC-style /flags; llvm-lib produces
-#     .lib archives).
-#   - INCLUDE / LIB               clang-cl does not auto-locate the xwin SDK;
-#     these mirror what vcvarsall would set.
-#   - CARGO_TARGET_*_LINKER       lld-link is the MSVC-compatible linker.
-#   - CL                           clang-cl reads this like cl.exe; the
-#     -Wno-* flags silence warnings that CEF's own CMake escalates with
-#     /WX (e.g. `/MP` is a cl.exe-only flag that clang-cl rejects under
-#     -Werror).
 
 set -euo pipefail
 

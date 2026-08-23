@@ -1,6 +1,3 @@
-//! Capture commands — driving `native-livekit`'s desktop capturer and
-//! video track.
-
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -11,15 +8,10 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use crate::AppHandle;
 use crate::platform::video_capture_available;
 
-/// When set, the capture commands route to the synthetic test-pattern source
-/// instead of the portal: the headless e2e drives the real UI flow (preview →
-/// go live) without a portal picker or a Wayland session. Production runs
-/// never set this.
 fn e2e_capture_mode() -> bool {
     std::env::var("SLOPCAST_E2E_CAPTURE").as_deref() == Ok("synthetic")
 }
 
-/// A capturable screen or window in the Windows WGC source picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CaptureSourceKind {
@@ -27,7 +19,6 @@ pub enum CaptureSourceKind {
     Window,
 }
 
-/// One capturable source as reported by `get_capture_sources`.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureSourceInfo {
@@ -37,8 +28,6 @@ pub struct CaptureSourceInfo {
     pub kind: CaptureSourceKind,
 }
 
-/// The renderer's picker selection, passed into the capture commands on
-/// Windows (ignored on Linux, where the portal picker decides).
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureSourceSelection {
@@ -67,9 +56,6 @@ fn map_source_info(info: native_livekit::CaptureSourceInfo) -> CaptureSourceInfo
     }
 }
 
-/// Starts a capture through the active route: the synthetic source in e2e
-/// mode, the WGC source on Windows (the picker's selection), the portal
-/// source otherwise. Returns the `CaptureStartResult`.
 fn start_capture(
     config: &CaptureConfig,
     source: Option<CaptureSourceSelection>,
@@ -90,10 +76,6 @@ fn start_capture(
     result
 }
 
-/// The real (non-e2e) capture route. On Windows the renderer's picker
-/// selection is required — there is no system picker; elsewhere the
-/// platform's default source runs (the portal picker on Wayland, a
-/// video-less no-op elsewhere).
 #[cfg(target_os = "windows")]
 fn start_real_capture(
     _config: &CaptureConfig,
@@ -113,14 +95,6 @@ fn start_real_capture(
     native_livekit::start_desktop_capture()
 }
 
-/// The most recent preview payload, kept for the `frame` custom-protocol
-/// handler. One slot, replaced per emission — bounded by construction.
-///
-/// Why not `tauri::ipc::Channel` or a per-invoke `Response`? Both deliver
-/// raw bodies (>1 KB) through the same slow `__TAURI_CHANNEL__|fetch`
-/// machinery (~4 s per 2 MB response). A custom URI scheme
-/// serves bytes directly from the protocol handler — no IPC, no ordering,
-/// no queue — the renderer fetches at its own pace.
 pub static LATEST_FRAME: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 fn clear_latest_frame() -> Result<(), String> {
@@ -133,7 +107,6 @@ fn clear_latest_frame() -> Result<(), String> {
     Ok(())
 }
 
-/// Registers the preview callback and stashes each header-prefixed BGRA payload.
 pub fn register_preview_frame_callback() {
     native_livekit::set_preview_callback(Box::new(move |bytes, _pts_us| {
         if let Ok(mut slot) = LATEST_FRAME.lock() {
@@ -142,15 +115,8 @@ pub fn register_preview_frame_callback() {
     }));
 }
 
-/// The app handle the capture-ended callback emits the `capture-ended`
-/// event through; registered once at startup, like the preview callback.
 static CAPTURE_ENDED_EMITTER: Mutex<Option<AppHandle>> = Mutex::new(None);
 
-/// Registers the capture-ended callback: the portal closes the `ScreenCast`
-/// session when the compositor ends the stream (e.g. the presenter closed
-/// the captured window), and the renderer tears the share down on the
-/// `capture-ended` event. The callback runs on the capture thread; the emit
-/// is non-blocking, so the join in `stop_desktop_capture` never waits on it.
 pub fn register_capture_ended_callback(app: &AppHandle) {
     if let Ok(mut guard) = CAPTURE_ENDED_EMITTER.lock() {
         *guard = Some(app.clone());
@@ -163,9 +129,6 @@ pub fn register_capture_ended_callback(app: &AppHandle) {
     }));
 }
 
-/// Reports the renderer's preview card size (device pixels) so the preview
-/// emitter scales frames to fit it — OBS-style "scale to the window" —
-/// instead of shipping full-resolution frames through the channel.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_preview_viewport(width: u32, height: u32) -> bool {
@@ -173,8 +136,6 @@ pub fn set_preview_viewport(width: u32, height: u32) -> bool {
     true
 }
 
-/// Clears the reported preview viewport; preview emission pauses until the
-/// renderer reports a size again.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn clear_preview_viewport() -> bool {
@@ -182,7 +143,6 @@ pub fn clear_preview_viewport() -> bool {
     true
 }
 
-/// Result of `start_native_capture` (X11/macOS degrade to audio-only).
 #[derive(Debug, Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureStartResult {
@@ -202,11 +162,6 @@ impl CaptureStartResult {
     }
 }
 
-/// Starts the native capture: publishes the video track and starts the
-/// desktop capturer. On Wayland the portal picker appears; on Windows the
-/// renderer's picker selection (`source`) is required — there is no system
-/// picker. On platforms with no capture route (X11, macOS) the share
-/// degrades to audio-only (synthetic e2e mode bypasses the platform gate).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_native_capture(
     config: CaptureConfig,
@@ -235,14 +190,9 @@ pub async fn start_native_capture(
     .unwrap_or_else(|e| CaptureStartResult::failed(format!("start capture task failed: {e}")))
 }
 
-/// Re-publishes the video track with new encoder settings without restarting
-/// the capture. Returns `false` on platforms without a capture route or when
-/// the publish fails.
-///
-/// # Errors
-///
-/// Returns an error if the update task fails to run.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if the video update task fails.
 pub async fn update_native_video(config: CaptureConfig) -> Result<bool, String> {
     if !video_capture_available() && !e2e_capture_mode() {
         return Ok(false);
@@ -255,12 +205,9 @@ pub async fn update_native_video(config: CaptureConfig) -> Result<bool, String> 
     Ok(updated)
 }
 
-/// Stops the video track, desktop capture and audio capture.
-///
-/// # Errors
-///
-/// Returns an error when any active capture component cannot be stopped.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if an active capture component cannot stop.
 pub async fn stop_native_capture() -> Result<(), String> {
     let video_result = native_livekit::stop_video_track();
     let capture_stopped = native_livekit::stop_desktop_capture();
@@ -278,14 +225,9 @@ pub async fn stop_native_capture() -> Result<(), String> {
     Ok(())
 }
 
-/// Stops and unpublishes only the video share, preserving room audio and the
-/// `LiveKit` connection.
-///
-/// # Errors
-///
-/// Returns an error when the video publication or desktop capturer cannot be
-/// stopped.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if the video capture cannot stop.
 pub async fn stop_video_capture() -> Result<(), String> {
     let track_result = native_livekit::stop_video_track();
     let capture_stopped = native_livekit::stop_desktop_capture();
@@ -299,22 +241,18 @@ pub async fn stop_video_capture() -> Result<(), String> {
     Ok(())
 }
 
-/// Returns `true` while the published video track is active.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn is_native_capture_active() -> bool {
     native_livekit::is_video_track_active()
 }
 
-/// Returns the current desktop capture stage counters.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_video_capture_stats() -> DesktopCaptureStats {
     native_livekit::get_desktop_capture_stats()
 }
 
-/// Resolution preset → capture dimensions (mirrors `RESOLUTION_DIMENSIONS`
-/// in `@slopcast/shared-types`).
 #[must_use]
 fn resolution_dims(preset: &str) -> (u32, u32) {
     match preset {
@@ -326,16 +264,9 @@ fn resolution_dims(preset: &str) -> (u32, u32) {
     }
 }
 
-/// Starts the capture in pre-roll mode: frames flow to the preview, no track
-/// is published (Linux portal picker appears; Windows starts the WGC
-/// capturer for the renderer's source selection). In synthetic e2e mode the
-/// test-pattern source runs instead of the real route.
-///
-/// # Errors
-///
-/// Returns an error on platforms without a capture route, when a Windows
-/// source selection is missing, or when the capturer fails to start.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if preview capture cannot start.
 pub async fn start_capture_preview(
     app: AppHandle,
     source: Option<CaptureSourceSelection>,
@@ -346,9 +277,6 @@ pub async fn start_capture_preview(
     tauri::async_runtime::spawn_blocking(move || {
         clear_latest_frame()?;
         if e2e_capture_mode() {
-            // Drive the synthetic source from the persisted stream settings
-            // (resolution + fps) so e2e passes exercise the configured
-            // cadence — a hardcoded 720p@30 source silently caps every pass.
             let saved = crate::settings::get_stream_settings(app)
                 .unwrap_or_else(|_| crate::settings::default_stream_settings());
             let (width, height) = resolution_dims(&saved.resolution);
@@ -368,9 +296,6 @@ pub async fn start_capture_preview(
             };
             native_livekit::start_synthetic_capture(&config)?;
         } else {
-            // The real route ignores the encoder config — capture runs at
-            // the source's native resolution; the encoder target is applied
-            // when `go_live` publishes the track.
             let config = native_livekit::CaptureConfig {
                 width: 0,
                 height: 0,
@@ -387,10 +312,6 @@ pub async fn start_capture_preview(
     .map_err(|e| format!("start capture preview task failed: {e}"))?
 }
 
-/// Starts the synthetic test-pattern capture (headless e2e, manual probes):
-/// generated frames feed the exact same conversion and publish path as the
-/// portal capture, so the full encode → SFU → spectator chain is testable
-/// without a picker or a Wayland session.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_synthetic_capture(config: CaptureConfig) -> CaptureStartResult {
     tauri::async_runtime::spawn_blocking(move || {
@@ -412,17 +333,9 @@ pub async fn start_synthetic_capture(config: CaptureConfig) -> CaptureStartResul
     .unwrap_or_else(|e| CaptureStartResult::failed(format!("synthetic capture task failed: {e}")))
 }
 
-/// Publishes the previewed capture: when a pre-roll capture
-/// is already active the track is published against it (frames keep flowing
-/// to both the preview and the track); otherwise the combined start runs
-/// (publish + capture start, using the renderer's Windows source selection
-/// when one is supplied).
-///
-/// # Errors
-///
-/// Returns an error on platforms without a capture route or when the track
-/// publish or the capturer start fails.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if the video track or capture cannot start.
 pub async fn go_live(
     config: CaptureConfig,
     source: Option<CaptureSourceSelection>,
@@ -452,14 +365,9 @@ pub async fn go_live(
     .map_err(|e| format!("go live task failed: {e}"))?
 }
 
-/// Enumerates the screens and windows capturable through WGC (Windows-only),
-/// for the renderer's in-app source picker.
-///
-/// # Errors
-///
-/// Returns an error on non-Windows platforms or when the WGC enumeration
-/// fails.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if capture source enumeration fails.
 pub async fn get_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     #[cfg(target_os = "windows")]
     {
@@ -474,16 +382,11 @@ pub async fn get_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     }
 }
 
-/// Benchmark-only: raw-payload channel for `bench_push_frames` throughput/latency
-/// measurements.
 static BENCH_CHANNEL: Mutex<Option<Channel<InvokeResponseBody>>> = Mutex::new(None);
 
-/// Registers the benchmark channel. Replaces any previously registered one.
-///
-/// # Errors
-///
-/// Returns an error when the channel state lock is poisoned.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if the benchmark channel lock is unavailable.
 pub async fn bench_register_channel(channel: Channel<InvokeResponseBody>) -> Result<(), String> {
     let Ok(mut guard) = BENCH_CHANNEL.lock() else {
         return Err("bench channel lock poisoned".into());
@@ -492,15 +395,9 @@ pub async fn bench_register_channel(channel: Channel<InvokeResponseBody>) -> Res
     Ok(())
 }
 
-/// Benchmark-only: pushes `count` raw payloads of `size` bytes at
-/// `interval_ms` cadence through the registered bench channel. The renderer
-/// records arrival timestamps and computes cadence, jitter and bytes/s.
-///
-/// # Errors
-///
-/// Returns an error when the channel state lock is poisoned or no channel
-/// has been registered yet.
 #[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if the benchmark channel is unavailable.
 pub async fn bench_push_frames(count: u32, size: usize, interval_ms: u64) -> Result<(), String> {
     let channel = {
         let Ok(guard) = BENCH_CHANNEL.lock() else {

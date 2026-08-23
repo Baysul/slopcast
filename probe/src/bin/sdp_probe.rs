@@ -1,15 +1,3 @@
-//! Temporary diagnostic probe (2026-08-06): publish a synthetic video track
-//! through the same livekit SDK path as the desktop app — but drive the
-//! source DIRECTLY at 60 fps (no app pacer, no portal) — and sample
-//! outbound-rtp `framesEncoded` twice to measure the encoder's real
-//! sustained framerate. 30 fps here => the cap lives in the
-//! SDK/C++/SFU-negotiation path; 60 fps => the app's delivery is the cap.
-//! Run: livekit-server --dev on :7880, then
-//! `cargo run -p pw-conflict-probe --bin sdp_probe`.
-//! 2026-08-08: PROBE_DURATION env (s), and the test pattern is a moving
-//! white box on gray (was solid gray) so a spectator can detect
-//! frame alternation (old/new jumping) vs even motion.
-
 use std::time::Duration;
 
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
@@ -107,9 +95,6 @@ fn main() {
         let mut first_sample = None;
         let mut pushed = 0u64;
         let push_interval = Duration::from_micros(1_000_000 / u64::from(fps.max(1)));
-        // Moving white box (1/6 width, 1/6 height) travelling left->right,
-        // wrapping, so the content differs every frame and a spectator can
-        // detect frame alternation (box jumping back) vs even motion.
         let box_w = (width / 6).max(1);
         let box_h = (height / 6).max(1);
         let travel = width - box_w;
@@ -128,8 +113,6 @@ fn main() {
                 y.fill(128);
                 u.fill(128);
                 v.fill(128);
-                // White box (Y=235, U=V=128) at x0; U/V stay neutral so the
-                // box is visible as luminance only.
                 let x0 = ((u64::from(travel) * (pushed % 128)) / 128) as usize;
                 let y0 = (height / 2 - box_h / 2) as usize;
                 let stride_y = width as usize;
@@ -165,7 +148,6 @@ fn main() {
     });
 }
 
-/// Reports the negotiated video codec mime from the local track's stats.
 async fn report_live_codec(room: &Room) -> Option<String> {
     for (_sid, publication) in room.local_participant().track_publications() {
         let Some(track) = publication.track() else {
@@ -193,7 +175,6 @@ async fn report_live_codec(room: &Room) -> Option<String> {
     None
 }
 
-/// Frames encoded by the published video track (outbound-rtp framesEncoded).
 async fn sample(room: &Room) -> u64 {
     for (_sid, publication) in room.local_participant().track_publications() {
         let Some(track) = publication.track() else {
@@ -214,7 +195,6 @@ async fn sample(room: &Room) -> u64 {
     0
 }
 
-/// Bytes sent by the published video track.
 async fn sample_bytes(room: &Room) -> u64 {
     for (_sid, publication) in room.local_participant().track_publications() {
         let Some(track) = publication.track() else {

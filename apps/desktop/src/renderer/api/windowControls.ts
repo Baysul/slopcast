@@ -1,9 +1,3 @@
-// Typed window-controls wrapper for the custom titlebar — the window
-// customization guide's `getCurrentWindow()` surface, kept separate from
-// desktop.ts because these are frontend window APIs rather than backend
-// commands. Each call degrades gracefully outside the Tauri runtime (plain
-// `vite dev` in a browser) with a one-time warning, like desktop.ts.
-
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -15,7 +9,6 @@ const warnUnavailable = (op: string, err: unknown): void => {
   console.warn(`[window] "${op}" unavailable, using fallback:`, err);
 };
 
-// Only meaningful inside the Tauri webview; throws in a plain browser.
 const currentWindow = (): ReturnType<typeof getCurrentWindow> | null => {
   try {
     return getCurrentWindow();
@@ -80,8 +73,6 @@ export const windowControls = {
       return false;
     }
   },
-  // Fires on maximize/unmaximize too (the window resizes), so it keeps the
-  // maximize/restore icon in sync with the real window state.
   onResized: async (callback: () => void): Promise<UnlistenFn> => {
     const win = currentWindow();
     if (!win) return () => undefined;

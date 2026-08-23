@@ -53,10 +53,6 @@ fn portal_window_name(props: &DictRef) -> Option<String> {
     extract_portal_window_name_from_map(|key| props.get(key).map(Into::into))
 }
 
-/// What a `kwin-screencast-<suffix>` stream captures, derived from the suffix.
-/// `KWin` names window streams after the window's desktop file name, monitor
-/// streams after the output (`DP-1`, `HDMI-A-1`, `eDP-1`, …), and region
-/// streams after the geometry (`x,y WxH`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KdeScreencast {
     Window,
@@ -65,17 +61,12 @@ enum KdeScreencast {
 }
 
 fn classify_kde_screencast(suffix: &str) -> KdeScreencast {
-    // An empty suffix is a window whose desktop file name is empty (or a
-    // restored portal session) — monitor and region names are never empty.
     if suffix.is_empty() {
         return KdeScreencast::Window;
     }
     if suffix.contains(',') {
         return KdeScreencast::Region;
     }
-    // Output names end in a digit group after a dash (`DP-3`, `HDMI-A-1`),
-    // while desktop file names carry dots or underscores (`org.kde.dolphin`,
-    // `steam_app_default`) or no dash at all (`codium`, `signal`).
     let output_like = suffix.split('-').nth(1).is_some()
         && suffix
             .rsplit('-')
@@ -91,9 +82,6 @@ fn classify_kde_screencast(suffix: &str) -> KdeScreencast {
 
 fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     let suffix = media_name.strip_prefix("kwin-screencast-")?;
-    // Empty suffix means KWin didn't encode a window identity (e.g. restored
-    // portal session with persist) — can't resolve any specific app. Monitors
-    // and regions never map to a single application.
     if suffix.is_empty() || classify_kde_screencast(suffix) != KdeScreencast::Window {
         return None;
     }
@@ -103,14 +91,9 @@ fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     {
         return Some(app);
     }
-    // Layer 5: the window's own process as a PID target — captures apps with no
-    // active stream yet (e.g. Spotify while paused).
     window_pid_fallback(&win, suffix)
 }
 
-/// Layers 1–4 of the KDE audio resolution: match the captured window against
-/// the *active* audio streams (process hierarchy, binary, name, caption,
-/// desktop file name).
 #[allow(
     clippy::too_many_lines,
     reason = "four ordered match strategies are clearer as one cascade than as separate helpers"
@@ -120,9 +103,6 @@ fn match_kde_window_to_apps(
     win: &kwin::WindowMatch,
     suffix: &str,
 ) -> Option<AudioApp> {
-    // Layer 1: Process hierarchy & related process tree match — check if
-    // the audio process and window owner process are identical, parent/child,
-    // or share a launcher/container ancestor (e.g. Proton/Wine, Steam/bwrap).
     if let Some(app) = apps.iter().find(|app| {
         let app_pid = app.process_id.cast_unsigned();
         are_processes_related(app_pid, win.pid)
@@ -130,9 +110,6 @@ fn match_kde_window_to_apps(
         return Some(app.clone());
     }
 
-    // Layer 1b: Match audio app by checking process binary/cmdline of running
-    // audio apps against the suffix or window caption (normalizing Windows backslashes
-    // and .exe extensions).
     let clean_suffix = suffix.trim_end_matches(".exe").trim_end_matches(".EXE");
     for app in apps {
         let app_pid = app.process_id;
@@ -157,7 +134,6 @@ fn match_kde_window_to_apps(
         }
     }
 
-    // Layer 2: window-process candidates (comm / cmdline binary).
     let comm = std::fs::read_to_string(format!("/proc/{}/comm", win.pid)).ok();
     let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", win.pid)).ok();
     let mut candidates: Vec<String> = Vec::new();
@@ -187,14 +163,12 @@ fn match_kde_window_to_apps(
         }
     }
 
-    // Layer 3: Window caption match.
     if !win.caption.is_empty()
         && let Some(app) = crate::find_best_audio_match(apps, &win.caption)
     {
         return Some(app);
     }
 
-    // Layer 4: desktop file name suffix.
     if !is_generic_launcher(suffix)
         && let Some(app) = crate::find_best_audio_match(apps, suffix)
     {
@@ -204,8 +178,6 @@ fn match_kde_window_to_apps(
     None
 }
 
-/// The friendliest display name for a process: its comm unless that is a
-/// generic launcher (steam, wine64-preloader, …), falling back to `fallback`.
 fn process_display_name(pid: u32, fallback: &str) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
         .ok()
@@ -214,9 +186,6 @@ fn process_display_name(pid: u32, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// A process-id capture target (`id = -pid`) for an app that is running but
-/// currently silent. Pid 0/1 and pids that do not fit the negative-id
-/// encoding are rejected.
 fn pid_fallback_app(pid: i32, name: String) -> Option<AudioApp> {
     if pid <= 1 {
         return None;
@@ -232,7 +201,6 @@ fn pid_fallback_app(pid: i32, name: String) -> Option<AudioApp> {
     })
 }
 
-/// Layer 5 for KDE window captures: the window's own process as a PID target.
 fn window_pid_fallback(win: &kwin::WindowMatch, suffix: &str) -> Option<AudioApp> {
     let pid = i32::try_from(win.pid).ok()?;
     let name = if win.caption.is_empty() {
@@ -243,16 +211,11 @@ fn window_pid_fallback(win: &kwin::WindowMatch, suffix: &str) -> Option<AudioApp
     pid_fallback_app(pid, name)
 }
 
-/// The last dot-segment of a reverse-domain app id (`org.mozilla.firefox` →
-/// `firefox`). Only names with at least two dots qualify — binary names like
-/// `ffxiv_dx11.exe` (a single dot) stay untouched.
 fn shorten_portal_app_id(name: &str) -> Option<&str> {
     let short = name.split('.').next_back()?;
     (name.matches('.').count() >= 2 && short.len() >= 3).then_some(short)
 }
 
-/// Resolves the process id for a portal-reported window application id:
-/// exact name/binary match first, then the last dot-segment (`org.gnome.…`).
 fn resolve_pid_for_portal_app(name: &str) -> Option<i32> {
     let procs = iter_proc();
     if let Some(pid) = resolve_pid_by_name(&procs, name) {
@@ -262,26 +225,19 @@ fn resolve_pid_for_portal_app(name: &str) -> Option<i32> {
     resolve_pid_by_name(&procs, short)
 }
 
-/// Snapshot of the `PipeWire` video nodes relevant to an active portal capture.
 #[derive(Default)]
 struct VideoScan {
     de: Option<&'static str>,
     source_type: Option<&'static str>,
     media_name: Option<String>,
     video_node_count: u32,
-    /// Highest `object.serial` seen — serials order streams by creation time, so
-    /// this picks the active stream over lingering ones.
     highest_serial: u64,
-    /// `(object.serial, media.name)` per KDE screencast node.
     kde_media_names: Vec<(u64, String)>,
     capture_names: Vec<String>,
     screencast_node_id: Option<u32>,
-    /// xdg-desktop-portal metadata (`portal.screencast.*`) of the captured window.
     portal_props: Option<HashMap<String, String>>,
 }
 
-/// Collect only the xdg-desktop-portal metadata keys (`portal.screencast.*`)
-/// from the screencast video node's registry + info props.
 fn merge_portal_props(
     out: &mut Option<HashMap<String, String>>,
     registry: &HashMap<String, String>,
@@ -324,8 +280,6 @@ fn inspect_video_graph() -> Option<VideoScan> {
             move |global| {
                 let Some(props) = global.props else { return };
                 let media_class = props.get("media.class").unwrap_or("");
-                // Only producer/output nodes carry capture-source metadata;
-                // consumer nodes (Stream/Input/Video) are not relevant.
                 if !media_class.starts_with("Video/")
                     && !media_class.starts_with("Stream/Output/Video")
                 {
@@ -418,13 +372,10 @@ fn inspect_video_graph() -> Option<VideoScan> {
         .register();
 
     sync_registry(&pw.core, &pw.main_loop);
-    // Second round for bound nodes to deliver their info events.
     sync_registry(&pw.core, &pw.main_loop);
     Some(scan.take())
 }
 
-/// The active KDE screencast stream: the most recently created one, by
-/// `object.serial` (`KWin` can leave older, lingering streams listed).
 fn active_kde_media_name(kde_media_names: &[(u64, String)]) -> Option<&str> {
     kde_media_names
         .iter()
@@ -433,10 +384,7 @@ fn active_kde_media_name(kde_media_names: &[(u64, String)]) -> Option<&str> {
 }
 
 fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
-    // 1. For KDE screencast streams (`kwin-screencast-*`), evaluate strictly
-    // the single active (most recently created) stream based on object.serial.
     if let Some(active_mn) = active_kde_media_name(&scan.kde_media_names) {
-        // If the active stream is a monitor or region, return None directly.
         if let Some(suffix) = active_mn.strip_prefix("kwin-screencast-") {
             let class = classify_kde_screencast(suffix);
             if class == KdeScreencast::Monitor || class == KdeScreencast::Region {
@@ -444,16 +392,13 @@ fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
             }
         }
 
-        // Resolve only the active stream; never fall through to older lingering ones.
         return resolve_kde_screencast_audio(active_mn);
     }
 
-    // 2. Monitors and regions for non-KDE environments are screen displays — return None.
     if scan.source_type == Some("monitor") || scan.source_type == Some("region") {
         return None;
     }
 
-    // 3. GNOME / XDG portal streams: match the capture names against running apps.
     if let Ok(apps) = list_audio_applications()
         && let Some(app) = scan
             .capture_names
@@ -463,7 +408,6 @@ fn resolve_from_video_scan(scan: &VideoScan) -> Option<AudioApp> {
         return Some(app);
     }
 
-    // 4. Portal app with no active stream: resolve its id to a running process.
     scan.capture_names.iter().find_map(|name| {
         let pid = resolve_pid_for_portal_app(name)?;
         let display = process_display_name(pid.cast_unsigned(), name);
@@ -500,8 +444,6 @@ pub(crate) fn get_capture_context() -> Result<crate::CaptureContext, String> {
         video_node_count: scan.video_node_count.cast_signed(),
         app,
         screencast_node_id: node_id,
-        // `object.serial` values stay far below 2^53, so the f64 conversion
-        // is exact for every serial that can occur in practice.
         #[allow(
             clippy::cast_precision_loss,
             reason = "object.serial is monotonically increasing from 1 and stays below 2^53 in any real session"
@@ -539,8 +481,6 @@ mod tests {
 
     #[test]
     fn window_pid_fallback_prefers_process_comm_over_caption() {
-        // Our own live process: comm is the test binary (not a generic
-        // launcher), so it must win over the caption.
         let pid = std::process::id();
         let win = super::super::kwin::WindowMatch {
             pid,
@@ -571,17 +511,14 @@ mod tests {
             Some("Nautilus")
         );
         assert_eq!(shorten_portal_app_id("com.spotify.Client"), Some("Client"));
-        // Single-dot names are binaries (or plain names) — never shortened.
         assert_eq!(shorten_portal_app_id("ffxiv_dx11.exe"), None);
         assert_eq!(shorten_portal_app_id("spotify"), None);
         assert_eq!(shorten_portal_app_id("org"), None);
-        // Too-short segments are not usable search keys.
         assert_eq!(shorten_portal_app_id("org.foo.x"), None);
     }
 
     #[test]
     fn matches_pipewire_portal_screencast_node_properties() {
-        // Sample PipeWire properties from xdg-desktop-portal / getDisplayMedia() window pickers
         let mut ffxiv_props = HashMap::new();
         ffxiv_props.insert("portal.screencast.title", "FINAL FANTASY XIV".to_string());
         ffxiv_props.insert(
@@ -631,7 +568,6 @@ mod tests {
             },
         ];
 
-        // Simulated PipeWire VideoScan from a getDisplayMedia() portal screencast
         let scan = VideoScan {
             de: Some("kde"),
             source_type: Some("window"),
@@ -650,14 +586,12 @@ mod tests {
             .find_map(|name| crate::find_best_audio_match(&apps, name));
         assert_eq!(matched.map(|a| a.id), Some(234));
 
-        // Matching Zenless Zone Zero by window name
         let matched_zzz = crate::find_best_audio_match(&apps, "Zenless Zone Zero");
         assert_eq!(matched_zzz.map(|a| a.id), Some(101));
     }
 
     #[test]
     fn classifies_kde_window_names() {
-        // KWin names window streams after the window's desktop file name.
         for suffix in [
             "codium",
             "signal",
@@ -669,7 +603,6 @@ mod tests {
             "io.ente.auth",
             "gitbutler-tauri",
             "steam_app_default",
-            // Window with no desktop file name at all.
             "",
         ] {
             assert_eq!(
@@ -682,7 +615,6 @@ mod tests {
 
     #[test]
     fn classifies_kde_monitor_names() {
-        // KWin names monitor streams after the output connector.
         for suffix in ["DP-1", "DP-3", "HDMI-A-1", "eDP-1", "DVI-D-1", "Virtual-1"] {
             assert_eq!(
                 classify_kde_screencast(suffix),
@@ -713,8 +645,6 @@ mod tests {
 
     #[test]
     fn classifies_dash_digit_suffix_with_dot_or_underscore_as_window() {
-        // Desktop-file-like names that *look* like outputs (dash + digits) but
-        // carry a dot/underscore must stay window-classified.
         for suffix in ["org.kde.foo-1", "steam_app_123", "app-2_test"] {
             assert_eq!(
                 classify_kde_screencast(suffix),
@@ -801,13 +731,6 @@ mod tests {
 
     #[test]
     fn kde_window_resolution_never_falls_through_to_unrelated_audio_apps() {
-        // A KDE window capture resolves strictly by the captured window's
-        // identity. An unrelated running audio app — a different process,
-        // e.g. Spotify playing in another window, which may appear in
-        // `capture_names` from another video node — must never be picked,
-        // even when the captured app has no active audio stream: the
-        // resolution ends at the captured window's own PID target (Layer 5),
-        // never at the unrelated app.
         let win = super::super::kwin::WindowMatch {
             pid: std::process::id(),
             caption: "VSCodium".into(),
@@ -831,10 +754,6 @@ mod tests {
 
     #[test]
     fn active_kde_stream_is_the_newest_ignoring_older_lingering_streams() {
-        // KWin can leave lingering screencast streams behind (an older
-        // capture's node is eventually destroyed, but it may still be
-        // listed); the active stream is the most recently created one —
-        // highest `object.serial` — regardless of list order.
         let names = vec![
             (100, "kwin-screencast-steam_app_default".to_string()),
             (200, "kwin-screencast-codium".to_string()),

@@ -43,12 +43,10 @@ test('subscribers are not notified for epsilon-level changes', () => {
   const seen: number[][] = [];
   audioWaveStore.subscribe(2, (columns) => seen.push(columns));
   const wave = silentWave();
-  wave[0] = 0.001; // below WAVE_EPSILON
+  wave[0] = 0.001;
   audioWaveStore.updateWave([{ id: 2, columns: wave }]);
-  // First update establishes the wave (one notification)...
   assert.equal(seen.length, 2);
   audioWaveStore.updateWave([{ id: 2, columns: wave }]);
-  // ...but an identical (sub-epsilon) re-update must not notify again.
   assert.equal(seen.length, 2);
 });
 

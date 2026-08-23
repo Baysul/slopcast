@@ -139,8 +139,6 @@ const applyVideoDelta = (acc: VideoStats, report: RTCStatLike, prev: StatsPrev):
   if (db >= 0) acc.videoBitrate = (db * 8) / dt;
   const df = (report.framesDecoded ?? 0) - prev.framesDecoded;
   if (df >= 0) acc.frameRate = df / dt;
-  // Delta-based loss: cumulative loss understates recent degradation
-  // and can never recover after a burst.
   const dl = Math.max(0, (report.packetsLost ?? 0) - prev.packetsLost);
   const dr = Math.max(0, (report.packetsReceived ?? 0) - prev.packetsReceived);
   const total = dl + dr;
@@ -163,8 +161,6 @@ const applyVideoDelta = (acc: VideoStats, report: RTCStatLike, prev: StatsPrev):
   );
 };
 
-// The stats schema has many optional counters, and folding them in one pass
-// keeps the per-report semantics explicit.
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: RTC stats folding is intentionally comprehensive.
 function foldInboundVideo(acc: VideoStats, report: RTCStatLike, stats: RTCStatsReport, prev: StatsPrev | null): void {
   const ts = report.timestamp ?? 0;

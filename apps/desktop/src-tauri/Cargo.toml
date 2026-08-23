@@ -31,7 +31,6 @@ tauri-build = {
 }
 
 [dependencies]
-# tauri = { version = "2", features = [] }
 tauri = {
   git = "https://github.com/tauri-apps/tauri",
   branch = "feat/cef",
@@ -43,20 +42,13 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
-# E2E-only (MIGRATION §12): CEF remote-debugging via
-# e2e::with_command_line_args; no plugin deps remain.
 native-livekit = { path = "../../../packages/native-livekit" }
 native-rust = { path = "../../../packages/native-rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Only the Linux dlopen shims in platform.rs touch libc; keeping it off
-# other targets keeps unused_crate_dependencies quiet there.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [features]
-# Embedded WebDriver plugins are gone (see MIGRATION §12): the presenter
-# phase now drives the app over CEF's DevTools protocol via Playwright,
-# which needs only the command-line flag registered in e2e.rs.
 e2e = []

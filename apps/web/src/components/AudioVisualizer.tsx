@@ -65,8 +65,6 @@ const initPipeline = (canvas: HTMLCanvasElement, audioCtx: AudioContext, mediaSt
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
 
-  // DPR-aware backing store so the 80×20 canvas is crisp on HiDPI
-  // displays; the CSS size stays fixed.
   const dpr = window.devicePixelRatio || 1;
   canvas.width = CANVAS_WIDTH * dpr;
   canvas.height = CANVAS_HEIGHT * dpr;
@@ -152,7 +150,6 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
 
     return () => {
       window.removeEventListener(AUDIO_UNLOCK_EVENT, onUnlock);
-      // cancelAnimationFrame(0) is a no-op when the pipeline never started.
       cancelAnimationFrame(frameRef.current);
       if (audioCtx && audioCtx.state !== 'closed') {
         audioCtx.close().catch((err) => {

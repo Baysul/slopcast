@@ -6,9 +6,6 @@ import express from 'express';
 
 import { initRoutes, toHttpUrl, toWsUrl } from './routes.js';
 
-// The same helpers feed the LiveKit HTTP client and the WebSocket URL handed
-// to presenters/spectators; a mismatch breaks room creation or joining.
-
 test('toWsUrl passes ws/wss through unchanged', () => {
   assert.equal(toWsUrl('ws://localhost:7880'), 'ws://localhost:7880');
   assert.equal(toWsUrl('wss://livekit.example.com'), 'wss://livekit.example.com');
@@ -44,8 +41,6 @@ async function startTestServer(): Promise<{ base: string; close: () => Promise<v
     base: `http://127.0.0.1:${port}`,
     close: () =>
       new Promise((resolve) => {
-        // fetch() keeps sockets alive; closeAllConnections lets the test
-        // process exit instead of hanging on server.close().
         server.closeAllConnections();
         server.close(() => resolve());
       }),
@@ -95,8 +90,6 @@ test('spectator token route mints a usable token for a valid code', async () => 
 });
 
 test('spectator token route mints a token even for an unknown room', async () => {
-  // Room existence is not checked at token time — LiveKit itself rejects
-  // joins to nonexistent rooms; this must stay a 200, not a 404.
   const server = await startTestServer();
   try {
     const res = await fetch(`${server.base}/api/rooms/zzz-999-qqq/token`);

@@ -4,36 +4,16 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Bounded lock-free ring queue for up to 8 audio frame chunks (~160 ms of
-/// 48 kHz stereo audio at the default ~20 ms slot). Kept small on
-/// purpose: a stall upstream must not be able to buffer seconds of stale
-/// audio that would then play out behind the live video. The producer
-/// applies a drop-oldest eviction policy on push (see `acquire_slot_for`)
-/// — when the ring is full the newest chunk evicts the oldest, so the
-/// backlog stays bounded and playback stays as close to live as possible.
 const AUDIO_QUEUE_CAPACITY: usize = 8;
 
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_CHANNELS: u16 = 2;
-const DEFAULT_SAMPLE_BYTES: usize = 2; // i16
-pub(crate) const PCM_FRAME_SIZE: usize = (DEFAULT_CHANNELS as usize) * DEFAULT_SAMPLE_BYTES; // 4 bytes
+const DEFAULT_SAMPLE_BYTES: usize = 2;
 
-/// Default slot capacity: 4096 bytes, ~21 ms of 48 kHz stereo 16-bit PCM
-/// (192,000 B/s). Sized to a small multiple of the `PipeWire` ~10 ms
-/// quantum so each slot holds roughly one or two callbacks' worth of
-/// samples; this keeps drop-oldest eviction coarse-grain to at most ~21 ms
-/// of audio (a much larger slot — e.g. the old 16 KiB / 85 ms — would
-/// discard an audible chunk every time it evicted).
+pub(crate) const PCM_FRAME_SIZE: usize = (DEFAULT_CHANNELS as usize) * DEFAULT_SAMPLE_BYTES;
+
 pub(crate) const DEFAULT_SLOT_CAPACITY: usize = 4096;
 
-/// PCM data callback: 48 kHz stereo 16-bit signed integer samples. The ring
-/// carries packed S16LE bytes end-to-end; the platform capture code
-/// (`linux/capture.rs`, `windows/mod.rs`) performs the native format
-/// conversion (e.g. F32LE → S16LE) before the bytes ever reach the ring, so
-/// the worker only decodes each 2-byte pair into an `i16` sample. No
-/// F32LE → i16 conversion happens here. The boxed `Fn` (not a thread-safe
-/// function) is called synchronously on the ring worker thread, so it must
-/// never block.
 pub(crate) type AudioDataCallback = dyn Fn(Vec<i16>) + Send + Sync;
 
 struct AudioProducer {
@@ -108,29 +88,11 @@ pub(crate) fn calculate_slot_capacity(
     let bytes_per_sec = (sample_rate as usize).saturating_mul(frame_size);
     let base_bytes = (bytes_per_sec.saturating_mul(max_interval_ms as usize)) / 1000;
     let target = base_bytes.saturating_mul(headroom_factor.max(1));
-    // Floor a slot at ~10.7 ms of mono (2048 bytes) so degenerate
-    // max_interval_ms/headroom inputs still produce a non-trivial slot.
     let min_cap = align_up(2048, frame_size);
     let target = target.max(min_cap);
     align_down(target, frame_size)
 }
 
-/// Acquires a slot to store `chunk`, applying the ring's drop-oldest
-/// eviction policy. Pure with respect to the two slot pools it is given
-/// (no global state except the counters), so it is unit-testable in
-/// isolation from the live worker thread.
-///
-/// * A free slot is used when one is available.
-/// * When the ring is full (no free slot), the **oldest** queued chunk is
-///   evicted (its backlog bytes counted as truncated) and its slot reused
-///   for `chunk`. The consumer drains FIFO, so preserving the newest chunk
-///   keeps playback as close to live as possible when the worker falls
-///   behind — a drop-newest strategy would instead pin the start of the
-///   backlog and play stale audio once the consumer catches up.
-/// * If both pools are exhausted (only possible in a pathological race),
-///   `None` is returned and the caller drops `chunk`.
-///
-/// Returns `Some(slot)` populated with `chunk`, or `None` to drop it.
 fn acquire_slot_for(
     free_slots: &crossbeam_queue::ArrayQueue<Vec<u8>>,
     data_queue: &crossbeam_queue::ArrayQueue<Vec<u8>>,
@@ -143,25 +105,17 @@ fn acquire_slot_for(
         TRUNCATED_BYTES.fetch_add(stale.len() as u64, Ordering::Relaxed);
         Some(stale)
     } else {
-        // Both queues empty: 8 slots total, so this only happens in a
-        // pathological mid-race window. Drop the new chunk.
         RING_DROPS.fetch_add(1, Ordering::Relaxed);
         TRUNCATED_BYTES.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         None
     }
 }
 
-/// Accepts packed 48 kHz stereo S16LE PCM bytes.
-/// Platform capture code is responsible for normalizing/converting
-/// its native format before calling `push_pcm_bytes`.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn push_pcm_bytes(bytes: &[u8]) {
     push_pcm_bytes_inner(bytes, None);
 }
 
-/// Pushes PCM only when `generation` still owns the active ring. Windows
-/// capture sessions use this to keep a detached old producer from writing
-/// into a replacement session after an audio-target switch.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn push_pcm_bytes_for_generation(bytes: &[u8], generation: u64) {
     push_pcm_bytes_inner(bytes, Some(generation));
@@ -223,9 +177,6 @@ fn push_pcm_bytes_inner(bytes: &[u8], generation: Option<u64>) {
         slot.extend_from_slice(chunk);
 
         if let Err(returned_slot) = producer.data_queue.push(slot) {
-            // data_queue capacity == total slot count, and one slot was just
-            // removed from the pool, so a push can only fail in a pathological
-            // race; return the slot to the free pool rather than losing it.
             let _ = producer.free_slots.push(returned_slot);
         } else {
             pushed = true;
@@ -243,10 +194,6 @@ pub(crate) fn start_audio_ring() -> Result<(), String> {
 }
 
 pub(crate) fn start_audio_ring_for_generation(generation: u64) -> Result<(), String> {
-    // Slot sized from the `PipeWire` ~10 ms quantum (×2 headroom ⇒ ~20 ms),
-    // not a 100 ms × 2 = ~200 ms slot — drop-oldest eviction discards whole
-    // slots, so a coarse slot would turn a single eviction into an audible
-    // ~200 ms audio gap.
     let calculated_capacity = calculate_slot_capacity(
         DEFAULT_SAMPLE_RATE,
         DEFAULT_CHANNELS,
@@ -313,11 +260,6 @@ fn start_audio_ring_with_capacity_and_generation(
                         if !chunk.is_empty() {
                             let cb_guard = AUDIO_CALLBACK.load();
                             if let Some(cb) = cb_guard.as_ref() {
-                                // Chunks are frame-aligned (the push path
-                                // truncates unaligned tails) packed S16LE —
-                                // already converted from the platform's native
-                                // format upstream by capture.rs, so every pair
-                                // of bytes decodes exactly to one i16 sample.
                                 let samples: Vec<i16> = chunk
                                     .as_chunks::<2>()
                                     .0
@@ -369,14 +311,6 @@ fn stop_audio_ring_internal(guard: &mut Option<AudioRingSession>) {
         session.stop.store(true, Ordering::Relaxed);
         if let Some(join) = session.worker.take() {
             join.thread().unpark();
-            // Reap the worker on a detached thread: it synchronously runs
-            // the user PCM callback, and joining it while
-            // `AUDIO_RING_LIFECYCLE` (and `CAPTURE_STATE` above it) is held
-            // would deadlock the moment that callback ever re-enters
-            // capture control. Same detached-reaper pattern as the capture
-            // and metering workers. The worker exits on its stop flag
-            // without draining queued chunks; `AUDIO_PRODUCER` is already
-            // swapped to `None`, so no new chunks can arrive.
             let _ = thread::Builder::new()
                 .name("audio-ring-reaper".into())
                 .spawn(move || {
@@ -416,9 +350,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // The ring's counters and producer are process-global statics, so tests
-    // that start/stop the ring or read stats race each other when run in
-    // parallel. Serialize them.
     static RING_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_ring_tests() -> std::sync::MutexGuard<'static, ()> {
@@ -434,7 +365,6 @@ mod tests {
         assert!(cap >= 2048);
         assert_eq!(cap, 38400);
 
-        // Frame size 6 (not dividing 2048)
         let cap_6 = calculate_slot_capacity(48_000, 3, 2, 10, 1);
         assert_eq!(cap_6 % 6, 0);
         assert!(cap_6 >= 2048);
@@ -447,7 +377,6 @@ mod tests {
         assert_eq!(align_up(4, 4), 4);
         assert_eq!(align_up(17, 8), 24);
         assert_eq!(align_up(42, 0), 42);
-        // Saturating: usize::MAX stays usize::MAX instead of wrapping.
         assert_eq!(align_up(usize::MAX, 4), usize::MAX);
     }
 
@@ -462,9 +391,6 @@ mod tests {
 
     #[test]
     fn slot_capacity_falls_back_when_channels_zero() {
-        // Zero channels would divide by nothing; the default slot size must
-        // be returned instead of 0 (a zero-sized slot would make every
-        // push_pcm_bytes chunk a no-op).
         assert_eq!(
             calculate_slot_capacity(48_000, 0, 2, 100, 2),
             DEFAULT_SLOT_CAPACITY
@@ -477,16 +403,12 @@ mod tests {
 
     #[test]
     fn slot_capacity_respects_minimum_floor_and_headroom_clamp() {
-        // A tiny interval must still clear the 2 KiB floor.
         let cap = calculate_slot_capacity(8_000, 1, 1, 1, 1);
-        // 8 bytes/s of mono u8: far below the floor, so exactly 2048 remains.
         assert_eq!(cap, 2048);
 
-        // headroom 0 is treated as 1 (max(1)), not as "zero everything".
         let zero_headroom = calculate_slot_capacity(48_000, 2, 2, 100, 0);
         assert_eq!(zero_headroom, calculate_slot_capacity(48_000, 2, 2, 100, 1));
 
-        // max_interval_ms 0 still yields the floor, not 0.
         assert!(calculate_slot_capacity(48_000, 2, 2, 0, 2) >= 2048);
     }
 
@@ -520,7 +442,6 @@ mod tests {
         let _guard = lock_ring_tests();
         start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
         reset_audio_ring_stats();
-        // 2 bytes < one 4-byte frame: nothing capturable remains.
         push_pcm_bytes(&[9, 9]);
         let stats = get_audio_ring_stats();
         assert_eq!(stats.captured_chunks, 0);
@@ -564,7 +485,6 @@ mod tests {
         start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
         reset_audio_ring_stats();
 
-        // Push 18 bytes (4 frames = 16 bytes, 2 unaligned trailing bytes)
         let payload = vec![0u8; 18];
         push_pcm_bytes(&payload);
 
@@ -582,7 +502,6 @@ mod tests {
         start_audio_ring_with_capacity(8192, 4).unwrap_or_else(|e| panic!("ring start: {e}"));
         reset_audio_ring_stats();
 
-        // Push 20,000 bytes (larger than 8,192 byte slot capacity)
         let payload = vec![1u8; 20000];
         push_pcm_bytes(&payload);
 
@@ -596,12 +515,6 @@ mod tests {
 
     #[test]
     fn drop_oldest_acquire_reuses_oldest_when_ring_full() {
-        // Pure test of `acquire_slot_for` against standalone slot pools —
-        // no live worker thread, so no race. `free_slots` empty + a full
-        // `data_queue` must evict the OLDEST queued chunk (the FIFO front)
-        // and count its backlog bytes as truncated. It still mutates the
-        // global drop/truncate counters, so it must serialize against the
-        // other ring tests like any test that reads those statics.
         let _guard = lock_ring_tests();
         reset_audio_ring_stats();
         let free_slots = crossbeam_queue::ArrayQueue::new(8);
@@ -616,9 +529,7 @@ mod tests {
 
         let slot = acquire_slot_for(&free_slots, &data_queue, &[9u8; 32])
             .unwrap_or_else(|| panic!("expected an acquired slot"));
-        // The evicted slot was the *oldest* queued chunk (index 0).
         assert_eq!(slot, vec![0u8; 64]);
-        // Newest chunk replaced it in the queue.
         data_queue
             .push(slot)
             .unwrap_or_else(|_| panic!("data_queue push failed"));
@@ -645,12 +556,9 @@ mod tests {
                 .unwrap_or_else(|_| panic!("free_slots push failed"));
         }
 
-        // `acquire_slot_for` hands back a free slot as-is (the caller then
-        // clears and populates it), so the queue is drained but no drop or
-        // eviction counters fire.
         let slot = acquire_slot_for(&free_slots, &data_queue, &[7u8; 8])
             .unwrap_or_else(|| panic!("expected an acquired slot"));
-        assert_eq!(slot, vec![0u8; 16]); // oldest free slot (index 0)
+        assert_eq!(slot, vec![0u8; 16]);
         assert_eq!(free_slots.len(), 7);
         assert_eq!(data_queue.len(), 0);
 

@@ -15,25 +15,14 @@ export interface ScreensharePreviewProps {
   onCopyLink: () => void;
 }
 
-// Debounce for reporting the preview card size to the backend: window
-// resizes fire ResizeObserver callbacks in bursts, but the native scale
-// target only needs the final size.
 const VIEWPORT_REPORT_DEBOUNCE_MS = 150;
 
-// Capture and encoding run entirely in native code (PipeWire -> native-livekit),
-// so the renderer has no MediaStream to preview. While capture is active the
-// card renders the JPEG preview frames pushed by the backend instead of a
-// video element; telemetry overlays the canvas once the stream is live.
 export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
   ({ captureStage, roomCode, copied, previewFrame, telemetry, onCopyLink }) => {
     const live = captureStage === 'live';
     const showPreview = previewFrame !== null && captureStage !== 'idle';
     const viewportRef = useRef<HTMLDivElement | null>(null);
 
-    // Report the preview card size (device pixels) so the backend scales
-    // preview frames to fit it — OBS-style "scale to the window". The canvas
-    // is drawn into this container; the backend needs its size, not the
-    // capture resolution, to size the JPEGs.
     useEffect(() => {
       const container = viewportRef.current;
       if (!container) return;

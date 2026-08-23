@@ -11,15 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Mutex;
 
-/// Serializes `PipeWire` enumeration: the renderer polls `getAudioApps` every
-/// 3s on tokio blocking threads, and `libpipewire` contexts/registries are not
-/// safe to touch concurrently. The global `pipewire::init()` once is completed
-/// at startup (`ensure_pipewire_init`); this gate orders the per-call sessions.
 static PW_ACCESS: Mutex<()> = Mutex::new(());
 
-/// Best-effort window/tab title for an audio stream node, used by the UI to tell
-/// same-named applications apart. Browsers put the tab title in `media.name`;
-/// values that just restate the app name or a generic role are not titles.
 fn stream_window_title(props: &DictRef, app_name: &str) -> Option<String> {
     for key in [
         "media.name",
@@ -38,10 +31,6 @@ fn stream_window_title(props: &DictRef, app_name: &str) -> Option<String> {
     None
 }
 
-/// True for values that restate the app name or a generic stream role.
-/// `WirePlumber`'s numbered defaults ("audio stream #1") count as generic once
-/// the trailing " #<n>" counter is stripped, so the picker falls back to its
-/// "N audio streams" count label instead of displaying them as titles.
 fn is_generic_title(value: &str, app_name: &str) -> bool {
     const GENERIC: [&str; 11] = [
         "playback",
@@ -70,11 +59,6 @@ fn is_generic_title(value: &str, app_name: &str) -> bool {
     })
 }
 
-/// True when a `PipeWire` client should never be offered as an audio capture
-/// target: it is us, a session daemon, or a name that can never map to a
-/// user-meaningful audio app (`Steam` itself, `WEBRTC VoiceEngine` utility
-/// clients, …). Pid 0/1 and pids that do not fit the negative-id encoding
-/// (`id = -pid`) are rejected too.
 fn is_skip_client(pid: u32, name: &str, our_pid: u32) -> bool {
     const SKIP_NAMES: [&str; 7] = [
         "slopcast",
@@ -101,19 +85,12 @@ fn is_skip_client(pid: u32, name: &str, our_pid: u32) -> bool {
     is_system_or_session_daemon(pid)
 }
 
-/// Appends `PipeWire` clients that are connected to the daemon but currently
-/// have no `Stream/Output/Audio` node — e.g. Spotify while paused. They are
-/// selectable as process-id targets (`id = -pid`); the capture session links
-/// their audio the moment it starts playing. Clients whose pid already owns a
-/// stream node are skipped (the stream entries carry the rich metadata).
 fn append_idle_clients(apps: &mut Vec<AudioApp>, clients: HashMap<u32, (u32, String)>) {
     let our_pid = std::process::id();
     let stream_pids: HashSet<u32> = apps
         .iter()
         .filter_map(|app| (app.process_id > 0).then_some(app.process_id.cast_unsigned()))
         .collect();
-    // Prefer the friendliest name per pid: the shortest one sorts first
-    // (e.g. "Chromium" before "Chromium input").
     let mut idle: Vec<(u32, String)> = clients.into_values().collect();
     idle.sort_by(|(pid_a, name_a), (pid_b, name_b)| {
         (pid_a, name_a.len()).cmp(&(pid_b, name_b.len()))
@@ -155,10 +132,6 @@ fn collect_client_pids(
     let cp = Rc::clone(&client_pids);
     let ci = Rc::clone(&client_info);
     let ap = Rc::clone(apps);
-    // Node info props (e.g. `media.name`, where browsers put the tab title) are
-    // not part of the registry advertisement — they only arrive after binding
-    // the node. Audio stream nodes are bound here and kept until the second
-    // sync round below has delivered their info events.
     let bound_nodes: Rc<RefCell<Vec<(pipewire::node::Node, pipewire::node::NodeListener)>>> =
         Rc::new(RefCell::new(Vec::new()));
     let bindings = bound_nodes;
@@ -282,12 +255,10 @@ fn collect_client_pids(
         .register();
 
     sync_registry(core, main_loop);
-    // Second round trip: bound node proxies deliver their info events.
     sync_registry(core, main_loop);
     (client_pids.take(), client_info.take())
 }
 
-/// Normalize a string for fuzzy matching: lowercase, strip non-alphanumeric.
 fn norm(s: &str) -> String {
     s.chars()
         .filter(char::is_ascii_alphanumeric)
@@ -295,11 +266,6 @@ fn norm(s: &str) -> String {
         .collect()
 }
 
-/// Annotate audio apps with MPRIS now-playing titles.
-/// MPRIS players are matched to apps by PID (when the player's bus-owner PID
-/// matches the audio stream's `process_id`), then by fuzzy name containment
-/// (identity/desktop-entry vs app name). Among matching players, the one with
-/// `PlaybackStatus == "Playing"` wins; otherwise the first is used.
 fn annotate_mpris_titles(apps: &mut [AudioApp]) {
     let players = mpris::list_players();
     if players.is_empty() {
@@ -341,7 +307,6 @@ fn annotate_mpris_titles(apps: &mut [AudioApp]) {
     }
 }
 
-/// True when either string subsumes the other (min length 3).
 fn contains_fuzzy(a: &str, b: &str) -> bool {
     if a.len() < 3 || b.len() < 3 {
         return false;
@@ -367,10 +332,6 @@ pub(crate) fn list_audio_applications() -> Result<Vec<AudioApp>, String> {
     Ok(apps)
 }
 
-/// Full property dictionaries of every live `Stream/Output/Audio` node —
-/// registry props merged with bound-node info props, the same view `pw-dump`
-/// prints. Debugging aid for auto-resolve misses: the renderer logs these when
-/// a capture starts so the captured window can be matched against real nodes.
 type NodePropList = Vec<(u32, HashMap<String, String>)>;
 
 pub(crate) fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, String> {
@@ -430,7 +391,6 @@ pub(crate) fn dump_audio_sources() -> Result<Vec<HashMap<String, String>>, Strin
         .register();
 
     sync_registry(&pw.core, &pw.main_loop);
-    // Second round trip: bound node proxies deliver their info events.
     sync_registry(&pw.core, &pw.main_loop);
     Ok(nodes.take().into_iter().map(|(_, map)| map).collect())
 }
@@ -461,15 +421,11 @@ mod tests {
         assert!(is_skip_client(1, "init", our_pid));
         assert!(is_skip_client(i32::MAX as u32 + 1, "Spotify", our_pid));
         assert!(is_skip_client(100, "   ", our_pid));
-        // A dead pid resolves to a session daemon in the /proc walk.
         assert!(is_skip_client(999_999_999, "Spotify", our_pid));
     }
 
     #[test]
     fn skip_client_rejects_noise_clients_but_keeps_real_apps() {
-        // A pid that is definitely not the test process and never appears as
-        // a session daemon in /proc: our own live pid with a different
-        // "our_pid" argument.
         let live_pid = std::process::id();
         let other_pid = u32::MAX - 1;
         for name in [

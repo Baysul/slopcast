@@ -93,8 +93,6 @@ test('representative keeps first window title when no media title exists', () =>
   ];
   const groups = groupAudioApps(apps);
   const group = groups[0] as AudioAppGroup;
-  // First member stays representative: a later window title must not
-  // override an existing one.
   assert.equal(group.representative.id, 1);
 });
 

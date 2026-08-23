@@ -18,8 +18,8 @@ export function toHttpUrl(url: string): string {
       parsed.hostname = '127.0.0.1';
     }
     normalized = parsed.toString().replace(/\/$/, '');
-  } catch {
-    // Ignore invalid URLs
+  } catch (error) {
+    console.debug('[routes] invalid URL:', error);
   }
   return normalized;
 }

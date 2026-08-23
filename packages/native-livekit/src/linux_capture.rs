@@ -1,51 +1,3 @@
-//! Linux desktop capture engine: libwebrtc's `DesktopCapturer` with the
-//! `PipeWire` backend (XDG Desktop Portal `ScreenCast`), driven through the
-//! livekit crate's bundled bindings — the same `desktop_capturer` module the
-//! Windows arm uses for WGC, no forks, no patches. It replaces the former
-//! in-house portal + `pw_stream` + EGL engine (see SCREEN-CAPTURE-INHOUSE.md):
-//! the m144 prebuilt ships the whole `PipeWire` capturer including the three
-//! `KWin` corrupt-buffer checks, so ~3,000 lines of hand-rolled zbus/EGL code
-//! and portal-protocol maintenance move upstream.
-//!
-//! Cursor: m144's `BaseCapturerPipeWire` ignores `prefer_cursor_embedded` on
-//! Wayland — it always requests `cursor_mode=metadata` from the portal, and
-//! `KWin` then attaches the cursor as `SPA_META_Cursor` stream metadata instead
-//! of rendering it into the pixels. The vendored `webrtc-sys` shim
-//! (`vendor/webrtc-sys/src/desktop_capturer.cpp`) wraps the capturer in a
-//! `DesktopAndCursorComposer` (with `MouseCursorMonitorPipeWire` reading the
-//! same `SharedScreenCastStream`) so the cursor is alpha-blended into every
-//! frame — the same path Chromium uses for Wayland screensharing.
-//!
-//! Capture semantics (verified against `webrtc-sdk/webrtc@m144_release`):
-//! - `DesktopCaptureSourceType::Generic` → `kAnyScreenContent` (Screen |
-//!   Window bits) — the KDE picker shows monitors *and* windows.
-//! - `get_source_list()` returns only a placeholder on Wayland; the real
-//!   selection happens in the portal picker opened by `start_capture(None)`.
-//! - `capture_frame()` is a non-blocking poll; the callback fires
-//!   synchronously on the polling thread. Once the first `PipeWire` buffer
-//!   arrived, the capturer re-shares the last frame on every poll (static
-//!   content keeps flowing, like WGC); before the first frame it returns
-//!   `ERROR_TEMPORARY`.
-//! - `ERROR_PERMANENT` = portal session closed (captured window gone) or
-//!   portal failure — mapped once to the `capture-ended` event, mirroring
-//!   the old `Session::Closed` semantics.
-//! - The portal handshake is async `GDBus`; callbacks dispatch only when the
-//!   thread-default `GMainContext` is iterated. `start` creates the capturer
-//!   under `MainContext::with_thread_default` (so the proxies bind to *our*
-//!   context, never the process-global one the `GTK` main thread runs), and
-//!   `poll` drains that context — with the context kept pushed as the
-//!   thread-default for every iteration, because `GDBus` method-call replies
-//!   and signal subscriptions dispatch on the *calling* thread's
-//!   thread-default context (`GTask` captures it at call time), not on the
-//!   proxy's context. Without the push, the whole post-creation handshake
-//!   (`CreateSession` / `SelectSources` / `Start` / `OpenPipeWireRemote`)
-//!   lands on the `GTK` main thread, and the last reply handler runs the
-//!   blocking `PipeWire` setup on the `UI` thread — the app freezes when a
-//!   source is picked. With it, the whole portal flow stays on the capture
-//!   thread and can never race `CaptureFrame`.
-//!
-//! Feeds packed-BGRA `CapturedFrame` values into Frame delivery.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -58,50 +10,25 @@ use livekit::webrtc::desktop_capturer::{
 use crate::desktop_capture::{capture_poll_fps, fire_capture_ended_once};
 use crate::frame_delivery::{CapturedFrame, FrameIngress, SourceIssue, monotonic_us};
 
-/// The `PipeWire` desktop capture engine: owns the libwebrtc capturer (created,
-/// started and polled on the capture thread) and maps its callback into the
-/// typed Frame delivery ingress. Created by the acquisition coordinator;
-/// `poll` is driven by its source worker at the encoder
-/// target fps (or the fallback preview cadence before a track is live).
 pub(crate) struct LinuxDesktopCapture {
     capturer: DesktopCapturer,
-    /// Set on the first `ERROR_PERMANENT`; polling stops until `stop()`.
     ended: Arc<AtomicBool>,
-    /// Next `capture_frame` tick; paced so the pipeline never sees more
-    /// polls than the encoder target.
     next_poll_at: Instant,
-    /// The thread-default context the portal's `GDBus` handshake dispatches
-    /// on; drained in `poll` so callbacks run on this thread.
     glib_ctx: MainContext,
 }
 
 impl LinuxDesktopCapture {
-    /// Creates the capturer (Generic → portal picker with monitors *and*
-    /// windows), starts the capture session and returns. The portal picker
-    /// opens inside `start_capture` — the session is reported running before
-    /// the user answers, matching the old engine's UX. Runs on the capture
-    /// thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the `GLib` thread-default context cannot be set
-    /// or no `PipeWire` capturer can be created (e.g. X11, where
-    /// `IsSupported` = Wayland && `InitializePipeWire` fails).
     pub(crate) fn start(ingress: FrameIngress) -> Result<Self, String> {
+        // Portal callbacks use the capture worker's thread-default GLib context.
         let glib_ctx = MainContext::new();
         let ended = Arc::new(AtomicBool::new(false));
         let ended_cb = Arc::clone(&ended);
         let mut options = DesktopCapturerOptions::new(DesktopCaptureSourceType::Generic);
-        // The vendored webrtc-sys shim wraps the PipeWire capturer in a
-        // `DesktopAndCursorComposer` when this flag is set, so the cursor is
-        // composited into the frames (m144 itself ignores the flag — see the
-        // module doc).
         options.set_include_cursor(true);
         let capturer = glib_ctx
             .with_thread_default(move || {
                 let mut capturer = DesktopCapturer::new(options)
                     .ok_or_else(|| "Desktop capturer unavailable (PipeWire portal)".to_string())?;
-                // Scratch buffer to re-pack stride-padded rows into the packed-BGRA contract.
                 let mut packed: Vec<u8> = Vec::new();
                 capturer.start_capture(None, move |result| match result {
                     Ok(frame) => {
@@ -116,10 +43,6 @@ impl LinuxDesktopCapture {
                         let stride = usize::try_from(frame.stride()).unwrap_or(0);
                         let data = frame.data();
                         let bgra = if stride == row_bytes {
-                            // Bound the checked slice: a corrupt/short FFI
-                            // buffer must surface as a dropped capture frame,
-                            // never as a panic inside the PipeWire process
-                            // callback (which cannot unwind).
                             let required = row_bytes.saturating_mul(frame_rows);
                             if data.len() < required {
                                 ingress.record_issue(SourceIssue::DroppedFrame);
@@ -127,10 +50,6 @@ impl LinuxDesktopCapture {
                             }
                             &data[..required]
                         } else if stride >= row_bytes {
-                            // Each source row must hold a full destination
-                            // row, and there must be one full row per frame
-                            // row, else the copy below would read out of
-                            // bounds.
                             let required = stride.saturating_mul(frame_rows);
                             if data.len() < required {
                                 ingress.record_issue(SourceIssue::DroppedFrame);
@@ -146,7 +65,6 @@ impl LinuxDesktopCapture {
                             }
                             &packed
                         } else {
-                            // stride < row_bytes cannot be packed safely.
                             ingress.record_issue(SourceIssue::DroppedFrame);
                             return;
                         };
@@ -157,14 +75,7 @@ impl LinuxDesktopCapture {
                             pts_us: monotonic_us(),
                         });
                     }
-                    Err(CaptureError::Temporary) => {
-                        // No new buffer since the last poll — expected while
-                        // the portal picker is open and when the compositor
-                        // has nothing new to record. NOT an error: counting
-                        // it in `capture_errors` made every normal session
-                        // start (picker open, pre-first-frame) read as
-                        // faulted in the telemetry and e2e diagnostics.
-                    }
+                    Err(CaptureError::Temporary) => {}
                     Err(CaptureError::Permanent) => {
                         ingress.record_issue(SourceIssue::CaptureError);
                         if !ended_cb.swap(true, Ordering::Relaxed) {
@@ -186,10 +97,6 @@ impl LinuxDesktopCapture {
         })
     }
 
-    /// Drains pending portal callbacks, then paces and issues one
-    /// `capture_frame` poll when due. The callback runs synchronously inside
-    /// the call; `ERROR_PERMANENT` flips `ended` so later polls are no-ops
-    /// until the session is stopped.
     pub(crate) fn poll(&mut self) {
         if self.ended.load(Ordering::Relaxed) {
             return;
@@ -200,24 +107,12 @@ impl LinuxDesktopCapture {
         }
         let glib_ctx = &self.glib_ctx;
         let capturer = &mut self.capturer;
-        // Dispatch pending portal GDBus callbacks before polling — the
-        // capturer's portal state machine advances only while its context is
-        // iterated. The context must stay pushed as thread-default while
-        // callbacks run (GDBus replies dispatch on the caller's
-        // thread-default context — see the module doc for the UI-thread
-        // freeze this prevents).
         let _ = glib_ctx.with_thread_default(|| {
             while glib_ctx.pending() {
                 glib_ctx.iteration(false);
             }
             capturer.capture_frame();
         });
-        // Advance a *fixed* deadline and skip any intervals the synchronous
-        // capture_frame callback (BGRA→I420 convert + pacer queue) already
-        // consumed. Scheduling from `now + interval` after that serial work
-        // would put the next deadline in the past for any frame slower than
-        // the interval — a catch-up/tight-loop that degrades pacing instead
-        // of backing off.
         let interval = Duration::from_micros(1_000_000 / u64::from(capture_poll_fps().max(1)));
         self.next_poll_at += interval;
         let after = Instant::now();

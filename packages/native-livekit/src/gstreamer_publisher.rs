@@ -1,5 +1,3 @@
-//! Concrete Linux `GStreamer` adapter for the Publisher session module.
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,18 +17,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
-/// Audio appsrc queue depth in buffers (~20 ms of PCM per chunk): ~160 ms.
-/// Was 50 (~1 s of PCM) under a non-leaky queue — during congestion the
-/// audio chain buffered a full second of stale speech ahead of the video
-/// stream (AV-sync drift), then dropped nothing until the backlog overflow.
-/// Leaky-downstream bound at 160 ms (see `attach_audio`).
 const AUDIO_APPSRC_MAX_BUFFERS: u64 = 8;
-/// PCM samples pushed at pipeline attach so the sink's codec discovery can
-/// see the audio stream. Must span at least one full opusenc frame (20 ms =
-/// 960 frames at 48 kHz; with stereo that is 1920 samples) or opusenc never
-/// emits, the sink never gets the audio caps, and its signaller stays
-/// gated on `codec_discovery_done` — the presenter would never join the
-/// room. Two frames (40 ms) cover frame-boundary rounding.
 const AUDIO_DISCOVERY_SAMPLES: usize = 3840;
 const OPUS_BITRATE: i32 = 128_000;
 
@@ -41,19 +28,9 @@ static VIDEO_INPUT: LazyLock<Mutex<Option<PublishedVideoInput>>> =
 static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
 static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VIDEO_FRAMES_SUBMITTED: AtomicU64 = AtomicU64::new(0);
-/// Incremented on every `connect`. Workers snapshot it at startup and gate
-/// every write to the shared publish state (inputs, connection/video flags)
-/// on it: a stale worker that finishes late — reaped after `disconnect()`'s
-/// grace period — can never clear or overwrite the *next* worker's state.
 static WORKER_GENERATION: AtomicU64 = AtomicU64::new(0);
-/// Total PCM chunks dropped by the audio appsrc (for the rate-limited
-/// drop report in `feed_pcm`).
 static AUDIO_PCM_DROPS: AtomicU64 = AtomicU64::new(0);
-/// Wall-clock seconds of the last audio-drop warning (rate limiting).
 static LAST_AUDIO_DROP_WARN_AT: AtomicU64 = AtomicU64::new(0);
-/// Real-path diagnostic switch. It removes the audio track from the WebRTC
-/// publication, unlike muting the spectator element, so Chromium cannot use
-/// it for A/V synchronization during an isolation run.
 static AUDIO_PUBLICATION_DISABLED: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("SLOPCAST_DISABLE_AUDIO").is_some());
 
@@ -77,10 +54,6 @@ struct ConnectionConfig {
     identity: String,
 }
 
-/// The video encoder target the publisher can change without a pipeline
-/// rebuild. `codec` is missing only from `CaptureConfig` (VP8 default), but
-/// after the first `attach_video` the codec is always known and fixed for the
-/// session — an in-place update with a different codec never happens here.
 #[derive(Debug, Clone, PartialEq)]
 struct VideoTarget {
     codec: String,
@@ -106,21 +79,10 @@ fn configuration_requires_rebuild(current: &CaptureConfig, target: &CaptureConfi
         || current.height != target.height
 }
 
-/// The configured ceiling in kbps from the stream settings. The low-level
-/// `bitrate_bps_to_kbps` conversion stays strict; this helper owns the
-/// *config* semantics: a missing, zero, or non-finite `max_bitrate` is not a
-/// 1 kbps stream, it is "no usable ceiling" — fall back to the automatic
-/// default so an automatic/`None` session can never become a 1 kbps encode.
-/// Shared with `gstreamer_encoder::attach` so the encoder's initial ceiling
-/// always agrees with the controller's.
 pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
     crate::publisher_session::configured_ceiling_kbps(config)
 }
 
-/// Clears the shared publish state, but only if this worker is still the
-/// current one. A stale worker that finishes late (reaped after
-/// `disconnect()`'s grace period) must never clear the *next* worker's
-/// inputs or connection/video flags.
 fn publish_state_guard() -> MutexGuard<'static, ()> {
     match PUBLISH_STATE_GATE.lock() {
         Ok(guard) => guard,
@@ -161,12 +123,7 @@ struct PublisherPipeline {
     pipeline: gst::Pipeline,
     sink: gst::Element,
     video_config: Option<CaptureConfig>,
-    /// The active video encoder: Publisher session rate proposals re-target
-    /// its VBR ceiling in place without rebuilding.
     encoder: Option<GstreamerEncoder>,
-    /// Worker generation this pipeline belongs to; every write to the
-    /// shared publish state checks it so a stale pipeline (leftover of a
-    /// reaped worker) can never clobber the current worker's state.
     generation: u64,
     is_shutdown: bool,
 }
@@ -180,11 +137,6 @@ pub(crate) fn load_plugins(plugin_dir: &Path) -> Result<(), String> {
         ));
     }
 
-    // `gst_registry_scan_path` returns TRUE only when the registry *changed*
-    // (i.e. new plugins were discovered). A cache hit — plugins already
-    // registered from a previous run — returns FALSE, which is not an error:
-    // the required elements are still present. Treat only a genuinely missing
-    // directory as fatal.
     gst::Registry::get().scan_path(plugin_dir);
 
     verify_required_elements()
@@ -224,9 +176,6 @@ pub(crate) fn connect(
 
 pub(crate) fn disconnect() {
     crate::publisher_session::shutdown_active();
-    // Serialize retirement with every shared-state installation. A reaped
-    // worker may finish its private pipeline later, but cannot pass a stale
-    // generation check and write after this block returns.
     let _gate = publish_state_guard();
     WORKER_GENERATION.fetch_add(1, Ordering::Relaxed);
     crate::desktop_capture::clear_scale_target();
@@ -310,11 +259,6 @@ pub(crate) fn feed_pcm(samples: &[i16]) {
     if *AUDIO_PUBLICATION_DISABLED || samples.is_empty() {
         return;
     }
-    // A silent no-input return is legitimate before any room is connected
-    // (the audio ring runs as soon as capture starts, before Go Live), so
-    // only count it as a drop once a room session exists: the input is then
-    // missing because a rebuild/reconnect tore the audio branch down, and
-    // the chunks really are lost.
     if !ROOM_CONNECTED.load(Ordering::Relaxed) {
         return;
     }
@@ -323,8 +267,6 @@ pub(crate) fn feed_pcm(samples: &[i16]) {
         input.filter(|input| input.generation == WORKER_GENERATION.load(Ordering::Relaxed))
     else {
         AUDIO_PCM_DROPS.fetch_add(1, Ordering::Relaxed);
-        // Rate-limit the warning: at ~50 Hz push cadence a sustained rebuild
-        // would otherwise flood the log with one line per dropped chunk.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -341,8 +283,6 @@ pub(crate) fn feed_pcm(samples: &[i16]) {
 
     if let Err(error) = push_pcm(&input, samples) {
         AUDIO_PCM_DROPS.fetch_add(1, Ordering::Relaxed);
-        // Rate-limit the warning: at ~50 Hz push cadence a sustained stall
-        // would otherwise flood the log with one line per dropped chunk.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -388,13 +328,6 @@ impl PublisherPipeline {
             )
             .build()
             .map_err(|error| format!("Failed to create livekitwebrtcsink: {error}"))?;
-        // We hand the sink an already-encoded stream and drive its bitrate
-        // ourselves through the encoder + `RateController`. The sink's own
-        // GCC congestion controller would fight that (it holds the encoder
-        // bitrate hostage on TWCC feedback), and its FEC bloat/burst
-        // bandwidth on top of the presenter's configured ceiling — disable
-        // both for diagnostic isolation. NACK/RTX retransmission stays on so
-        // a lost packet is repaired rather than always surfacing as stutter.
         sink.set_property_from_str("congestion-control", "disabled");
         sink.set_property("do-fec", false);
         sink.set_property("do-retransmission", true);
@@ -421,9 +354,6 @@ impl PublisherPipeline {
         if let Some(config) = video_config {
             publisher.attach_video(config.clone())?;
         }
-        // Only the current worker may take its pipeline live: a stale
-        // pipeline (reaped worker still winding down) would otherwise
-        // publish a silent zombie track to the room.
         {
             let _gate = publish_state_guard();
             if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
@@ -442,9 +372,6 @@ impl PublisherPipeline {
             let _ = publisher.pipeline.set_state(gst::State::Null);
             return Err("GStreamer publisher generation became stale during startup".into());
         }
-        // Gate the shared audio-input install (and the discovery PCM push)
-        // on the generation: a stale pipeline must not steal the input a
-        // newer worker already installed.
         if let Some(audio_input) = audio_input {
             let _gate = publish_state_guard();
             if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
@@ -458,10 +385,6 @@ impl PublisherPipeline {
 
     fn attach_video(&mut self, config: CaptureConfig) -> Result<(), String> {
         let encoder = GstreamerEncoder::attach(&self.pipeline, &self.sink, &config)?;
-        // Gate the shared state install on the generation (see `new`): a
-        // stale worker's rebuild must never overwrite the current worker's
-        // `VIDEO_INPUT` — two live pipelines fighting over one input would
-        // interleave frames.
         {
             let _gate = publish_state_guard();
             if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
@@ -517,8 +440,6 @@ impl PublisherPipeline {
         Ok(update)
     }
 
-    /// Applies an fps or configured-ceiling change without rebuilding when
-    /// codec and frame dimensions are unchanged.
     fn apply_target(&mut self, target: &VideoTarget) -> Result<CeilingUpdate, String> {
         let encoder = self
             .encoder
@@ -578,9 +499,6 @@ impl PublisherPipeline {
             return;
         }
 
-        // A stale pipeline (leftover of a reaped worker) still tears down
-        // its own pipeline, but must not clear the inputs the *current*
-        // worker installed.
         {
             let _gate = publish_state_guard();
             if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
@@ -645,8 +563,6 @@ impl LifecycleEffects for GstreamerEffects {
             .apply_target(&target)
             .map_err(|error| EffectError::new("change GStreamer video", error))?;
         if matches!(update, CeilingUpdate::Applied | CeilingUpdate::Attempted) {
-            // The concrete pipeline and the session state become authoritative
-            // together; reconnect must never restore the pre-change config.
             pipeline.video_config = Some(config.clone());
         }
         Ok(InPlaceChange::Applied(update))
@@ -726,19 +642,8 @@ fn attach_audio(
         .is_live(true)
         .block(false)
         .max_buffers(AUDIO_APPSRC_MAX_BUFFERS)
-        // Leaky-downstream with a small bound (~160 ms, see
-        // AUDIO_APPSRC_MAX_BUFFERS): during congestion the *oldest* PCM is
-        // dropped (freshest wins) instead of letting a second of stale
-        // speech queue up ahead of the video stream — a half-second
-        // AV-sync drift where the presenter's voice lags the screen. The
-        // `block(false)` push path never waits; drops are counted and
-        // rate-limited-logged in `feed_pcm`.
         .leaky_type(gst_app::AppLeakyType::Downstream)
         .build();
-    // PTS is sample-clocked in push_pcm, so the pipeline clock must not
-    // stamp buffers (do-timestamp would drift against the sample count and
-    // the resampler would hear it as rate wobble). Each generation owns its
-    // clock so a late reaper cannot reset the current pipeline's timestamps.
     let queue = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 10_u32)
         .property("max-size-bytes", 0_u32)
@@ -801,12 +706,6 @@ fn configure_signaller(
     signaller.set_property("auth-token", &config.token);
     signaller.set_property("room-name", &config.room_name);
     signaller.set_property("identity", &config.identity);
-    // LiveKit join state lives on the signaller's `connection-state`
-    // property (`server-connected` and beyond once the join completes);
-    // mirror it so is_native_room_connected reflects a real connection,
-    // not merely a pipeline that was built. The store is gated on the
-    // worker generation: a stale pipeline's signaller must not flick the
-    // flag while the current worker is connected.
     signaller.connect_notify(Some("connection-state"), move |obj, _| {
         let connected = obj
             .property_value("connection-state")
@@ -824,15 +723,6 @@ fn configure_signaller(
             ROOM_CONNECTED.store(connected, Ordering::Relaxed);
         }
     });
-    // The signaller reports websocket failures (server disconnect, ping
-    // timeout, join rejection) through its `error` signal, NOT a GStreamer
-    // bus error — the worker's poll_error would never see them and the
-    // pipeline would keep encoding into a dead connection while
-    // `ROOM_CONNECTED` stays true. Surface the failure as a bus error on
-    // the pipeline so the existing reconnect machinery tears down and
-    // rejoins. This is the watch on the silent signaller death observed
-    // in the field: the websocket vanishes, the app still claims live, and
-    // spectators see nothing.
     let pipeline_for_error = pipeline.clone();
     signaller.connect("error", false, move |values| {
         let message = values[1]
@@ -874,10 +764,6 @@ fn push_pcm(input: &AudioInput, samples: &[i16]) -> Result<(), String> {
         }
         drop(mapped);
 
-        // Sample-clocked PTS: timestamps must advance exactly with the
-        // sample count, or the resampler → opusenc → RTP chain hears rate
-        // drift as pops and out-of-tune audio. The counter is reset per
-        // pipeline instance in attach_audio.
         let start_frame = input.next_frame.fetch_add(frames as u64, Ordering::Relaxed);
         let pts_ns = start_frame * gst::ClockTime::SECOND.nseconds() / u64::from(SAMPLE_RATE);
         let end_ns = (start_frame + frames as u64) * gst::ClockTime::SECOND.nseconds()
@@ -921,9 +807,6 @@ fn make_element(name: &str) -> Result<gst::Element, String> {
 }
 
 fn verify_required_elements() -> Result<(), String> {
-    // `videoconvert` stays required: the VA-API and software encoder chains
-    // need it (base plugin, always installed) even though NVENC branches
-    // build cudaupload/cudaconvertscale instead.
     const REQUIRED: &[&str] = &[
         "appsrc",
         "queue",
@@ -955,9 +838,6 @@ fn verify_required_elements() -> Result<(), String> {
     ))
 }
 
-/// Whether `GStreamer` can create and initialize an element without the Rust
-/// builder's panic path. Transitioning to `READY` also opens hardware device
-/// handles, catching unavailable VA displays and drivers before selection.
 pub(crate) fn can_initialize_element(name: &str) -> bool {
     let Some(factory) = gst::ElementFactory::find(name) else {
         return false;
@@ -985,13 +865,6 @@ pub(crate) fn can_initialize_element(name: &str) -> bool {
 }
 
 pub(crate) fn verify_codec_elements(codec: &str) -> Result<(), String> {
-    // Only the encoder itself must be present and initializable here. On the
-    // bundled livekitwebrtcsink we observed an internal parser being inserted
-    // after the encoder (see `gstreamer_encoder::attach`), so no external
-    // parser factories are required in our branch — but that observation is
-    // specific to the bundled 0.15.3 build, not asserted for every runtime.
-    // The whole preference chain is probed (NVENC → VA-API → software), so
-    // the error names every tried encoder.
     if !matches!(codec, "h264" | "h265" | "vp8" | "vp9" | "av1") {
         return Err(format!("Unsupported GStreamer video codec: {codec}"));
     }
@@ -1021,28 +894,19 @@ fn connect_payloader_setup(sink: &gst::Element) {
         if factory_name.is_some_and(|name| name.starts_with("rtpvp9pay"))
             && payloader.find_property("picture-id-mode").is_some()
         {
-            // Stock webrtcsink configures the classic rtpvp9pay factory but
-            // not rtpvp9pay2, which has equal rank in the bundled runtime.
             payloader.set_property_from_str("picture-id-mode", "15-bit");
         }
 
-        // Preserve webrtcsink's default MTU and header-extension setup.
         Some(false.to_value())
     });
 }
 
 pub(crate) fn selected_encoder_name(codec: &str) -> &'static str {
-    // Factory presence does not guarantee instantiation (no CUDA device, or
-    // a missing VA display / driver encode support), so the whole chain is
-    // probed in preference order before a hardware encoder is selected.
     select_encoder(codec, can_initialize_element)
 }
 
 fn supported_video_caps() -> gst::Caps {
     gst::Caps::builder_full()
-        // Offer the full H.264 profile ladder (see sink_video_caps): any
-        // `High` decoder can decode `constrained-baseline`; pinning only
-        // the baseline would filter Chrome's `High` offer for no gain.
         .structure(
             gst::Structure::builder("video/x-h264")
                 .field("stream-format", "avc")
@@ -1128,10 +992,6 @@ pub(crate) fn available_video_codecs() -> Vec<(&'static str, String, bool)> {
         .collect()
 }
 
-/// The codec table in picker order. Each entry lists the chain's encoders
-/// so a codec is offered when any of its encoders exist; the actual
-/// selection (and the hardware flag) comes from the probed chain in
-/// `gstreamer_encoder::codec_chains`, which is the single source of truth.
 fn codec_chains_list() -> [(&'static str, &'static str, [&'static str; 3]); 5] {
     [
         ("vp8", "VP8", ["vp8enc", "", ""]),
@@ -1142,15 +1002,10 @@ fn codec_chains_list() -> [(&'static str, &'static str, [&'static str; 3]); 5] {
     ]
 }
 
-/// `NativeCodecInfo.hardware` flag: the encoder that won the selection
-/// chain is a hardware encoder factory.
 fn is_hardware_encoder(encoder: &str) -> bool {
     encoder.starts_with("nv") || encoder.starts_with("va")
 }
 
-/// Suffix the display label with the winning encoder's hardware vendor so
-/// the picker can show e.g. "H.264 (NVENC)"; software labels stay
-/// unchanged.
 fn codec_label(label: &str, encoder: &str) -> String {
     if let Some(suffix) = encoder_suffix(encoder) {
         format!("{label} ({suffix})")
@@ -1179,20 +1034,6 @@ fn fold_telemetry(
         timestamp_ms: Some(epoch_timestamp_ms()),
         ..NativeTelemetry::default()
     };
-    // gst-webrtc-bin stats carry no reliable `kind` split across
-    // versions: the bundled 1.28.6 emits `kind` on the RTP stream
-    // structures but master removed it again ("To be added: kind" in
-    // gstwebrtcstats.c), so the video/audio split is recovered from the
-    // codec each RTP stream references: codec structures expose their
-    // `clock-rate` (video is always 90 kHz, Opus 48 kHz) under their
-    // `id`, which the RTP stream structures reference via `codec-id`. The
-    // pipeline's only audio codec is opusenc, so the clock rate is
-    // unambiguous regardless of which video encoder won the selection
-    // chain. Structure *names* also differ by version — 1.28.6
-    // still uses `outbound-rtp` / `remote-inbound-rtp` / `codec`, while
-    // master renamed them to `rtp-outbound-stream-stats_<ssrc>` /
-    // `rtp-remote-inbound-stream-stats_<ssrc>` / `codec-stats-<pad>` —
-    // so both variants are matched.
     let codec_clock_rates = structures
         .iter()
         .filter(|structure| is_codec_stats(structure.name().as_str()))
@@ -1212,9 +1053,6 @@ fn fold_telemetry(
         }
     }
     if let Some(config) = config {
-        // Encoded count is measured after the codec parser (the real encoder
-        // throughput); the submitted count is frames pushed into the appsrc.
-        // The gap between them is backpressure drops.
         telemetry.video_frames_encoded = Some(stat_as_f64(encoded_frames()));
         telemetry.video_frames_submitted = Some(VIDEO_FRAMES_SUBMITTED.load(Ordering::Relaxed));
         telemetry.video_width = Some(config.width);
@@ -1230,11 +1068,6 @@ fn fold_telemetry(
                     .to_uppercase()
             )
         });
-        // Live appsrc statistics — `dropped` is the stutter diagnostic
-        // (buffers the leaky appsrc discarded when the queue was full).
-        // Clone the input out and read stats after dropping the lock: the
-        // capture thread's per-frame push takes the same lock, and a stats
-        // read stalled behind a busy GLib context must not hold it up.
         let video_input = VIDEO_INPUT.lock().ok().and_then(|input| input.clone());
         if let Some(input) = video_input {
             let stats = input.input.appsrc_stats();
@@ -1265,8 +1098,6 @@ fn flatten_into(structure: &gst::Structure, flattened: &mut Vec<gst::Structure>)
     }
 }
 
-/// Stats structure-name variants seen across gst-webrtc-bin versions
-/// (classic names in the bundled 1.28.6, W3C-style names on master).
 fn is_outbound_stats(name: &str) -> bool {
     name == "outbound-rtp" || name.starts_with("rtp-outbound-stream-stats_")
 }
@@ -1279,13 +1110,6 @@ fn is_codec_stats(name: &str) -> bool {
     name == "codec" || name.starts_with("codec-stats-")
 }
 
-/// The RTP stream's media kind, recovered through the codec it references
-/// (gst-webrtc-bin's `kind` field is present in 1.28.6 but was removed
-/// again on master). The pipeline's only audio codec — opusenc at 48 kHz —
-/// fixes the audio clock rate; video runs at 90 kHz regardless of which
-/// video encoder won the selection chain, so the split is unambiguous.
-/// `None` when the codec cannot be resolved; such streams are ignored
-/// rather than guessed.
 fn stream_is_video(
     structure: &gst::Structure,
     codec_clock_rates: &HashMap<String, u32>,
@@ -1317,8 +1141,6 @@ fn fold_outbound(
     } else {
         telemetry.audio_bytes_sent = bytes;
         telemetry.audio_packets_sent = packets;
-        // The codec structure carries no usable format marker across
-        // versions; the pipeline's only audio codec is Opus at 48 kHz.
         telemetry
             .audio_codec
             .get_or_insert_with(|| "audio/OPUS".into());
@@ -1378,8 +1200,6 @@ mod tests {
         RATE_QUEUE_FULL_COOLDOWN_TICKS, RATE_QUEUE_FULL_TICKS, RATE_RECOVER_TICKS, RateController,
     };
 
-    /// `Structure` creation asserts a `gst::init`; `gst_init` is not
-    /// thread-safe to race, so every test initializes through this once.
     fn init_gst() {
         static INIT: OnceLock<()> = OnceLock::new();
         INIT.get_or_init(|| {
@@ -1418,9 +1238,6 @@ mod tests {
     }
 
     fn codec(id: &str, clock_rate: u32) -> gst::Structure {
-        // Bundled 1.28.6 names the codec structure `codec` (master:
-        // `codec-stats-<pad>`) and exposes the W3C-style id, which the
-        // RTP stream structures reference via `codec-id`.
         gst::Structure::builder("codec")
             .field("id", id)
             .field("clock-rate", clock_rate)
@@ -1428,8 +1245,6 @@ mod tests {
     }
 
     fn outbound(codec_id: &str, ssrc: u32, bytes: u64, packets: u64) -> gst::Structure {
-        // Bundled 1.28.6 names it `outbound-rtp` (master:
-        // `rtp-outbound-stream-stats_<ssrc>`).
         gst::Structure::builder("outbound-rtp")
             .field("id", format!("rtp-outbound-stream-stats_{ssrc}"))
             .field("codec-id", codec_id)
@@ -1438,9 +1253,6 @@ mod tests {
             .build()
     }
 
-    // The fixtures mirror what gst-webrtc-bin stats actually emit: classic
-    // structure names with W3C-style `id`/`codec-id` fields. `packets-lost`
-    // stays an i32.
     #[test]
     fn telemetry_folds_gstreamer_outbound_stats() {
         init_gst();
@@ -1592,15 +1404,12 @@ mod tests {
         controller.reset(&config);
         assert_eq!(controller.current_kbps(), 20_000);
 
-        // First observation primes the counters; the loss shows up in the
-        // second one.
         assert!(
             controller
                 .observe(&telemetry_with_loss(10_000.0, 0.0))
                 .is_none()
         );
         let next = controller.observe(&telemetry_with_loss(12_000.0, 600.0));
-        // 600/2000 = 30% interval loss ≥ 3%: step down 20_000 × 0.75.
         assert_eq!(next, Some(15_000));
         assert_eq!(controller.current_kbps(), 15_000);
     }
@@ -1619,8 +1428,6 @@ mod tests {
                 .observe(&telemetry_with_loss(10_000.0, 0.0))
                 .is_none()
         );
-        // 2% interval loss: above the clean threshold, below the step-down
-        // threshold — hold, and it is not a clean interval.
         assert!(
             controller
                 .observe(&telemetry_with_loss(12_000.0, 40.0))
@@ -1667,8 +1474,6 @@ mod tests {
             Some(15_000)
         );
 
-        // 9 clean (~1 s) intervals hold; the 10th clean interval steps the
-        // rate back up toward the configured ceiling.
         let mut sent = 12_000.0;
         for _ in 0..(RATE_RECOVER_TICKS - 1) {
             sent += 2_000.0;
@@ -1679,14 +1484,14 @@ mod tests {
             );
         }
         let next = controller.observe(&telemetry_with_loss(sent + 2_000.0, 0.0));
-        assert_eq!(next, Some(17_250)); // 15_000 × 1.15
+        assert_eq!(next, Some(17_250));
         assert_eq!(controller.current_kbps(), 17_250);
     }
 
     #[test]
     fn rate_controller_never_goes_below_the_floor_or_above_the_ceiling() {
         let config = CaptureConfig {
-            max_bitrate: Some(500_000.0), // ceiling = 500 kbps = the floor
+            max_bitrate: Some(500_000.0),
             auto_bitrate: true,
             ..Default::default()
         };
@@ -1698,12 +1503,10 @@ mod tests {
                 .is_none()
         );
 
-        // 100% interval loss: cannot step below the floor.
         let next = controller.observe(&telemetry_with_loss(12_000.0, 2_000.0));
         assert_eq!(next, None);
         assert_eq!(controller.current_kbps(), 500);
 
-        // Clean intervals cannot push past the ceiling either.
         let mut sent = 12_000.0;
         for _ in 0..(RATE_RECOVER_TICKS * 2) {
             sent += 2_000.0;
@@ -1735,7 +1538,6 @@ mod tests {
             Some(15_000)
         );
 
-        // A stream-settings change resets the controller to the new ceiling.
         let changed = CaptureConfig {
             max_bitrate: Some(8_000_000.0),
             auto_bitrate: true,
@@ -1760,19 +1562,14 @@ mod tests {
                 .is_none()
         );
 
-        // An auto-reconnect rebuilds the pipeline: the fresh GStreamer stats
-        // start near zero, so the cumulative counters regress. The controller
-        // must re-prime instead of computing a bogus zero (or huge) delta.
         assert!(
             controller
                 .observe(&telemetry_with_loss(50.0, 0.0))
                 .is_none()
         );
-        // The re-primed baseline is now 50; the next observation measures
-        // against it normally.
         assert_eq!(
             controller.observe(&telemetry_with_loss(2_050.0, 60.0)),
-            Some(15_000) // 60/2000 = 3% → step down 20_000 × 0.75
+            Some(15_000)
         );
     }
 
@@ -1787,16 +1584,13 @@ mod tests {
         controller.reset(&config);
         assert_eq!(controller.current_kbps(), 20_000);
 
-        // First fast observation primes the backpressure baseline.
         assert!(
             controller
                 .observe_backpressure(&telemetry_with_backpressure(0, Some(0)))
                 .is_none()
         );
-        // A dropped frame in the next window steps down at the fast cadence
-        // — no ~1 s wait for the receiver-loss report.
         let next = controller.observe_backpressure(&telemetry_with_backpressure(1, Some(6)));
-        assert_eq!(next, Some(17_000)); // 20_000 × 0.85
+        assert_eq!(next, Some(17_000));
         assert_eq!(controller.current_kbps(), 17_000);
     }
 
@@ -1815,8 +1609,6 @@ mod tests {
                 .is_none()
         );
 
-        // Keyframe/warmup bursts fill the queue for a window or two without
-        // a drop: the level alone must hold full for several windows.
         for _ in 0..(RATE_QUEUE_FULL_TICKS - 1) {
             assert!(
                 controller
@@ -1828,8 +1620,6 @@ mod tests {
         let next = controller.observe_backpressure(&telemetry_with_backpressure(0, Some(6)));
         assert_eq!(next, Some(17_000));
 
-        // A fullness-only step resets the accumulation and starts a cooldown:
-        // a still-full queue cannot keep stepping every ~200 ms window.
         for _ in 0..RATE_QUEUE_FULL_COOLDOWN_TICKS {
             assert!(
                 controller
@@ -1838,8 +1628,6 @@ mod tests {
             );
             assert_eq!(controller.current_kbps(), 17_000);
         }
-        // After the cooldown the queue must re-accumulate sustained fullness
-        // before the weak signal may step again.
         for _ in 0..(RATE_QUEUE_FULL_TICKS - 1) {
             assert!(
                 controller
@@ -1848,9 +1636,8 @@ mod tests {
             );
         }
         let next = controller.observe_backpressure(&telemetry_with_backpressure(0, Some(6)));
-        assert_eq!(next, Some(14_450)); // 17_000 × 0.85
+        assert_eq!(next, Some(14_450));
 
-        // Queue drains → no further steps.
         assert!(
             controller
                 .observe_backpressure(&telemetry_with_backpressure(0, Some(0)))
@@ -1878,19 +1665,14 @@ mod tests {
             Some(17_000)
         );
 
-        // An auto-reconnect rebuilds the pipeline: the fresh appsrc starts
-        // its counters back at zero. The controller must re-prime instead of
-        // reading the regression as a (negative) delta.
         assert!(
             controller
                 .observe_backpressure(&telemetry_with_backpressure(0, Some(0)))
                 .is_none()
         );
-        // The re-primed baseline is now 0; the next observation measures
-        // against it normally.
         assert_eq!(
             controller.observe_backpressure(&telemetry_with_backpressure(1, Some(0))),
-            Some(14_450) // 17_000 × 0.85
+            Some(14_450)
         );
     }
 
@@ -1904,28 +1686,22 @@ mod tests {
         let mut controller = RateController::default();
         controller.reset(&config);
 
-        // The loss path primes its own baseline...
         assert!(
             controller
                 .observe(&telemetry_with_loss(10_000.0, 0.0))
                 .is_none()
         );
-        // ...so the backpressure path's first observation must not read the
-        // loss baseline as a drop delta: it primes its own counters instead.
         assert!(
             controller
                 .observe_backpressure(&telemetry_with_backpressure(5, Some(6)))
                 .is_none()
         );
         assert_eq!(controller.current_kbps(), 20_000);
-        // Primed now, the next observation measures against the new baseline.
         assert_eq!(
             controller.observe_backpressure(&telemetry_with_backpressure(6, Some(6))),
-            Some(17_000) // 20_000 × 0.85
+            Some(17_000)
         );
 
-        // The other direction: backpressure priming must not let the loss
-        // path's first observation read a stale zero baseline as 3% loss.
         controller.reset(&config);
         assert!(
             controller
@@ -1943,7 +1719,7 @@ mod tests {
     #[test]
     fn rate_controller_backpressure_never_goes_below_the_floor() {
         let config = CaptureConfig {
-            max_bitrate: Some(500_000.0), // ceiling = 500 kbps = the floor
+            max_bitrate: Some(500_000.0),
             auto_bitrate: true,
             ..Default::default()
         };
@@ -1955,7 +1731,6 @@ mod tests {
                 .is_none()
         );
 
-        // Sustained drops cannot step below the floor.
         for _ in 0..10 {
             assert!(
                 controller
@@ -1977,7 +1752,6 @@ mod tests {
         controller.reset(&config);
         assert!(!controller.enabled);
 
-        // Even sustained backpressure must not move a manual ceiling.
         assert!(
             controller
                 .observe_backpressure(&telemetry_with_backpressure(1, Some(6)))
@@ -2005,7 +1779,6 @@ mod tests {
                 .observe_backpressure(&telemetry_with_backpressure(0, Some(0)))
                 .is_none()
         );
-        // The loss path accrued clean intervals...
         assert!(
             controller
                 .observe(&telemetry_with_loss(12_000.0, 0.0))
@@ -2018,8 +1791,6 @@ mod tests {
         );
         assert_eq!(controller.clean_ticks, 2);
 
-        // ...then backpressure steps down and must reset the streak so
-        // recovery does not jump back up right after an overload.
         assert_eq!(
             controller.observe_backpressure(&telemetry_with_backpressure(1, Some(6))),
             Some(17_000)
@@ -2039,7 +1810,6 @@ mod tests {
         assert!(!controller.enabled);
         assert_eq!(controller.current_kbps(), 20_000);
 
-        // Even 100% interval loss must not move a manual ceiling.
         assert!(
             controller
                 .observe(&telemetry_with_loss(12_000.0, 2_000.0))
@@ -2067,16 +1837,13 @@ mod tests {
         );
         assert_eq!(
             controller.observe(&telemetry_with_loss(12_000.0, 600.0)),
-            Some(7_500) // 30% loss → 10_000 × 0.75
+            Some(7_500)
         );
         assert_eq!(controller.current_kbps(), 7_500);
     }
 
     #[test]
     fn rate_controller_snapshot_restore_preserves_adapted_rate() {
-        // The worker's failed settings-rebuild path snapshots the controller
-        // before the pipeline teardown and restores it on failure, so the old
-        // configuration resumes at its *adapted* ceiling, not a reset one.
         let config = CaptureConfig {
             max_bitrate: Some(20_000_000.0),
             auto_bitrate: true,
@@ -2124,9 +1891,6 @@ mod tests {
 
     #[test]
     fn configured_ceiling_kbps_never_yields_one_kbps_from_invalid_input() {
-        // The "automatic gives one frame" failure class: a missing/zero/
-        // non-finite ceiling must normalize to the automatic default, never
-        // to a 1 kbps encode.
         assert_eq!(
             configured_ceiling_kbps(&CaptureConfig {
                 max_bitrate: Some(0.0),

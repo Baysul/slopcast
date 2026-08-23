@@ -1,25 +1,3 @@
-// Preview transport + end-to-end preview benchmark (Phase 2), Playwright-CDP
-// port of the old WDIO bench spec.
-//
-// Measures, in the real app:
-//   1. Transport: Tauri's raw channel throughput + arrival jitter for the
-//      two candidate preview payloads — option 1's JPEG frames (~100 KB)
-//      vs option 2's raw RGBA frames (921 KB at 640×360).
-//   2. End-to-end: synthetic capture → libjpeg-turbo encode → raw channel →
-//      webview decode → canvas draw, reporting effective fps and p50/p95/p99
-//      latency (native pts → arrival → drawn).
-//
-// Output: `test-output/bench-preview.json` (cwd is apps/desktop, so the
-// repo-root test-output dir is two levels up).
-//
-// Run (after `VITE_E2E=1 pnpm --filter desktop tauri build --features e2e`):
-//
-// ```sh
-// SLOPCAST_E2E_CAPTURE=synthetic XDG_CONFIG_HOME=$(pwd)/test-output/e2e-userdata \
-//   ../../target/release/slopcast &
-// node tests/e2e/bench-preview.playwright.ts
-// ```
-
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { type Browser, chromium, type Page } from 'playwright';
@@ -96,9 +74,6 @@ function tauriInvoke<T>(page: Page, command: string, args?: Record<string, unkno
   ) as Promise<T>;
 }
 
-/// Pushes `count` payloads of `size` bytes through a raw Tauri channel
-/// (registered in-page via `window.__TAURI__.core.Channel` — withGlobalTauri
-/// is on) and records arrival timestamps and payload sizes.
 async function transportRun(
   page: Page,
   payloadBytes: number,
@@ -164,8 +139,6 @@ async function main(): Promise<void> {
   if (!page) throw new Error('CEF exposed no page target over CDP');
 
   try {
-    // 640×360 BGRA (921 KB/frame — the raw preview payload size) and a
-    // 100 KB/frame baseline, both at ~60 fps cadence for 3 s.
     const jpeg = await transportRun(page, 100_000, 180, 16);
     result.transport.jpeg = jpeg;
     const rgba = await transportRun(page, 640 * 360 * 4, 180, 16);
@@ -176,9 +149,6 @@ async function main(): Promise<void> {
     console.log(`[bench] transport rgba: ${JSON.stringify(rgba)}`);
     writeResult();
 
-    // Arm the renderer's bench hook (main.tsx records arrival, PreviewCanvas
-    // records draw completion), then drive the real preview pipeline with
-    // the synthetic capture source.
     await page.evaluate(() => {
       (
         window as unknown as {
@@ -190,8 +160,6 @@ async function main(): Promise<void> {
         [];
     });
 
-    // Drive the real UI flow: the preview canvas only mounts once the app's
-    // captureStage leaves 'idle', which requires a room + the Start button.
     await page.getByRole('button', { name: 'Create Live Room', exact: true }).click();
     await page.locator('span.font-mono').waitFor({ state: 'attached', timeout: 30_000 });
     await page.getByRole('button', { name: 'Start Screenshare', exact: true }).click();
@@ -216,8 +184,6 @@ async function main(): Promise<void> {
     const stats = await tauriInvoke<{ previewFramesSent: number }>(page, 'get_video_capture_stats');
 
     const drawn = data.filter((entry) => entry[2] !== null);
-    // Note: end-to-end native-emit → arrival latency is not reported because
-    // the native pts clock and performance.now() have different zero points.
     const arrivalToDraw = drawn
       .map(([, arrivalMs, drawMs]) => (drawMs as number) - arrivalMs)
       .filter((v) => v >= 0)

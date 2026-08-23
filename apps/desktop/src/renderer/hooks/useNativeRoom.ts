@@ -34,10 +34,6 @@ export interface UseNativeRoomReturn {
   disconnectRoom: () => void;
 }
 
-// The renderer's only room path: room creation mints a presenter token from
-// the server, then the connection itself lives in native-livekit (Tauri
-// backend). Spectator count and connection state are polled over commands since
-// native-livekit does not push events to the renderer.
 export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNativeRoomOptions): UseNativeRoomReturn {
   const [roomCode, setRoomCode] = useState<string>('');
   const [shareUrl, setShareUrl] = useState<string>('');
@@ -45,9 +41,6 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
   const [isCreatingRoom, setIsCreatingRoom] = useState<boolean>(false);
 
   const roomActiveRef = useRef(false);
-  // connectNativeRoom returns before the worker finishes joining (ROOM_CONNECTED
-  // flips only after the audio track publishes), so a transient false on the
-  // first polls must not be treated as a disconnect.
   const sawConnectedRef = useRef(false);
 
   const disconnectRoom = useCallback(() => {
@@ -104,10 +97,6 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
     }
   }, [apiEndpoint, livekitUrl, disconnectRoom, isCreatingRoom]);
 
-  // Poll spectator count and detect an unexpected room drop (native-livekit
-  // has no event push to the renderer). A settings update rebuilds the Linux
-  // publisher pipeline and briefly drops its connection flag, so only clear
-  // the room after the native session itself has ended.
   useEffect(() => {
     if (!roomCode) return;
 

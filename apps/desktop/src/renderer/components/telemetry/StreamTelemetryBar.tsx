@@ -10,8 +10,6 @@ export interface StreamTelemetry {
   width: number | null;
   height: number | null;
   frameRate: number | null;
-  /** Capture-side rate (frames dequeued from the source per second) — the
-   * encode fps in this bar can only be as high as this. */
   captureFps: number | null;
   targetFrameRate: number | null;
   videoBitrate: number | null;
@@ -145,10 +143,6 @@ const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemet
   );
 };
 
-// Memoized: rendered inside the memoized `ScreensharePreview`, which
-// re-renders at capture rate (fresh `previewFrame` prop every frame) —
-// without the memo the sparkline rebuilt its SVG strings 60×/s even though
-// `telemetry` only changes once per second.
 export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = React.memo(({ telemetry: t }) => {
   const fpsDegrade = t.frameRate != null && t.targetFrameRate != null && t.frameRate < t.targetFrameRate * 0.75;
   const lossDegrade = t.packetLossPct != null && t.packetLossPct > 1;

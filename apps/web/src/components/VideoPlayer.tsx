@@ -126,9 +126,6 @@ const usePlaybackDiagnostics = (videoRef: React.RefObject<HTMLVideoElement | nul
   }, [videoRef]);
 };
 
-// Browsers block unmuted autoplay without a gesture: try playing at normal
-// volume first, then retry muted. Resolves to whether a user gesture is still
-// needed for audio.
 async function playWithMuteFallback(video: HTMLVideoElement): Promise<boolean> {
   try {
     await video.play();
@@ -273,9 +270,6 @@ const usePlaybackControls = (mediaStream: MediaStream | null, fullBleed?: boolea
     playWithMuteFallback(video).then((needsGesture) => {
       applyPlayResult(video, needsGesture, setIsPlaying, setIsMuted, setNeedsUserGesture, false);
     });
-    // RoomPage mutates one stable stream identity in place (track
-    // subscribe/unsubscribe), so this effect never re-runs for a track
-    // change — listen on the stream itself to keep hasVideoTrack honest.
     mediaStream.addEventListener('addtrack', applyTracks);
     mediaStream.addEventListener('removetrack', applyTracks);
     return () => {

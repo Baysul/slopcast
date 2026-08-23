@@ -18,8 +18,6 @@ declare global {
 
 const diagnosticEnabled = (): boolean => new URLSearchParams(window.location.search).has('diagnostics');
 
-// Distilled status signal, matching the desktop titlebar convention: a bare
-// dot + uppercase word, no pill or background. The video owns the viewport.
 const StatusSignal: React.FC<{ variant: StatusVariant; children: React.ReactNode }> = ({ variant, children }) => {
   let dotClass: string;
   if (variant === 'live') {
@@ -41,12 +39,7 @@ const StatusSignal: React.FC<{ variant: StatusVariant; children: React.ReactNode
 
 const DECODER_STALL_THRESHOLD_MS = 8000;
 const DECODER_STALL_CHECK_MS = 2000;
-// Belt-and-braces guard around room.connect: livekit-client times out its
-// own signal handshake, but the status badge must never sit on "Connecting..."
-// indefinitely if a future bump regresses that.
 const CONNECT_TIMEOUT_MS = 20000;
-// A track re-publish (settings change) unsubscribes then re-subscribes the
-// video track within a beat; wait before declaring the stream ended.
 const STREAM_END_GRACE_MS = 500;
 
 const logH264Sdp = (room: Room): void => {
@@ -63,8 +56,8 @@ const logH264Sdp = (room: Room): void => {
     for (const line of h264Lines) {
       console.log(`[SDP:recv] H264 remote fmtp: ${line}`);
     }
-  } catch {
-    /* diagnostic-only */
+  } catch (error) {
+    console.debug('[SDP:recv] failed to inspect remote description:', error);
   }
 };
 
@@ -80,20 +73,12 @@ const collectExistingTracks = (room: Room): MediaStreamTrack[] => {
   return tracks;
 };
 
-// Stream liveness is defined by video publications: the presenter publishes
-// an audio track for the whole room lifetime, so audio alone means "presenter
-// connected, not sharing" — never "live". Only publications with a live track
-// count: when the SFU closes a downtrack, TrackUnsubscribed fires from the
-// track-ended path *before* the participant-update cleanup removes the stale
-// publication, so the maps lag the event.
+// Audio persists for the room lifetime; a live video publication means the presenter is sharing.
 const hasRemoteVideo = (room: Room): boolean =>
   [...room.remoteParticipants.values()].some((participant) =>
     [...participant.videoTrackPublications.values()].some((publication) => publication.track != null),
   );
 
-// Ensures a managed stream exists. Fresh streams re-attach every
-// still-subscribed audio track: the presenter's audio publication survives a
-// stop/restart cycle within the same room, so it never re-subscribes.
 const ensureManagedStream = (room: Room, managedStreamRef: React.RefObject<MediaStream | null>): MediaStream => {
   if (managedStreamRef.current) {
     return managedStreamRef.current;
@@ -117,9 +102,6 @@ const endStream = (
   if (managedStreamRef.current) {
     const stream = managedStreamRef.current;
     managedStreamRef.current = null;
-    // Only the unsubscribed video tracks are dead; the presenter's audio
-    // track stays subscribed in the room and must not be stopped — it is
-    // re-attached to the next stream when the presenter shares again.
     for (const track of stream.getVideoTracks()) {
       track.stop();
     }
@@ -156,8 +138,6 @@ const attachExistingTracks = (
     setConnectionStatus('live');
     setStatusText('Live');
   } else {
-    // Only the room-lifetime audio track is up: the presenter is connected
-    // but not sharing yet.
     setConnectionStatus('connecting');
     setStatusText('Connected — waiting for stream...');
   }
@@ -317,8 +297,6 @@ export const RoomPage: React.FC = () => {
   const stallStartRef = useRef<number>(0);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Set when a connection attempt fails; guards the badge state from being
-  // overwritten by the tear-down events (Disconnected) that follow.
   const connectFailedRef = useRef(false);
 
   const resetIdleTimer = useCallback(() => {
@@ -418,9 +396,6 @@ export const RoomPage: React.FC = () => {
       roomRef.current = null;
     }
 
-    // VideoPlayer attaches the underlying MediaStreamTrack rather than using
-    // RemoteVideoTrack.attach(), so LiveKit cannot receive the visibility and
-    // dimensions required by adaptive streaming.
     const room = new Room({ adaptiveStream: false });
     roomRef.current = room;
 
@@ -434,17 +409,12 @@ export const RoomPage: React.FC = () => {
       if (!stream.getTracks().includes(track.mediaStreamTrack)) {
         stream.addTrack(track.mediaStreamTrack);
       }
-      // Reuse the same MediaStream object identity: mutating it in place keeps
-      // VideoPlayer's srcObject binding stable, so playback is never restarted
-      // by a track subscribe/unsubscribe.
       setMediaStream(stream);
       if (track.kind === 'video') {
         setConnectionStatus('live');
         setStatusText('Live');
         logH264Sdp(room);
       } else if (!hasRemoteVideo(room)) {
-        // Audio alone means the presenter is connected but not sharing. Never
-        // downgrade an already-live stream.
         setConnectionStatus('connecting');
         setStatusText('Connected — waiting for stream...');
       }
@@ -456,13 +426,6 @@ export const RoomPage: React.FC = () => {
       if (managedStreamRef.current) {
         managedStreamRef.current.removeTrack(track.mediaStreamTrack);
       }
-      // Do NOT gate on the publication maps here: the event fires from the
-      // track-ended path while the stale publication is still present (the
-      // participant-update cleanup lags). Arm the grace timer instead and let
-      // it re-check the settled state. A re-publish (settings change) and the
-      // presenter leaving both pass through here; give a re-subscribe or the
-      // participant teardown a beat to arrive before declaring the stream
-      // ended.
       if (streamEndTimerRef.current) {
         clearTimeout(streamEndTimerRef.current);
       }
@@ -470,7 +433,7 @@ export const RoomPage: React.FC = () => {
         streamEndTimerRef.current = null;
         if (isStale()) return;
         if (hasRemoteVideo(room)) return;
-        if (room.remoteParticipants.size === 0) return; // ParticipantDisconnected owns this state
+        if (room.remoteParticipants.size === 0) return;
         endStream(managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
       }, STREAM_END_GRACE_MS);
     });
@@ -511,10 +474,6 @@ export const RoomPage: React.FC = () => {
       setParticipantCount(room.remoteParticipants.size);
     });
 
-    // A video publication this browser cannot subscribe to (e.g. the
-    // presenter publishing H.265 while this Chromium build has no HEVC
-    // decoder) leaves the spectator stuck on "waiting for presenter" with no
-    // error. Surface the codec gap instead of hanging silently.
     room.on(RoomEvent.TrackPublished, () => {
       if (isStale()) return;
       const unsupported = [...room.remoteParticipants.values()]
@@ -603,8 +562,6 @@ export const RoomPage: React.FC = () => {
             if (timeout) clearTimeout(timeout);
           }
         } catch (err) {
-          // A timed-out connect may still complete later; tear the room down
-          // so the error state stays truthful.
           void room.disconnect().catch(() => undefined);
           throw err;
         }
@@ -619,8 +576,6 @@ export const RoomPage: React.FC = () => {
         if (isStale()) return;
         connectFailedRef.current = true;
         setConnectionStatus('error');
-        // The header badge renders statusText — it must not keep claiming
-        // "Connecting..." while the connection actually failed.
         setStatusText('Connection failed');
         setErrorMsg(`Connection failed: ${err instanceof Error ? err.message : String(err)}`);
       });
@@ -692,7 +647,6 @@ export const RoomPage: React.FC = () => {
 
   const handleResync = () => initializeConnection();
 
-  // Feeds the spectator telemetry bar (VideoPlayer polls this at 2 s).
   const getStatsFn = useCallback(async (): Promise<RTCStatsReport | null> => {
     const room = roomRef.current;
     if (!room) return null;

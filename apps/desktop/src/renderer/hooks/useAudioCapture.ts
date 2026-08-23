@@ -10,7 +10,6 @@ const AUDIO_APPS_POLL_MS = 3000;
 
 const wordsOf = (q: string): string[] => q.split(/[^a-z0-9]+/).filter((w) => w.length > 0);
 
-// 1. Exact name match
 const matchExactName = (apps: AudioApp[], q: string): AudioApp | null =>
   apps.find((a) => a.name.trim().toLowerCase() === q) ?? null;
 
@@ -21,7 +20,6 @@ const cleanName = (name: string): string =>
     .replace(/[^a-z0-9]/g, '')
     .replace(/exe$/, '');
 
-// 2. Cleaned name equality (handling spaces / .exe, e.g. "zenless zone zero" vs "zenlesszonezero.exe")
 const matchCleanedName = (apps: AudioApp[], qClean: string): AudioApp | null => {
   if (qClean.length < 3) return null;
   return (
@@ -32,13 +30,11 @@ const matchCleanedName = (apps: AudioApp[], qClean: string): AudioApp | null => 
   );
 };
 
-// 3. Name contained in query or query in name
 const matchNameContained = (apps: AudioApp[], q: string): AudioApp | null => {
   const qLower = q.toLowerCase();
   return apps.find((a) => qLower.includes(a.name.toLowerCase()) || a.name.toLowerCase().includes(qLower)) ?? null;
 };
 
-// 4. Acronym match for multi-word queries (e.g. "Final Fantasy XIV" -> "ffxiv" matching "ffxiv_dx11.exe")
 const matchAcronym = (apps: AudioApp[], q: string): AudioApp | null => {
   const words = wordsOf(q);
   if (words.length < 2) return null;
@@ -47,7 +43,6 @@ const matchAcronym = (apps: AudioApp[], q: string): AudioApp | null => {
   return apps.find((a) => a.name.toLowerCase().includes(acronym)) ?? null;
 };
 
-// 5. Significant word match (words with length >= 4)
 const matchSignificantWord = (apps: AudioApp[], q: string): AudioApp | null => {
   for (const word of wordsOf(q)) {
     if (word.length >= 4) {
@@ -58,7 +53,6 @@ const matchSignificantWord = (apps: AudioApp[], q: string): AudioApp | null => {
   return null;
 };
 
-// 6. First word match
 const matchFirstWord = (apps: AudioApp[], q: string): AudioApp | null => {
   const firstWord = wordsOf(q)[0];
   if (!firstWord) return null;
@@ -112,17 +106,11 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
 
   const audioAppIdRef = useRef<number | null>(null);
 
-  // Keep the list identity stable across polls so memoized consumers
-  // (AudioAppPicker, audioAppGroups) don't re-render on unchanged data.
-  // The comparison includes media/window titles — they change while
-  // ids/names stay identical, so a title-only update must reach the UI.
   const loadAudioApps = useCallback(async () => {
     const apps = await desktopApi.getAudioApps();
     setAudioApps((prev) => (audioAppsEqual(prev, apps) ? prev : apps));
   }, []);
 
-  // Audio apps auto-refresh; safe during a live share (read-only PipeWire
-  // enumeration, selection keyed by id is never mutated by a refresh).
   useEffect(() => {
     void loadAudioApps();
     const interval = setInterval(() => {
@@ -133,7 +121,6 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
     return () => clearInterval(interval);
   }, [loadAudioApps]);
 
-  // Audio waveform metering
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
@@ -161,9 +148,6 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
     };
   }, []);
 
-  // Selects the app whose PipeWire streams get linked into the capture node.
-  // The PCM then flows native-rust -> backend -> native-livekit automatically;
-  // the renderer never creates or publishes a JS audio track.
   const startAudioCapture = useCallback(async (targetId: number): Promise<boolean> => {
     const started = await desktopApi.startAudioCapture(targetId);
     if (!started) {
@@ -217,14 +201,11 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
     if (!explicit) setAutoDetectedApp(null);
   }, []);
 
-  // Real-time audio source switching while sharing
   useEffect(() => {
     if (!isSharing) return;
     const newId = selectedAudioAppId;
     if (newId === null) return;
 
-    // audioAppIdRef tracks the target the native layer actually captures, so
-    // `prevId` is the real previous target, not the UI selection.
     const prevId = audioAppIdRef.current;
     if (prevId === newId) return;
 
