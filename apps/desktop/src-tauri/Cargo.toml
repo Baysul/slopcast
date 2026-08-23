@@ -47,9 +47,13 @@ tauri-plugin-single-instance = "2"
 # e2e::with_command_line_args; no plugin deps remain.
 native-livekit = { path = "../../../packages/native-livekit" }
 native-rust = { path = "../../../packages/native-rust" }
-libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Only the Linux dlopen shims in platform.rs touch libc; keeping it off
+# other targets keeps unused_crate_dependencies quiet there.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [features]
 # Embedded WebDriver plugins are gone (see MIGRATION §12): the presenter
