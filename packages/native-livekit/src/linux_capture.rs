@@ -44,8 +44,7 @@
 //!   source is picked. With it, the whole portal flow stays on the capture
 //!   thread and can never race `CaptureFrame`.
 //!
-//! Feeds the shared packed-BGRA `FrameCallback` contract (see
-//! `desktop_capture`), reusing `convert_frame` and the paced delivery loop.
+//! Feeds packed-BGRA `CapturedFrame` values into Frame delivery.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,15 +55,13 @@ use livekit::webrtc::desktop_capturer::{
     CaptureError, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
 };
 
-use crate::desktop_capture::{
-    FrameCallback, STATS_DROPPED, STATS_ERRORS, capture_poll_fps, fire_capture_ended_once,
-    monotonic_us,
-};
+use crate::desktop_capture::{capture_poll_fps, fire_capture_ended_once};
+use crate::frame_delivery::{CapturedFrame, FrameIngress, SourceIssue, monotonic_us};
 
 /// The `PipeWire` desktop capture engine: owns the libwebrtc capturer (created,
 /// started and polled on the capture thread) and maps its callback into the
-/// shared packed-BGRA `FrameCallback` contract. Created inside `run_capture`'s
-/// Linux arm; `poll` is driven by the shared capture loop at the encoder
+/// typed Frame delivery ingress. Created by the acquisition coordinator;
+/// `poll` is driven by its source worker at the encoder
 /// target fps (or the fallback preview cadence before a track is live).
 pub(crate) struct LinuxDesktopCapture {
     capturer: DesktopCapturer,
@@ -90,7 +87,7 @@ impl LinuxDesktopCapture {
     /// Returns an error when the `GLib` thread-default context cannot be set
     /// or no `PipeWire` capturer can be created (e.g. X11, where
     /// `IsSupported` = Wayland && `InitializePipeWire` fails).
-    pub(crate) fn start(on_frame: FrameCallback) -> Result<Self, String> {
+    pub(crate) fn start(ingress: FrameIngress) -> Result<Self, String> {
         let glib_ctx = MainContext::new();
         let ended = Arc::new(AtomicBool::new(false));
         let ended_cb = Arc::clone(&ended);
@@ -106,13 +103,12 @@ impl LinuxDesktopCapture {
                     .ok_or_else(|| "Desktop capturer unavailable (PipeWire portal)".to_string())?;
                 // Scratch buffer to re-pack stride-padded rows into the packed-BGRA contract.
                 let mut packed: Vec<u8> = Vec::new();
-                let mut on_frame = on_frame;
                 capturer.start_capture(None, move |result| match result {
                     Ok(frame) => {
                         let width = u32::try_from(frame.width()).unwrap_or(0);
                         let height = u32::try_from(frame.height()).unwrap_or(0);
                         if width == 0 || height == 0 {
-                            STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                            ingress.record_issue(SourceIssue::DroppedFrame);
                             return;
                         }
                         let row_bytes = usize::try_from(width * 4).unwrap_or(0);
@@ -126,7 +122,7 @@ impl LinuxDesktopCapture {
                             // callback (which cannot unwind).
                             let required = row_bytes.saturating_mul(frame_rows);
                             if data.len() < required {
-                                STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                                ingress.record_issue(SourceIssue::DroppedFrame);
                                 return;
                             }
                             &data[..required]
@@ -137,7 +133,7 @@ impl LinuxDesktopCapture {
                             // bounds.
                             let required = stride.saturating_mul(frame_rows);
                             if data.len() < required {
-                                STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                                ingress.record_issue(SourceIssue::DroppedFrame);
                                 return;
                             }
                             packed.clear();
@@ -151,10 +147,15 @@ impl LinuxDesktopCapture {
                             &packed
                         } else {
                             // stride < row_bytes cannot be packed safely.
-                            STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                            ingress.record_issue(SourceIssue::DroppedFrame);
                             return;
                         };
-                        on_frame(width, height, bgra, monotonic_us());
+                        let _ = ingress.submit(CapturedFrame {
+                            width,
+                            height,
+                            bgra,
+                            pts_us: monotonic_us(),
+                        });
                     }
                     Err(CaptureError::Temporary) => {
                         // No new buffer since the last poll — expected while
@@ -165,7 +166,7 @@ impl LinuxDesktopCapture {
                         // faulted in the telemetry and e2e diagnostics.
                     }
                     Err(CaptureError::Permanent) => {
-                        STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
+                        ingress.record_issue(SourceIssue::CaptureError);
                         if !ended_cb.swap(true, Ordering::Relaxed) {
                             log::info!(
                                 "[desktop-capture] portal session closed — captured source is gone"

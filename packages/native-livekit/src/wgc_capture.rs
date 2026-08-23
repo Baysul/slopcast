@@ -35,9 +35,7 @@
 //!   `capture_frame()` — WGC is WinRT-based and the shim expects the thread
 //!   to already own an apartment.
 //!
-//! Feeds the shared packed-BGRA `FrameCallback` contract (see
-//! `desktop_capture`), reusing `convert_frame`, the paced delivery loop
-//! and the preview emitter unchanged.
+//! Feeds packed-BGRA `CapturedFrame` values into Frame delivery.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -50,10 +48,8 @@ use livekit::webrtc::desktop_capturer::{
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows::core::HRESULT;
 
-use crate::desktop_capture::{
-    FrameCallback, STATS_DROPPED, STATS_ERRORS, capture_poll_fps, fire_capture_ended_once,
-    monotonic_us,
-};
+use crate::desktop_capture::{capture_poll_fps, fire_capture_ended_once};
+use crate::frame_delivery::{CapturedFrame, FrameIngress, SourceIssue, monotonic_us};
 
 /// The thread was already initialized in a different COM apartment; the WGC
 /// session may still work, so it is tolerated (same policy as the WASAPI
@@ -188,8 +184,8 @@ fn enumerate_kind(
 
 /// The WGC capture engine: owns the libwebrtc capturer (created, started and
 /// polled on the capture thread) and maps its callback into the shared
-/// packed-BGRA `FrameCallback` contract. Created inside `run_capture`'s WGC
-/// arm; `poll` is driven by the shared capture loop at the encoder target
+/// typed Frame delivery ingress. Created by the acquisition coordinator;
+/// `poll` is driven by its source worker at the encoder target
 /// fps (or the fallback preview cadence before a track is live).
 pub(crate) struct WgcCapture {
     /// Declared before `_com` so it drops first (fields drop in declaration
@@ -218,7 +214,7 @@ impl WgcCapture {
     pub(crate) fn start(
         kind: WgcSourceKind,
         id: u64,
-        on_frame: FrameCallback,
+        ingress: FrameIngress,
     ) -> Result<Self, String> {
         let com = ComApartment::init()?;
         let mut options = DesktopCapturerOptions::new(kind.into());
@@ -236,35 +232,34 @@ impl WgcCapture {
         // Scratch buffer to re-pack stride-padded rows into the packed-BGRA
         // contract (WGC rows pad to a D3D11 row pitch).
         let mut packed: Vec<u8> = Vec::new();
-        let mut on_frame = on_frame;
         capturer.start_capture(Some(source), move |result| match result {
             Ok(frame) => {
                 let width = u32::try_from(frame.width()).unwrap_or(0);
                 let height = u32::try_from(frame.height()).unwrap_or(0);
                 if width == 0 || height == 0 {
-                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    ingress.record_issue(SourceIssue::DroppedFrame);
                     return;
                 }
                 let Some(row_bytes) = usize::try_from(width)
                     .ok()
                     .and_then(|frame_width| frame_width.checked_mul(4))
                 else {
-                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    ingress.record_issue(SourceIssue::DroppedFrame);
                     return;
                 };
                 let frame_rows = usize::try_from(height).unwrap_or(0);
                 let stride = usize::try_from(frame.stride()).unwrap_or(0);
                 let Some(packed_len) = row_bytes.checked_mul(frame_rows) else {
-                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    ingress.record_issue(SourceIssue::DroppedFrame);
                     return;
                 };
                 let Some(source_len) = stride.checked_mul(frame_rows) else {
-                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    ingress.record_issue(SourceIssue::DroppedFrame);
                     return;
                 };
                 let data = frame.data();
                 if stride < row_bytes || data.len() < source_len {
-                    STATS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    ingress.record_issue(SourceIssue::DroppedFrame);
                     return;
                 }
 
@@ -281,14 +276,19 @@ impl WgcCapture {
                     }
                     &packed
                 };
-                on_frame(width, height, bgra, monotonic_us());
+                let _ = ingress.submit(CapturedFrame {
+                    width,
+                    height,
+                    bgra,
+                    pts_us: monotonic_us(),
+                });
             }
             Err(CaptureError::Temporary) => {
                 // Transient WGC drop (frame pool raced the poll); keep going.
-                STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
+                ingress.record_issue(SourceIssue::CaptureError);
             }
             Err(CaptureError::Permanent) => {
-                STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
+                ingress.record_issue(SourceIssue::CaptureError);
                 if !ended_cb.swap(true, Ordering::Relaxed) {
                     log::info!("[desktop-capture] WGC source is gone — captured source closed");
                     fire_capture_ended_once();

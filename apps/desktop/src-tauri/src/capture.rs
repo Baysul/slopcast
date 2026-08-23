@@ -133,7 +133,7 @@ fn clear_latest_frame() -> Result<(), String> {
     Ok(())
 }
 
-/// Registers the preview callback: stashes each raw BGRA payload in `LATEST_FRAME`.
+/// Registers the preview callback and stashes each header-prefixed BGRA payload.
 pub fn register_preview_frame_callback() {
     native_livekit::set_preview_callback(Box::new(move |bytes, _pts_us| {
         if let Ok(mut slot) = LATEST_FRAME.lock() {
@@ -173,8 +173,8 @@ pub fn set_preview_viewport(width: u32, height: u32) -> bool {
     true
 }
 
-/// Clears the reported preview viewport; previews fall back to the source
-/// resolution until the renderer reports again.
+/// Clears the reported preview viewport; preview emission pauses until the
+/// renderer reports a size again.
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn clear_preview_viewport() -> bool {

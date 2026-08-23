@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod desktop_capture;
+mod frame_delivery;
 
 #[cfg(target_os = "linux")]
 mod gstreamer_encoder;
@@ -15,6 +16,9 @@ mod gstreamer_publisher;
 
 #[cfg(target_os = "linux")]
 mod linux_capture;
+
+#[cfg(target_os = "linux")]
+mod publisher_session;
 
 #[cfg(target_os = "windows")]
 mod wgc_capture;
@@ -547,12 +551,7 @@ pub fn feed_pcm(pcm: Vec<i16>) -> Result<(), String> {
 pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let target = (config.width, config.height, config.fps);
-        let result = gstreamer_publisher::start_video(config);
-        if result.is_ok() {
-            desktop_capture::set_scale_target(target.0, target.1, target.2);
-        }
-        result
+        gstreamer_publisher::start_video(config)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -572,7 +571,6 @@ pub fn start_video_track(config: CaptureConfig) -> Result<(), String> {
 pub fn stop_video_track() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        desktop_capture::clear_scale_target();
         gstreamer_publisher::stop_video()
     }
 
@@ -665,10 +663,10 @@ pub fn get_desktop_capture_stats() -> DesktopCaptureStats {
     desktop_capture::stats()
 }
 
-/// Registers the preview callback: the capture thread invokes it with
-/// BGRA frames `(data, pts_us)` while a capture session is active. The
-/// engine stays Tauri-unaware — the Tauri backend forwards the bytes to the
-/// renderer's preview channel. Replaces any previously registered callback.
+/// Registers the preview callback. Frame delivery emits a 16-byte timestamp
+/// and dimensions header followed by packed BGRA pixels while capture is
+/// active. The Tauri backend forwards the payload to the renderer. Replaces
+/// any previously registered callback.
 pub fn set_preview_callback(callback: Box<dyn Fn(Vec<u8>, i64) + Send + Sync>) {
     desktop_capture::set_preview_callback(callback);
 }
@@ -1011,8 +1009,12 @@ async fn handle_start_video(room: &Room, config: &CaptureConfig) {
         }
     }
 
-    desktop_capture::set_scale_target(config.width, config.height, config.fps);
     VIDEO_SOURCE.store(Some(Arc::new(source)));
+    if let Err(error) = desktop_capture::set_scale_target(config.width, config.height, config.fps) {
+        log::error!("Failed to bind Frame delivery to WebRTC publication: {error}");
+        VIDEO_SOURCE.store(None);
+        return;
+    }
     VIDEO_ACTIVE.store(true, Ordering::SeqCst);
 }
 

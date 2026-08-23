@@ -3743,7 +3743,6 @@ name = "native-livekit"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "base64 0.22.1",
  "glib 0.21.5",
  "gstreamer",
  "gstreamer-app",

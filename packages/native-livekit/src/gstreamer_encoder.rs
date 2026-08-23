@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::CaptureConfig;
-use crate::desktop_capture::{VideoSample, trace_encoder_output, trace_frame};
+use crate::frame_delivery::{VideoSample, trace_encoder_output, trace_frame};
 
 /// Video appsrc queue depth in buffers. Two was too tight: any transient
 /// encoder hiccup (VA-API pipeline stall, driver swap) saturated it
@@ -101,7 +101,7 @@ static VIDEO_FRAMES_ENCODED: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn reset_encoded_frames() {
     VIDEO_FRAMES_ENCODED.store(0, Ordering::Relaxed);
-    crate::desktop_capture::clear_i420_freelist();
+    crate::frame_delivery::clear_i420_freelist();
 }
 
 pub(crate) fn encoded_frames() -> u64 {
@@ -436,13 +436,10 @@ impl VideoInput {
         Ok(())
     }
 
-    /// The active buffer cadence; the publisher updates it on a live fps
-    /// change and `push_frame` reads it per frame.
     pub(crate) fn fps(&self) -> u32 {
         self.fps.load(Ordering::Relaxed)
     }
 
-    /// Updates the buffer cadence in place (no pipeline rebuild).
     pub(crate) fn set_fps(&self, fps: u32) {
         self.fps.store(fps, Ordering::Relaxed);
     }
@@ -475,8 +472,7 @@ pub(crate) struct GstreamerEncoder {
     ceiling_kbps: u32,
     /// The probe-gated encoder policy fixed when this pipeline attached.
     plan: EncoderPlan,
-    /// A runtime property mismatch pins further automatic changes until this
-    /// pipeline rebuilds.
+    /// A runtime property mismatch pins further changes until rebuild.
     rate_is_pinned: bool,
     elements: Vec<gst::Element>,
     sink_pad: gst::Pad,
@@ -510,6 +506,10 @@ impl GstreamerEncoder {
 
     pub(crate) fn can_adapt(&self) -> bool {
         !self.rate_is_pinned
+    }
+
+    pub(crate) fn ceiling_kbps(&self) -> u32 {
+        self.ceiling_kbps
     }
 
     pub(crate) fn encoder_name(&self) -> &'static str {

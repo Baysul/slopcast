@@ -1,16 +1,17 @@
-//! Linux `LiveKit` publication through the stock `livekitwebrtcsink` plugin.
+//! Concrete Linux `GStreamer` adapter for the Publisher session module.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{LazyLock, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::gstreamer_encoder::{
-    APPSRC_MAX_BUFFERS, GstreamerEncoder, VideoInput, bitrate_bps_to_kbps, encoded_frames,
-    reset_encoded_frames, select_encoder,
+    CeilingUpdate, GstreamerEncoder, VideoInput, encoded_frames, reset_encoded_frames,
+    select_encoder,
+};
+use crate::publisher_session::{
+    ConfigOutcome, EffectError, InPlaceChange, LifecycleEffects, PublisherSession, VideoIntent,
 };
 use crate::{CHANNELS, CaptureConfig, NativeTelemetry, SAMPLE_RATE};
 use gst::glib::translate::{ToGlibPtr, from_glib_full};
@@ -31,81 +32,15 @@ const AUDIO_APPSRC_MAX_BUFFERS: u64 = 8;
 /// gated on `codec_discovery_done` — the presenter would never join the
 /// room. Two frames (40 ms) cover frame-boundary rounding.
 const AUDIO_DISCOVERY_SAMPLES: usize = 3840;
-/// Command reply timeout. 30 s (was 10 s): a legitimate `StartVideo`
-/// rebuild can be slow when the SFU connection path stalls, and the worker
-/// processes commands serially — a timed-out caller must not race state
-/// that the worker will still settle (the worker's eventual `StopVideo`/
-/// `Shutdown` processing makes the settled state consistent either way).
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const INITIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
-/// Reconnect retry backoff (exponential, capped): the first attempt after a
-/// drop waits one second, then 2, 4, 8… up to `RECONNECT_DELAY_MAX`. The
-/// SFU outage is usually transient, so retries never give up — but a
-/// sustained outage no longer rebuilds the pipeline every second forever.
-const RECONNECT_DELAY_BASE: Duration = Duration::from_secs(1);
-const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(15);
-/// Grace period for `disconnect()`'s bounded worker join: a healthy worker
-/// answers `Shutdown` within ~20 ms (its recv timeout); anything still
-/// running after the grace is reaped on a detached thread.
-const DISCONNECT_GRACE: Duration = Duration::from_secs(2);
 const OPUS_BITRATE: i32 = 128_000;
 
-// Congestion-controller tuning. One tick is one POLL_INTERVAL loop
-// iteration (~20 ms), so the observation cadences below are ~200 ms for
-// the local backpressure path and ~1 s for the receiver-loss path.
-/// Observations between fast backpressure observations (~200 ms): local
-/// signals (appsrc drops, a persistently full queue) show the encoder is
-/// falling behind *now*, so they must not wait for the ~1 s receiver-loss
-/// report to confirm the overload.
-const RATE_BACKPRESSURE_TICKS: u32 = 10;
-/// Observations between rate steps (~1 s).
-const RATE_ADAPT_TICKS: u32 = 50;
-/// Interval loss ratio ≥ this triggers a step down (3% of packets lost in
-/// one second is a decisive congestion signal; transient wifi single-packet
-/// loss stays below it).
-const RATE_LOSS_HIGH: f64 = 0.03;
-/// Interval loss ratio ≤ this counts as a clean interval (0.5%).
-const RATE_LOSS_LOW: f64 = 0.005;
-/// Clean intervals before stepping back up toward the configured ceiling
-/// (10 s of steady, low-loss sending).
-const RATE_RECOVER_TICKS: u32 = 10;
-const RATE_STEP_DOWN: f64 = 0.75;
-const RATE_STEP_UP: f64 = 1.15;
-/// Ceiling multiplier on a local backpressure signal. Gentler than the
-/// receiver-loss step (`RATE_STEP_DOWN`): it fires as often as every 200 ms
-/// while the encoder is behind, so a deep overload compounds quickly
-/// without a single transient stall cratering the rate.
-const RATE_STEP_BACKPRESSURE: f64 = 0.85;
-/// Consecutive fast ticks the appsrc queue must sit at full depth before
-/// the queue level alone counts as backpressure. Keyframe and pipeline-
-/// warmup bursts fill the 6-buffer queue for a window or two without a
-/// drop; three windows (~600 ms) of sustained fullness means the encoder
-/// cannot keep up.
-const RATE_QUEUE_FULL_TICKS: u32 = 3;
-/// Fast ticks after a fullness-only rate step before the queue level alone
-/// may drive another one (~2 s at the 200 ms backpressure cadence). A
-/// still-full queue after a step cannot keep compounding the weakest
-/// congestion signal; drops (a stronger signal) still fire immediately
-/// during the cooldown.
-const RATE_QUEUE_FULL_COOLDOWN_TICKS: u32 = 10;
-/// Hard floor for the adapted ceiling: below this the encoder quality
-/// degrades faster than the congestion it is trying to escape.
-const RATE_FLOOR_KBPS: u32 = 500;
-/// Ceiling used when the stream settings carry no usable `max_bitrate`
-/// (missing, zero, or non-finite): the "automatic" start point the
-/// controller adapts around.
-const DEFAULT_VIDEO_BITRATE_BPS: f64 = 20_000_000.0;
-
-static PUBLISHER: LazyLock<Mutex<Option<PublisherHandle>>> = LazyLock::new(|| Mutex::new(None));
-static AUDIO_INPUT: LazyLock<Mutex<Option<gst_app::AppSrc>>> = LazyLock::new(|| Mutex::new(None));
-static VIDEO_INPUT: LazyLock<Mutex<Option<VideoInput>>> = LazyLock::new(|| Mutex::new(None));
+static PUBLISH_STATE_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static AUDIO_INPUT: LazyLock<Mutex<Option<AudioInput>>> = LazyLock::new(|| Mutex::new(None));
+static VIDEO_INPUT: LazyLock<Mutex<Option<PublishedVideoInput>>> =
+    LazyLock::new(|| Mutex::new(None));
 static ROOM_CONNECTED: AtomicBool = AtomicBool::new(false);
 static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VIDEO_FRAMES_SUBMITTED: AtomicU64 = AtomicU64::new(0);
-// Sample clock for the audio appsrc: PTS is derived from a monotonically
-// increasing PCM frame count (see push_pcm), never from the pipeline clock.
-static NEXT_AUDIO_FRAME: AtomicU64 = AtomicU64::new(0);
 /// Incremented on every `connect`. Workers snapshot it at startup and gate
 /// every write to the shared publish state (inputs, connection/video flags)
 /// on it: a stale worker that finishes late — reaped after `disconnect()`'s
@@ -122,29 +57,24 @@ static LAST_AUDIO_DROP_WARN_AT: AtomicU64 = AtomicU64::new(0);
 static AUDIO_PUBLICATION_DISABLED: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("SLOPCAST_DISABLE_AUDIO").is_some());
 
-struct PublisherHandle {
-    command_sender: SyncSender<PublisherCommand>,
-    join: JoinHandle<()>,
+#[derive(Clone)]
+struct AudioInput {
+    appsrc: gst_app::AppSrc,
+    generation: u64,
+    next_frame: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
+struct PublishedVideoInput {
+    input: VideoInput,
+    generation: u64,
+}
+
 struct ConnectionConfig {
     url: String,
     token: String,
     room_name: String,
     identity: String,
-}
-
-enum PublisherCommand {
-    StartVideo {
-        config: CaptureConfig,
-        reply: SyncSender<Result<(), String>>,
-    },
-    StopVideo {
-        reply: SyncSender<Result<(), String>>,
-    },
-    GetTelemetry(SyncSender<Option<NativeTelemetry>>),
-    Shutdown,
 }
 
 /// The video encoder target the publisher can change without a pipeline
@@ -156,7 +86,6 @@ struct VideoTarget {
     codec: String,
     fps: u32,
     ceiling_kbps: u32,
-    auto_bitrate: bool,
 }
 
 impl VideoTarget {
@@ -165,234 +94,16 @@ impl VideoTarget {
             codec: config.video_codec.as_deref().unwrap_or("vp8").to_string(),
             fps: config.fps,
             ceiling_kbps: configured_ceiling_kbps(config),
-            auto_bitrate: config.auto_bitrate,
         }
     }
 }
 
-enum ConnectedOutcome {
-    Reconnect,
-    /// A video settings change arrived that requires a full pipeline rebuild
-    /// (the sink's `video-caps` is only changeable in NULL/READY state). The
-    /// in-place path in `run_connected` handles codec-unchanged fps/bitrate
-    /// changes without one.
-    Rebuild {
-        config: CaptureConfig,
-        reply: SyncSender<Result<(), String>>,
-    },
-    Shutdown,
-}
-
-/// Congestion controller for the video encoder. Two observation paths share
-/// one adapted ceiling:
-///
-/// - **Local backpressure** (`observe_backpressure`, ~200 ms): appsrc drops
-///   and a persistently full appsrc queue mean the encoder is falling behind
-///   the capture cadence at the current bitrate. These react immediately —
-///   long before the receiver's loss report.
-/// - **Receiver loss** (`observe`, ~1 s): the remote-inbound loss ratio
-///   confirms the overload on the wire. The 3% threshold and 25% step stay;
-///   by the time this report lands, backpressure has already cut the rate.
-///
-/// The ceiling steps down fast and recovers slowly: a step up needs
-/// `RATE_RECOVER_TICKS` clean (~1 s) intervals, so an overload cannot
-/// oscillate. The adapted rate is re-applied to a freshly rebuilt pipeline
-/// after an auto-reconnect; `reset` (explicit stream-settings change) starts
-/// from the configured ceiling again.
-#[derive(Debug, Clone, Copy, Default)]
-struct RateController {
-    /// Whether the controller may step the encoder ceiling at all. `false`
-    /// (manual bitrate) pins the encoder at the configured ceiling; the
-    /// caller must still gate `observe` on this so a manual session never
-    /// adapts.
-    enabled: bool,
-    /// Configured ceiling from the stream settings (the cap `current_kbps`
-    /// never exceeds).
-    ceiling_kbps: u32,
-    /// The currently applied ceiling; starts at `ceiling_kbps` and is
-    /// stepped by `observe`.
-    current_kbps: u32,
-    /// Consecutive clean (~1 s) intervals without high loss.
-    clean_ticks: u32,
-    /// Packet counters of the previous observation (for interval deltas).
-    last_packets_sent: u64,
-    last_packets_lost: u64,
-    /// Cumulative appsrc dropped buffers of the previous fast observation.
-    last_appsrc_dropped: u64,
-    /// Consecutive fast ticks the appsrc queue sat at full depth (persistent
-    /// encoder underrun; distinct from the drop counter).
-    queue_full_ticks: u32,
-    /// Fast ticks after a fullness-only step before the queue level may
-    /// drive another one; suppresses the weakest signal while the encoder
-    /// digests the new rate (drops still fire).
-    fullness_cooldown_ticks: u32,
-    /// Whether the receiver-loss packet counters have been primed with a
-    /// first observation.
-    loss_primed: bool,
-    /// Whether the backpressure counters (appsrc drops) have been primed
-    /// with a first observation.
-    backpressure_primed: bool,
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    reason = "packet counters came from the stats fold as finite f64 (exact below 2^53); the loss ratio is clamped, and the stepped ceiling is bounded by [RATE_FLOOR_KBPS, ceiling] before the narrowing"
-)]
-impl RateController {
-    /// (Re)start from a fresh stream-settings ceiling. Called whenever a
-    /// `StartVideo` rebuild succeeds with a (possibly new) configuration.
-    fn reset(&mut self, config: &CaptureConfig) {
-        self.enabled = config.auto_bitrate;
-        let ceiling = configured_ceiling_kbps(config);
-        self.ceiling_kbps = ceiling;
-        self.current_kbps = ceiling;
-        self.clean_ticks = 0;
-        self.loss_primed = false;
-        self.backpressure_primed = false;
-        self.last_appsrc_dropped = 0;
-        self.queue_full_ticks = 0;
-        self.fullness_cooldown_ticks = 0;
-    }
-
-    /// The currently applied ceiling (re-applied after an auto-reconnect
-    /// rebuilds the pipeline, which starts at the configured ceiling).
-    fn current_kbps(&self) -> u32 {
-        self.current_kbps
-    }
-
-    /// One ~1 s observation. Returns the new ceiling to apply, or `None` to
-    /// hold the current rate. Always holds when disabled (manual bitrate):
-    /// a fixed ceiling must never be adapted, regardless of which caller
-    /// invokes this.
-    fn observe(&mut self, telemetry: &NativeTelemetry) -> Option<u32> {
-        if !self.enabled {
-            return None;
-        }
-        let (Some(sent), Some(lost)) = (telemetry.video_packets_sent, telemetry.video_packets_lost)
-        else {
-            // No outbound or remote-inbound report yet (early session,
-            // mid-reconnect, or the SFU hasn't sent a receiver report):
-            // hold the current rate — a missing report says nothing.
-            return None;
-        };
-        let (sent, lost) = (sent as u64, lost as u64);
-        // Re-prime when the cumulative sent counter regresses: an
-        // auto-reconnect builds a fresh pipeline whose GStreamer stats start
-        // back near zero, so the previous baseline would read as zero deltas
-        // until the new cumulative count caught up (the controller frozen for
-        // that window). The lost counter resets together with sent on a
-        // rebuild, so the sent regression is the unambiguous signal.
-        if !self.loss_primed || sent < self.last_packets_sent {
-            self.last_packets_sent = sent;
-            self.last_packets_lost = lost;
-            self.loss_primed = true;
-            return None;
-        }
-        let delta_sent = sent.saturating_sub(self.last_packets_sent);
-        let delta_lost = lost.saturating_sub(self.last_packets_lost);
-        self.last_packets_sent = sent;
-        self.last_packets_lost = lost;
-        if delta_sent == 0 {
-            // Nothing was sent this interval (encoder idle); no signal.
-            return None;
-        }
-        let loss_ratio = (delta_lost as f64 / delta_sent as f64).min(1.0);
-
-        if loss_ratio >= RATE_LOSS_HIGH {
-            self.clean_ticks = 0;
-            let next = ((f64::from(self.current_kbps)) * RATE_STEP_DOWN).round() as u32;
-            let next = next.max(RATE_FLOOR_KBPS);
-            if next < self.current_kbps {
-                self.current_kbps = next;
-                return Some(next);
-            }
-            // Already at the floor.
-            return None;
-        }
-        if loss_ratio <= RATE_LOSS_LOW {
-            self.clean_ticks += 1;
-            if self.clean_ticks >= RATE_RECOVER_TICKS && self.current_kbps < self.ceiling_kbps {
-                self.clean_ticks = 0;
-                let next = ((f64::from(self.current_kbps)) * RATE_STEP_UP)
-                    .round()
-                    .clamp(f64::from(RATE_FLOOR_KBPS), f64::from(self.ceiling_kbps))
-                    as u32;
-                if next > self.current_kbps {
-                    self.current_kbps = next;
-                    return Some(next);
-                }
-            }
-            return None;
-        }
-        // Between thresholds: hold, and reset the clean streak — some loss
-        // happened, so it was not a clean interval.
-        self.clean_ticks = 0;
-        None
-    }
-
-    /// One ~200 ms backpressure observation. Steps the ceiling down as soon
-    /// as the encoder shows it cannot absorb the capture cadence at the
-    /// current bitrate: any appsrc drop (`video_appsrc_dropped`), or an
-    /// appsrc queue that stays full across consecutive windows. Receiver
-    /// loss (`observe`) remains the slower confirmation — by the time its
-    /// ~1 s report lands, the local signal has already cut the rate.
-    fn observe_backpressure(&mut self, telemetry: &NativeTelemetry) -> Option<u32> {
-        if !self.enabled {
-            return None;
-        }
-        let dropped = telemetry.video_appsrc_dropped.unwrap_or(0);
-        // A settings rebuild / reconnect installs a fresh appsrc and resets
-        // the drop counter: re-prime on regression instead of reading a
-        // bogus (or negative) delta.
-        if !self.backpressure_primed || dropped < self.last_appsrc_dropped {
-            self.last_appsrc_dropped = dropped;
-            self.queue_full_ticks = 0;
-            self.fullness_cooldown_ticks = 0;
-            self.backpressure_primed = true;
-            return None;
-        }
-        let dropped_delta = dropped - self.last_appsrc_dropped;
-        self.last_appsrc_dropped = dropped;
-        let queue_full = telemetry
-            .video_appsrc_level_buffers
-            .is_some_and(|level| u64::from(level) >= APPSRC_MAX_BUFFERS);
-        // The queue level is the weakest signal: a full queue from a
-        // keyframe/warmup burst must persist for several windows to count,
-        // and a fullness-only step resets the accumulation and starts a
-        // cooldown, so a still-full queue cannot keep stepping every window.
-        if queue_full && self.fullness_cooldown_ticks == 0 {
-            self.queue_full_ticks += 1;
-        } else {
-            self.queue_full_ticks = 0;
-        }
-        if self.fullness_cooldown_ticks > 0 {
-            self.fullness_cooldown_ticks -= 1;
-        }
-        let fullness_only = dropped_delta == 0;
-        if fullness_only && self.queue_full_ticks < RATE_QUEUE_FULL_TICKS {
-            // No drop and the queue either drained or only filled
-            // transiently (keyframe/warmup burst): not backpressure yet.
-            return None;
-        }
-        if fullness_only {
-            self.queue_full_ticks = 0;
-            self.fullness_cooldown_ticks = RATE_QUEUE_FULL_COOLDOWN_TICKS;
-        }
-        // Backpressure is congestion: recovery must wait for clean intervals
-        // again, like the loss path.
-        self.clean_ticks = 0;
-        let next = ((f64::from(self.current_kbps)) * RATE_STEP_BACKPRESSURE)
-            .round()
-            .max(f64::from(RATE_FLOOR_KBPS)) as u32;
-        if next < self.current_kbps {
-            self.current_kbps = next;
-            return Some(next);
-        }
-        // Already at the floor.
-        None
-    }
+fn configuration_requires_rebuild(current: &CaptureConfig, target: &CaptureConfig) -> bool {
+    let current_target = VideoTarget::from_config(current);
+    let next_target = VideoTarget::from_config(target);
+    current_target.codec != next_target.codec
+        || current.width != target.width
+        || current.height != target.height
 }
 
 /// The configured ceiling in kbps from the stream settings. The low-level
@@ -403,18 +114,25 @@ impl RateController {
 /// Shared with `gstreamer_encoder::attach` so the encoder's initial ceiling
 /// always agrees with the controller's.
 pub(crate) fn configured_ceiling_kbps(config: &CaptureConfig) -> u32 {
-    let bps = config
-        .max_bitrate
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(DEFAULT_VIDEO_BITRATE_BPS);
-    bitrate_bps_to_kbps(bps)
+    crate::publisher_session::configured_ceiling_kbps(config)
 }
 
 /// Clears the shared publish state, but only if this worker is still the
 /// current one. A stale worker that finishes late (reaped after
 /// `disconnect()`'s grace period) must never clear the *next* worker's
 /// inputs or connection/video flags.
+fn publish_state_guard() -> MutexGuard<'static, ()> {
+    match PUBLISH_STATE_GATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::error!("GStreamer publish state gate was poisoned; recovering guarded state");
+            poisoned.into_inner()
+        }
+    }
+}
+
 fn finish_if_current(generation: u64) {
+    let _gate = publish_state_guard();
     if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
         return;
     }
@@ -423,12 +141,28 @@ fn finish_if_current(generation: u64) {
     VIDEO_ACTIVE.store(false, Ordering::Relaxed);
 }
 
+struct GstreamerEffects {
+    connection: ConnectionConfig,
+    generation: u64,
+    pipeline: Option<PublisherPipeline>,
+}
+
+impl GstreamerEffects {
+    fn new(connection: ConnectionConfig, generation: u64) -> Self {
+        Self {
+            connection,
+            generation,
+            pipeline: None,
+        }
+    }
+}
+
 struct PublisherPipeline {
     pipeline: gst::Pipeline,
     sink: gst::Element,
     video_config: Option<CaptureConfig>,
-    /// The active video encoder: the congestion controller re-targets its
-    /// VBR ceiling in place (`adapt_rate`) without rebuilding.
+    /// The active video encoder: Publisher session rate proposals re-target
+    /// its VBR ceiling in place without rebuilding.
     encoder: Option<GstreamerEncoder>,
     /// Worker generation this pipeline belongs to; every write to the
     /// shared publish state checks it so a stale pipeline (leftover of a
@@ -469,82 +203,33 @@ pub(crate) fn connect(
     disconnect();
     gst::init().map_err(|error| format!("Failed to initialize GStreamer: {error}"))?;
     verify_required_elements()?;
-    let connection = ConnectionConfig {
-        url,
-        token,
-        room_name,
-        identity,
+    let generation = {
+        let _gate = publish_state_guard();
+        WORKER_GENERATION.fetch_add(1, Ordering::Relaxed) + 1
     };
-    let (command_sender, command_receiver) = mpsc::sync_channel(32);
-    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
-    // Bump the generation *after* `disconnect()` so any worker reaped
-    // beyond `disconnect()`'s grace period counts as stale: it will gate
-    // its teardown and cannot clear the state this new worker installs.
-    let generation = WORKER_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
-    let join = thread::Builder::new()
-        .name("slopcast-gstreamer-livekit".into())
-        .spawn(move || run_worker(&connection, &command_receiver, &ready_sender, generation))
-        .map_err(|error| format!("Failed to spawn GStreamer publisher worker: {error}"))?;
-    match ready_receiver.recv_timeout(INITIAL_CONNECT_TIMEOUT) {
-        Ok(Ok(())) => {
-            let mut publisher = PUBLISHER
-                .lock()
-                .map_err(|_| "GStreamer publisher lock poisoned")?;
-            *publisher = Some(PublisherHandle {
-                command_sender,
-                join,
-            });
-        }
-        Ok(Err(error)) => {
-            crate::reap_detached(join, "slopcast-gstreamer-livekit-reaper");
-            return Err(error);
-        }
-        Err(error) => {
-            let _ = command_sender.send(PublisherCommand::Shutdown);
-            crate::reap_detached(join, "slopcast-gstreamer-livekit-reaper");
-            return Err(format!("GStreamer publisher startup timed out: {error}"));
-        }
-    }
+    let effects = GstreamerEffects::new(
+        ConnectionConfig {
+            url,
+            token,
+            room_name,
+            identity,
+        },
+        generation,
+    );
+    let session =
+        PublisherSession::spawn(effects, generation).map_err(|error| error.to_string())?;
 
-    Ok(())
+    crate::publisher_session::install_active(session).map_err(|error| error.to_string())
 }
 
 pub(crate) fn disconnect() {
-    let handle = PUBLISHER
-        .lock()
-        .ok()
-        .and_then(|mut publisher| publisher.take());
-    if let Some(handle) = handle {
-        // Best-effort Shutdown: if the command queue is saturated (worker
-        // wedged in a GStreamer call for 32+ commands), the bounded wait
-        // below and the reaper still guarantee eventual reaping.
-        if let Err(error) = handle.command_sender.try_send(PublisherCommand::Shutdown) {
-            log::warn!("GStreamer publisher Shutdown send failed (queue full): {error}");
-        }
-        // Bounded wait: a healthy worker answers Shutdown within ~20 ms
-        // (its recv timeout), but a worker stuck in a GStreamer call
-        // (pathological plugin hang) must not block the Tauri command
-        // thread forever. Anything still running after the grace period is
-        // reaped on a detached thread (same pattern as the audio ring's
-        // worker reaper); the generation gate keeps the late-finishing
-        // worker from clearing the *next* worker's state.
-        let deadline = std::time::Instant::now() + DISCONNECT_GRACE;
-        while !handle.join.is_finished() && std::time::Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        if handle.join.is_finished() {
-            let _ = handle.join.join();
-        } else {
-            log::warn!(
-                "GStreamer publisher worker did not stop within {DISCONNECT_GRACE:?}; reaping asynchronously"
-            );
-            let _ = thread::Builder::new()
-                .name("slopcast-gstreamer-livekit-reaper".into())
-                .spawn(move || {
-                    let _ = handle.join.join();
-                });
-        }
-    }
+    crate::publisher_session::shutdown_active();
+    // Serialize retirement with every shared-state installation. A reaped
+    // worker may finish its private pipeline later, but cannot pass a stale
+    // generation check and write after this block returns.
+    let _gate = publish_state_guard();
+    WORKER_GENERATION.fetch_add(1, Ordering::Relaxed);
+    crate::desktop_capture::clear_scale_target();
     clear_inputs();
     ROOM_CONNECTED.store(false, Ordering::Relaxed);
     VIDEO_ACTIVE.store(false, Ordering::Relaxed);
@@ -555,66 +240,70 @@ pub(crate) fn is_connected() -> bool {
 }
 
 pub(crate) fn has_active_session() -> bool {
-    PUBLISHER.lock().is_ok_and(|publisher| {
-        publisher
-            .as_ref()
-            .is_some_and(|handle| !handle.join.is_finished())
-    })
+    crate::publisher_session::has_active()
 }
 
 pub(crate) fn start_video(config: CaptureConfig) -> Result<(), String> {
-    let command_sender = command_sender()?;
-    let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+    map_config_outcome(crate::publisher_session::change_active(VideoIntent::new(
+        config,
+    )))
+}
 
-    command_sender
-        .send(PublisherCommand::StartVideo {
-            config,
-            reply: reply_sender,
-        })
-        .map_err(|_| "GStreamer publisher worker stopped")?;
-
-    reply_receiver
-        .recv_timeout(COMMAND_TIMEOUT)
-        .map_err(|error| format!("GStreamer video start timed out: {error}"))?
+fn map_config_outcome(
+    result: Result<ConfigOutcome, crate::publisher_session::SessionError>,
+) -> Result<(), String> {
+    match result {
+        Ok(ConfigOutcome::Applied | ConfigOutcome::Queued) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 pub(crate) fn stop_video() -> Result<(), String> {
-    let command_sender = PUBLISHER
-        .lock()
-        .map_err(|_| "GStreamer publisher lock poisoned")?
-        .as_ref()
-        .map(|publisher| publisher.command_sender.clone());
-    let Some(command_sender) = command_sender else {
-        return Ok(());
-    };
-    let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-
-    command_sender
-        .send(PublisherCommand::StopVideo {
-            reply: reply_sender,
-        })
-        .map_err(|_| "GStreamer publisher worker stopped")?;
-
-    reply_receiver
-        .recv_timeout(COMMAND_TIMEOUT)
-        .map_err(|error| format!("GStreamer video stop timed out: {error}"))?
+    crate::publisher_session::stop_active_video().map_err(|error| error.to_string())
 }
 
 pub(crate) fn is_video_active() -> bool {
     VIDEO_ACTIVE.load(Ordering::Relaxed)
 }
 
-pub(crate) fn push_video_frame(sample: crate::desktop_capture::VideoSample) -> Result<(), String> {
-    let input = VIDEO_INPUT
+#[derive(Clone)]
+pub(crate) struct VideoOutput {
+    input: VideoInput,
+    generation: u64,
+}
+
+impl VideoOutput {
+    pub(crate) fn is_same_publication(&self, other: &Self) -> bool {
+        self.generation == other.generation
+    }
+
+    pub(crate) fn push(&self, sample: crate::frame_delivery::VideoSample) -> Result<(), String> {
+        if WORKER_GENERATION.load(Ordering::Relaxed) != self.generation {
+            return Err("GStreamer video output belongs to a stale publisher generation".into());
+        }
+
+        self.input.push_frame(sample)?;
+        VIDEO_FRAMES_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+
+        Ok(())
+    }
+}
+
+pub(crate) fn video_output() -> Result<VideoOutput, String> {
+    let _gate = publish_state_guard();
+    let published = VIDEO_INPUT
         .lock()
-        .map_err(|_| "GStreamer video input lock poisoned")?
+        .map_err(|_| "GStreamer video input lock poisoned".to_string())?
         .clone()
         .ok_or_else(|| "GStreamer video publication is not active".to_string())?;
+    if published.generation != WORKER_GENERATION.load(Ordering::Relaxed) {
+        return Err("GStreamer video publication belongs to a stale generation".into());
+    }
 
-    input.push_frame(sample)?;
-    VIDEO_FRAMES_SUBMITTED.fetch_add(1, Ordering::Relaxed);
-
-    Ok(())
+    Ok(VideoOutput {
+        input: published.input,
+        generation: published.generation,
+    })
 }
 
 pub(crate) fn feed_pcm(samples: &[i16]) {
@@ -630,7 +319,9 @@ pub(crate) fn feed_pcm(samples: &[i16]) {
         return;
     }
     let input = AUDIO_INPUT.lock().ok().and_then(|input| input.clone());
-    let Some(input) = input else {
+    let Some(input) =
+        input.filter(|input| input.generation == WORKER_GENERATION.load(Ordering::Relaxed))
+    else {
         AUDIO_PCM_DROPS.fetch_add(1, Ordering::Relaxed);
         // Rate-limit the warning: at ~50 Hz push cadence a sustained rebuild
         // would otherwise flood the log with one line per dropped chunk.
@@ -667,299 +358,7 @@ pub(crate) fn feed_pcm(samples: &[i16]) {
 }
 
 pub(crate) fn telemetry() -> Option<NativeTelemetry> {
-    let command_sender = command_sender().ok()?;
-    let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-    command_sender
-        .send(PublisherCommand::GetTelemetry(reply_sender))
-        .ok()?;
-
-    reply_receiver
-        .recv_timeout(Duration::from_millis(500))
-        .ok()?
-}
-
-fn command_sender() -> Result<SyncSender<PublisherCommand>, String> {
-    PUBLISHER
-        .lock()
-        .map_err(|_| "GStreamer publisher lock poisoned")?
-        .as_ref()
-        .map(|publisher| publisher.command_sender.clone())
-        .ok_or_else(|| "GStreamer publisher is not connected".to_string())
-}
-
-fn run_worker(
-    connection: &ConnectionConfig,
-    command_receiver: &Receiver<PublisherCommand>,
-    ready_sender: &SyncSender<Result<(), String>>,
-    generation: u64,
-) {
-    let mut pipeline = None;
-    let mut video_config = None;
-    let mut rate_controller = RateController::default();
-    // Keep the worker dormant until Go Live so the initial offer contains both
-    // tracks. After that, the bundled 1.28-era sink renegotiates request-pad
-    // additions and removals, allowing video to restart without leaving the
-    // room or rebuilding its audio branch.
-    let _ = ready_sender.send(Ok(()));
-
-    loop {
-        let Some(active_pipeline) = pipeline.as_mut() else {
-            match command_receiver.recv_timeout(POLL_INTERVAL) {
-                Ok(PublisherCommand::StartVideo { config, reply }) => {
-                    if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
-                        // A late process from a reaped worker: do not build a
-                        // pipeline that would fight the current worker.
-                        let _ = reply.send(Err(
-                            "GStreamer publisher worker is stale; reconnecting refreshes it".into(),
-                        ));
-                        continue;
-                    }
-                    match PublisherPipeline::new(connection, Some(&config), generation) {
-                        Ok(new_pipeline) => {
-                            rate_controller.reset(&config);
-                            video_config = Some(config);
-                            pipeline = Some(new_pipeline);
-                            let _ = reply.send(Ok(()));
-                        }
-                        Err(error) => {
-                            let _ = reply.send(Err(error));
-                        }
-                    }
-                }
-                Ok(PublisherCommand::StopVideo { reply }) => {
-                    video_config = None;
-                    let _ = reply.send(Ok(()));
-                }
-                Ok(PublisherCommand::GetTelemetry(reply)) => {
-                    let _ = reply.send(None);
-                }
-                Ok(PublisherCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => {}
-            }
-            continue;
-        };
-
-        match run_connected(
-            active_pipeline,
-            command_receiver,
-            &mut video_config,
-            &mut rate_controller,
-        ) {
-            ConnectedOutcome::Shutdown => break,
-            ConnectedOutcome::Rebuild { config, reply } => {
-                finish_if_current(generation);
-                // Snapshot the controller before tearing down the pipeline: a
-                // failed settings-change rebuild must resume the old settings
-                // with the *adapted* ceiling it had reached, not a reset one
-                // (an 11.25 Mbps adaptation must not snap back to 20 Mbps).
-                let previous_controller = rate_controller;
-                drop(pipeline.take());
-                match rebuild(connection, &config, generation) {
-                    Ok(fresh) => {
-                        // Settings changed: the fresh encoder starts at the
-                        // NEW configured ceiling and the controller resets to
-                        // match — never the old adapted rate.
-                        rate_controller.reset(&config);
-                        video_config = Some(config);
-                        pipeline = Some(fresh);
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(error) => {
-                        rate_controller = previous_controller;
-                        let _ = reply.send(Err(error));
-                        match reconnect(
-                            connection,
-                            command_receiver,
-                            &mut video_config,
-                            &mut rate_controller,
-                            generation,
-                        ) {
-                            Some(mut reconnected) => {
-                                reconnected.apply_rate(rate_controller.current_kbps());
-                                pipeline = Some(reconnected);
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-            ConnectedOutcome::Reconnect => {
-                finish_if_current(generation);
-                drop(pipeline.take());
-                match reconnect(
-                    connection,
-                    command_receiver,
-                    &mut video_config,
-                    &mut rate_controller,
-                    generation,
-                ) {
-                    Some(mut reconnected) => {
-                        reconnected.apply_rate(rate_controller.current_kbps());
-                        pipeline = Some(reconnected);
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
-    finish_if_current(generation);
-}
-
-fn run_connected(
-    pipeline: &mut PublisherPipeline,
-    command_receiver: &Receiver<PublisherCommand>,
-    video_config: &mut Option<CaptureConfig>,
-    rate_controller: &mut RateController,
-) -> ConnectedOutcome {
-    let mut rate_ticks: u32 = 0;
-    let mut backpressure_ticks: u32 = 0;
-    loop {
-        match command_receiver.recv_timeout(POLL_INTERVAL) {
-            Ok(PublisherCommand::StartVideo { config, reply }) => {
-                if Some(&config) == pipeline.video_config.as_ref() {
-                    let _ = reply.send(Ok(()));
-                    continue;
-                }
-                // An fps/bitrate change under the same codec is applied to
-                // the running encoder in place: the capture cadence and the
-                // PTS clock adapt without touching the WebRTC session, so
-                // the spectator's decoder keeps receiving frames. Width,
-                // height, or a codec change is a pipeline rebuild.
-                let target = VideoTarget::from_config(&config);
-                let current = pipeline.video_config.as_ref().map(VideoTarget::from_config);
-                let same_frame = pipeline.video_config.as_ref().is_some_and(|current| {
-                    current.width == config.width && current.height == config.height
-                });
-                if current.as_ref().is_some_and(|c| c.codec == target.codec)
-                    && same_frame
-                    && pipeline.apply_target(&target)
-                {
-                    pipeline.video_config = Some(config.clone());
-                    rate_controller.reset(&config);
-                    let _ = reply.send(Ok(()));
-                } else {
-                    return ConnectedOutcome::Rebuild { config, reply };
-                }
-            }
-            Ok(PublisherCommand::StopVideo { reply }) => {
-                *video_config = None;
-                let _ = reply.send(pipeline.detach_video());
-            }
-            Ok(PublisherCommand::GetTelemetry(reply)) => {
-                let _ = reply.send(Some(pipeline.telemetry()));
-            }
-            Ok(PublisherCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
-                return ConnectedOutcome::Shutdown;
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-
-        if let Some(error) = pipeline.poll_error() {
-            log::warn!("GStreamer LiveKit publisher will reconnect after error: {error}");
-            return ConnectedOutcome::Reconnect;
-        }
-
-        // ~200 ms backpressure cadence: local signals (appsrc drops, a
-        // persistently full queue) mean the encoder is falling behind *now* —
-        // step the ceiling immediately instead of waiting a full second for
-        // the receiver-loss report to confirm the overload.
-        // Only in automatic mode and when the active encoder plan supports
-        // an in-place ceiling change.
-        backpressure_ticks += 1;
-        if backpressure_ticks >= RATE_BACKPRESSURE_TICKS {
-            backpressure_ticks = 0;
-            if rate_controller.enabled && pipeline.can_adapt_rate() {
-                pipeline.adapt_rate_backpressure(rate_controller);
-            }
-        }
-
-        // ~1 s congestion-control cadence: step the encoder ceiling down on
-        // sustained remote-inbound loss, back up toward the configured
-        // ceiling after clean intervals. Only in automatic mode (manual
-        // bitrate is pinned) and when the active encoder plan supports an
-        // in-place ceiling change.
-        rate_ticks += 1;
-        if rate_ticks >= RATE_ADAPT_TICKS {
-            rate_ticks = 0;
-            if rate_controller.enabled && pipeline.can_adapt_rate() {
-                pipeline.adapt_rate(rate_controller);
-            }
-        }
-    }
-}
-
-fn reconnect(
-    connection: &ConnectionConfig,
-    command_receiver: &Receiver<PublisherCommand>,
-    video_config: &mut Option<CaptureConfig>,
-    rate_controller: &mut RateController,
-    generation: u64,
-) -> Option<PublisherPipeline> {
-    let mut delay = RECONNECT_DELAY_BASE;
-    loop {
-        // Wait out the backoff, answering commands as they arrive (a
-        // StopVideo or Shutdown interrupts the wait promptly even at the
-        // deepest backoff).
-        let deadline = std::time::Instant::now() + delay;
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match command_receiver.recv_timeout(remaining) {
-                Ok(PublisherCommand::StartVideo { config, reply }) => {
-                    if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
-                        // A late process from a reaped worker: answering Ok
-                        // here would leave the caller holding a dead stream.
-                        let _ = reply.send(Err(
-                            "GStreamer publisher worker is stale; reconnecting refreshes it".into(),
-                        ));
-                        continue;
-                    }
-                    rate_controller.reset(&config);
-                    *video_config = Some(config);
-                    let _ = reply.send(Ok(()));
-                }
-                Ok(PublisherCommand::StopVideo { reply }) => {
-                    *video_config = None;
-                    let _ = reply.send(Ok(()));
-                }
-                Ok(PublisherCommand::GetTelemetry(reply)) => {
-                    let _ = reply.send(None);
-                }
-                Ok(PublisherCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
-                    return None;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-            }
-        }
-
-        match PublisherPipeline::new(connection, video_config.as_ref(), generation) {
-            Ok(pipeline) => {
-                log::info!("GStreamer LiveKit publisher reconnected");
-                return Some(pipeline);
-            }
-            Err(error) => {
-                log::warn!("GStreamer LiveKit reconnect failed: {error}");
-                delay = (delay * 2).min(RECONNECT_DELAY_MAX);
-            }
-        }
-    }
-}
-
-/// Builds a fresh pipeline for a changed video configuration. The new
-/// encoder starts at the *new* configured ceiling — unlike `reconnect`,
-/// which re-applies the controller's currently adapted rate because the
-/// configuration is unchanged.
-fn rebuild(
-    connection: &ConnectionConfig,
-    config: &CaptureConfig,
-    generation: u64,
-) -> Result<PublisherPipeline, String> {
-    let pipeline = PublisherPipeline::new(connection, Some(config), generation)?;
-    log::info!("GStreamer LiveKit publisher rebuilt for video settings change");
-    Ok(pipeline)
+    crate::publisher_session::active_telemetry()
 }
 
 impl PublisherPipeline {
@@ -1009,7 +408,7 @@ impl PublisherPipeline {
             log::info!("GStreamer audio publication disabled for diagnostic isolation");
             None
         } else {
-            Some(attach_audio(&pipeline, &sink)?)
+            Some(attach_audio(&pipeline, &sink, generation)?)
         };
         let mut publisher = Self {
             pipeline,
@@ -1025,20 +424,33 @@ impl PublisherPipeline {
         // Only the current worker may take its pipeline live: a stale
         // pipeline (reaped worker still winding down) would otherwise
         // publish a silent zombie track to the room.
-        if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
-            publisher
-                .pipeline
-                .set_state(gst::State::Playing)
-                .map_err(|error| format!("Failed to start GStreamer LiveKit pipeline: {error}"))?;
+        {
+            let _gate = publish_state_guard();
+            if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
+                return Err("GStreamer publisher generation became stale before startup".into());
+            }
+        }
+        publisher
+            .pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|error| format!("Failed to start GStreamer LiveKit pipeline: {error}"))?;
+        let is_stale_after_start = {
+            let _gate = publish_state_guard();
+            WORKER_GENERATION.load(Ordering::Relaxed) != generation
+        };
+        if is_stale_after_start {
+            let _ = publisher.pipeline.set_state(gst::State::Null);
+            return Err("GStreamer publisher generation became stale during startup".into());
         }
         // Gate the shared audio-input install (and the discovery PCM push)
         // on the generation: a stale pipeline must not steal the input a
         // newer worker already installed.
-        if WORKER_GENERATION.load(Ordering::Relaxed) == generation
-            && let Some(audio_input) = audio_input
-        {
-            set_audio_input(Some(audio_input.clone()))?;
-            push_pcm(&audio_input, &[0; AUDIO_DISCOVERY_SAMPLES])?;
+        if let Some(audio_input) = audio_input {
+            let _gate = publish_state_guard();
+            if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
+                set_audio_input(Some(audio_input.clone()))?;
+                push_pcm(&audio_input, &[0; AUDIO_DISCOVERY_SAMPLES])?;
+            }
         }
 
         Ok(publisher)
@@ -1050,11 +462,17 @@ impl PublisherPipeline {
         // stale worker's rebuild must never overwrite the current worker's
         // `VIDEO_INPUT` — two live pipelines fighting over one input would
         // interleave frames.
-        if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
-            set_video_input(Some(encoder.input()))?;
-            VIDEO_FRAMES_SUBMITTED.store(0, Ordering::Relaxed);
-            reset_encoded_frames();
-            VIDEO_ACTIVE.store(true, Ordering::Relaxed);
+        {
+            let _gate = publish_state_guard();
+            if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
+                set_video_input(Some(PublishedVideoInput {
+                    input: encoder.input(),
+                    generation: self.generation,
+                }))?;
+                VIDEO_FRAMES_SUBMITTED.store(0, Ordering::Relaxed);
+                reset_encoded_frames();
+                VIDEO_ACTIVE.store(true, Ordering::Relaxed);
+            }
         }
         self.encoder = Some(encoder);
         self.video_config = Some(config);
@@ -1063,9 +481,12 @@ impl PublisherPipeline {
     }
 
     fn detach_video(&mut self) -> Result<(), String> {
-        if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
-            set_video_input(None)?;
-            VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+        {
+            let _gate = publish_state_guard();
+            if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
+                set_video_input(None)?;
+                VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+            }
         }
         self.video_config = None;
         let Some(encoder) = self.encoder.as_ref() else {
@@ -1078,68 +499,44 @@ impl PublisherPipeline {
         Ok(())
     }
 
-    /// Re-applies an adapted encoder ceiling after a rebuild or reconnect.
-    fn apply_rate(&mut self, ceiling_kbps: u32) {
-        if let Some(encoder) = self.encoder.as_mut() {
-            let _ = encoder.set_ceiling_kbps(ceiling_kbps);
+    fn apply_ceiling(&mut self, ceiling_kbps: u32) -> Result<CeilingUpdate, String> {
+        let encoder = self
+            .encoder
+            .as_mut()
+            .ok_or_else(|| "GStreamer video encoder is not attached".to_string())?;
+        if encoder.ceiling_kbps() == ceiling_kbps {
+            return Ok(CeilingUpdate::Applied);
         }
+        if !encoder.can_adapt() {
+            return Ok(CeilingUpdate::Pinned);
+        }
+        let update = encoder.set_ceiling_kbps(ceiling_kbps);
+        if matches!(update, CeilingUpdate::Applied | CeilingUpdate::Attempted) {
+            log::info!("GStreamer congestion controller: encoder ceiling {ceiling_kbps} kbps");
+        }
+        Ok(update)
     }
 
-    fn can_adapt_rate(&self) -> bool {
-        self.encoder
-            .as_ref()
-            .is_some_and(GstreamerEncoder::can_adapt)
-    }
-
-    /// Applies an fps/bitrate change to the running encoder in place (codec
-    /// and frame size unchanged). The shared fps atomic updates the PTS
-    /// clock and buffer durations on the very next pushed frame, and the
-    /// ceiling moves through the same knob the congestion controller uses.
-    /// Returns `false` when the encoder cannot move its rate live (libaom
-    /// av1enc), in which case the caller must rebuild the pipeline. The
-    /// caller's `RateController::reset` re-arms the controller at the new
-    /// configured ceiling.
-    fn apply_target(&mut self, target: &VideoTarget) -> bool {
-        let Some(encoder) = self.encoder.as_mut() else {
-            return false;
-        };
+    /// Applies an fps or configured-ceiling change without rebuilding when
+    /// codec and frame dimensions are unchanged.
+    fn apply_target(&mut self, target: &VideoTarget) -> Result<CeilingUpdate, String> {
+        let encoder = self
+            .encoder
+            .as_mut()
+            .ok_or_else(|| "GStreamer video encoder is not attached".to_string())?;
         if encoder.input().fps() != target.fps {
             encoder.input().set_fps(target.fps);
             log::info!("GStreamer encoder: live fps change to {}", target.fps);
         }
-        !encoder.set_ceiling_kbps(target.ceiling_kbps).is_pinned()
-    }
 
-    /// One ~1 s congestion-control observation: fold the sink stats, step
-    /// the `RateController`, and re-target the encoder when it decides to
-    /// move.
-    fn adapt_rate(&mut self, rate_controller: &mut RateController) {
-        if !self.can_adapt_rate() {
-            return;
-        }
-        let telemetry = self.telemetry();
-        if let Some(ceiling_kbps) = rate_controller.observe(&telemetry) {
-            log::info!(
-                "GStreamer congestion controller: applying encoder ceiling {ceiling_kbps} kbps"
-            );
-            self.apply_rate(ceiling_kbps);
-        }
-    }
-
-    /// One ~200 ms local-backpressure observation: fold the sink stats, step
-    /// the `RateController` on encoder-overload signals, and re-target the
-    /// encoder when it decides to move.
-    fn adapt_rate_backpressure(&mut self, rate_controller: &mut RateController) {
-        if !self.can_adapt_rate() {
-            return;
-        }
-        let telemetry = self.telemetry();
-        if let Some(ceiling_kbps) = rate_controller.observe_backpressure(&telemetry) {
-            log::info!(
-                "GStreamer congestion controller: backpressure, applying encoder ceiling {ceiling_kbps} kbps"
-            );
-            self.apply_rate(ceiling_kbps);
-        }
+        let update = if encoder.ceiling_kbps() == target.ceiling_kbps {
+            CeilingUpdate::Applied
+        } else if encoder.can_adapt() {
+            encoder.set_ceiling_kbps(target.ceiling_kbps)
+        } else {
+            CeilingUpdate::Pinned
+        };
+        Ok(update)
     }
 
     fn poll_error(&self) -> Option<String> {
@@ -1184,17 +581,133 @@ impl PublisherPipeline {
         // A stale pipeline (leftover of a reaped worker) still tears down
         // its own pipeline, but must not clear the inputs the *current*
         // worker installed.
-        if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
-            let _ = set_audio_input(None);
-            let _ = set_video_input(None);
-            VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+        {
+            let _gate = publish_state_guard();
+            if WORKER_GENERATION.load(Ordering::Relaxed) == self.generation {
+                let _ = set_audio_input(None);
+                let _ = set_video_input(None);
+                VIDEO_ACTIVE.store(false, Ordering::Relaxed);
+            }
         }
         let _ = self.pipeline.set_state(gst::State::Null);
         self.is_shutdown = true;
     }
 }
 
-fn attach_audio(pipeline: &gst::Pipeline, sink: &gst::Element) -> Result<gst_app::AppSrc, String> {
+impl LifecycleEffects for GstreamerEffects {
+    fn is_generation_current(&self) -> bool {
+        WORKER_GENERATION.load(Ordering::Relaxed) == self.generation
+    }
+
+    fn build(&mut self, intent: Option<&VideoIntent>) -> Result<(), EffectError> {
+        let config = intent.map(VideoIntent::config);
+        let pipeline = PublisherPipeline::new(&self.connection, config, self.generation)
+            .map_err(|error| EffectError::new("build GStreamer publisher", error))?;
+        self.pipeline = Some(pipeline);
+        Ok(())
+    }
+
+    fn teardown(&mut self) {
+        finish_if_current(self.generation);
+        drop(self.pipeline.take());
+    }
+
+    fn stop_video(&mut self) -> Result<(), EffectError> {
+        let pipeline = self
+            .pipeline
+            .as_mut()
+            .ok_or_else(|| EffectError::new("stop GStreamer video", "pipeline is absent"))?;
+        pipeline
+            .detach_video()
+            .map_err(|error| EffectError::new("stop GStreamer video", error))
+    }
+
+    fn change_in_place(&mut self, intent: &VideoIntent) -> Result<InPlaceChange, EffectError> {
+        let pipeline = self
+            .pipeline
+            .as_mut()
+            .ok_or_else(|| EffectError::new("change GStreamer video", "pipeline is absent"))?;
+        let config = intent.config();
+        if pipeline.video_config.as_ref() == Some(config) {
+            return Ok(InPlaceChange::Applied(CeilingUpdate::Applied));
+        }
+
+        let target = VideoTarget::from_config(config);
+        let requires_rebuild = pipeline
+            .video_config
+            .as_ref()
+            .is_none_or(|current| configuration_requires_rebuild(current, config));
+        if requires_rebuild {
+            return Ok(InPlaceChange::RequiresRebuild);
+        }
+
+        let update = pipeline
+            .apply_target(&target)
+            .map_err(|error| EffectError::new("change GStreamer video", error))?;
+        if matches!(update, CeilingUpdate::Applied | CeilingUpdate::Attempted) {
+            // The concrete pipeline and the session state become authoritative
+            // together; reconnect must never restore the pre-change config.
+            pipeline.video_config = Some(config.clone());
+        }
+        Ok(InPlaceChange::Applied(update))
+    }
+
+    fn can_apply_ceiling(&self) -> bool {
+        self.pipeline
+            .as_ref()
+            .and_then(|pipeline| pipeline.encoder.as_ref())
+            .is_some_and(GstreamerEncoder::can_adapt)
+    }
+
+    fn apply_ceiling(&mut self, ceiling_kbps: u32) -> Result<CeilingUpdate, EffectError> {
+        self.pipeline
+            .as_mut()
+            .ok_or_else(|| EffectError::new("apply encoder ceiling", "pipeline is absent"))?
+            .apply_ceiling(ceiling_kbps)
+            .map_err(|error| EffectError::new("apply encoder ceiling", error))
+    }
+
+    fn telemetry(&self) -> Option<NativeTelemetry> {
+        self.pipeline.as_ref().map(PublisherPipeline::telemetry)
+    }
+
+    fn poll_fault(&self) -> Option<EffectError> {
+        self.pipeline
+            .as_ref()
+            .and_then(PublisherPipeline::poll_error)
+            .map(|error| EffectError::new("poll GStreamer publisher", error))
+    }
+
+    fn install_live_binding(&mut self, intent: &VideoIntent) -> Result<(), EffectError> {
+        let config = intent.config();
+        let binding =
+            crate::desktop_capture::create_live_binding(config.width, config.height, config.fps)
+                .map_err(|error| EffectError::new("install Frame delivery binding", error))?;
+        let _gate = publish_state_guard();
+        if !self.is_generation_current() {
+            return Err(EffectError::new(
+                "install Frame delivery binding",
+                "publisher generation is stale",
+            ));
+        }
+
+        crate::desktop_capture::set_delivery_binding(binding);
+        Ok(())
+    }
+
+    fn install_dormant_binding(&mut self) {
+        let _gate = publish_state_guard();
+        if self.is_generation_current() {
+            crate::desktop_capture::clear_scale_target();
+        }
+    }
+}
+
+fn attach_audio(
+    pipeline: &gst::Pipeline,
+    sink: &gst::Element,
+    generation: u64,
+) -> Result<AudioInput, String> {
     let raw_caps = gst::Caps::builder("audio/x-raw")
         .field("format", "S16LE")
         .field("layout", "interleaved")
@@ -1224,9 +737,8 @@ fn attach_audio(pipeline: &gst::Pipeline, sink: &gst::Element) -> Result<gst_app
         .build();
     // PTS is sample-clocked in push_pcm, so the pipeline clock must not
     // stamp buffers (do-timestamp would drift against the sample count and
-    // the resampler would hear it as rate wobble). Reset the sample clock
-    // per pipeline instance — rebuild() constructs a fresh audio chain.
-    NEXT_AUDIO_FRAME.store(0, Ordering::Relaxed);
+    // the resampler would hear it as rate wobble). Each generation owns its
+    // clock so a late reaper cannot reset the current pipeline's timestamps.
     let queue = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 10_u32)
         .property("max-size-bytes", 0_u32)
@@ -1271,7 +783,11 @@ fn attach_audio(pipeline: &gst::Pipeline, sink: &gst::Element) -> Result<gst_app
         .link(&sink_pad)
         .map_err(|error| format!("Failed to link Opus into livekitwebrtcsink: {error}"))?;
 
-    Ok(appsrc)
+    Ok(AudioInput {
+        appsrc,
+        generation,
+        next_frame: Arc::new(AtomicU64::new(0)),
+    })
 }
 
 fn configure_signaller(
@@ -1303,6 +819,7 @@ fn configure_signaller(
                     "server-connected" | "publishing" | "published" | "subscribed"
                 )
             });
+        let _gate = publish_state_guard();
         if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
             ROOM_CONNECTED.store(connected, Ordering::Relaxed);
         }
@@ -1332,7 +849,7 @@ fn configure_signaller(
     });
 }
 
-fn push_pcm(appsrc: &gst_app::AppSrc, samples: &[i16]) -> Result<(), String> {
+fn push_pcm(input: &AudioInput, samples: &[i16]) -> Result<(), String> {
     let channel_count = usize::try_from(CHANNELS).map_err(|_| "Audio channels exceed usize")?;
     if !samples.len().is_multiple_of(channel_count) {
         return Err(format!(
@@ -1361,21 +878,22 @@ fn push_pcm(appsrc: &gst_app::AppSrc, samples: &[i16]) -> Result<(), String> {
         // sample count, or the resampler → opusenc → RTP chain hears rate
         // drift as pops and out-of-tune audio. The counter is reset per
         // pipeline instance in attach_audio.
-        let start_frame = NEXT_AUDIO_FRAME.fetch_add(frames as u64, Ordering::Relaxed);
+        let start_frame = input.next_frame.fetch_add(frames as u64, Ordering::Relaxed);
         let pts_ns = start_frame * gst::ClockTime::SECOND.nseconds() / u64::from(SAMPLE_RATE);
         let end_ns = (start_frame + frames as u64) * gst::ClockTime::SECOND.nseconds()
             / u64::from(SAMPLE_RATE);
         buffer_ref.set_pts(gst::ClockTime::from_nseconds(pts_ns));
         buffer_ref.set_duration(gst::ClockTime::from_nseconds(end_ns - pts_ns));
     }
-    appsrc
+    input
+        .appsrc
         .push_buffer(buffer)
         .map_err(|error| format!("GStreamer appsrc rejected PCM: {error}"))?;
 
     Ok(())
 }
 
-fn set_audio_input(input: Option<gst_app::AppSrc>) -> Result<(), String> {
+fn set_audio_input(input: Option<AudioInput>) -> Result<(), String> {
     *AUDIO_INPUT
         .lock()
         .map_err(|_| "GStreamer audio input lock poisoned")? = input;
@@ -1383,7 +901,7 @@ fn set_audio_input(input: Option<gst_app::AppSrc>) -> Result<(), String> {
     Ok(())
 }
 
-fn set_video_input(input: Option<VideoInput>) -> Result<(), String> {
+fn set_video_input(input: Option<PublishedVideoInput>) -> Result<(), String> {
     *VIDEO_INPUT
         .lock()
         .map_err(|_| "GStreamer video input lock poisoned")? = input;
@@ -1719,7 +1237,7 @@ fn fold_telemetry(
         // read stalled behind a busy GLib context must not hold it up.
         let video_input = VIDEO_INPUT.lock().ok().and_then(|input| input.clone());
         if let Some(input) = video_input {
-            let stats = input.appsrc_stats();
+            let stats = input.input.appsrc_stats();
             telemetry.video_appsrc_input = stats.input;
             telemetry.video_appsrc_output = stats.output;
             telemetry.video_appsrc_dropped = stats.dropped;
@@ -1856,6 +1374,9 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
+    use crate::publisher_session::{
+        RATE_QUEUE_FULL_COOLDOWN_TICKS, RATE_QUEUE_FULL_TICKS, RATE_RECOVER_TICKS, RateController,
+    };
 
     /// `Structure` creation asserts a `gst::init`; `gst_init` is not
     /// thread-safe to race, so every test initializes through this once.
@@ -1866,6 +1387,27 @@ mod tests {
                 panic!("GStreamer must initialize in tests: {error}");
             }
         });
+    }
+
+    fn capture_config(codec: &str, fps: u32, bitrate: f64) -> CaptureConfig {
+        CaptureConfig {
+            width: 1920,
+            height: 1080,
+            fps,
+            video_codec: Some(codec.into()),
+            max_bitrate: Some(bitrate),
+            auto_bitrate: true,
+        }
+    }
+
+    #[test]
+    fn fps_and_bitrate_changes_stay_in_place() {
+        let current = capture_config("h264", 60, 20_000_000.0);
+        let fps_target = capture_config("h264", 30, 20_000_000.0);
+        let bitrate_target = capture_config("h264", 60, 10_000_000.0);
+
+        assert!(!configuration_requires_rebuild(&current, &fps_target));
+        assert!(!configuration_requires_rebuild(&current, &bitrate_target));
     }
 
     #[test]
@@ -2563,6 +2105,21 @@ mod tests {
 
         controller = snapshot;
         assert_eq!(controller.current_kbps(), 15_000);
+    }
+
+    #[test]
+    fn facade_maps_applied_and_queued_to_success_and_typed_errors_to_strings() {
+        assert!(map_config_outcome(Ok(ConfigOutcome::Applied)).is_ok());
+        assert!(map_config_outcome(Ok(ConfigOutcome::Queued)).is_ok());
+        let error = crate::publisher_session::SessionError {
+            kind: crate::publisher_session::SessionErrorKind::Effect,
+            operation: "build publisher",
+            message: "encoder failed".into(),
+        };
+        assert_eq!(
+            map_config_outcome(Err(error)),
+            Err("build publisher: encoder failed".into())
+        );
     }
 
     #[test]
