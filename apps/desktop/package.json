@@ -6,7 +6,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc -p tsconfig.renderer.json --noEmit && cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings",
+    "check": "tsc -p tsconfig.json --noEmit && cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings",
     "dev": "tauri dev",
     "dev:renderer": "vite",
     "build": "pnpm --filter @slopcast/shared-types build && vite build",
