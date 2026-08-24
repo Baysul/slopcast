@@ -1,8 +1,19 @@
-import { Check, Copy, Video, X } from 'lucide-react';
+import { Check, Copy, Link2Off, Video, X } from 'lucide-react';
 import { motion } from 'motion/react';
 import * as React from 'react';
 import { useEffect, useState } from 'react';
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -27,6 +38,11 @@ function usePrefersReducedMotion(): boolean {
 export interface SourcePickerProps {
   roomCode: string;
   isCreatingRoom: boolean;
+  isClosingRoom: boolean;
+  isRoomTransitioning: boolean;
+  canCreateRoom: boolean;
+  roomCreateDisabledReason: string | null;
+  hasRetryableRoom: boolean;
   copied: 'link' | 'code' | null;
   captureContext: CaptureContext | null;
   autoDetectFailed: boolean;
@@ -41,6 +57,8 @@ export interface SourcePickerProps {
   setPickerOpen: (open: boolean) => void;
   onSourceSelected: (selection: CaptureSourceSelection) => void;
   onCreateRoom: () => void;
+  onRetryRoomConnection: () => void;
+  onCloseRoom: () => void;
   onCopyCode: () => void;
   onCopyLink: () => void;
   onStartShare: () => void;
@@ -51,57 +69,147 @@ export interface SourcePickerProps {
 interface RoomControlsProps {
   roomCode: string;
   isCreatingRoom: boolean;
+  isClosingRoom: boolean;
+  canCreateRoom: boolean;
+  roomCreateDisabledReason: string | null;
+  hasRetryableRoom: boolean;
   copied: 'link' | 'code' | null;
   spectatorCount: number;
   onCreateRoom: () => void;
+  onRetryRoomConnection: () => void;
+  onCloseRoom: () => void;
   onCopyCode: () => void;
   onCopyLink: () => void;
 }
 
-const RoomControls: React.FC<RoomControlsProps> = React.memo(
-  ({ roomCode, isCreatingRoom, copied, spectatorCount, onCreateRoom, onCopyCode, onCopyLink }) => {
-    if (!roomCode) {
-      return (
-        <Button
-          variant="default"
-          onClick={onCreateRoom}
-          disabled={isCreatingRoom}
-          aria-busy={isCreatingRoom}
-          className="w-full font-bold"
-        >
-          {isCreatingRoom ? 'Creating Room…' : 'Create Live Room'}
-        </Button>
-      );
-    }
+type EmptyRoomControlsProps = Pick<
+  RoomControlsProps,
+  | 'canCreateRoom'
+  | 'hasRetryableRoom'
+  | 'isCreatingRoom'
+  | 'onCreateRoom'
+  | 'onRetryRoomConnection'
+  | 'roomCreateDisabledReason'
+>;
 
-    return (
-      <div className="space-y-3" aria-live="polite">
-        <div className="flex items-center gap-2 flex-wrap">
-          {spectatorCount > 0 && (
-            <Badge variant="info" className="tabular-nums">
-              {spectatorCount} spectator{spectatorCount === 1 ? '' : 's'}
-            </Badge>
+function EmptyRoomControls({
+  canCreateRoom,
+  hasRetryableRoom,
+  isCreatingRoom,
+  onCreateRoom,
+  onRetryRoomConnection,
+  roomCreateDisabledReason,
+}: EmptyRoomControlsProps): React.ReactNode {
+  let buttonLabel = 'Create Live Room';
+  if (isCreatingRoom) buttonLabel = 'Connecting Room…';
+  else if (hasRetryableRoom) buttonLabel = 'Retry connection';
+
+  return (
+    <div className="space-y-2">
+      <Button
+        variant="default"
+        onClick={hasRetryableRoom ? onRetryRoomConnection : onCreateRoom}
+        disabled={isCreatingRoom || (!hasRetryableRoom && !canCreateRoom)}
+        aria-busy={isCreatingRoom}
+        aria-describedby={roomCreateDisabledReason ? 'create-room-hint' : undefined}
+        className="w-full font-bold"
+      >
+        {buttonLabel}
+      </Button>
+      {roomCreateDisabledReason && !hasRetryableRoom && (
+        <p id="create-room-hint" className="text-sm leading-relaxed text-muted-foreground">
+          {roomCreateDisabledReason}
+        </p>
+      )}
+      {hasRetryableRoom && (
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          The replacement room is ready, but LiveKit did not connect. Retry within 45 seconds.
+        </p>
+      )}
+    </div>
+  );
+}
+
+type ActiveRoomControlsProps = Pick<
+  RoomControlsProps,
+  'copied' | 'isClosingRoom' | 'onCloseRoom' | 'onCopyCode' | 'onCopyLink' | 'roomCode' | 'spectatorCount'
+>;
+
+function ActiveRoomControls({
+  copied,
+  isClosingRoom,
+  onCloseRoom,
+  onCopyCode,
+  onCopyLink,
+  roomCode,
+  spectatorCount,
+}: ActiveRoomControlsProps): React.ReactNode {
+  const spectatorLabel = `${spectatorCount} spectator${spectatorCount === 1 ? '' : 's'}`;
+  let closeDescription = 'Sharing will stop and this room link will stop working. This cannot be undone.';
+  if (spectatorCount > 0) {
+    closeDescription = `Sharing will stop, ${spectatorLabel} will disconnect, and this room link will stop working. This cannot be undone.`;
+  }
+
+  return (
+    <div className="space-y-3" aria-live="polite">
+      <div className="flex flex-wrap items-center gap-2">
+        {spectatorCount > 0 && (
+          <Badge variant="info" className="tabular-nums">
+            {spectatorLabel}
+          </Badge>
+        )}
+        <span className="font-mono text-sm font-semibold tabular-nums tracking-wide text-foreground/90">
+          {roomCode}
+        </span>
+        <Button variant="secondary" size="sm" onClick={onCopyCode} className="gap-1.5">
+          {copied === 'code' ? <Check className="w-3.5 h-3.5 text-safelight" aria-hidden="true" /> : null}
+          {copied === 'code' ? 'Copied' : 'Copy code'}
+        </Button>
+        <Button size="sm" onClick={onCopyLink} className="gap-1.5">
+          {copied === 'link' ? (
+            <Check className="w-4 h-4" aria-hidden="true" />
+          ) : (
+            <Copy className="w-4 h-4" aria-hidden="true" />
           )}
-          <span className="font-mono text-sm font-semibold tabular-nums tracking-wide text-foreground/90">
-            {roomCode}
-          </span>
-          <Button variant="secondary" size="sm" onClick={onCopyCode} className="gap-1.5">
-            {copied === 'code' ? <Check className="w-3.5 h-3.5 text-safelight" aria-hidden="true" /> : null}
-            {copied === 'code' ? 'Copied' : 'Copy code'}
-          </Button>
-          <Button size="sm" onClick={onCopyLink} className="gap-1.5">
-            {copied === 'link' ? (
-              <Check className="w-4 h-4" aria-hidden="true" />
-            ) : (
-              <Copy className="w-4 h-4" aria-hidden="true" />
-            )}
-            {copied === 'link' ? 'Link copied' : 'Copy link'}
-          </Button>
-        </div>
+          {copied === 'link' ? 'Link copied' : 'Copy link'}
+        </Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isClosingRoom}
+              className="gap-1.5 border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Link2Off className="size-4" aria-hidden="true" />
+              {isClosingRoom ? 'Closing…' : 'Close room'}
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Close this room?</AlertDialogTitle>
+              <AlertDialogDescription className="leading-relaxed">{closeDescription}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep room open</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={onCloseRoom}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                Close room
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
-    );
-  },
-);
+    </div>
+  );
+}
+
+const RoomControls: React.FC<RoomControlsProps> = React.memo((props) => {
+  if (!props.roomCode) return <EmptyRoomControls {...props} />;
+  return <ActiveRoomControls {...props} />;
+});
 
 RoomControls.displayName = 'RoomControls';
 
@@ -109,6 +217,11 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
   ({
     roomCode,
     isCreatingRoom,
+    isClosingRoom,
+    isRoomTransitioning,
+    canCreateRoom,
+    roomCreateDisabledReason,
+    hasRetryableRoom,
     copied,
     captureContext,
     autoDetectFailed,
@@ -123,6 +236,8 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
     setPickerOpen,
     onSourceSelected,
     onCreateRoom,
+    onRetryRoomConnection,
+    onCloseRoom,
     onCopyCode,
     onCopyLink,
     onStartShare,
@@ -145,9 +260,15 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
           <RoomControls
             roomCode={roomCode}
             isCreatingRoom={isCreatingRoom}
+            isClosingRoom={isClosingRoom || isRoomTransitioning}
+            canCreateRoom={canCreateRoom}
+            roomCreateDisabledReason={roomCreateDisabledReason}
+            hasRetryableRoom={hasRetryableRoom}
             copied={copied}
             spectatorCount={spectatorCount}
             onCreateRoom={onCreateRoom}
+            onRetryRoomConnection={onRetryRoomConnection}
+            onCloseRoom={onCloseRoom}
             onCopyCode={onCopyCode}
             onCopyLink={onCopyLink}
           />
@@ -193,7 +314,7 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
               <Button
                 variant="default"
                 onClick={onStartShare}
-                disabled={!canStartShare}
+                disabled={!canStartShare || isRoomTransitioning}
                 aria-describedby={disabledReason ? 'start-screenshare-hint' : 'start-screenshare-ready-hint'}
                 className="group relative w-full font-bold overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.14)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] active:shadow-[inset_0_1px_1px_rgba(0,0,0,0.2)] active:scale-[0.99] transition-[transform,box-shadow,background-color] duration-200 ease-out disabled:shadow-none disabled:active:scale-100"
               >
@@ -244,10 +365,15 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
           {captureStage === 'previewing' && (
             <div className="space-y-2">
               <div className="flex gap-2">
-                <Button variant="default" onClick={onGoLive} disabled={!canGoLive} className="flex-1 font-bold">
+                <Button
+                  variant="default"
+                  onClick={onGoLive}
+                  disabled={!canGoLive || isRoomTransitioning}
+                  className="flex-1 font-bold"
+                >
                   Go Live
                 </Button>
-                <Button variant="secondary" onClick={onStopShare} className="flex-1">
+                <Button variant="secondary" onClick={onStopShare} disabled={isRoomTransitioning} className="flex-1">
                   Cancel
                 </Button>
               </div>
@@ -262,7 +388,12 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
           {captureStage === 'live' && (
             <div className="space-y-2">
               {!showStopConfirm ? (
-                <Button variant="destructive" onClick={() => setShowStopConfirm(true)} className="w-full font-bold">
+                <Button
+                  variant="destructive"
+                  onClick={() => setShowStopConfirm(true)}
+                  disabled={isRoomTransitioning}
+                  className="w-full font-bold"
+                >
                   Stop Screenshare
                 </Button>
               ) : (

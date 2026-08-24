@@ -33,23 +33,29 @@ const spectatorCountLimiter = rateLimit({
   message: { error: 'Too many spectator count requests, please try again later' },
 });
 
-const allowedOrigins = new Set([
-  config.websiteUrl,
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://[::1]:3000',
+const desktopOrigins = new Set([
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://[::1]:5173',
   'tauri://localhost',
   'http://tauri.localhost',
 ]);
+const allowedOrigins = new Set([
+  config.websiteUrl,
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://[::1]:3000',
+  ...desktopOrigins,
+]);
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && allowedOrigins.has(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'DELETE, GET, POST, OPTIONS');
+    const allowedHeaders = desktopOrigins.has(origin)
+      ? 'Content-Type, X-Client-Origin, X-Room-Close-Key'
+      : 'Content-Type';
+    res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Max-Age', '86400');
   }

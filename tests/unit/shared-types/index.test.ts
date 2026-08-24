@@ -29,6 +29,8 @@ test('valid fields pass through unchanged', () => {
     videoCodec: 'h264',
     resolution: '720p',
     apiEndpoint: 'https://srv.example.com',
+    apiEndpointIsCustom: true,
+    pendingApiEndpoint: 'https://pending.example.com',
     autoBitrate: false,
     motionMode: 'dynamic',
   };
@@ -77,6 +79,22 @@ test('empty or non-string apiEndpoint falls back', () => {
 
 test('apiEndpoint is kept verbatim (not trimmed or normalized)', () => {
   assert.equal(sanitizeStreamSettings({ apiEndpoint: '  http://x  ' }).apiEndpoint, '  http://x  ');
+});
+
+test('endpoint state accepts explicit values and rejects invalid pending values', () => {
+  const valid = sanitizeStreamSettings({
+    apiEndpointIsCustom: true,
+    pendingApiEndpoint: 'https://pending.example.com',
+  });
+  assert.equal(valid.apiEndpointIsCustom, true);
+  assert.equal(valid.pendingApiEndpoint, 'https://pending.example.com');
+
+  const invalid = sanitizeStreamSettings({ apiEndpointIsCustom: 'yes', pendingApiEndpoint: ' ' });
+  assert.equal(invalid.apiEndpointIsCustom, false);
+  assert.equal(invalid.pendingApiEndpoint, null);
+
+  const legacy = sanitizeStreamSettings({ apiEndpoint: 'https://legacy.example.com' });
+  assert.equal(legacy.apiEndpointIsCustom, true);
 });
 
 test('fmtBitrate formats null as an em dash', () => {

@@ -68,6 +68,8 @@ export interface StreamSettings {
   videoCodec: VideoCodec;
   resolution: ResolutionPreset;
   apiEndpoint: string;
+  apiEndpointIsCustom: boolean;
+  pendingApiEndpoint: string | null;
   autoBitrate: boolean;
   motionMode: MotionMode;
 }
@@ -78,6 +80,8 @@ export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   videoCodec: 'vp8',
   resolution: '1080p',
   apiEndpoint: 'http://localhost:3001',
+  apiEndpointIsCustom: false,
+  pendingApiEndpoint: null,
   autoBitrate: true,
   motionMode: 'auto',
 };
@@ -151,13 +155,20 @@ export function sanitizeStreamSettings(input: StreamSettingsInput): StreamSettin
     return value;
   };
   const endpoint = input.apiEndpoint;
+  const pendingEndpoint = input.pendingApiEndpoint;
+  const sanitizedEndpoint = isString(endpoint) && endpoint.trim() !== '' ? endpoint : defaults.apiEndpoint;
+  let apiEndpointIsCustom = input.apiEndpointIsCustom === true;
+  if (input.apiEndpointIsCustom == null && sanitizedEndpoint !== defaults.apiEndpoint) apiEndpointIsCustom = true;
 
   return {
     fps: numberInRange(input.fps, 1, 60, defaults.fps),
     bitrateLimit: numberInRange(input.bitrateLimit, 100_000, 200_000_000, defaults.bitrateLimit),
     videoCodec: stringValueOr(input.videoCodec, isVideoCodec, defaults.videoCodec),
     resolution: stringValueOr(input.resolution, isResolutionPreset, defaults.resolution),
-    apiEndpoint: isString(endpoint) && endpoint.trim() !== '' ? endpoint : defaults.apiEndpoint,
+    apiEndpoint: sanitizedEndpoint,
+    apiEndpointIsCustom,
+    pendingApiEndpoint:
+      isString(pendingEndpoint) && pendingEndpoint.trim() !== '' ? pendingEndpoint : defaults.pendingApiEndpoint,
     autoBitrate: input.autoBitrate === true || input.autoBitrate === false ? input.autoBitrate : defaults.autoBitrate,
     motionMode: stringValueOr(input.motionMode, isMotionMode, defaults.motionMode),
   };
