@@ -35,3 +35,19 @@ _Avoid_: publication target, stream target, scale target
 **Publisher session**:
 The lifetime of one presenter publication connection through dormant, connected, recovery, and shutdown states.
 _Avoid_: publisher worker, lifecycle loop
+
+**Viewer-session buffer**:
+A spectator-local, temporary history of one share interval received by one browser tab. It remains after sharing stops or the presenter leaves, but disappears when a new share begins or the spectator refreshes or leaves.
+_Avoid_: room DVR, recording, archive
+
+**Rewind window**:
+The spectator-selected maximum duration retained in a viewer-session buffer. Its default is two minutes.
+_Avoid_: retention period, recording length
+
+**Share interval**:
+One continuous video publication from when a presenter starts sharing until they stop. A room may contain several share intervals.
+_Avoid_: stream, session
+
+**Live edge**:
+The newest playable moment in an active share interval. A spectator viewing an older moment is behind live.
+_Avoid_: current time, stream end

@@ -26,19 +26,20 @@ An open-source, self-hostable screenshare ecosystem that gives presenters surgic
 
 - **Presenter** launches the Desktop App, creates a room, selects a window to share, and optionally overrides the auto-detected audio source. Audio capture happens through native OS audio APIs (PipeWire on Linux, WASAPI on Windows).
 - **Spectators** open a browser URL or enter a room code on the Web App. They are strictly read-only: they receive video + filtered audio tracks via WebRTC. No install, no account.
-- **Rooms are ephemeral.** Created on demand, identified by a unique room code, and closed when the presenter disconnects. No persistent storage of streams.
+- **Rooms are ephemeral.** Created on demand, identified by a unique room code, and closed when the presenter disconnects. No stream media persists outside a spectator's temporary viewer-session buffer.
 - A **Signaling Server** manages WebSocket connections, room state, and WebRTC signalling between presenter and spectators.
 
 ## Capabilities and Constraints
 
 - **Desktop App (Tauri 2):** Screenshare capture, per-window audio capture (virtual capture sink linked only to target app), room creation, WebRTC broadcasting to multiple spectators.
-- **Web App (React):** Room join by code/link, WebRTC video+audio reception, spectator-only enforcement (no publish capability), connection state management.
+- **Web App (React):** Room join by code/link, WebRTC video+audio reception, spectator-only enforcement (no publish capability), connection state management, and browser-local replay within a spectator-selected rewind window.
 - **Signaling Server (Express + ws):** Room creation with unique code, participant tracking, role assignment, WebRTC signaling relay (offers/answers/ICE candidates).
 - **Native Rust Engine (`packages/native-rust` + `native-livekit`):** PipeWire graph control for virtual capture sink creation and target-only audio linking on Linux; WASAPI process loopback on Windows; LiveKit room + publishing.
 - **Key constraints:**
   - Web client cannot publish media streams (enforced by design and protocol).
   - Audio capture on Linux depends on PipeWire; KDE windows lack identity metadata for auto-detection.
   - Rooms are single-presenter; only one stream per room.
+  - Replay availability depends on the browser's ability to record and seek the active media format.
   - Windows native audio driver is in progress.
 
 ## Brand Commitments
