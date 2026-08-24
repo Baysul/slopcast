@@ -19,6 +19,8 @@ pub struct StreamSettings {
     pub video_codec: String,
     pub resolution: String,
     pub api_endpoint: String,
+    pub api_endpoint_is_custom: bool,
+    pub pending_api_endpoint: Option<String>,
     pub auto_bitrate: bool,
     pub motion_mode: String,
 }
@@ -31,6 +33,8 @@ pub fn default_stream_settings() -> StreamSettings {
         video_codec: "vp8".into(),
         resolution: "1080p".into(),
         api_endpoint: "http://localhost:3001".into(),
+        api_endpoint_is_custom: false,
+        pending_api_endpoint: None,
         auto_bitrate: true,
         motion_mode: "auto".into(),
     }
@@ -64,8 +68,17 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
     };
     let api_endpoint = match o.get("apiEndpoint").and_then(serde_json::Value::as_str) {
         Some(v) if !v.trim().is_empty() => v.to_string(),
-        _ => defaults.api_endpoint,
+        _ => defaults.api_endpoint.clone(),
     };
+    let api_endpoint_is_custom = o
+        .get("apiEndpointIsCustom")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(api_endpoint != defaults.api_endpoint);
+    let pending_api_endpoint = o
+        .get("pendingApiEndpoint")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
     let motion_mode = match o.get("motionMode").and_then(serde_json::Value::as_str) {
         Some(v) if VALID_MOTION_MODES.contains(&v) => v.to_string(),
         _ => defaults.motion_mode,
@@ -86,6 +99,8 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
         video_codec: codec,
         resolution,
         api_endpoint,
+        api_endpoint_is_custom,
+        pending_api_endpoint,
         auto_bitrate,
         motion_mode,
     }
@@ -190,6 +205,8 @@ mod tests {
         assert_eq!(defaults.video_codec, "vp8");
         assert_eq!(defaults.resolution, "1080p");
         assert_eq!(defaults.api_endpoint, "http://localhost:3001");
+        assert!(!defaults.api_endpoint_is_custom);
+        assert_eq!(defaults.pending_api_endpoint, None);
         assert!(defaults.auto_bitrate);
         assert_eq!(defaults.motion_mode, "auto");
     }
@@ -272,6 +289,31 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_validates_endpoint_state() {
+        let sanitized = sanitize_stream_settings(&json!({
+            "apiEndpointIsCustom": true,
+            "pendingApiEndpoint": "https://pending.example.com"
+        }));
+        assert!(sanitized.api_endpoint_is_custom);
+        assert_eq!(
+            sanitized.pending_api_endpoint,
+            Some("https://pending.example.com".into())
+        );
+
+        let invalid = sanitize_stream_settings(&json!({
+            "apiEndpointIsCustom": "true",
+            "pendingApiEndpoint": " "
+        }));
+        assert!(!invalid.api_endpoint_is_custom);
+        assert_eq!(invalid.pending_api_endpoint, None);
+
+        let legacy = sanitize_stream_settings(&json!({
+            "apiEndpoint": "https://legacy.example.com"
+        }));
+        assert!(legacy.api_endpoint_is_custom);
+    }
+
+    #[test]
     fn sanitize_validates_auto_bitrate() {
         let sanitize_auto = |v: serde_json::Value| {
             sanitize_stream_settings(&json!({ "autoBitrate": v })).auto_bitrate
@@ -310,5 +352,7 @@ mod tests {
         assert!(obj.contains_key("videoCodec"));
         assert!(obj.contains_key("resolution"));
         assert!(obj.contains_key("apiEndpoint"));
+        assert!(obj.contains_key("apiEndpointIsCustom"));
+        assert!(obj.contains_key("pendingApiEndpoint"));
     }
 }

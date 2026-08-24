@@ -3,6 +3,16 @@ import { codecLabel, RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Toaster } from '@/components/ui/sonner';
 import { desktopApi } from './api/desktop';
 import { AudioAppPicker } from './components/audio/AudioAppPicker';
@@ -10,10 +20,12 @@ import { PlatformNotice } from './components/gate/PlatformNotice';
 import { TitleBar } from './components/layout/TitleBar';
 import { ScreensharePreview } from './components/onboarding/preview/ScreensharePreview';
 import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
+import type { ApiEndpointAvailability } from './components/settings/ApiEndpointField';
 import { StreamSettingsPanel } from './components/settings/StreamSettingsPanel';
 import { SourcePicker } from './components/sources/SourcePicker';
 import { idleTelemetry } from './components/telemetry/StreamTelemetryBar';
 import { useAudioCapture } from './hooks/useAudioCapture';
+import type { PreparedRoom } from './hooks/useNativeRoom';
 import { useNativeRoom } from './hooks/useNativeRoom';
 import { useStreamSettings } from './hooks/useStreamSettings';
 import { useStreamTelemetry } from './hooks/useStreamTelemetry';
@@ -23,6 +35,8 @@ import { recommendBitrateCap } from './utils/bitrate';
 import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
 import './index.css';
+
+const ROOM_RETRY_MS = 45_000;
 
 function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
   if (!(payload instanceof ArrayBuffer)) return null;
@@ -81,11 +95,25 @@ export const PresenterApp: React.FC = () => {
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [copied, setCopied] = useState<'link' | 'code' | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [endpointAvailability, setEndpointAvailability] = useState<ApiEndpointAvailability>('checking');
+  const [hasHealthyApiEndpoint, setHasHealthyApiEndpoint] = useState(false);
+  const [endpointSwitchCandidate, setEndpointSwitchCandidate] = useState<string | null>(null);
+  const [endpointValidationRevision, setEndpointValidationRevision] = useState(0);
+  const [isRoomTransitioning, setIsRoomTransitioning] = useState(false);
+  const [retryableReplacement, setRetryableReplacement] = useState<{
+    expiresAt: number;
+    room: PreparedRoom;
+    shouldResumeSharing: boolean;
+  } | null>(null);
   const selectedCaptureSourceRef = useRef<CaptureSourceSelection | null>(null);
+  const isConfirmingEndpointSwitchRef = useRef(false);
+  const hadAudioCaptureRef = useRef(false);
 
   const {
     apiEndpoint,
-    setApiEndpoint,
+    activateApiEndpoint,
+    pendingApiEndpoint,
+    setPendingApiEndpoint,
     livekitUrl,
     streamSettingsOpen,
     setStreamSettingsOpen,
@@ -105,19 +133,51 @@ export const PresenterApp: React.FC = () => {
     streamFpsRef,
     resolutionRef,
     autoBitrateRef,
+    settingsHydrated,
   } = useStreamSettings();
+
+  const handleRoomDisconnect = useCallback((): void => {
+    setCaptureStage('idle');
+    setPreviewFrame(null);
+    setEndpointValidationRevision((revision) => revision + 1);
+    if (!hadAudioCaptureRef.current) return;
+
+    hadAudioCaptureRef.current = false;
+    void desktopApi.stopAudioCapture().then((stopped) => {
+      if (!stopped) notify('error', 'Audio capture cleanup failed', 'Stop the audio capture before sharing again.');
+    });
+  }, []);
 
   const {
     roomCode,
     shareUrl,
     spectatorCount,
     isCreatingRoom,
+    isClosingRoom,
     createRoom: createNativeRoom,
-    disconnectRoom,
+    prepareRoom,
+    connectPreparedRoom,
+    discardPreparedRoom,
+    closeRoom,
+    closeRoomBestEffort,
+    roomEndpoint,
   } = useNativeRoom({
     apiEndpoint,
     livekitUrl,
+    onDisconnect: handleRoomDisconnect,
   });
+
+  useEffect(() => {
+    if (!retryableReplacement) return;
+    const remainingMs = Math.max(0, retryableReplacement.expiresAt - Date.now());
+    const timer = setTimeout(() => {
+      void discardPreparedRoom(retryableReplacement.room);
+      setRetryableReplacement(null);
+      setEndpointValidationRevision((revision) => revision + 1);
+      notify('info', 'Replacement room expired', 'Create a fresh room when you are ready to try again.');
+    }, remainingMs);
+    return () => clearTimeout(timer);
+  }, [discardPreparedRoom, retryableReplacement]);
 
   const {
     audioApps,
@@ -139,6 +199,7 @@ export const PresenterApp: React.FC = () => {
     attemptAutoResolve,
     handleSelectApp,
   } = useAudioCapture(captureStage === 'live');
+  hadAudioCaptureRef.current = audioAppIdRef.current !== null;
 
   const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } =
     useStreamTelemetry(spectatorCount);
@@ -217,9 +278,9 @@ export const PresenterApp: React.FC = () => {
 
     return () => {
       disposed = true;
-      disconnectRoom();
+      closeRoomBestEffort();
     };
-  }, [disconnectRoom]);
+  }, [closeRoomBestEffort]);
 
   useEffect(() => {
     if (captureStage !== 'live') {
@@ -279,20 +340,14 @@ export const PresenterApp: React.FC = () => {
     await createNativeRoom();
   }, [setAudioAppExplicitlySet, setAutoDetectedApp, setSelectedAudioAppId, setAutoDetectFailed, createNativeRoom]);
 
-  const handleStopShare = useCallback(async () => {
+  const resetCaptureState = useCallback((): void => {
     captureSessionRef.current += 1;
     lastVideoConfigKeyRef.current = null;
     setCaptureStage('idle');
     stopTelemetryPolling();
-    const stopped = await desktopApi.stopNativeCapture();
-    if (!stopped) {
-      notify('error', 'Screenshare stop failed', 'The room remains open, but capture could not be stopped cleanly.');
-    }
     audioAppIdRef.current = null;
     setPreviewFrame(null);
-    if (!audioAppExplicitlySet) {
-      setSelectedAudioAppId(null);
-    }
+    if (!audioAppExplicitlySet) setSelectedAudioAppId(null);
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
     setAutoDetectFailed(false);
@@ -305,6 +360,26 @@ export const PresenterApp: React.FC = () => {
     setAutoDetectedApp,
     setAutoDetectFailed,
   ]);
+
+  const stopCaptureAfterRoomClosure = useCallback(async (): Promise<void> => {
+    const hadAudioCapture = audioAppIdRef.current !== null;
+    resetCaptureState();
+    hadAudioCaptureRef.current = false;
+    if (!hadAudioCapture) return;
+
+    const stopped = await desktopApi.stopAudioCapture();
+    if (!stopped) {
+      notify('error', 'Audio capture cleanup failed', 'The room closed, but audio capture did not stop cleanly.');
+    }
+  }, [audioAppIdRef, resetCaptureState]);
+
+  const handleStopShare = useCallback(async () => {
+    resetCaptureState();
+    const stopped = await desktopApi.stopNativeCapture();
+    if (!stopped) {
+      notify('error', 'Screenshare stop failed', 'The room remains open, but capture could not be stopped cleanly.');
+    }
+  }, [resetCaptureState]);
 
   useEffect(() => {
     const unlistenPromise = desktopApi.onCaptureEnded(() => {
@@ -520,6 +595,180 @@ export const PresenterApp: React.FC = () => {
     }
   }, [buildCaptureConfig, activateLive]);
 
+  const resumeSharingAfterReplacement = useCallback(
+    async (shouldResumeSharing: boolean): Promise<void> => {
+      if (!shouldResumeSharing) return;
+      try {
+        const source = selectedCaptureSourceRef.current ?? undefined;
+        await startCombinedShare(source);
+      } catch (error) {
+        console.error('Failed to resume sharing after room replacement:', error);
+        await cleanupFailedShare();
+        setCaptureStage('idle');
+        const message = error instanceof Error ? error.message : 'The capture source could not be restarted.';
+        notify('error', 'Sharing did not resume', `${message} The new room remains open.`);
+      }
+    },
+    [cleanupFailedShare, startCombinedShare],
+  );
+
+  const handleApiEndpointAvailabilityChange = useCallback(
+    (availability: ApiEndpointAvailability, endpoint: string): void => {
+      setEndpointAvailability(availability);
+      if (endpoint === apiEndpoint) setHasHealthyApiEndpoint(availability === 'healthy');
+    },
+    [apiEndpoint],
+  );
+
+  const handleApiEndpointValidated = useCallback(
+    (endpoint: string): void => {
+      if (endpoint === apiEndpoint) {
+        setHasHealthyApiEndpoint(true);
+        if (!roomCode) setPendingApiEndpoint(null);
+        return;
+      }
+      if (endpoint === pendingApiEndpoint && roomCode) return;
+      if (!roomCode && !retryableReplacement) {
+        activateApiEndpoint(endpoint);
+        setHasHealthyApiEndpoint(true);
+        return;
+      }
+
+      setEndpointSwitchCandidate(endpoint);
+    },
+    [activateApiEndpoint, apiEndpoint, pendingApiEndpoint, retryableReplacement, roomCode, setPendingApiEndpoint],
+  );
+
+  const handleApiEndpointReset = useCallback((): void => {
+    setEndpointSwitchCandidate(null);
+    setPendingApiEndpoint(null);
+  }, [setPendingApiEndpoint]);
+
+  const deferEndpointSwitch = useCallback((): void => {
+    if (!endpointSwitchCandidate) return;
+    setPendingApiEndpoint(endpointSwitchCandidate);
+    setEndpointSwitchCandidate(null);
+  }, [endpointSwitchCandidate, setPendingApiEndpoint]);
+
+  const handleEndpointDialogOpenChange = useCallback(
+    (open: boolean): void => {
+      if (open || isConfirmingEndpointSwitchRef.current) return;
+      deferEndpointSwitch();
+    },
+    [deferEndpointSwitch],
+  );
+
+  const handleReplaceRoom = useCallback(async (): Promise<void> => {
+    const candidate = endpointSwitchCandidate;
+    if (!candidate || isRoomTransitioning) return;
+    isConfirmingEndpointSwitchRef.current = true;
+    setIsRoomTransitioning(true);
+
+    const shouldResumeSharing = captureStage === 'live';
+    const replacement = await prepareRoom(candidate);
+    if (!replacement) {
+      setPendingApiEndpoint(candidate);
+      setEndpointSwitchCandidate(null);
+      isConfirmingEndpointSwitchRef.current = false;
+      setIsRoomTransitioning(false);
+      return;
+    }
+
+    const closed = await closeRoom();
+    if (!closed.ok) {
+      await discardPreparedRoom(replacement);
+      setPendingApiEndpoint(candidate);
+      setEndpointSwitchCandidate(null);
+      isConfirmingEndpointSwitchRef.current = false;
+      setIsRoomTransitioning(false);
+      notify('error', 'Room replacement stopped', closed.error ?? 'The current room could not be closed.');
+      return;
+    }
+
+    await stopCaptureAfterRoomClosure();
+    const connected = await connectPreparedRoom(replacement);
+    if (!connected.ok) {
+      setRetryableReplacement({
+        expiresAt: Date.now() + ROOM_RETRY_MS,
+        room: replacement,
+        shouldResumeSharing,
+      });
+      setPendingApiEndpoint(candidate);
+      setEndpointSwitchCandidate(null);
+      isConfirmingEndpointSwitchRef.current = false;
+      setIsRoomTransitioning(false);
+      notify('error', 'Replacement room did not connect', 'One retry is available in the room controls.');
+      return;
+    }
+
+    activateApiEndpoint(candidate);
+    setEndpointSwitchCandidate(null);
+    isConfirmingEndpointSwitchRef.current = false;
+    setIsRoomTransitioning(false);
+    await resumeSharingAfterReplacement(shouldResumeSharing);
+  }, [
+    activateApiEndpoint,
+    captureStage,
+    closeRoom,
+    connectPreparedRoom,
+    discardPreparedRoom,
+    endpointSwitchCandidate,
+    isRoomTransitioning,
+    prepareRoom,
+    resumeSharingAfterReplacement,
+    stopCaptureAfterRoomClosure,
+    setPendingApiEndpoint,
+  ]);
+
+  const handleRetryRoomConnection = useCallback(async (): Promise<void> => {
+    const replacement = retryableReplacement;
+    if (!replacement || isRoomTransitioning) return;
+    if (Date.now() >= replacement.expiresAt) {
+      await discardPreparedRoom(replacement.room);
+      setRetryableReplacement(null);
+      setEndpointValidationRevision((revision) => revision + 1);
+      notify('error', 'Replacement room expired', 'Create a fresh room to try again.');
+      return;
+    }
+    setRetryableReplacement(null);
+    setIsRoomTransitioning(true);
+
+    const connected = await connectPreparedRoom(replacement.room);
+    if (!connected.ok) {
+      await discardPreparedRoom(replacement.room);
+      setEndpointValidationRevision((revision) => revision + 1);
+      setIsRoomTransitioning(false);
+      notify('error', 'Room connection failed', connected.error ?? 'Create a fresh room to try again.');
+      return;
+    }
+
+    activateApiEndpoint(replacement.room.apiEndpoint);
+    setIsRoomTransitioning(false);
+    await resumeSharingAfterReplacement(replacement.shouldResumeSharing);
+  }, [
+    activateApiEndpoint,
+    connectPreparedRoom,
+    discardPreparedRoom,
+    isRoomTransitioning,
+    resumeSharingAfterReplacement,
+    retryableReplacement,
+  ]);
+
+  const handleCloseRoom = useCallback(async (): Promise<void> => {
+    if (isRoomTransitioning) return;
+    setIsRoomTransitioning(true);
+    const result = await closeRoom();
+    if (!result.ok) {
+      setIsRoomTransitioning(false);
+      notify('error', 'Room closure failed', result.error ?? 'The room remains open. Try again.');
+      return;
+    }
+
+    await stopCaptureAfterRoomClosure();
+    setIsRoomTransitioning(false);
+    if (pendingApiEndpoint) setEndpointValidationRevision((revision) => revision + 1);
+  }, [closeRoom, isRoomTransitioning, pendingApiEndpoint, stopCaptureAfterRoomClosure]);
+
   const flashCopied = useCallback((kind: 'link' | 'code') => {
     setCopied(kind);
     setTimeout(() => setCopied(null), 2000);
@@ -546,8 +795,18 @@ export const PresenterApp: React.FC = () => {
     }
   }, [roomCode, flashCopied]);
 
-  const canStartShare = !!roomCode && captureStage === 'idle';
-  const canGoLive = captureStage === 'previewing' && previewFrame !== null;
+  const isEndpointCheckPending = endpointAvailability === 'checking' || endpointAvailability === 'typing';
+  const canCreateRoom = settingsHydrated && hasHealthyApiEndpoint && !isEndpointCheckPending && !isRoomTransitioning;
+  const roomCreateDisabledReason = (): string | null => {
+    if (!settingsHydrated) return 'Loading saved API endpoint settings.';
+    if (endpointAvailability === 'checking') return 'Checking the API endpoint before room creation.';
+    if (endpointAvailability === 'typing') return 'Finish editing the API endpoint before creating a room.';
+    if (hasHealthyApiEndpoint) return null;
+    if (endpointAvailability === 'error') return 'Fix the API endpoint before creating a room.';
+    return null;
+  };
+  const canStartShare = !!roomCode && captureStage === 'idle' && !isRoomTransitioning;
+  const canGoLive = captureStage === 'previewing' && previewFrame !== null && !isRoomTransitioning;
   const startDisabledReason = (): string | null => {
     if (captureStage !== 'idle' || canStartShare) return null;
     if (!roomCode) return 'Create a live room to start sharing.';
@@ -581,8 +840,15 @@ export const PresenterApp: React.FC = () => {
             <SourcePicker
               roomCode={roomCode}
               isCreatingRoom={isCreatingRoom}
+              isClosingRoom={isClosingRoom}
+              isRoomTransitioning={isRoomTransitioning}
+              canCreateRoom={canCreateRoom}
+              roomCreateDisabledReason={roomCreateDisabledReason()}
+              hasRetryableRoom={retryableReplacement !== null}
               copied={copied}
               onCreateRoom={handleCreateRoom}
+              onRetryRoomConnection={() => void handleRetryRoomConnection()}
+              onCloseRoom={() => void handleCloseRoom()}
               onCopyCode={handleCopyCode}
               onCopyLink={handleCopyLink}
               captureContext={captureContext}
@@ -631,7 +897,13 @@ export const PresenterApp: React.FC = () => {
             motionMode={motionMode}
             setMotionMode={setMotionMode}
             apiEndpoint={apiEndpoint}
-            setApiEndpoint={setApiEndpoint}
+            pendingApiEndpoint={pendingApiEndpoint}
+            roomEndpoint={roomEndpoint}
+            endpointValidationRevision={endpointValidationRevision}
+            endpointControlsDisabled={isRoomTransitioning || retryableReplacement !== null}
+            onApiEndpointAvailabilityChange={handleApiEndpointAvailabilityChange}
+            onApiEndpointValidated={handleApiEndpointValidated}
+            onApiEndpointReset={handleApiEndpointReset}
           />
         </main>
       </div>
@@ -640,8 +912,37 @@ export const PresenterApp: React.FC = () => {
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
-      <TitleBar isLive={captureStage === 'live'} isPreviewing={captureStage === 'previewing'} />
+      <TitleBar
+        isLive={captureStage === 'live'}
+        isPreviewing={captureStage === 'previewing'}
+        onClose={closeRoomBestEffort}
+      />
       {content}
+      <AlertDialog open={endpointSwitchCandidate !== null} onOpenChange={handleEndpointDialogOpenChange}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>API endpoint changed</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2 leading-relaxed">
+              <span className="block">Recreating the room disconnects spectators and changes the room link.</span>
+              {captureStage === 'live' && (
+                <span className="block">
+                  Slopcast will resume sharing, but your operating system may ask you to choose the screen or window
+                  again.
+                </span>
+              )}
+              {captureStage === 'previewing' && (
+                <span className="block">The current preview will close. You can choose a source again afterward.</span>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isRoomTransitioning}>Use after this room closes</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void handleReplaceRoom()} disabled={isRoomTransitioning}>
+              {captureStage === 'live' ? 'Recreate room and resume sharing' : 'Recreate room'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <Toaster />
     </div>
   );

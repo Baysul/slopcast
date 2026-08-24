@@ -4,6 +4,26 @@ A room-based screen and audio sharing system: a Tauri desktop presenter, a web s
 
 ## Language
 
+**API endpoint**:
+The HTTP or HTTPS base URL of the Slopcast server that the desktop uses to check health and manage rooms.
+_Avoid_: server URL, API URL
+
+**Endpoint candidate**:
+A validated API endpoint waiting to replace the current endpoint after an existing room closes.
+_Avoid_: pending endpoint, edited endpoint
+
+**Room endpoint**:
+The API endpoint that allocated and manages a specific active room for that room's lifetime.
+_Avoid_: active endpoint, current server
+
+**Room replacement**:
+The transition that prepares a room on an endpoint candidate, closes the existing room, and connects the presenter to the new room.
+_Avoid_: restart stream, switch server
+
+**Active room**:
+An ephemeral room registration that may issue participant credentials until it is closed, expires, or its server restarts.
+_Avoid_: allocated code, open room
+
 **Encoder chain**:
 The ordered, probe-gated preference of video encoders for a codec: NVENC → VA-API → software.
 _Avoid_: encoder preference list, codec fallback stack
@@ -35,6 +55,10 @@ _Avoid_: publication target, stream target, scale target
 **Publisher session**:
 The lifetime of one presenter publication connection through dormant, connected, recovery, and shutdown states.
 _Avoid_: publisher worker, lifecycle loop
+
+**Room closure**:
+The irreversible end of a room that disconnects its presenter and spectators and invalidates its room link.
+_Avoid_: room disconnect, stop sharing, end stream
 
 **Viewer-session buffer**:
 A spectator-local, temporary history of one share interval received by one browser tab. It remains after sharing stops or the presenter leaves, but disappears when a new share begins or the spectator refreshes or leaves.

@@ -18,6 +18,8 @@ import { Switch } from '@/components/ui/switch';
 import { manualBitrateOptions, recommendedBitrateRange } from '@/utils/bitrate';
 import type { CodecInfo } from '@/utils/codecs';
 import { groupCodecsByHardware } from '@/utils/codecs';
+import type { ApiEndpointAvailability } from './ApiEndpointField';
+import { ApiEndpointField } from './ApiEndpointField';
 
 const BITS_PER_MEGABIT = 1_000_000;
 
@@ -88,8 +90,14 @@ export interface StreamSettingsPanelProps {
   setAutoBitrate: (auto: boolean) => void;
   motionMode: MotionMode;
   setMotionMode: (mode: MotionMode) => void;
-  apiEndpoint?: string;
-  setApiEndpoint?: (endpoint: string) => void;
+  apiEndpoint: string;
+  pendingApiEndpoint: string | null;
+  roomEndpoint: string | null;
+  endpointValidationRevision: number;
+  endpointControlsDisabled: boolean;
+  onApiEndpointAvailabilityChange: (availability: ApiEndpointAvailability, endpoint: string) => void;
+  onApiEndpointValidated: (endpoint: string) => void;
+  onApiEndpointReset: () => void;
 }
 
 export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
@@ -112,7 +120,13 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
     motionMode,
     setMotionMode,
     apiEndpoint,
-    setApiEndpoint,
+    pendingApiEndpoint,
+    roomEndpoint,
+    endpointValidationRevision,
+    endpointControlsDisabled,
+    onApiEndpointAvailabilityChange,
+    onApiEndpointValidated,
+    onApiEndpointReset,
   }) => {
     const openClass = streamSettingsOpen ? 'rotate-0' : '-rotate-90';
     const containerClass = streamSettingsOpen ? 'max-h-[800px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden';
@@ -352,24 +366,16 @@ export const StreamSettingsPanel: React.FC<StreamSettingsPanelProps> = memo(
               </div>
             </div>
 
-            {setApiEndpoint && (
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="api-endpoint"
-                  className="text-xs font-semibold uppercase tracking-wider text-muted-foreground block"
-                >
-                  API Endpoint
-                </label>
-                <Input
-                  id="api-endpoint"
-                  type="url"
-                  value={apiEndpoint ?? 'http://localhost:3001'}
-                  onChange={(e) => setApiEndpoint(e.target.value)}
-                  placeholder="http://localhost:3001"
-                  className="w-full bg-secondary text-sm text-foreground"
-                />
-              </div>
-            )}
+            <ApiEndpointField
+              activeEndpoint={apiEndpoint}
+              pendingEndpoint={pendingApiEndpoint}
+              roomEndpoint={roomEndpoint}
+              validationRevision={endpointValidationRevision}
+              disabled={endpointControlsDisabled}
+              onAvailabilityChange={onApiEndpointAvailabilityChange}
+              onValidated={onApiEndpointValidated}
+              onReset={onApiEndpointReset}
+            />
           </CardContent>
         </div>
       </Card>

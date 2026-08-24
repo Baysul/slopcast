@@ -6,6 +6,7 @@ import { windowControls } from '@/api/windowControls';
 export interface TitleBarProps {
   isLive?: boolean;
   isPreviewing?: boolean;
+  onClose?: () => void;
 }
 
 function getCenterSignal(isPreviewing: boolean): React.ReactNode {
@@ -22,7 +23,7 @@ function getCenterSignal(isPreviewing: boolean): React.ReactNode {
   return null;
 }
 
-export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, isPreviewing = false }) => {
+export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, isPreviewing = false, onClose }) => {
   const [maximized, setMaximized] = useState(false);
 
   const handleMouseDown = (event: React.MouseEvent<HTMLElement>): void => {
@@ -109,7 +110,10 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
         <button
           type="button"
           aria-label="Close"
-          onClick={() => void windowControls.close()}
+          onClick={() => {
+            onClose?.();
+            void windowControls.close();
+          }}
           className="w-11 flex items-center justify-center text-muted-foreground transition-colors hover:bg-destructive hover:text-destructive-foreground"
         >
           <X className="w-4 h-4" aria-hidden="true" />

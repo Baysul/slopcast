@@ -1,6 +1,6 @@
 import type { MotionMode, ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { desktopApi } from '../api/desktop';
 import { notify } from '../lib/toast';
 import type { CodecInfo } from '../utils/codecs';
@@ -14,12 +14,16 @@ const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
   a.videoCodec === b.videoCodec &&
   a.resolution === b.resolution &&
   a.apiEndpoint === b.apiEndpoint &&
+  a.apiEndpointIsCustom === b.apiEndpointIsCustom &&
+  a.pendingApiEndpoint === b.pendingApiEndpoint &&
   a.autoBitrate === b.autoBitrate &&
   a.motionMode === b.motionMode;
 
 export interface UseStreamSettingsReturn {
   apiEndpoint: string;
-  setApiEndpoint: React.Dispatch<React.SetStateAction<string>>;
+  activateApiEndpoint: (endpoint: string) => void;
+  pendingApiEndpoint: string | null;
+  setPendingApiEndpoint: React.Dispatch<React.SetStateAction<string | null>>;
   livekitUrl: string;
   setLivekitUrl: React.Dispatch<React.SetStateAction<string>>;
   streamSettingsOpen: boolean;
@@ -47,6 +51,8 @@ export interface UseStreamSettingsReturn {
 
 export function useStreamSettings(): UseStreamSettingsReturn {
   const [apiEndpoint, setApiEndpoint] = useState<string>('http://localhost:3001');
+  const [apiEndpointIsCustom, setApiEndpointIsCustom] = useState(false);
+  const [pendingApiEndpoint, setPendingApiEndpoint] = useState<string | null>(null);
   const [livekitUrl, setLivekitUrl] = useState<string>('');
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
   const [streamFps, setStreamFps] = useState(DEFAULT_STREAM_SETTINGS.fps);
@@ -85,8 +91,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   useEffect(() => {
     (async () => {
       const config = await desktopApi.getAppConfig();
-      if (config.apiEndpoint) setApiEndpoint(config.apiEndpoint);
-      if (config.livekitUrl) setLivekitUrl(config.livekitUrl);
+      setLivekitUrl(config.livekitUrl);
 
       const codecs = recommendCodec(fromNativeCodecInfo(await desktopApi.getNativeSupportedCodecs()));
       setAvailableCodecs(codecs);
@@ -95,12 +100,16 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
       const bestCodec = codecs[0] ? codecs[0].codec : 'vp8';
       const hydratedCodec = savedOk ? saved.videoCodec : bestCodec;
-      lastSavedSettingsRef.current = saved;
+      const hydratedEndpoint = saved.apiEndpointIsCustom ? saved.apiEndpoint : config.apiEndpoint || saved.apiEndpoint;
+      const hydratedSettings = { ...saved, apiEndpoint: hydratedEndpoint, videoCodec: hydratedCodec };
+      lastSavedSettingsRef.current = hydratedSettings;
       setStreamFps(saved.fps);
       setBitrateLimit(saved.bitrateLimit);
       setVideoCodec(hydratedCodec);
       setResolution(saved.resolution);
-      setApiEndpoint(saved.apiEndpoint);
+      setApiEndpoint(hydratedEndpoint);
+      setApiEndpointIsCustom(saved.apiEndpointIsCustom);
+      setPendingApiEndpoint(saved.pendingApiEndpoint);
       setAutoBitrate(saved.autoBitrate);
       setMotionMode(saved.motionMode);
       settingsHydratedRef.current = true;
@@ -116,6 +125,8 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       videoCodec,
       resolution,
       apiEndpoint,
+      apiEndpointIsCustom,
+      pendingApiEndpoint,
       autoBitrate,
       motionMode,
     };
@@ -138,11 +149,29 @@ export function useStreamSettings(): UseStreamSettingsReturn {
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [streamFps, bitrateLimit, videoCodec, resolution, apiEndpoint, autoBitrate, motionMode]);
+  }, [
+    streamFps,
+    bitrateLimit,
+    videoCodec,
+    resolution,
+    apiEndpoint,
+    apiEndpointIsCustom,
+    pendingApiEndpoint,
+    autoBitrate,
+    motionMode,
+  ]);
+
+  const activateApiEndpoint = useCallback((endpoint: string): void => {
+    setApiEndpoint(endpoint);
+    setApiEndpointIsCustom(true);
+    setPendingApiEndpoint(null);
+  }, []);
 
   return {
     apiEndpoint,
-    setApiEndpoint,
+    activateApiEndpoint,
+    pendingApiEndpoint,
+    setPendingApiEndpoint,
     livekitUrl,
     setLivekitUrl,
     streamSettingsOpen,
