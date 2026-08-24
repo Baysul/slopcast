@@ -1595,8 +1595,10 @@ mod tests {
         .unwrap_or_else(|error| panic!("delivery start failed: {error}"));
         clock.wait_for_workers();
         submit_color_frame(&ingress, 7);
+        let delivery_deadline = clock.delivery_deadline();
         clock.advance(Duration::from_millis(20));
         old_output.wait_for(1);
+        clock.wait_for_next_delivery_deadline(delivery_deadline);
         let old_bgra = [126_u8; 8 * 8 * 4];
         assert_eq!(
             ingress.submit(CapturedFrame {
@@ -1612,8 +1614,9 @@ mod tests {
             height: 4,
             fps: 60,
         }));
+        let delivery_deadline = clock.delivery_deadline();
         clock.advance(Duration::from_millis(20));
-        thread::yield_now();
+        clock.wait_for_next_delivery_deadline(delivery_deadline);
         assert!(
             new_output
                 .frames
