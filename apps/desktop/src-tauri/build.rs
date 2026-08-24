@@ -4,10 +4,15 @@ use std::path::{Path, PathBuf};
 const FRONTEND_DIST: &str = "../dist/renderer";
 
 fn main() {
-    // Tauri CLI sets this deprecated variable and overrides tauri.conf.json.
+    let windows_attributes = tauri_build::WindowsAttributes::new().static_vc_runtime(false);
+    let attributes = tauri_build::Attributes::new().windows_attributes(windows_attributes);
+
+    // The stable CLI exports this deprecated override and cannot parse the fork's config key.
     // SAFETY: Cargo runs this build script single-threaded before other build work.
     unsafe { std::env::remove_var("STATIC_VCRUNTIME") };
-    tauri_build::build();
+    if let Err(error) = tauri_build::try_build(attributes) {
+        panic!("{error:#}");
+    }
 
     let out_dir = std::env::var_os("OUT_DIR").map(PathBuf::from);
     let Some(out_dir) = out_dir else {
