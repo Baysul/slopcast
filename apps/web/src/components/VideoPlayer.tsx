@@ -13,6 +13,7 @@ import {
 import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { AudioVisualizer, unlockAudioContexts } from './AudioVisualizer';
+import { REPLAY_BLOCKED_MESSAGE } from './replay/replay-ownership';
 import { type UseViewerReplayResult, useViewerReplay } from './replay/use-viewer-replay';
 import {
   REPLAY_LIVE_TOLERANCE_SECONDS,
@@ -727,6 +728,24 @@ const PlayerSettings: React.FC<{
               aria-label="Show telemetry"
             />
           </div>
+
+          {snapshot.availability === 'blocked' && (
+            <div className="border-t border-white/10 pt-4" data-testid="replay-owner-notice">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay</p>
+              <p role="status" className="mt-1 text-xs leading-relaxed text-caption-text">
+                {REPLAY_BLOCKED_MESSAGE}
+              </p>
+            </div>
+          )}
+
+          {snapshot.availability === 'unavailable' && snapshot.unavailableReason && (
+            <div className="border-t border-white/10 pt-4">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay unavailable</p>
+              <p role="status" className="mt-1 text-xs leading-relaxed text-caption-text">
+                {snapshot.unavailableReason}
+              </p>
+            </div>
+          )}
 
           {isReplayAvailable && (
             <div className="space-y-4 border-t border-white/10 pt-4">

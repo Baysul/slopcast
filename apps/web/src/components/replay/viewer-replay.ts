@@ -1,4 +1,5 @@
 import { type BufferedRange, ReplayMediaBuffer } from './replay-media-buffer';
+import { createBrowserReplayOwnership, type ReplayOwnership, type ReplayOwnershipState } from './replay-ownership';
 import { ReplayStore } from './replay-store';
 
 export const REPLAY_DEFAULT_SECONDS = 120;
@@ -14,7 +15,7 @@ const THUMBNAIL_WIDTH = 160;
 const THUMBNAIL_HEIGHT = 90;
 const THUMBNAIL_QUALITY = 0.65;
 
-export type ReplayAvailability = 'checking' | 'available' | 'unavailable';
+export type ReplayAvailability = 'checking' | 'available' | 'blocked' | 'unavailable';
 export type ReplayMode = 'live' | 'replay';
 
 export interface ReplayThumbnail {
@@ -51,7 +52,8 @@ export const readReplayWindowSeconds = (): number => {
     const stored = window.localStorage.getItem(REPLAY_PREFERENCE_KEY);
     if (stored == null) return REPLAY_DEFAULT_SECONDS;
 
-    return sanitizeWindowSeconds(Number(stored));
+    const windowSeconds = sanitizeWindowSeconds(Number(stored));
+    return windowSeconds > 0 ? windowSeconds : REPLAY_DEFAULT_SECONDS;
   } catch (error) {
     console.info('[Replay] Saved replay preference is unavailable; using two minutes:', error);
     return REPLAY_DEFAULT_SECONDS;
@@ -59,6 +61,8 @@ export const readReplayWindowSeconds = (): number => {
 };
 
 const saveReplayWindowSeconds = (value: number): void => {
+  if (value <= 0) return;
+
   try {
     window.localStorage.setItem(REPLAY_PREFERENCE_KEY, String(value));
   } catch (error) {
@@ -178,6 +182,7 @@ export class ViewerReplay {
   private previousChunkEnd = 0;
   private generation = 0;
   private readonly states = new Set<'destroyed' | 'ending'>();
+  private readonly ownership: ReplayOwnership;
 
   constructor(
     private readonly replayVideo: HTMLVideoElement,
@@ -186,6 +191,7 @@ export class ViewerReplay {
     private readonly onChange: (snapshot: ViewerReplaySnapshot) => void,
   ) {
     this.snapshot = createInitialSnapshot(sanitizeWindowSeconds(windowSeconds));
+    this.ownership = createBrowserReplayOwnership(this.handleOwnershipChange);
     this.replayVideo.addEventListener('timeupdate', this.handleReplayTimeUpdate);
     this.replayVideo.addEventListener('ended', this.handleReplayEnded);
   }
@@ -220,11 +226,23 @@ export class ViewerReplay {
       this.markUnavailable(failure);
       return;
     }
-
-    this.update({ availability: 'available', unavailableReason: null });
-    if (this.snapshot.windowSeconds > 0) {
-      await this.beginRecording(generation);
+    if (this.snapshot.windowSeconds === 0) {
+      this.update({ availability: 'available', unavailableReason: null });
+      return;
     }
+
+    const ownershipState = this.ownership.getState();
+    if (ownershipState.status === 'unsupported' || ownershipState.status === 'failed') {
+      this.markUnavailable(ownershipState.reason);
+      return;
+    }
+    if (ownershipState.status === 'owned') {
+      this.update({ availability: 'available', unavailableReason: null });
+      await this.beginRecording(generation);
+      return;
+    }
+
+    this.ownership.claim();
   }
 
   endShare(): void {
@@ -259,17 +277,30 @@ export class ViewerReplay {
       this.mediaBuffer = null;
       this.clearStoredMedia();
       this.releaseThumbnails();
-      this.update({ mode: 'live', range: null, position: 0, preview: null });
+      this.ownership.release();
+      this.update({
+        availability: 'available',
+        unavailableReason: null,
+        mode: 'live',
+        range: null,
+        position: 0,
+        preview: null,
+      });
       return;
     }
 
     this.mediaBuffer?.setWindowSeconds(windowSeconds);
     this.pruneToWindow();
     if (this.stream && !this.recorder) {
-      const generation = this.generation;
-      this.beginRecording(generation).catch((error) => {
-        this.markUnavailable(error instanceof Error ? error.message : 'Replay recording failed');
-      });
+      const ownershipState = this.ownership.getState();
+      if (ownershipState.status === 'owned') {
+        const generation = this.generation;
+        this.beginRecording(generation).catch((error) => {
+          this.markUnavailable(error instanceof Error ? error.message : 'Replay recording failed');
+        });
+        return;
+      }
+      this.ownership.claim();
     }
   }
 
@@ -356,6 +387,7 @@ export class ViewerReplay {
     this.replayVideo.removeEventListener('ended', this.handleReplayEnded);
     this.releaseThumbnails();
     this.clearStoredMedia();
+    this.ownership.destroy();
   }
 
   private async beginRecording(generation: number): Promise<void> {
@@ -639,7 +671,8 @@ export class ViewerReplay {
     this.states.delete('ending');
     const range = this.snapshot.range;
     if (!range) {
-      this.update({ isShareEnded: true, mode: 'live' });
+      this.ownership.release();
+      this.update({ availability: 'available', isShareEnded: true, mode: 'live' });
       return;
     }
 
@@ -677,6 +710,7 @@ export class ViewerReplay {
     this.mediaBuffer = null;
     this.releaseThumbnails();
     this.clearStoredMedia();
+    this.ownership.release();
     this.update({
       availability: 'unavailable',
       unavailableReason: reason,
@@ -705,6 +739,27 @@ export class ViewerReplay {
       .catch((error) => console.warn('[Replay] Failed to clear temporary replay media:', error))
       .finally(() => store.close());
   }
+
+  private readonly handleOwnershipChange = (state: ReplayOwnershipState): void => {
+    if (this.states.has('destroyed')) return;
+    if (state.status === 'waiting') {
+      this.update({ availability: 'blocked', unavailableReason: null });
+      return;
+    }
+    if (state.status === 'owned') {
+      this.update({ availability: 'available', unavailableReason: null });
+      if (!this.stream || this.snapshot.windowSeconds === 0 || this.recorder) return;
+
+      const generation = this.generation;
+      this.beginRecording(generation).catch((error) => {
+        this.markUnavailable(error instanceof Error ? error.message : 'Replay recording failed');
+      });
+      return;
+    }
+    if (state.status === 'unsupported' || state.status === 'failed') {
+      this.markUnavailable(state.reason);
+    }
+  };
 
   private async clearSession(): Promise<void> {
     this.stopRecording();

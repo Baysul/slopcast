@@ -7,6 +7,7 @@
     "dev": "vite",
     "prebuild": "pnpm --filter @slopcast/shared-types build",
     "check": "tsc --noEmit",
+    "test": "node --test \"../../tests/unit/web/*.test.ts\"",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
