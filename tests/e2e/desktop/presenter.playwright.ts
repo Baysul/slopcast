@@ -34,6 +34,8 @@ interface NativeTelemetry {
 interface CaptureStats {
   framesPushed: number;
   previewFramesSent: number;
+  cursorFrames: number;
+  cursorMissing: boolean;
 }
 
 interface PhaseResult {
@@ -55,6 +57,8 @@ interface PhaseResult {
   telemetryFps: number;
   senderBitrateBps: number;
   senderBitrateSampleMs: number;
+  cursorFrames: number;
+  cursorMissing: boolean;
   postSubscriptionTelemetryReady: boolean;
   errors: string[];
 }
@@ -99,6 +103,8 @@ const phase: PhaseResult = {
   telemetryFps: 0,
   senderBitrateBps: 0,
   senderBitrateSampleMs: 0,
+  cursorFrames: 0,
+  cursorMissing: false,
   postSubscriptionTelemetryReady: false,
   errors: [],
 };
@@ -441,6 +447,8 @@ async function main(): Promise<void> {
       phase.encoderImplementation = t1.telemetry.encoderImplementation ?? null;
       phase.captureFramesPushed = t1.stats.framesPushed;
       phase.previewFramesSent = t1.stats.previewFramesSent;
+      phase.cursorFrames = t1.stats.cursorFrames;
+      phase.cursorMissing = t1.stats.cursorMissing;
       const framesDelta = (t1.telemetry.videoFramesEncoded ?? 0) - (t0.telemetry.videoFramesEncoded ?? 0);
       phase.telemetryFps = Math.round(framesDelta / (TELEMETRY_SAMPLE_GAP_MS / 1000));
       phase.telemetryFlowing = framesDelta > 0 && t1.stats.framesPushed > 0;
@@ -460,6 +468,12 @@ async function main(): Promise<void> {
         `Presenter stream ran at ${phase.telemetryFps} fps, expected at least ${minimumFps} fps for a configured ${expectedFps} fps stream`,
       );
       assert(phase.previewFramesSent > 0, 'No preview frames were emitted (previewFramesSent stayed at 0)');
+      if (captureMode === 'portal') {
+        assert(
+          !phase.cursorMissing,
+          `Presenter cursor never composed into the stream (cursorFrames=${phase.cursorFrames})`,
+        );
+      }
 
       const uiFps = await readTelemetryBarFps(page);
       console.log(
