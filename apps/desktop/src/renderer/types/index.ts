@@ -109,6 +109,8 @@ export interface DesktopCaptureStats {
   pacerDrops: number;
   pacerDepth: number;
   pacerMaxDepth: number;
+  cursorFrames: number;
+  cursorMissing: boolean;
 }
 
 export interface GpuInfo {

@@ -20,6 +20,8 @@ export interface StreamTelemetry {
   bitrateHistory: number[];
   elapsedMs: number;
   hasAudio: boolean;
+  cursorFrames: number;
+  cursorMissing: boolean;
 }
 
 export function idleTelemetry(): StreamTelemetry {
@@ -41,6 +43,8 @@ export function idleTelemetry(): StreamTelemetry {
     bitrateHistory: [],
     elapsedMs: 0,
     hasAudio: false,
+    cursorFrames: 0,
+    cursorMissing: false,
   };
 }
 
@@ -143,6 +147,37 @@ const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemet
   );
 };
 
+const CursorCell: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) => {
+  const degrade = t.cursorMissing && t.cursorFrames === 0;
+  let label = '—';
+  if (degrade) {
+    label = 'not in stream';
+  } else if (t.cursorFrames > 0) {
+    label = 'tracked';
+  }
+  return (
+    <div
+      className="flex flex-col gap-1 shrink-0 min-w-0"
+      data-testid="cursor-warning"
+      data-cursor-missing={degrade ? 'true' : 'false'}
+    >
+      <span
+        className={`text-xs font-semibold uppercase tracking-wider leading-none ${
+          degrade ? 'text-destructive/75' : 'text-muted-foreground'
+        }`}
+      >
+        Cursor
+      </span>
+      <span
+        className={`text-sm font-mono font-semibold leading-none ${degrade ? 'text-destructive' : 'text-foreground'}`}
+      >
+        {degrade && <TriangleAlert className="inline size-3 mr-1 -mt-0.5" aria-hidden="true" />}
+        {label}
+      </span>
+    </div>
+  );
+};
+
 export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = React.memo(({ telemetry: t }) => {
   const fpsDegrade = t.frameRate != null && t.targetFrameRate != null && t.frameRate < t.targetFrameRate * 0.75;
   const lossDegrade = t.packetLossPct != null && t.packetLossPct > 1;
@@ -181,6 +216,7 @@ export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = Reac
             degrade={fpsDegrade}
           />
           <TelemetryCell label="Capture" value={<span data-testid="telemetry-capture">{captureValue}</span>} />
+          <CursorCell telemetry={t} />
           <TelemetryCell
             label="Bitrate"
             value={

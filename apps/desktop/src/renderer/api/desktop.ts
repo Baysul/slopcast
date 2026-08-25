@@ -131,6 +131,8 @@ export const desktopApi = {
       pacerDrops: 0,
       pacerDepth: 0,
       pacerMaxDepth: 0,
+      cursorFrames: 0,
+      cursorMissing: false,
     }),
   startCapturePreview: (source?: CaptureSourceSelection): Promise<boolean> =>
     invokeOk('start_capture_preview', source ? { source } : undefined),

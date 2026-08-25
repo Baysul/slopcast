@@ -25,6 +25,8 @@ interface StatsSnapshot {
   audioBps: number | null;
   fps: number | null;
   captureFps: number | null;
+  cursorFrames: number;
+  cursorMissing: boolean;
   packetsSent: number;
   packetsLost: number;
   rttMs: number | null;
@@ -59,11 +61,12 @@ const applyAudioDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPre
   if (db > 0) snap.audioBps = (db * 8) / dt;
 };
 
-async function sampleCaptureFps(prev: {
-  dequeued: number;
-  at: number;
-  init: boolean;
-}): Promise<{ fps: number | null; next: { dequeued: number; at: number; init: boolean } }> {
+async function sampleCaptureFps(prev: { dequeued: number; at: number; init: boolean }): Promise<{
+  fps: number | null;
+  cursorFrames: number;
+  cursorMissing: boolean;
+  next: { dequeued: number; at: number; init: boolean };
+}> {
   const stats = await desktopApi.getVideoCaptureStats();
   const nowMs = performance.now();
   let fps: number | null = null;
@@ -74,6 +77,8 @@ async function sampleCaptureFps(prev: {
   }
   return {
     fps,
+    cursorFrames: stats.cursorFrames,
+    cursorMissing: stats.cursorMissing,
     next: { dequeued: stats.framesDequeued, at: nowMs, init: true },
   };
 }
@@ -87,6 +92,8 @@ const foldNativeTelemetry = (t: NativeTelemetry, prev: StatsPrev): StatsSnapshot
     audioBps: null,
     fps: null,
     captureFps: null,
+    cursorFrames: 0,
+    cursorMissing: false,
     packetsSent: (t.videoPacketsSent ?? 0) + (t.audioPacketsSent ?? 0),
     packetsLost: (t.videoPacketsLost ?? 0) + (t.audioPacketsLost ?? 0),
     rttMs: t.rttMs,
@@ -159,6 +166,8 @@ const telemetryWithoutSender = (
   audioBitrate: null,
   packetLossPct: null,
   captureFps: null,
+  cursorFrames: 0,
+  cursorMissing: false,
 });
 
 const buildTelemetryUpdate = (
@@ -178,6 +187,8 @@ const buildTelemetryUpdate = (
   frameRate: smoothed.sFps ?? p.frameRate,
   videoBitrate: smoothed.sBr ?? p.videoBitrate,
   captureFps: snap.captureFps ?? p.captureFps,
+  cursorFrames: snap.cursorFrames,
+  cursorMissing: snap.cursorMissing,
   audioCodec: snap.audioMime ? codecLabel(snap.audioMime) : p.audioCodec,
   audioBitrate: snap.audioBps ?? p.audioBitrate,
   hasAudio: inputs.hasAudio,
@@ -308,6 +319,8 @@ export function useStreamTelemetry(spectatorCount: number): UseStreamTelemetryRe
         const snap = foldNativeTelemetry(t, statsPrevRef.current);
         const capture = await sampleCaptureFps(capturePrevRef.current);
         snap.captureFps = capture.fps;
+        snap.cursorFrames = capture.cursorFrames;
+        snap.cursorMissing = capture.cursorMissing;
         capturePrevRef.current = capture.next;
         const smoothed = smoothTelemetry(snap, fpsBuf, brBuf, bitrateHistoryRef.current);
         bitrateHistoryRef.current = smoothed.bitrateHistory;
