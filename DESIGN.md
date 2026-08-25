@@ -281,7 +281,7 @@ Borders are thin (1px), semi-transparent (0.5–0.8 opacity), and always the bor
 - **Control buttons:** `bg-black/30 hover:bg-black/50 rounded-xl backdrop-blur-sm` — 12px radius, translucent black, glass blur. Focus ring: `focus-visible:ring-2 focus-visible:ring-safelight/70`.
 - **Player settings:** The settings popover is always available. It contains the spectator telemetry switch and, when supported, replay-window controls.
 - **Replay timeline:** The visible rail stays 4px high inside a 44px vertical pointer target. Passive `LIVE` labels do not appear below the rail. Behind-live time, the `Go Live` action, and the ended state remain visible when relevant.
-- **Audio Visualizer:** Canvas-based frequency bars rendered in Safelight alpha ramp. 80×20px module in the top-right of the player; on fullBleed it sits at `top-4 right-16`.
+- **Audio Visualizer:** Shared desktop/web waveform bars rendered symmetrically around a center line in the Safelight alpha ramp. The spectator player places the draggable module at `top-4 right-16` by default and keeps it above overlapping playback controls.
 
 ### Stream Telemetry
 - **Desktop presenter:** A glass control bar sits over the bottom of the preview (`from-black/95 via-black/75`). It shows codec, resolution, frame rate, bitrate, packet loss, audio, a 48-second bitrate sparkline, and elapsed time.

@@ -1,5 +1,6 @@
+import { type AudioLevelSubscription, AudioVisualizer as SharedAudioVisualizer } from '@slopcast/ui';
 import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 declare global {
   interface Window {
@@ -8,10 +9,11 @@ declare global {
 }
 
 interface AudioVisualizerProps {
-  mediaStream: MediaStream | null;
+  mediaStream: MediaStream;
   playerRef: React.RefObject<HTMLDivElement | null>;
   className?: string;
   showStatus?: boolean;
+  onInteraction?: (() => void) | undefined;
 }
 
 interface RelativePosition {
@@ -32,13 +34,11 @@ const AUDIO_UNLOCK_EVENT = 'slopcast-audio-unlock';
 const POSITION_STORAGE_KEY = 'slopcast:audio-visualizer-position';
 const DRAG_THRESHOLD = 3;
 const DOUBLE_TAP_DELAY_MS = 350;
+const SAMPLE_INTERVAL_MS = 1000 / 30;
 
-const CANVAS_WIDTH = 80;
-const CANVAS_HEIGHT = 20;
-
-export function unlockAudioContexts() {
+export const unlockAudioContexts = (): void => {
   window.dispatchEvent(new CustomEvent(AUDIO_UNLOCK_EVENT));
-}
+};
 
 const isRelativePosition = (position: RelativePosition): boolean =>
   Number.isFinite(position.x) &&
@@ -82,7 +82,6 @@ const clamp = (value: number, maximum: number): number => Math.min(maximum, Math
 
 const getPositionStyle = (position: RelativePosition | null): React.CSSProperties | undefined => {
   if (!position) return undefined;
-
   return {
     left: `${position.x * 100}%`,
     top: `${position.y * 100}%`,
@@ -90,108 +89,71 @@ const getPositionStyle = (position: RelativePosition | null): React.CSSPropertie
   };
 };
 
-const createAudioContext = (): AudioContext | null => {
-  const ACtor = window.AudioContext ?? window.webkitAudioContext;
-  if (!ACtor) return null;
-  const audioCtx = new ACtor();
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume().catch((err) => {
-      console.warn('[AudioVisualizer] AudioContext resume failed:', err);
-    });
-  }
-  return audioCtx;
-};
+const createMediaStreamSubscription =
+  (mediaStream: MediaStream): AudioLevelSubscription =>
+  (listener) => {
+    const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
+    if (!AudioContextConstructor || mediaStream.getAudioTracks().length === 0) return () => undefined;
 
-const hasSignal = (data: Uint8Array<ArrayBuffer>): boolean => {
-  for (const value of data) {
-    if (value > 0) return true;
-  }
-  return false;
-};
-
-const drawBars = (ctx: CanvasRenderingContext2D, data: Uint8Array<ArrayBuffer>): void => {
-  ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-  const barWidth = (CANVAS_WIDTH / data.length) * 1.5;
-  let x = 0;
-  for (const value of data) {
-    const barHeight = (value / 255) * CANVAS_HEIGHT;
-    const alpha = 0.3 + (value / 255) * 0.7;
-    ctx.fillStyle = `rgba(196, 128, 74, ${alpha})`;
-    ctx.fillRect(x, CANVAS_HEIGHT - barHeight, barWidth - 2, barHeight);
-    x += barWidth + 1;
-  }
-};
-
-interface Pipeline {
-  analyser: AnalyserNode;
-  dataArray: Uint8Array<ArrayBuffer>;
-  ctx: CanvasRenderingContext2D;
-}
-
-const initPipeline = (canvas: HTMLCanvasElement, audioCtx: AudioContext, mediaStream: MediaStream): Pipeline | null => {
-  const analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 64;
-
-  const source = audioCtx.createMediaStreamSource(mediaStream);
-  source.connect(analyser);
-
-  const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = CANVAS_WIDTH * dpr;
-  canvas.height = CANVAS_HEIGHT * dpr;
-  ctx.scale(dpr, dpr);
-
-  return { analyser, dataArray, ctx };
-};
-
-const createDrawLoop = (pipeline: Pipeline, frameRef: { current: number }): (() => void) => {
-  let wasSilent = false;
-  const loop = () => {
-    frameRef.current = requestAnimationFrame(loop);
-    if (document.hidden) return;
-
-    pipeline.analyser.getByteFrequencyData(pipeline.dataArray);
-
-    if (!hasSignal(pipeline.dataArray)) {
-      if (!wasSilent) {
-        pipeline.ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-        wasSilent = true;
-      }
-      return;
+    let audioContext: AudioContext;
+    try {
+      audioContext = new AudioContextConstructor();
+    } catch (error) {
+      console.error('[AudioVisualizer] Failed to initialize AudioContext:', error);
+      return () => undefined;
     }
-    wasSilent = false;
 
-    drawBars(pipeline.ctx, pipeline.dataArray);
+    const analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    const levels = new Float32Array(256);
+    let animationFrame = 0;
+    let lastSampleAt = 0;
+    analyser.fftSize = levels.length;
+    source.connect(analyser);
+
+    const resumeAudio = (): void => {
+      if (audioContext.state !== 'suspended') return;
+      audioContext.resume().catch((error) => {
+        console.warn('[AudioVisualizer] AudioContext resume failed:', error);
+      });
+    };
+    const sample = (now: number): void => {
+      animationFrame = requestAnimationFrame(sample);
+      if (document.hidden || now - lastSampleAt < SAMPLE_INTERVAL_MS) return;
+
+      lastSampleAt = now;
+      analyser.getFloatTimeDomainData(levels);
+      listener(levels);
+    };
+
+    resumeAudio();
+    window.addEventListener(AUDIO_UNLOCK_EVENT, resumeAudio);
+    animationFrame = requestAnimationFrame(sample);
+    return () => {
+      window.removeEventListener(AUDIO_UNLOCK_EVENT, resumeAudio);
+      cancelAnimationFrame(animationFrame);
+      source.disconnect();
+      analyser.disconnect();
+      if (audioContext.state === 'closed') return;
+      audioContext.close().catch((error) => {
+        console.warn('[AudioVisualizer] AudioContext close failed:', error);
+      });
+    };
   };
-  return loop;
-};
 
-const startPipeline = (
-  canvas: HTMLCanvasElement,
-  mediaStream: MediaStream,
-  frameRef: { current: number },
-): AudioContext | null => {
-  const audioCtx = createAudioContext();
-  if (!audioCtx) return null;
-
-  const pipeline = initPipeline(canvas, audioCtx, mediaStream);
-  if (!pipeline) return null;
-
-  createDrawLoop(pipeline, frameRef)();
-  return audioCtx;
-};
-
-export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, playerRef, className, showStatus }) => {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
+  mediaStream,
+  playerRef,
+  className,
+  showStatus,
+  onInteraction,
+}) => {
   const visualizerRef = useRef<HTMLDivElement | null>(null);
   const dragSessionRef = useRef<DragSession | null>(null);
   const lastTapTimeRef = useRef(0);
   const [position, setPosition] = useState<RelativePosition | null>(readSavedPosition);
   const positionRef = useRef(position);
+  const subscribe = useMemo(() => createMediaStreamSubscription(mediaStream), [mediaStream]);
 
   const resetPosition = (): void => {
     positionRef.current = null;
@@ -215,7 +177,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, p
       grabOffsetY: event.clientY - visualizerBounds.top,
       hasMoved: false,
     };
-
+    onInteraction?.();
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -243,10 +205,10 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, p
       x: maximumLeft === 0 ? 0 : left / maximumLeft,
       y: maximumTop === 0 ? 0 : top / maximumTop,
     };
-
     dragSession.hasMoved = true;
     positionRef.current = nextPosition;
     setPosition(nextPosition);
+    onInteraction?.();
     event.preventDefault();
     event.stopPropagation();
   };
@@ -283,54 +245,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, p
     resetPosition();
   };
 
-  useEffect(() => {
-    if (!mediaStream || mediaStream.getAudioTracks().length === 0) return;
-
-    const frameRef = { current: 0 };
-    let audioCtx: AudioContext | null = null;
-    let started = false;
-
-    const startVisualizer = () => {
-      if (started || !mediaStream || mediaStream.getAudioTracks().length === 0) return;
-
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-
-      try {
-        const nextCtx = startPipeline(canvas, mediaStream, frameRef);
-        if (!nextCtx) return;
-        audioCtx = nextCtx;
-        started = true;
-      } catch (err) {
-        console.error('[AudioVisualizer] Failed to initialize AudioContext:', err);
-      }
-    };
-
-    startVisualizer();
-
-    const onUnlock = () => {
-      if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume().catch((err) => {
-          console.warn('[AudioVisualizer] AudioContext resume failed:', err);
-        });
-      }
-      startVisualizer();
-    };
-    window.addEventListener(AUDIO_UNLOCK_EVENT, onUnlock);
-
-    return () => {
-      window.removeEventListener(AUDIO_UNLOCK_EVENT, onUnlock);
-      cancelAnimationFrame(frameRef.current);
-      if (audioCtx && audioCtx.state !== 'closed') {
-        audioCtx.close().catch((err) => {
-          console.warn('[AudioVisualizer] AudioContext close failed:', err);
-        });
-      }
-    };
-  }, [mediaStream]);
-
   const placementClass = position ? '' : 'top-4 right-16';
-
   return (
     <div
       ref={visualizerRef}
@@ -353,7 +268,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, p
         </span>
       )}
       <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Audio</span>
-      <canvas ref={canvasRef} width={80} height={20} className="rounded overflow-hidden" />
+      <SharedAudioVisualizer subscribe={subscribe} />
     </div>
   );
 };
