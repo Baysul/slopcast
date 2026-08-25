@@ -60,6 +60,10 @@ _Avoid_: frame processing, capture pipeline
 The width, height, frame rate, and live state that govern frame delivery.
 _Avoid_: publication target, stream target, scale target
 
+**Presenter cursor**:
+The presenter's native pointer within a selected display or window. It appears in both the presenter preview and spectator video throughout a share interval.
+_Avoid_: mouse cursor, pointer overlay
+
 **Publisher session**:
 The lifetime of one presenter publication connection through dormant, connected, recovery, and shutdown states.
 _Avoid_: publisher worker, lifecycle loop
