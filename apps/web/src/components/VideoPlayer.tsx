@@ -29,6 +29,7 @@ import {
 import { Button } from './ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Slider } from './ui/slider';
+import { Switch } from './ui/switch';
 
 interface VideoPlayerProps {
   mediaStream: MediaStream | null;
@@ -45,6 +46,24 @@ interface VideoPlayerProps {
 
 const STATS_POLL_MS = 2000;
 const MAX_PRESENTATION_TRACE_FRAMES = 20_000;
+const TELEMETRY_VISIBILITY_STORAGE_KEY = 'slopcast:spectator-telemetry-visible';
+
+const readTelemetryVisibility = (): boolean => {
+  try {
+    return window.localStorage.getItem(TELEMETRY_VISIBILITY_STORAGE_KEY) === 'true';
+  } catch (error) {
+    console.warn('[VideoPlayer] Could not read the telemetry preference:', error);
+    return false;
+  }
+};
+
+const saveTelemetryVisibility = (isVisible: boolean): void => {
+  try {
+    window.localStorage.setItem(TELEMETRY_VISIBILITY_STORAGE_KEY, String(isVisible));
+  } catch (error) {
+    console.warn('[VideoPlayer] Could not save the telemetry preference:', error);
+  }
+};
 
 interface PresentationFrame {
   callbackTime: number;
@@ -194,41 +213,39 @@ interface SpectatorTelemetryState {
 }
 
 const useSpectatorTelemetry = (
+  isVisible: boolean,
   isLive: boolean,
   getStatsFn: (() => Promise<RTCStatsReport | null>) | undefined,
   mediaStream: MediaStream | null,
 ): SpectatorTelemetryState => {
   const [telemetry, setTelemetry] = useState<SpectatorTelemetry | null>(null);
-  const statsPrevRef = useRef<ReturnType<typeof createStatsPrev>>(null);
-  const telemetryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (telemetryPollRef.current) {
-      clearInterval(telemetryPollRef.current);
-      telemetryPollRef.current = null;
-    }
-    statsPrevRef.current = null;
     setTelemetry(null);
+    if (!isVisible || !isLive || !getStatsFn) return;
 
-    if (!isLive || !getStatsFn) return;
-
-    telemetryPollRef.current = setInterval(async () => {
+    let isCancelled = false;
+    let statsPrev: ReturnType<typeof createStatsPrev> = null;
+    const pollTelemetry = async (): Promise<void> => {
       const report = await getStatsFn();
-      if (!report) return;
+      if (!report || isCancelled) return;
 
-      const hasAudio = mediaStream?.getAudioTracks().some((t) => t.enabled) ?? false;
-      const t = computeTelemetry(report, statsPrevRef.current, hasAudio);
-      statsPrevRef.current = createStatsPrev(report) ?? statsPrevRef.current;
-      setTelemetry(t);
+      const hasAudio = mediaStream?.getAudioTracks().some((track) => track.enabled) ?? false;
+      const nextTelemetry = computeTelemetry(report, statsPrev, hasAudio);
+      statsPrev = createStatsPrev(report) ?? statsPrev;
+
+      setTelemetry(nextTelemetry);
+    };
+    const interval = setInterval(() => {
+      void pollTelemetry();
     }, STATS_POLL_MS);
 
+    void pollTelemetry();
     return () => {
-      if (telemetryPollRef.current) {
-        clearInterval(telemetryPollRef.current);
-        telemetryPollRef.current = null;
-      }
+      isCancelled = true;
+      clearInterval(interval);
     };
-  }, [isLive, getStatsFn, mediaStream]);
+  }, [isVisible, isLive, getStatsFn, mediaStream]);
 
   return { telemetry };
 };
@@ -552,13 +569,10 @@ const ReplayTimeline: React.FC<{
     previewPercent = ((previewPosition - range.start) / (range.end - range.start)) * 100;
   }
   let positionStatus = replayPositionLabel(snapshot, position);
-  let edgeStatus = 'LIVE';
-  let edgeStatusClass = 'text-safelight';
   if (snapshot.isShareEnded) {
     positionStatus = 'Stream ended';
-    edgeStatus = 'ENDED';
-    edgeStatusClass = 'text-white/45';
   }
+  const shouldShowPositionStatus = positionStatus !== 'LIVE';
 
   const seekByKeyboard = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     let target: number | null = null;
@@ -640,91 +654,119 @@ const ReplayTimeline: React.FC<{
             setDragPosition(null);
             if (next != null) replay.seek(next, isPlaying);
           }}
-          className="[&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-range]]:bg-white/70 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-white/80 [&_[data-slot=slider-thumb]]:bg-white"
+          className="h-11 [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-range]]:bg-white/70 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-white/80 [&_[data-slot=slider-thumb]]:bg-white"
         />
       </div>
 
-      <div className="flex items-center justify-between gap-3 text-xs font-mono tabular-nums text-white/55">
+      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-xs font-mono tabular-nums text-white/55">
         <span>-{formatReplayTime(range.end - range.start)}</span>
-        <span role="status" aria-live="polite" className="min-w-0 truncate text-center text-white/75">
-          {positionStatus}
-        </span>
+        {shouldShowPositionStatus ? (
+          <span role="status" aria-live="polite" className="min-w-0 truncate text-center text-white/75">
+            {positionStatus}
+          </span>
+        ) : (
+          <span aria-hidden="true" />
+        )}
         {isBehindLive && !snapshot.isShareEnded ? (
           <button
             type="button"
             onClick={replay.goLive}
-            className="font-sans font-semibold text-safelight hover:text-safelight-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 rounded-sm"
+            className="justify-self-end rounded-sm font-sans font-semibold text-safelight hover:text-safelight-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
           >
             Go Live
           </button>
         ) : (
-          <span className={edgeStatusClass}>{edgeStatus}</span>
+          <span aria-hidden="true" />
         )}
       </div>
     </div>
   );
 };
 
-const ReplaySettings: React.FC<{
+const PlayerSettings: React.FC<{
   replay: UseViewerReplayResult;
   controlClass: string;
-}> = ({ replay, controlClass }) => {
+  isTelemetryVisible: boolean;
+  onTelemetryVisibilityChange: (isVisible: boolean) => void;
+}> = ({ replay, controlClass, isTelemetryVisible, onTelemetryVisibilityChange }) => {
   const { snapshot } = replay;
-  if (snapshot.availability !== 'available') return null;
-
+  const isReplayAvailable = snapshot.availability === 'available';
   const settingLabel = snapshot.windowSeconds === 0 ? 'Off' : formatReplayTime(snapshot.windowSeconds);
   const retainedSeconds = snapshot.range ? snapshot.range.end - snapshot.range.start : 0;
 
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <button type="button" className={controlClass} title="Replay settings" aria-label="Replay settings">
+        <button type="button" className={controlClass} title="Player settings" aria-label="Player settings">
           <Settings2 className="w-4 h-4" />
         </button>
       </PopoverTrigger>
       <PopoverContent
-        aria-label="Replay settings"
+        aria-label="Player settings"
         side="top"
         align="end"
         sideOffset={12}
         className="w-72 border-white/10 bg-black/90 text-foreground backdrop-blur-md shadow-xl"
       >
         <div className="space-y-4">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay window</p>
-              <p className="mt-1 text-xs leading-relaxed text-caption-text">Temporary media stays in this tab.</p>
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <label
+                htmlFor="spectator-telemetry"
+                className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+              >
+                Telemetry
+              </label>
+              <p className="mt-1 text-xs leading-relaxed text-caption-text">Show incoming stream statistics.</p>
             </div>
-            <span className="text-sm font-mono font-semibold tabular-nums text-foreground">{settingLabel}</span>
+            <Switch
+              id="spectator-telemetry"
+              data-testid="spectator-telemetry-toggle"
+              checked={isTelemetryVisible}
+              onCheckedChange={onTelemetryVisibilityChange}
+              aria-label="Show telemetry"
+            />
           </div>
 
-          <Slider
-            min={0}
-            max={REPLAY_MAX_SECONDS}
-            step={REPLAY_STEP_SECONDS}
-            value={[snapshot.windowSeconds]}
-            aria-label="Replay buffer duration"
-            aria-valuetext={settingLabel}
-            onValueChange={(values) => {
-              const next = values[0];
-              if (next != null) replay.setWindowSeconds(next);
-            }}
-          />
+          {isReplayAvailable && (
+            <div className="space-y-4 border-t border-white/10 pt-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay window</p>
+                  <p className="mt-1 text-xs leading-relaxed text-caption-text">Temporary media stays in this tab.</p>
+                </div>
+                <span className="text-sm font-mono font-semibold tabular-nums text-foreground">{settingLabel}</span>
+              </div>
 
-          <div className="flex justify-between text-xs text-caption-text">
-            <span>Off</span>
-            <span>5 min</span>
-          </div>
+              <Slider
+                min={0}
+                max={REPLAY_MAX_SECONDS}
+                step={REPLAY_STEP_SECONDS}
+                value={[snapshot.windowSeconds]}
+                aria-label="Replay buffer duration"
+                aria-valuetext={settingLabel}
+                onValueChange={(values) => {
+                  const next = values[0];
+                  if (next != null) replay.setWindowSeconds(next);
+                }}
+              />
 
-          {snapshot.limitationReason && (
-            <p role="status" className="text-xs leading-relaxed text-safelight">
-              {snapshot.limitationReason}
-            </p>
-          )}
-          {!snapshot.limitationReason && retainedSeconds > 0 && snapshot.windowSeconds > 0 && (
-            <p className="text-xs leading-relaxed text-caption-text">
-              {formatReplayTime(retainedSeconds)} currently available
-            </p>
+              <div className="flex justify-between text-xs text-caption-text">
+                <span>Off</span>
+                <span>5 min</span>
+              </div>
+
+              {snapshot.limitationReason && (
+                <p role="status" className="text-xs leading-relaxed text-safelight">
+                  {snapshot.limitationReason}
+                </p>
+              )}
+              {!snapshot.limitationReason && retainedSeconds > 0 && snapshot.windowSeconds > 0 && (
+                <p className="text-xs leading-relaxed text-caption-text">
+                  {formatReplayTime(retainedSeconds)} currently available
+                </p>
+              )}
+            </div>
           )}
         </div>
       </PopoverContent>
@@ -734,6 +776,8 @@ const ReplaySettings: React.FC<{
 
 const MediaControls: React.FC<{
   telemetry: SpectatorTelemetry | null;
+  isTelemetryVisible: boolean;
+  onTelemetryVisibilityChange: (isVisible: boolean) => void;
   replay: UseViewerReplayResult;
   isPlaying: boolean;
   isMuted: boolean;
@@ -747,6 +791,8 @@ const MediaControls: React.FC<{
   overlayClass: string;
 }> = ({
   telemetry,
+  isTelemetryVisible,
+  onTelemetryVisibilityChange,
   replay,
   isPlaying,
   isMuted,
@@ -779,7 +825,7 @@ const MediaControls: React.FC<{
         {showTimeline && <ReplayTimeline replay={replay} isPlaying={isPlaying} />}
 
         <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
-          {telemetry?.hasVideo && (
+          {isTelemetryVisible && telemetry?.hasVideo && (
             <div className="min-w-0">
               <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Incoming</p>
               <SpectatorTelemetryBar telemetry={telemetry} />
@@ -819,7 +865,12 @@ const MediaControls: React.FC<{
               />
             </div>
 
-            <ReplaySettings replay={replay} controlClass={controlClass} />
+            <PlayerSettings
+              replay={replay}
+              controlClass={controlClass}
+              isTelemetryVisible={isTelemetryVisible}
+              onTelemetryVisibilityChange={onTelemetryVisibilityChange}
+            />
 
             {onResync && (
               <button
@@ -943,8 +994,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const replayVideoRef = useRef<HTMLVideoElement | null>(null);
   const captureVideoRef = useRef<HTMLVideoElement | null>(null);
   const isFullscreen = propIsFullscreen ?? false;
+  const [isTelemetryVisible, setIsTelemetryVisible] = useState(readTelemetryVisibility);
   const replay = useViewerReplay({ mediaStream, isLive, replayVideoRef, captureVideoRef });
-  const { telemetry } = useSpectatorTelemetry(isLive, getStatsFn, mediaStream);
+  const { telemetry } = useSpectatorTelemetry(isTelemetryVisible, isLive, getStatsFn, mediaStream);
   const {
     containerRef,
     isPlaying,
@@ -961,6 +1013,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   } = usePlaybackControls(mediaStream, fullBleed, liveVideoRef, replayVideoRef, replay);
   usePlaybackDiagnostics(liveVideoRef);
 
+  const handleTelemetryVisibilityChange = (isVisible: boolean): void => {
+    setIsTelemetryVisible(isVisible);
+    saveTelemetryVisibility(isVisible);
+  };
   const overlayControlsClass = getOverlayClass(isFullscreen, showFullscreenControls);
   const hasReplay = replay.snapshot.availability === 'available' && replay.snapshot.range != null;
   const isShowingReplay = replay.snapshot.mode === 'replay' && hasReplay;
@@ -1005,6 +1061,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       <MediaControls
         telemetry={telemetry}
+        isTelemetryVisible={isTelemetryVisible}
+        onTelemetryVisibilityChange={handleTelemetryVisibilityChange}
         replay={replay}
         isPlaying={isPlaying}
         isMuted={isMuted}
