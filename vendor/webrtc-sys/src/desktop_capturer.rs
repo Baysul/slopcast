@@ -40,6 +40,12 @@ pub mod ffi {
         allow_sck_system_picker: bool,
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct CursorStats {
+        frames_delivered: u64,
+        frames_with_cursor: u64,
+    }
+
     enum CaptureResult {
         Success,
         ErrorTemporary,
@@ -64,6 +70,9 @@ pub mod ffi {
         fn left(self: &DesktopFrame) -> i32;
         fn top(self: &DesktopFrame) -> i32;
         fn data(self: &DesktopFrame) -> *const u8;
+
+        fn get_cursor_stats() -> CursorStats;
+        fn reset_cursor_stats();
     }
 
     extern "Rust" {

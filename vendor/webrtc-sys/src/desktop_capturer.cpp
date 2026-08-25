@@ -23,6 +23,23 @@ using SourceList = webrtc::DesktopCapturer::SourceList;
 
 namespace livekit_ffi {
 
+// Counters for cursor composition observability. The compose decision happens
+// inside libwebrtc (DesktopAndCursorComposer may_contain_cursor gate), so the
+// only truth we can expose is what the frame reports after composition: whether
+// the frame claims to contain a cursor and how many frames were delivered.
+// These are process-wide because the Rust side resets them per capture session.
+static uint64_t g_frames_delivered = 0;
+static uint64_t g_frames_with_cursor = 0;
+
+CursorStats get_cursor_stats() {
+  return CursorStats{g_frames_delivered, g_frames_with_cursor};
+}
+
+void reset_cursor_stats() {
+  g_frames_delivered = 0;
+  g_frames_with_cursor = 0;
+}
+
 std::unique_ptr<DesktopCapturer> new_desktop_capturer(
     DesktopCapturerOptions options) {
   webrtc::DesktopCaptureOptions webrtc_options =
@@ -50,9 +67,20 @@ std::unique_ptr<DesktopCapturer> new_desktop_capturer(
   webrtc_options.set_allow_pipewire(true);
 #endif /* WEBRTC_USE_PIPEWIRE */
 
-  // prefer_cursor_embedded indicate that the capturer should try to include the
-  // cursor in the frame
-  webrtc_options.set_prefer_cursor_embedded(options.include_cursor);
+  // prefer_cursor_embedded asks the OS capturer to paint the cursor into the
+  // frame pixels. WGC honors it and paints the cursor natively. The PipeWire
+  // capturer in m144 must NOT get this flag: BaseCapturerPipeWire forwards it
+  // into SharedScreenCastStream, which then marks every frame
+  // may_contain_cursor=true, while ScreenCastPortal ignores it and still
+  // negotiates cursor_mode=metadata with the compositor. The frame claims to
+  // contain a cursor it does not contain, so DesktopAndCursorComposer skips
+  // the alpha-blend of the SPA_META_Cursor metadata. Keeping it false on the
+  // PipeWire arm lets the composer do the blend instead.
+  bool prefer_embedded = options.include_cursor;
+#if defined(WEBRTC_USE_PIPEWIRE) && !defined(WEBRTC_MAC) && !defined(_WIN64)
+  prefer_embedded = false;
+#endif
+  webrtc_options.set_prefer_cursor_embedded(prefer_embedded);
 
   std::unique_ptr<webrtc::DesktopCapturer> capturer = nullptr;
   switch (options.source_type) {
@@ -105,6 +133,13 @@ void DesktopCapturer::start(
 void DesktopCapturer::OnCaptureResult(
     webrtc::DesktopCapturer::Result result,
     std::unique_ptr<webrtc::DesktopFrame> frame) {
+  if (result == webrtc::DesktopCapturer::Result::SUCCESS && frame) {
+    g_frames_delivered++;
+    if (frame->may_contain_cursor()) {
+      g_frames_with_cursor++;
+    }
+  }
+
   CaptureResult ret_result = CaptureResult::ErrorPermanent;
   switch (result) {
     case webrtc::DesktopCapturer::Result::SUCCESS:

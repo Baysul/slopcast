@@ -69,4 +69,10 @@ class DesktopFrame {
 };
 
 std::unique_ptr<DesktopCapturer> new_desktop_capturer(DesktopCapturerOptions options);
+
+// Process-wide cursor composition counters for the active capture session.
+// The Rust side resets them around each session and merges them into its
+// desktop capture stats.
+CursorStats get_cursor_stats();
+void reset_cursor_stats();
 }  // namespace livekit_ffi
