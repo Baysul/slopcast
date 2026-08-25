@@ -5,8 +5,8 @@ import { readReplayWindowSeconds, ViewerReplay, type ViewerReplaySnapshot } from
 interface UseViewerReplayOptions {
   mediaStream: MediaStream | null;
   isLive: boolean;
+  liveVideoRef: React.RefObject<HTMLVideoElement | null>;
   replayVideoRef: React.RefObject<HTMLVideoElement | null>;
-  captureVideoRef: React.RefObject<HTMLVideoElement | null>;
 }
 
 export interface UseViewerReplayResult {
@@ -23,8 +23,8 @@ export interface UseViewerReplayResult {
 export const useViewerReplay = ({
   mediaStream,
   isLive,
+  liveVideoRef,
   replayVideoRef,
-  captureVideoRef,
 }: UseViewerReplayOptions): UseViewerReplayResult => {
   const [initialWindow] = useState(readReplayWindowSeconds);
   const [snapshot, setSnapshot] = useState<ViewerReplaySnapshot>(() => ({
@@ -44,11 +44,11 @@ export const useViewerReplay = ({
   const activeStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
+    const liveVideo = liveVideoRef.current;
     const replayVideo = replayVideoRef.current;
-    const captureVideo = captureVideoRef.current;
-    if (!replayVideo || !captureVideo) return;
+    if (!liveVideo || !replayVideo) return;
 
-    const controller = new ViewerReplay(replayVideo, captureVideo, initialWindow, setSnapshot);
+    const controller = new ViewerReplay(replayVideo, liveVideo, initialWindow, setSnapshot);
     const handlePageHide = (event: PageTransitionEvent): void => {
       if (!event.persisted) controller.destroy();
     };
@@ -62,7 +62,7 @@ export const useViewerReplay = ({
       controllerRef.current = null;
       activeStreamRef.current = null;
     };
-  }, [captureVideoRef, initialWindow, replayVideoRef]);
+  }, [initialWindow, liveVideoRef, replayVideoRef]);
 
   useEffect(() => {
     const controller = controllerRef.current;

@@ -42,7 +42,8 @@ interface VideoPlayerProps {
   decoderStalled?: boolean;
   stalledCodec?: string | null;
   isFullscreen?: boolean;
-  showFullscreenControls?: boolean;
+  showControls?: boolean;
+  onControlsActivity?: () => void;
 }
 
 const STATS_POLL_MS = 2000;
@@ -181,12 +182,8 @@ async function playWithMuteFallback(video: HTMLVideoElement): Promise<boolean> {
   }
 }
 
-const getOverlayClass = (isFullscreen: boolean, showFullscreenControls: boolean): string => {
-  if (isFullscreen) {
-    return showFullscreenControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none';
-  }
-  return 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto';
-};
+const getOverlayClass = (showControls: boolean): string =>
+  showControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none';
 
 const applyPlayResult = (
   video: HTMLVideoElement,
@@ -557,6 +554,7 @@ const ReplayTimeline: React.FC<{
   const { snapshot } = replay;
   const range = snapshot.range;
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const timelineBoundsRef = useRef<DOMRect | null>(null);
   const [dragPosition, setDragPosition] = useState<number | null>(null);
   const [hoverPosition, setHoverPosition] = useState<number | null>(null);
   if (!range) return null;
@@ -593,73 +591,74 @@ const ReplayTimeline: React.FC<{
   };
 
   const updatePointerPreview = (event: React.PointerEvent<HTMLDivElement>): void => {
-    const rect = timelineRef.current?.getBoundingClientRect();
-    if (!rect || rect.width === 0) return;
+    const bounds = timelineBoundsRef.current ?? timelineRef.current?.getBoundingClientRect();
+    if (!bounds || bounds.width === 0) return;
 
-    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    timelineBoundsRef.current = bounds;
+    const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
     const mediaTime = range.start + ratio * (range.end - range.start);
     setHoverPosition(mediaTime);
     replay.preview(mediaTime);
   };
 
   const clearPointerPreview = (): void => {
+    timelineBoundsRef.current = null;
     setHoverPosition(null);
     replay.preview(null);
   };
 
   return (
-    <div className="w-full space-y-2" data-replay-timeline="true">
-      <div
-        ref={timelineRef}
-        className="relative pt-16"
-        onPointerMove={updatePointerPreview}
-        onPointerLeave={clearPointerPreview}
-      >
-        {previewPosition != null && (
-          <div
-            className="absolute top-0 -translate-x-1/2 pointer-events-none"
-            style={{ left: `${Math.min(92, Math.max(8, previewPercent))}%` }}
-          >
-            <div className="overflow-hidden rounded-md border border-white/15 bg-black/90 shadow-lg">
-              {snapshot.preview && (
-                <img
-                  src={snapshot.preview.url}
-                  alt=""
-                  className="block aspect-video w-40 object-contain bg-black"
-                  aria-hidden="true"
-                />
-              )}
-              <div className="px-2 py-1 text-center text-xs font-mono tabular-nums text-foreground">
-                {replayPositionLabel(snapshot, previewPosition)}
-              </div>
+    <div
+      ref={timelineRef}
+      className="relative h-11 w-full"
+      data-replay-timeline="true"
+      onPointerMove={updatePointerPreview}
+      onPointerLeave={clearPointerPreview}
+    >
+      {previewPosition != null && (
+        <div
+          className="pointer-events-none absolute bottom-[calc(50%+0.75rem)] z-10 -translate-x-1/2"
+          style={{ left: `clamp(8rem, ${previewPercent}%, calc(100% - 8rem))` }}
+        >
+          <div className="overflow-hidden rounded-md border border-white/15 bg-black/90 shadow-lg">
+            {snapshot.preview && (
+              <img
+                src={snapshot.preview.url}
+                alt=""
+                className="block aspect-video w-56 max-w-[calc(100vw-2rem)] bg-black object-contain sm:w-64"
+                aria-hidden="true"
+              />
+            )}
+            <div className="px-2 py-1 text-center text-xs font-mono tabular-nums text-foreground">
+              {replayPositionLabel(snapshot, previewPosition)}
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-        <Slider
-          min={range.start}
-          max={range.end}
-          step={0.1}
-          value={[position]}
-          aria-label="Replay position"
-          aria-valuetext={replayPositionLabel(snapshot, position)}
-          onKeyDown={seekByKeyboard}
-          onValueChange={(values) => {
-            const next = values[0];
-            if (next == null) return;
-            setDragPosition(next);
-            replay.preview(next);
-          }}
-          onValueCommit={(values) => {
-            const next = values[0];
-            setDragPosition(null);
-            if (next != null) replay.seek(next, isPlaying);
-          }}
-          className="h-11 [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-range]]:bg-white/70 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-white/80 [&_[data-slot=slider-thumb]]:bg-white"
-        />
-      </div>
+      <Slider
+        min={range.start}
+        max={range.end}
+        step={0.1}
+        value={[position]}
+        aria-label="Replay position"
+        aria-valuetext={replayPositionLabel(snapshot, position)}
+        onKeyDown={seekByKeyboard}
+        onValueChange={(values) => {
+          const next = values[0];
+          if (next == null) return;
+          setDragPosition(next);
+          replay.preview(next);
+        }}
+        onValueCommit={(values) => {
+          const next = values[0];
+          setDragPosition(null);
+          if (next != null) replay.seek(next, isPlaying);
+        }}
+        className="h-11 cursor-pointer [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-range]]:bg-white/70 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-white/80 [&_[data-slot=slider-thumb]]:bg-white"
+      />
 
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-xs font-mono tabular-nums text-white/55">
+      <div className="absolute inset-x-0 top-[calc(50%+0.625rem)] grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-xs font-mono tabular-nums text-white/55">
         <span>-{formatReplayTime(range.end - range.start)}</span>
         {shouldShowPositionStatus ? (
           <span role="status" aria-live="polite" className="min-w-0 truncate text-center text-white/75">
@@ -687,16 +686,22 @@ const ReplayTimeline: React.FC<{
 const PlayerSettings: React.FC<{
   replay: UseViewerReplayResult;
   controlClass: string;
+  areControlsVisible: boolean;
   isTelemetryVisible: boolean;
   onTelemetryVisibilityChange: (isVisible: boolean) => void;
-}> = ({ replay, controlClass, isTelemetryVisible, onTelemetryVisibilityChange }) => {
+}> = ({ replay, controlClass, areControlsVisible, isTelemetryVisible, onTelemetryVisibilityChange }) => {
   const { snapshot } = replay;
+  const [isOpen, setIsOpen] = useState(false);
   const isReplayAvailable = snapshot.availability === 'available';
   const settingLabel = snapshot.windowSeconds === 0 ? 'Off' : formatReplayTime(snapshot.windowSeconds);
   const retainedSeconds = snapshot.range ? snapshot.range.end - snapshot.range.start : 0;
 
+  useEffect(() => {
+    if (!areControlsVisible) setIsOpen(false);
+  }, [areControlsVisible]);
+
   return (
-    <Popover>
+    <Popover open={areControlsVisible && isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
         <button type="button" className={controlClass} title="Player settings" aria-label="Player settings">
           <Settings2 className="w-4 h-4" />
@@ -807,6 +812,7 @@ const MediaControls: React.FC<{
   onVolumeChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onToggleFullscreen: () => void;
   onResync: (() => void) | undefined;
+  areControlsVisible: boolean;
   overlayClass: string;
 }> = ({
   telemetry,
@@ -822,6 +828,7 @@ const MediaControls: React.FC<{
   onVolumeChange,
   onToggleFullscreen,
   onResync,
+  areControlsVisible,
   overlayClass,
 }) => {
   const playLabel = isPlaying ? 'Pause' : 'Play';
@@ -840,28 +847,29 @@ const MediaControls: React.FC<{
     <div
       className={`absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/55 to-transparent px-4 pt-20 pb-4 z-20 transition-opacity duration-300 ${overlayClass}`}
     >
-      <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-3">
+      <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-2">
         {showTimeline && <ReplayTimeline replay={replay} isPlaying={isPlaying} />}
 
-        <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
-          {isTelemetryVisible && telemetry?.hasVideo && (
+        <div className="flex flex-col items-stretch gap-3 sm:grid sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-end sm:gap-4">
+          {isTelemetryVisible && telemetry?.hasVideo ? (
             <div className="min-w-0">
-              <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Incoming</p>
               <SpectatorTelemetryBar telemetry={telemetry} />
             </div>
+          ) : (
+            <div className="hidden sm:block" />
           )}
 
-          <div className="flex w-full items-center justify-end gap-2 sm:ml-auto sm:w-auto sm:shrink-0">
-            <button
-              type="button"
-              onClick={onTogglePlay}
-              className={controlClass}
-              title={playLabel}
-              aria-label={playLabel}
-            >
-              <PlayIcon className="w-5 h-5" />
-            </button>
+          <button
+            type="button"
+            onClick={onTogglePlay}
+            className={`${controlClass} self-center`}
+            title={playLabel}
+            aria-label={playLabel}
+          >
+            <PlayIcon className="w-5 h-5" />
+          </button>
 
+          <div className="flex w-full items-center justify-end gap-2 sm:w-auto sm:min-w-max sm:shrink-0 sm:justify-self-end">
             <div className="flex items-center gap-2 bg-black/30 px-3 py-1.5 rounded-xl backdrop-blur-sm">
               <button
                 type="button"
@@ -887,6 +895,7 @@ const MediaControls: React.FC<{
             <PlayerSettings
               replay={replay}
               controlClass={controlClass}
+              areControlsVisible={areControlsVisible}
               isTelemetryVisible={isTelemetryVisible}
               onTelemetryVisibilityChange={onTelemetryVisibilityChange}
             />
@@ -922,11 +931,10 @@ const MediaControls: React.FC<{
 const VideoLayers: React.FC<{
   liveVideoRef: React.RefObject<HTMLVideoElement | null>;
   replayVideoRef: React.RefObject<HTMLVideoElement | null>;
-  captureVideoRef: React.RefObject<HTMLVideoElement | null>;
   liveVideoClass: string;
   replayVideoClass: string;
   onToggleFullscreen: () => void;
-}> = ({ liveVideoRef, replayVideoRef, captureVideoRef, liveVideoClass, replayVideoClass, onToggleFullscreen }) => (
+}> = ({ liveVideoRef, replayVideoRef, liveVideoClass, replayVideoClass, onToggleFullscreen }) => (
   <>
     {/* biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
     <video
@@ -941,14 +949,6 @@ const VideoLayers: React.FC<{
       playsInline
       onDoubleClick={onToggleFullscreen}
       className={`absolute inset-0 w-full h-full object-contain cursor-pointer ${replayVideoClass}`}
-    />
-    <video
-      ref={captureVideoRef}
-      playsInline
-      muted
-      aria-hidden="true"
-      tabIndex={-1}
-      className="absolute size-px opacity-0 pointer-events-none"
     />
   </>
 );
@@ -965,6 +965,7 @@ const PlayerOverlays: React.FC<{
   stalledCodec: string | null | undefined;
   visualizerStream: MediaStream | null;
   playerRef: React.RefObject<HTMLDivElement | null>;
+  onControlsActivity: (() => void) | undefined;
   overlayClass: string;
   announcement: string | null;
 }> = ({
@@ -979,6 +980,7 @@ const PlayerOverlays: React.FC<{
   stalledCodec,
   visualizerStream,
   playerRef,
+  onControlsActivity,
   overlayClass,
   announcement,
 }) => (
@@ -993,7 +995,8 @@ const PlayerOverlays: React.FC<{
         mediaStream={visualizerStream}
         playerRef={playerRef}
         showStatus
-        className={`absolute z-20 hidden transition-opacity duration-300 sm:flex ${overlayClass}`}
+        onInteraction={onControlsActivity}
+        className={`absolute z-40 hidden transition-opacity duration-300 sm:flex ${overlayClass}`}
       />
     )}
     {announcement && (
@@ -1014,14 +1017,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   decoderStalled,
   stalledCodec,
   isFullscreen: propIsFullscreen,
-  showFullscreenControls = true,
+  showControls = true,
+  onControlsActivity,
 }) => {
   const liveVideoRef = useRef<HTMLVideoElement | null>(null);
   const replayVideoRef = useRef<HTMLVideoElement | null>(null);
-  const captureVideoRef = useRef<HTMLVideoElement | null>(null);
   const isFullscreen = propIsFullscreen ?? false;
   const [isTelemetryVisible, setIsTelemetryVisible] = useState(readTelemetryVisibility);
-  const replay = useViewerReplay({ mediaStream, isLive, replayVideoRef, captureVideoRef });
+  const replay = useViewerReplay({ mediaStream, isLive, liveVideoRef, replayVideoRef });
   const { telemetry } = useSpectatorTelemetry(isTelemetryVisible, isLive, getStatsFn, mediaStream);
   const {
     containerRef,
@@ -1042,8 +1045,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const handleTelemetryVisibilityChange = (isVisible: boolean): void => {
     setIsTelemetryVisible(isVisible);
     saveTelemetryVisibility(isVisible);
+    onControlsActivity?.();
   };
-  const overlayControlsClass = getOverlayClass(isFullscreen, showFullscreenControls);
+  const overlayControlsClass = getOverlayClass(showControls);
   const hasReplay = replay.snapshot.availability === 'available' && replay.snapshot.range != null;
   const isShowingReplay = replay.snapshot.mode === 'replay' && hasReplay;
   const showWaiting = (!isLive || !hasVideoTrack) && !hasReplay;
@@ -1055,7 +1059,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     : 'aspect-video rounded-2xl overflow-hidden border border-border';
   const liveVideoClass = replay.snapshot.mode === 'live' && hasVideoTrack && isLive ? 'visible' : 'invisible';
   const replayVideoClass = isShowingReplay ? 'visible' : 'invisible';
-  const cursorClass = isFullscreen && !showFullscreenControls ? 'cursor-none' : '';
+  const cursorClass = isFullscreen && !showControls ? 'cursor-none' : '';
 
   return (
     <div
@@ -1065,7 +1069,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       <VideoLayers
         liveVideoRef={liveVideoRef}
         replayVideoRef={replayVideoRef}
-        captureVideoRef={captureVideoRef}
         liveVideoClass={liveVideoClass}
         replayVideoClass={replayVideoClass}
         onToggleFullscreen={toggleFullscreen}
@@ -1082,6 +1085,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         stalledCodec={stalledCodec}
         visualizerStream={visualizerStream}
         playerRef={containerRef}
+        onControlsActivity={onControlsActivity}
         overlayClass={overlayControlsClass}
         announcement={replay.snapshot.announcement}
       />
@@ -1100,6 +1104,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         onVolumeChange={handleVolumeChange}
         onToggleFullscreen={toggleFullscreen}
         onResync={onResync}
+        areControlsVisible={showControls}
         overlayClass={overlayControlsClass}
       />
     </div>
