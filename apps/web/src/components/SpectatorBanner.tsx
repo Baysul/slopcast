@@ -1,6 +1,7 @@
 import { Monitor, X } from 'lucide-react';
 import type React from 'react';
 import { useEffect, useState } from 'react';
+import { markSpectatorCapabilityNoticeSeen, shouldShowSpectatorCapabilityNotice } from './spectator-capability-notice';
 
 interface SpectatorBannerProps {
   compact?: boolean;
@@ -9,21 +10,28 @@ interface SpectatorBannerProps {
 }
 
 export const SpectatorBanner: React.FC<SpectatorBannerProps> = ({ compact, autoFade = true, fadeDelayMs = 10000 }) => {
-  const [isVisible, setIsVisible] = useState(true);
+  const [shouldRender] = useState(() => shouldShowSpectatorCapabilityNotice(window.localStorage));
+  const [isVisible, setIsVisible] = useState(shouldRender);
 
   useEffect(() => {
-    if (!autoFade) return;
+    if (shouldRender) markSpectatorCapabilityNoticeSeen(window.localStorage);
+  }, [shouldRender]);
+
+  useEffect(() => {
+    if (!shouldRender || !autoFade) return;
 
     const timer = setTimeout(() => {
       setIsVisible(false);
     }, fadeDelayMs);
 
     return () => clearTimeout(timer);
-  }, [autoFade, fadeDelayMs]);
+  }, [autoFade, fadeDelayMs, shouldRender]);
 
   const fadeClasses = `transition-opacity duration-1000 ease-out ${
     isVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
   }`;
+
+  if (!shouldRender) return null;
 
   if (compact) {
     return (
