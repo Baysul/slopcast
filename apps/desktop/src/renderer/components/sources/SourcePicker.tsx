@@ -153,14 +153,16 @@ function ActiveRoomControls({
   return (
     <div className="space-y-3" aria-live="polite">
       <div className="flex flex-wrap items-center gap-2">
+        <span className="font-mono text-sm font-semibold tabular-nums tracking-wide text-foreground/90">
+          {roomCode}
+        </span>
         {spectatorCount > 0 && (
           <Badge variant="info" className="tabular-nums">
             {spectatorLabel}
           </Badge>
         )}
-        <span className="font-mono text-sm font-semibold tabular-nums tracking-wide text-foreground/90">
-          {roomCode}
-        </span>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
         <Button variant="secondary" size="sm" onClick={onCopyCode} className="gap-1.5">
           {copied === 'code' ? <Check className="w-3.5 h-3.5 text-safelight" aria-hidden="true" /> : null}
           {copied === 'code' ? 'Copied' : 'Copy code'}
@@ -337,10 +339,6 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
                 <span
                   aria-hidden="true"
                   className={`pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/[0.1] to-transparent opacity-0 transition-[transform,opacity] duration-[520ms] ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-full group-hover:opacity-100 group-focus-visible:translate-x-full group-focus-visible:opacity-100 motion-reduce:hidden ${!canStartShare ? 'hidden' : ''}`}
-                />
-                <span
-                  aria-hidden="true"
-                  className={`pointer-events-none absolute inset-[5px] rounded-[7px] border transition-colors duration-200 ${!canStartShare ? 'border-transparent' : 'border-transparent group-hover:border-white/10 group-focus-visible:border-white/10'}`}
                 />
                 <span className="relative flex items-center justify-center gap-2.5">
                   <Video
