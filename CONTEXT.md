@@ -24,6 +24,10 @@ _Avoid_: restart stream, switch server
 An ephemeral room registration that may issue participant credentials until it is closed, expires, or its server restarts.
 _Avoid_: allocated code, open room
 
+**Spectator capability notice**:
+A one-time explanation that the web client can view shares while hosting and sharing require the desktop client.
+_Avoid_: spectator banner, web limitation banner
+
 **Audio visualizer**:
 The shared waveform display that represents current audio activity on presenter and spectator surfaces.
 _Avoid_: audio level meter, waveform meter
