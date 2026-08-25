@@ -192,7 +192,7 @@ The layout follows a single-column spine for the spectator and a two-column grid
 
 **Web Spectator:**
 - Home page: centered single-column max-w-2xl content area with full-bleed dark background.
-- Room page: video owns the viewport (`fullBleed` aspect-video). Chrome floats as fixed overlays at the top (back / status / spectators / copy) and bottom (control bar). Sidebar participant panel deferred — spectator count is summarised in the header cluster instead.
+- Room page: video owns the viewport (`fullBleed` aspect-video). Chrome floats as fixed overlays at the top (back / status / copy) and bottom (control bar). Spectator counts are not shown.
 - Max width: 80rem (1280px) for room, 32rem (512px) for home join card.
 - Spacing rhythm safe areas: header overlay carries `pt-3 pb-8` so its bottom gradient fades before the stream; control bar carries `pt-12 pb-4` for the same reason on the underside.
 
@@ -270,19 +270,22 @@ Borders are thin (1px), semi-transparent (0.5–0.8 opacity), and always the bor
 
 ### Navigation / Header
 - **Web Header (HomePage):** Dark glass (`bg-background/80 border-b backdrop-blur-md`). Sticky top. Brand icon box + Slopcast wordmark (`text-base font-bold tracking-tight`).
-- **Web Room Page header overlay:** Fixed top, gradient-faded to transparent (`bg-black/60`). The cluster holds `[Back] [Status Badge] [Spectators pill]` on the left and `[Copy link]` on the right. Long status text truncates with `max-w-[60vw] sm:max-w-[320px]`. Spectator pill is hidden below `sm` per the mobile-truncation rule.
+- **Web Room Page header overlay:** Fixed top, gradient-faded to transparent (`bg-black/60`). The cluster holds `[Back] [Status Badge]` on the left and `[Copy link]` on the right. Long status text truncates with `max-w-[60vw] sm:max-w-[320px]`.
 - **Desktop Header (TitleBar):** Custom Tauri chrome (`decorations: false`), `h-10`, flat `bg-background` with `border-b border-border` — no glass, no glow. Left: bare `ScreenShare` icon (`w-4 h-4 text-muted-foreground`) + wordmark (`text-sm font-semibold tracking-tight`). Center: distilled signal — a 6px dot + uppercase word, no pill or background (`gap-2`, `text-xs font-medium tracking-widest`). `Live` uses `bg-safelight` with `motion-safe:animate-pulse` + `text-safelight`; `Preview` uses `bg-muted-foreground/60` + `text-muted-foreground`. The center slot is `pointer-events-none` so the drag region stays live; the whole bar is the drag target via `windowControls.startDragging()`, double-click toggles maximize. Right: native window controls (`w-11`, `Minus` / `Square`+`Copy` / `X`) with `hover:bg-accent/60` (close: `hover:bg-destructive`). Sticky, `select-none`, owns the window.
-- **Mobile:** Icon-based back navigation truncates secondary info. Spectator count pill hides below the `sm` breakpoint.
+- **Mobile:** Icon-based back navigation truncates secondary information.
 
 ### Video Player
 - **Container:** Aspect-video, black background, 16px radius (`rounded-2xl`), `overflow-hidden`. In `fullBleed` mode (RoomPage) it owns the viewport: `h-screen max-h-screen`, no radius, no border.
 - **Idle state:** Center-aligned `Radio` icon + status message + optional Reconnect button.
 - **Active state:** HTML5 video fills container. Top overlay (right-16) shows the AudioVisualizer pill — inset from the right edge so the always-on Copy button at top-right doesn't collide. Bottom overlay is a glass gradient control bar with play/pause, mute, volume slider (Safelight-accent range input `accent-[#C4804A]`), resync, and fullscreen toggle. Both overlays are hover-gated (`opacity-0 group-hover:opacity-100`).
 - **Control buttons:** `bg-black/30 hover:bg-black/50 rounded-xl backdrop-blur-sm` — 12px radius, translucent black, glass blur. Focus ring: `focus-visible:ring-2 focus-visible:ring-safelight/70`.
+- **Player settings:** The settings popover is always available. It contains the spectator telemetry switch and, when supported, replay-window controls.
+- **Replay timeline:** The visible rail stays 4px high inside a 44px vertical pointer target. Passive `LIVE` labels do not appear below the rail. Behind-live time, the `Go Live` action, and the ended state remain visible when relevant.
 - **Audio Visualizer:** Canvas-based frequency bars rendered in Safelight alpha ramp. 80×20px module in the top-right of the player; on fullBleed it sits at `top-4 right-16`.
 
-### Stream Telemetry (Desktop presenter only)
-- **Style:** Glass control bar fixed over the bottom of the preview (`from-black/95 via-black/75`). On-Air dot (`w-2 h-2 rounded-full bg-safelight motion-safe:animate-pulse`) + Safelight uppercase label (`text-xs font-semibold uppercase tracking-wider`), then mono tabular-nums cells for Codec / Resolution / Frame Rate (with target fps sublabel) / Bitrate / Packet Loss / Audio (codec + bitrate). Right rail: a 48s bitrate sparkline (Safelight `#C4804A`) and an Elapsed clock.
+### Stream Telemetry
+- **Desktop presenter:** A glass control bar sits over the bottom of the preview (`from-black/95 via-black/75`). It shows codec, resolution, frame rate, bitrate, packet loss, audio, a 48-second bitrate sparkline, and elapsed time.
+- **Web spectator:** Receiver telemetry starts hidden on first use. An app-wide local preference remembers the Player settings switch. Stats polling stops while the panel is hidden.
 - **Cells:** Label uses the Label role (`text-xs font-semibold uppercase tracking-wider`). Value uses Mono role at 14px (`text-sm font-mono font-semibold tabular-nums`). Sub-values use `text-xs font-mono text-caption-text`. Degrade states flip label and value to the destructive token.
 - **Sparkline caption:** `text-xs uppercase tracking-wider text-caption-text` — the quietest metadata tier.
 

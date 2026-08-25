@@ -290,7 +290,6 @@ export const RoomPage: React.FC = () => {
   const [statusText, setStatusText] = useState('Connecting...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [participantCount, setParticipantCount] = useState(0);
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [copied, setCopied] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -377,7 +376,6 @@ export const RoomPage: React.FC = () => {
     setStatusText('Connecting...');
     setErrorMsg(null);
     setMediaStream(null);
-    setParticipantCount(0);
     setDecoderStalled(false);
     setStalledCodec(null);
     connectFailedRef.current = false;
@@ -477,11 +475,6 @@ export const RoomPage: React.FC = () => {
       setStatusText('Room closed');
     });
 
-    room.on(RoomEvent.ParticipantConnected, () => {
-      if (isStale()) return;
-      setParticipantCount(room.remoteParticipants.size);
-    });
-
     room.on(RoomEvent.TrackPublished, () => {
       if (isStale()) return;
       const unsupported = [...room.remoteParticipants.values()]
@@ -506,9 +499,7 @@ export const RoomPage: React.FC = () => {
 
     room.on(RoomEvent.ParticipantDisconnected, () => {
       if (isStale()) return;
-      const count = room.remoteParticipants.size;
-      setParticipantCount(count);
-      if (count === 0) {
+      if (room.remoteParticipants.size === 0) {
         setConnectionStatus('closed');
         setStatusText('Presenter left');
       }
@@ -576,7 +567,6 @@ export const RoomPage: React.FC = () => {
           room.disconnect();
           return;
         }
-        setParticipantCount(room.remoteParticipants.size);
         attachExistingTracks(room, managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
       })
       .catch((err) => {
@@ -723,14 +713,6 @@ export const RoomPage: React.FC = () => {
             >
               <StatusSignal variant={variant}>{statusText}</StatusSignal>
             </span>
-            {participantCount > 0 && (
-              <span className="hidden sm:inline-flex items-center gap-2 text-xs font-medium text-white/60 whitespace-nowrap shrink-0 leading-none">
-                <span className="size-1.5 rounded-full bg-white/25" aria-hidden="true" />
-                <span className="tabular-nums">
-                  {participantCount} spectator{participantCount !== 1 ? 's' : ''}
-                </span>
-              </span>
-            )}
           </div>
           <button
             type="button"

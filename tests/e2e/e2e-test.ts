@@ -794,8 +794,20 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
   }
 }
 
+async function enableSpectatorTelemetry(page: Page): Promise<void> {
+  await page.locator('video').first().hover();
+  await page.getByRole('button', { name: 'Player settings' }).click();
+  const telemetryToggle = page.getByRole('switch', { name: 'Show telemetry' });
+  if (!(await telemetryToggle.isChecked())) {
+    await telemetryToggle.click();
+  }
+  await page.keyboard.press('Escape');
+}
+
 async function checkSpectatorDecodedFps(page: Page, result: TestResult, codec: string): Promise<void> {
   try {
+    await enableSpectatorTelemetry(page);
+
     const fpsValue = page.locator('[data-testid="spectator-telemetry-fps"]');
     await page.waitForFunction(
       () => {
