@@ -460,7 +460,9 @@ const WaitingOverlay: React.FC<{ statusText: string | undefined; onResync: (() =
 }) => (
   <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-10">
     <Radio className="w-8 h-8 text-white/20 mb-3" />
-    <p className="text-sm text-white/40 max-w-xs">{statusText || 'Waiting for presenter...'}</p>
+    <p className="max-w-sm text-base font-medium leading-relaxed text-white/60">
+      {statusText || 'Waiting for presenter...'}
+    </p>
     {onResync && (
       <Button
         variant="outline"
@@ -492,8 +494,8 @@ const GestureOverlay: React.FC<{
                    text-white hover:bg-safelight/30 transition-all backdrop-blur-md cursor-pointer"
       >
         <GestureIcon className="w-10 h-10 text-safelight" />
-        <span className="font-semibold text-base">{title}</span>
-        {audioTrackCount > 0 && <span className="text-xs text-white/40">{subtitle}</span>}
+        <span className="text-lg font-semibold leading-tight tracking-tight">{title}</span>
+        {audioTrackCount > 0 && <span className="max-w-xs text-sm leading-relaxed text-white/60">{subtitle}</span>}
       </button>
     </div>
   );
@@ -512,8 +514,8 @@ const DecoderStallOverlay: React.FC<{
       className="absolute inset-0 flex flex-col items-center justify-center bg-black/85 z-20 p-6"
     >
       <AlertTriangle className="w-8 h-8 text-safelight mb-3" />
-      <p className="text-sm font-medium text-white/90 mb-1">Video decoder issue</p>
-      <p className="text-xs text-white/50 mb-5 max-w-xs text-center">{detail}</p>
+      <p className="mb-1 text-base font-semibold leading-tight tracking-tight text-white/90">Video decoder issue</p>
+      <p className="mb-5 max-w-sm text-center text-sm leading-relaxed text-white/60">{detail}</p>
       {onResync && (
         <Button
           variant="outline"
@@ -723,7 +725,7 @@ const PlayerSettings: React.FC<{
               >
                 Telemetry
               </label>
-              <p className="mt-1 text-xs leading-relaxed text-caption-text">Show incoming stream statistics.</p>
+              <p className="mt-1 text-sm leading-relaxed text-caption-text">Show incoming stream statistics.</p>
             </div>
             <Switch
               id="spectator-telemetry"
@@ -737,7 +739,7 @@ const PlayerSettings: React.FC<{
           {snapshot.availability === 'blocked' && (
             <div className="border-t border-white/10 pt-4" data-testid="replay-owner-notice">
               <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay</p>
-              <p role="status" className="mt-1 text-xs leading-relaxed text-caption-text">
+              <p role="status" className="mt-1 text-sm leading-relaxed text-caption-text">
                 {REPLAY_BLOCKED_MESSAGE}
               </p>
             </div>
@@ -746,7 +748,7 @@ const PlayerSettings: React.FC<{
           {snapshot.availability === 'unavailable' && snapshot.unavailableReason && (
             <div className="border-t border-white/10 pt-4">
               <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay unavailable</p>
-              <p role="status" className="mt-1 text-xs leading-relaxed text-caption-text">
+              <p role="status" className="mt-1 text-sm leading-relaxed text-caption-text">
                 {snapshot.unavailableReason}
               </p>
             </div>
@@ -757,7 +759,7 @@ const PlayerSettings: React.FC<{
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay window</p>
-                  <p className="mt-1 text-xs leading-relaxed text-caption-text">Temporary media stays in this tab.</p>
+                  <p className="mt-1 text-sm leading-relaxed text-caption-text">Temporary media stays in this tab.</p>
                 </div>
                 <span className="text-sm font-mono font-semibold tabular-nums text-foreground">{settingLabel}</span>
               </div>
@@ -781,12 +783,12 @@ const PlayerSettings: React.FC<{
               </div>
 
               {snapshot.limitationReason && (
-                <p role="status" className="text-xs leading-relaxed text-safelight">
+                <p role="status" className="text-sm leading-relaxed text-safelight">
                   {snapshot.limitationReason}
                 </p>
               )}
               {!snapshot.limitationReason && retainedSeconds > 0 && snapshot.windowSeconds > 0 && (
-                <p className="text-xs leading-relaxed text-caption-text">
+                <p className="text-sm leading-relaxed text-caption-text">
                   {formatReplayTime(retainedSeconds)} currently available
                 </p>
               )}
@@ -933,25 +935,47 @@ const VideoLayers: React.FC<{
   replayVideoRef: React.RefObject<HTMLVideoElement | null>;
   liveVideoClass: string;
   replayVideoClass: string;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
   onToggleFullscreen: () => void;
-}> = ({ liveVideoRef, replayVideoRef, liveVideoClass, replayVideoClass, onToggleFullscreen }) => (
-  <>
-    {/* biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
-    <video
-      ref={liveVideoRef}
-      playsInline
-      onDoubleClick={onToggleFullscreen}
-      className={`absolute inset-0 w-full h-full object-contain cursor-pointer ${liveVideoClass}`}
-    />
-    {/* biome-ignore lint/a11y/useMediaCaption: locally buffered screen-share video does not provide captions */}
-    <video
-      ref={replayVideoRef}
-      playsInline
-      onDoubleClick={onToggleFullscreen}
-      className={`absolute inset-0 w-full h-full object-contain cursor-pointer ${replayVideoClass}`}
-    />
-  </>
-);
+}> = ({
+  liveVideoRef,
+  replayVideoRef,
+  liveVideoClass,
+  replayVideoClass,
+  isPlaying,
+  onTogglePlay,
+  onToggleFullscreen,
+}) => {
+  const playbackLabel = isPlaying ? 'Pause video' : 'Play video';
+  const layerClass =
+    'absolute inset-0 w-full h-full cursor-pointer border-0 bg-black p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-safelight/70';
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onTogglePlay}
+        onDoubleClick={onToggleFullscreen}
+        className={`${layerClass} ${liveVideoClass}`}
+        aria-label={playbackLabel}
+      >
+        {/* biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
+        <video ref={liveVideoRef} playsInline className="h-full w-full pointer-events-none object-contain" />
+      </button>
+      <button
+        type="button"
+        onClick={onTogglePlay}
+        onDoubleClick={onToggleFullscreen}
+        className={`${layerClass} ${replayVideoClass}`}
+        aria-label={playbackLabel}
+      >
+        {/* biome-ignore lint/a11y/useMediaCaption: locally buffered screen-share video does not provide captions */}
+        <video ref={replayVideoRef} playsInline className="h-full w-full pointer-events-none object-contain" />
+      </button>
+    </>
+  );
+};
 
 const PlayerOverlays: React.FC<{
   showWaiting: boolean;
@@ -1071,6 +1095,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         replayVideoRef={replayVideoRef}
         liveVideoClass={liveVideoClass}
         replayVideoClass={replayVideoClass}
+        isPlaying={isPlaying}
+        onTogglePlay={togglePlay}
         onToggleFullscreen={toggleFullscreen}
       />
       <PlayerOverlays
