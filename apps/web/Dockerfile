@@ -8,8 +8,10 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY package.json ./
 COPY apps/web/package.json apps/web/
 COPY packages/shared-types/package.json packages/shared-types/
+COPY packages/ui/package.json packages/ui/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY packages/shared-types/ packages/shared-types/
+COPY packages/ui/ packages/ui/
 COPY apps/web/ apps/web/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter @slopcast/shared-types build
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter web build
