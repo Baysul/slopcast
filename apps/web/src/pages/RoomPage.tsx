@@ -293,7 +293,7 @@ export const RoomPage: React.FC = () => {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [copied, setCopied] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [showFullscreenControls, setShowFullscreenControls] = useState(true);
+  const [showControls, setShowControls] = useState(true);
   const [decoderStalled, setDecoderStalled] = useState(false);
   const [stalledCodec, setStalledCodec] = useState<string | null>(null);
 
@@ -306,57 +306,49 @@ export const RoomPage: React.FC = () => {
   const streamEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectFailedRef = useRef(false);
 
-  const resetIdleTimer = useCallback(() => {
-    setShowFullscreenControls(true);
+  const resetControlsIdleTimer = useCallback(() => {
+    setShowControls(true);
     if (idleTimerRef.current) {
       clearTimeout(idleTimerRef.current);
     }
     idleTimerRef.current = setTimeout(() => {
-      setShowFullscreenControls(false);
+      setShowControls(false);
     }, 2500);
   }, []);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      const fs = !!document.fullscreenElement;
-      setIsFullscreen(fs);
-      if (!fs) {
-        setShowFullscreenControls(true);
-        if (idleTimerRef.current) {
-          clearTimeout(idleTimerRef.current);
-          idleTimerRef.current = null;
-        }
-      } else {
-        resetIdleTimer();
-      }
+      setIsFullscreen(!!document.fullscreenElement);
+      resetControlsIdleTimer();
     };
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      if (idleTimerRef.current) {
-        clearTimeout(idleTimerRef.current);
-      }
     };
-  }, [resetIdleTimer]);
+  }, [resetControlsIdleTimer]);
 
   useEffect(() => {
-    if (!isFullscreen) return;
-
     const handleActivity = () => {
-      resetIdleTimer();
+      resetControlsIdleTimer();
     };
 
+    resetControlsIdleTimer();
     window.addEventListener('pointermove', handleActivity);
+    window.addEventListener('pointerdown', handleActivity);
     window.addEventListener('touchstart', handleActivity);
     window.addEventListener('keydown', handleActivity);
 
     return () => {
       window.removeEventListener('pointermove', handleActivity);
+      window.removeEventListener('pointerdown', handleActivity);
       window.removeEventListener('touchstart', handleActivity);
       window.removeEventListener('keydown', handleActivity);
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+      }
     };
-  }, [isFullscreen, resetIdleTimer]);
+  }, [resetControlsIdleTimer]);
 
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href).catch((err) => {
@@ -673,7 +665,7 @@ export const RoomPage: React.FC = () => {
   const variant = statusVariant();
   const CopyIcon = copied ? Check : Copy;
 
-  const headerFadeClass = isFullscreen && !showFullscreenControls ? 'opacity-0 pointer-events-none' : 'opacity-100';
+  const headerFadeClass = showControls ? 'opacity-100' : 'opacity-0 pointer-events-none';
 
   return (
     <div className="min-h-screen bg-background text-foreground relative">
@@ -688,15 +680,16 @@ export const RoomPage: React.FC = () => {
           decoderStalled={decoderStalled}
           stalledCodec={stalledCodec}
           isFullscreen={isFullscreen}
-          showFullscreenControls={showFullscreenControls}
+          showControls={showControls}
+          onControlsActivity={resetControlsIdleTimer}
         />
       </div>
 
       <div
         className={`fixed top-0 inset-x-0 bg-gradient-to-b from-black/60 to-transparent px-4 pt-3 pb-8 z-30 pointer-events-none transition-opacity duration-300 ${headerFadeClass}`}
       >
-        <div className="flex items-center justify-between pointer-events-auto gap-3">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center justify-between pointer-events-none gap-3">
+          <div className="flex items-center gap-2 min-w-0 pointer-events-auto">
             <button
               type="button"
               onClick={() => navigate('/')}
@@ -719,7 +712,7 @@ export const RoomPage: React.FC = () => {
             onClick={copyLink}
             aria-label={copied ? 'Link copied' : 'Copy room link'}
             title="Copy room link"
-            className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+            className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black pointer-events-auto"
           >
             <CopyIcon className="w-4 h-4" />
           </button>

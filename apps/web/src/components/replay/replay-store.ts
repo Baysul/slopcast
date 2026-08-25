@@ -19,12 +19,6 @@ export interface StoredReplayChunk {
   blob: Blob;
 }
 
-export interface StoredReplayThumbnail {
-  sessionId: string;
-  mediaTime: number;
-  blob: Blob;
-}
-
 const requestResult = <T>(request: IDBRequest<T>): Promise<T> =>
   new Promise((resolve, reject) => {
     request.addEventListener('success', () => resolve(request.result), { once: true });
@@ -161,20 +155,9 @@ export class ReplayStore {
     await transactionDone(transaction);
   }
 
-  async putThumbnail(thumbnail: Omit<StoredReplayThumbnail, 'sessionId'>): Promise<void> {
-    const transaction = this.database.transaction(THUMBNAIL_STORE, 'readwrite');
-    transaction
-      .objectStore(THUMBNAIL_STORE)
-      .put({ ...thumbnail, sessionId: this.sessionId } satisfies StoredReplayThumbnail);
-    await transactionDone(transaction);
-  }
-
   async prune(cutoff: number): Promise<void> {
-    const transaction = this.database.transaction([CHUNK_STORE, THUMBNAIL_STORE], 'readwrite');
-    await Promise.all([
-      deleteBefore(transaction.objectStore(CHUNK_STORE), CHUNK_END_INDEX, this.sessionId, cutoff),
-      deleteBefore(transaction.objectStore(THUMBNAIL_STORE), THUMBNAIL_TIME_INDEX, this.sessionId, cutoff),
-    ]);
+    const transaction = this.database.transaction(CHUNK_STORE, 'readwrite');
+    await deleteBefore(transaction.objectStore(CHUNK_STORE), CHUNK_END_INDEX, this.sessionId, cutoff);
     await transactionDone(transaction);
   }
 

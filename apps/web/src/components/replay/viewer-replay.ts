@@ -10,10 +10,9 @@ export const REPLAY_LIVE_TOLERANCE_SECONDS = 2;
 const REPLAY_PREFERENCE_KEY = 'slopcast.replayWindowSeconds';
 const RECORDING_CHUNK_MS = 2000;
 const RECORDING_CHUNK_SECONDS = RECORDING_CHUNK_MS / 1000;
-const THUMBNAIL_INTERVAL_MS = 5000;
-const THUMBNAIL_WIDTH = 160;
-const THUMBNAIL_HEIGHT = 90;
-const THUMBNAIL_QUALITY = 0.65;
+const THUMBNAIL_WIDTH = 256;
+const THUMBNAIL_HEIGHT = 144;
+const THUMBNAIL_QUALITY = 0.75;
 
 export type ReplayAvailability = 'checking' | 'available' | 'blocked' | 'unavailable';
 export type ReplayMode = 'live' | 'replay';
@@ -35,10 +34,6 @@ export interface ViewerReplaySnapshot {
   limitationReason: string | null;
   announcement: string | null;
   preview: ReplayThumbnail | null;
-}
-
-interface ThumbnailRecord extends ReplayThumbnail {
-  blob: Blob;
 }
 
 const sanitizeWindowSeconds = (value: number): number => {
@@ -118,9 +113,11 @@ const createThumbnailBlob = async (video: HTMLVideoElement): Promise<Blob> => {
 
   if ('OffscreenCanvas' in window) {
     const canvas = new OffscreenCanvas(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
-    const context = canvas.getContext('2d');
+    const context = canvas.getContext('2d', { alpha: false });
     if (!context) throw new Error('The browser could not create a thumbnail canvas');
 
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
     context.fillStyle = '#000';
     context.fillRect(0, 0, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
     context.drawImage(video, x, y, width, height);
@@ -131,9 +128,11 @@ const createThumbnailBlob = async (video: HTMLVideoElement): Promise<Blob> => {
   const canvas = document.createElement('canvas');
   canvas.width = THUMBNAIL_WIDTH;
   canvas.height = THUMBNAIL_HEIGHT;
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d', { alpha: false });
   if (!context) throw new Error('The browser could not create a thumbnail canvas');
 
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
   context.fillStyle = '#000';
   context.fillRect(0, 0, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
   context.drawImage(video, x, y, width, height);
@@ -173,10 +172,10 @@ export class ViewerReplay {
   private recorder: MediaRecorder | null = null;
   private mediaBuffer: ReplayMediaBuffer | null = null;
   private store: ReplayStore | null = null;
-  private thumbnailTimer: ReturnType<typeof setInterval> | null = null;
-  private thumbnailCapturePending = false;
+  private thumbnailEpoch = 0;
+  private thumbnailCaptureEpoch: number | null = null;
   private thumbnailCaptureFailed = false;
-  private thumbnails: ThumbnailRecord[] = [];
+  private thumbnails: ReplayThumbnail[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
   private sequence = 0;
   private previousChunkEnd = 0;
@@ -186,7 +185,7 @@ export class ViewerReplay {
 
   constructor(
     private readonly replayVideo: HTMLVideoElement,
-    private readonly captureVideo: HTMLVideoElement,
+    private readonly thumbnailVideo: HTMLVideoElement,
     windowSeconds: number,
     private readonly onChange: (snapshot: ViewerReplaySnapshot) => void,
   ) {
@@ -250,9 +249,6 @@ export class ViewerReplay {
 
     this.states.add('ending');
     this.stream = null;
-    this.stopThumbnailCapture();
-    this.captureVideo.pause();
-    this.captureVideo.srcObject = null;
 
     if (this.recorder?.state === 'recording') {
       this.recorder.stop();
@@ -276,6 +272,7 @@ export class ViewerReplay {
       this.mediaBuffer?.destroy();
       this.mediaBuffer = null;
       this.clearStoredMedia();
+      this.resetThumbnailCapture();
       this.releaseThumbnails();
       this.ownership.release();
       this.update({
@@ -353,7 +350,7 @@ export class ViewerReplay {
 
   preview(mediaTime: number | null): void {
     if (mediaTime == null || this.thumbnails.length === 0) {
-      this.update({ preview: null });
+      if (this.snapshot.preview) this.update({ preview: null });
       return;
     }
 
@@ -363,6 +360,8 @@ export class ViewerReplay {
         nearest = thumbnail;
       }
     }
+    if (this.snapshot.preview === nearest) return;
+
     this.update({ preview: nearest ?? null });
   }
 
@@ -378,13 +377,11 @@ export class ViewerReplay {
     this.states.add('destroyed');
     this.generation += 1;
     this.stopRecording();
-    this.stopThumbnailCapture();
     this.mediaBuffer?.destroy();
     this.mediaBuffer = null;
-    this.captureVideo.pause();
-    this.captureVideo.srcObject = null;
     this.replayVideo.removeEventListener('timeupdate', this.handleReplayTimeUpdate);
     this.replayVideo.removeEventListener('ended', this.handleReplayEnded);
+    this.resetThumbnailCapture();
     this.releaseThumbnails();
     this.clearStoredMedia();
     this.ownership.destroy();
@@ -424,6 +421,7 @@ export class ViewerReplay {
     }
 
     this.store = store;
+    this.resetThumbnailCapture();
     this.mediaBuffer = new ReplayMediaBuffer(
       this.replayVideo,
       mimeType,
@@ -432,12 +430,6 @@ export class ViewerReplay {
       this.reduceEffectiveWindow,
       this.handleMediaBufferFailure,
     );
-    this.captureVideo.srcObject = stream;
-    this.captureVideo.muted = true;
-    this.captureVideo.play().catch((error) => {
-      console.info('[Replay] Live thumbnail video could not autoplay; previews will use timestamps:', error);
-      this.thumbnailCaptureFailed = true;
-    });
 
     try {
       this.recorder = new MediaRecorder(stream, { mimeType });
@@ -451,7 +443,6 @@ export class ViewerReplay {
     this.recorder.addEventListener('error', this.handleRecorderError);
     this.recorder.addEventListener('stop', this.handleRecorderStop);
     this.recorder.start(RECORDING_CHUNK_MS);
-    this.startThumbnailCapture();
   }
 
   private readonly handleRecordedData = (event: BlobEvent): void => {
@@ -480,9 +471,6 @@ export class ViewerReplay {
     if (isTrackChange) {
       this.states.add('ending');
       this.stream = null;
-      this.stopThumbnailCapture();
-      this.captureVideo.pause();
-      this.captureVideo.srcObject = null;
       return;
     }
 
@@ -514,6 +502,8 @@ export class ViewerReplay {
     const startedAt = Math.max(range.start, this.previousChunkEnd);
     const endedAt = range.end;
     this.previousChunkEnd = endedAt;
+
+    this.captureThumbnail(endedAt, range.start);
     await this.storeChunkWithFallback(store, { sequence, startedAt, endedAt, blob });
     await store.prune(Math.max(0, endedAt - this.snapshot.effectiveWindowSeconds));
     this.pruneThumbnails(range.start);
@@ -600,46 +590,36 @@ export class ViewerReplay {
     this.goLive();
   };
 
-  private startThumbnailCapture(): void {
-    this.stopThumbnailCapture();
+  private resetThumbnailCapture(): void {
+    this.thumbnailEpoch += 1;
+    this.thumbnailCaptureEpoch = null;
     this.thumbnailCaptureFailed = false;
-    this.thumbnailTimer = setInterval(() => {
-      this.captureThumbnail();
-    }, THUMBNAIL_INTERVAL_MS);
   }
 
-  private stopThumbnailCapture(): void {
-    if (!this.thumbnailTimer) return;
+  private captureThumbnail(mediaTime: number, cutoff: number): void {
+    const video = this.thumbnailVideo;
+    const thumbnailEpoch = this.thumbnailEpoch;
+    if (this.thumbnailCaptureEpoch === thumbnailEpoch || this.thumbnailCaptureFailed) return;
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0 || video.videoHeight === 0) {
+      return;
+    }
 
-    clearInterval(this.thumbnailTimer);
-    this.thumbnailTimer = null;
-  }
+    this.thumbnailCaptureEpoch = thumbnailEpoch;
+    createThumbnailBlob(video)
+      .then((blob) => {
+        if (this.states.has('destroyed') || thumbnailEpoch !== this.thumbnailEpoch) return;
 
-  private captureThumbnail(): void {
-    const range = this.snapshot.range;
-    const store = this.store;
-    if (!range || !store || this.thumbnailCapturePending || this.thumbnailCaptureFailed) return;
-
-    this.thumbnailCapturePending = true;
-    createThumbnailBlob(this.captureVideo)
-      .then(async (blob) => {
-        const mediaTime = range.end;
-        const thumbnail: ThumbnailRecord = {
-          mediaTime,
-          blob,
-          url: URL.createObjectURL(blob),
-        };
-        this.thumbnails.push(thumbnail);
-        await store.putThumbnail({ mediaTime, blob });
-        this.pruneThumbnails(range.start);
+        this.thumbnails.push({ mediaTime, url: URL.createObjectURL(blob) });
+        this.pruneThumbnails(cutoff);
       })
       .catch((error) => {
+        if (this.states.has('destroyed') || thumbnailEpoch !== this.thumbnailEpoch) return;
+
         this.thumbnailCaptureFailed = true;
-        this.stopThumbnailCapture();
         console.info('[Replay] Thumbnail generation unavailable; using timestamp previews:', error);
       })
       .finally(() => {
-        this.thumbnailCapturePending = false;
+        if (this.thumbnailCaptureEpoch === thumbnailEpoch) this.thumbnailCaptureEpoch = null;
       });
   }
 
@@ -656,15 +636,18 @@ export class ViewerReplay {
   }
 
   private pruneThumbnails(cutoff: number): void {
-    const retained: ThumbnailRecord[] = [];
+    const retained: ReplayThumbnail[] = [];
+    let shouldClearPreview = false;
     for (const thumbnail of this.thumbnails) {
       if (thumbnail.mediaTime < cutoff) {
+        shouldClearPreview ||= this.snapshot.preview === thumbnail;
         URL.revokeObjectURL(thumbnail.url);
       } else {
         retained.push(thumbnail);
       }
     }
     this.thumbnails = retained;
+    if (shouldClearPreview) this.update({ preview: null });
   }
 
   private finishShare(): void {
@@ -705,9 +688,9 @@ export class ViewerReplay {
 
     console.info(`[Replay] Unavailable: ${reason}`);
     this.stopRecording();
-    this.stopThumbnailCapture();
     this.mediaBuffer?.destroy();
     this.mediaBuffer = null;
+    this.resetThumbnailCapture();
     this.releaseThumbnails();
     this.clearStoredMedia();
     this.ownership.release();
@@ -763,12 +746,10 @@ export class ViewerReplay {
 
   private async clearSession(): Promise<void> {
     this.stopRecording();
-    this.stopThumbnailCapture();
     this.mediaBuffer?.destroy();
     this.mediaBuffer = null;
-    this.captureVideo.pause();
-    this.captureVideo.srcObject = null;
     this.replayVideo.pause();
+    this.resetThumbnailCapture();
     this.releaseThumbnails();
 
     const store = this.store;
