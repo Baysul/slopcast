@@ -135,7 +135,7 @@ This is not a gaming aesthetic — it is a *studio* aesthetic. Every control ear
 - Layered darkness distinguishes hierarchy: deeper bg for the canvas, lighter surfaces for controls.
 - Edges are soft but never timid — rounded corners on containers, sharp on controls.
 - Backdrop blur on overlays and headers creates atmospheric depth without breaking the dark field.
-- Motion is one pulse for live. The title-bar signal is a 6px dot and a word on flat dark — no pill, no glow, no wash — everything else stays still.
+- Motion is one pulse for live. A flat, low-opacity Safelight fill breathes across the full title bar. It has no gradient or glow, and everything else stays still.
 
 ### Known drift
 
@@ -170,7 +170,7 @@ The palette is a darkroom: total black, paper-white for the stream, and one roas
 
 **The Safelight Rule.** The roasted amber accent appears on at most 10% of any screen. It is reserved exclusively for live/active/capture states and the primary call to action. Overuse dilutes its signal power — if everything glows, nothing is live.
 
-**The No-Background Rule.** Backgrounds never carry color. Every visible tint comes from surface elevation (bg → surface → elevated), never from a colored wash. The Safelight accent lives only on elements with semantic meaning, never on chrome.
+**The No-Background Rule.** Backgrounds never carry color. Every visible tint comes from surface elevation (bg → surface → elevated), never from a colored wash. The live title bar is the sole exception: a flat, low-opacity Safelight fill turns the window chrome into a broadcast signal while streaming.
 
 ## Typography
 
@@ -261,6 +261,12 @@ Borders are thin (1px), semi-transparent (0.5–0.8 opacity), and always the bor
 - **Title:** `text-sm font-semibold leading-tight tracking-tight`. Actual usage universally overrides to `text-xs font-semibold uppercase tracking-wider text-muted-foreground` for card section labels.
 - **No shadow by default on content sections.** The preview card carries `shadow-2xl` as deliberate emphasis.
 
+### Alert dialogs
+- **Container:** Match desktop cards with `rounded-lg`, `border-border`, a nearly opaque `bg-card` fill, and `backdrop-blur-md`. Destructive color belongs on the confirming action, not the dialog border.
+
+### Presenter room metadata
+- **Spectator count:** A compact `rounded-md` status tile beside the room code. It uses `border-border`, a quiet background fill, normal-case `text-muted-foreground`, and tabular numerals. It is metadata, not a pill badge.
+
 ### Badges
 - **Shape:** Full radius pill (`rounded-full`). Padding `px-2.5 py-1`. Font `text-xs font-semibold uppercase tracking-wider`.
 - **Live (Safelight):** `bg-safelight-glow text-safelight border-safelight/20`. Used for LIVE, Broadcasting, Active states. The live ping dot is `aria-hidden` decoration — the live region announces "Live" via the status pill's `role="status"` wrapper.
@@ -271,7 +277,7 @@ Borders are thin (1px), semi-transparent (0.5–0.8 opacity), and always the bor
 ### Navigation / Header
 - **Web Header (HomePage):** Dark glass (`bg-background/80 border-b backdrop-blur-md`). Sticky top. Brand icon box + Slopcast wordmark (`text-base font-bold tracking-tight`).
 - **Web Room Page header overlay:** Fixed top, gradient-faded to transparent (`bg-black/60`). The cluster holds `[Back] [Status Badge]` on the left and `[Copy link]` on the right. Long status text truncates with `max-w-[60vw] sm:max-w-[320px]`.
-- **Desktop Header (TitleBar):** Custom Tauri chrome (`decorations: false`), `h-10`, flat `bg-background` with `border-b border-border` — no glass, no glow. Left: bare `ScreenShare` icon (`w-4 h-4 text-muted-foreground`) + wordmark (`text-sm font-semibold tracking-tight`). Center: distilled signal — a 6px dot + uppercase word, no pill or background (`gap-2`, `text-xs font-medium tracking-widest`). `Live` uses `bg-safelight` with `motion-safe:animate-pulse` + `text-safelight`; `Preview` uses `bg-muted-foreground/60` + `text-muted-foreground`. The center slot is `pointer-events-none` so the drag region stays live; the whole bar is the drag target via `windowControls.startDragging()`, double-click toggles maximize. Right: native window controls (`w-11`, `Minus` / `Square`+`Copy` / `X`) with `hover:bg-accent/60` (close: `hover:bg-destructive`). Sticky, `select-none`, owns the window.
+- **Desktop Header (TitleBar):** Custom Tauri chrome (`decorations: false`), `h-10`, `bg-background`, and `border-b border-border`. While live, a flat Safelight tint fills the entire bar and breathes between low-opacity states. The effect has no gradient and becomes a steady muted tint under reduced motion. Left: bare `ScreenShare` icon (`w-4 h-4 text-muted-foreground`) + wordmark (`text-sm font-semibold tracking-tight`). `Preview` uses a centered `bg-muted-foreground/60` dot + `text-muted-foreground` label. The center slot is `pointer-events-none` so the drag region stays live; the whole bar is the drag target via `windowControls.startDragging()`, double-click toggles maximize. Right: native window controls (`w-11`, `Minus` / `Square`+`Copy` / `X`) with `hover:bg-accent/60` (close: `hover:bg-destructive`). Sticky, `select-none`, owns the window.
 - **Mobile:** Icon-based back navigation truncates secondary information.
 
 ### Video Player

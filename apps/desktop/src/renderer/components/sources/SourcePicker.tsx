@@ -14,7 +14,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import type { CaptureContext, CaptureSourceSelection, CaptureStage } from '../../types';
@@ -157,9 +156,9 @@ function ActiveRoomControls({
           {roomCode}
         </span>
         {spectatorCount > 0 && (
-          <Badge variant="info" className="tabular-nums">
+          <span className="inline-flex items-center rounded-md border border-border bg-background/60 px-2 py-1 text-xs font-medium tabular-nums text-muted-foreground">
             {spectatorLabel}
-          </Badge>
+          </span>
         )}
       </div>
       <div className="grid grid-cols-3 gap-2">
@@ -275,22 +274,25 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
             onCopyLink={onCopyLink}
           />
 
-          {captureContext?.de === 'kde' && !autoDetectFailed && !kdeNoticeDismissed && (
-            <div className="relative bg-secondary border border-border rounded-lg p-3">
-              <p className="text-sm text-muted-foreground leading-relaxed pr-6">
-                KDE Plasma detected — window identity is unavailable in PipeWire streams. If auto-detection fails,
-                select an audio app manually.
-              </p>
-              <button
-                type="button"
-                onClick={() => setKdeNoticeDismissed(true)}
-                className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
-                aria-label="Dismiss KDE Plasma notice"
-              >
-                <X className="w-3.5 h-3.5" aria-hidden="true" />
-              </button>
-            </div>
-          )}
+          {captureContext?.de === 'kde' &&
+            captureContext.sourceType === 'window' &&
+            !autoDetectFailed &&
+            !kdeNoticeDismissed && (
+              <div className="relative bg-secondary border border-border rounded-lg p-3">
+                <p className="text-sm text-muted-foreground leading-relaxed pr-6">
+                  Your desktop may not identify the audio app for a shared window. If the stream has no audio, choose
+                  the app under Window Audio Capture.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setKdeNoticeDismissed(true)}
+                  className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
+                  aria-label="Dismiss audio detection notice"
+                >
+                  <X className="w-3.5 h-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            )}
 
           {autoDetectFailed && captureContext?.de === 'kde' && !kdeFailedNoticeDismissed && (
             <div className="relative bg-secondary border border-border rounded-lg p-3 space-y-1">
