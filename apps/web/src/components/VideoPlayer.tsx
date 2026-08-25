@@ -945,6 +945,7 @@ const PlayerOverlays: React.FC<{
   onUserGesture: () => void;
   stalledCodec: string | null | undefined;
   visualizerStream: MediaStream | null;
+  playerRef: React.RefObject<HTMLDivElement | null>;
   overlayClass: string;
   announcement: string | null;
 }> = ({
@@ -958,6 +959,7 @@ const PlayerOverlays: React.FC<{
   onUserGesture,
   stalledCodec,
   visualizerStream,
+  playerRef,
   overlayClass,
   announcement,
 }) => (
@@ -967,9 +969,14 @@ const PlayerOverlays: React.FC<{
       <GestureOverlay isPlaying={isPlaying} audioTrackCount={audioTrackCount} onUserGesture={onUserGesture} />
     )}
     {showStall && <DecoderStallOverlay stalledCodec={stalledCodec} onResync={onResync} />}
-    <div className={`absolute top-4 right-16 z-20 hidden transition-opacity duration-300 sm:block ${overlayClass}`}>
-      {visualizerStream && <AudioVisualizer mediaStream={visualizerStream} showStatus />}
-    </div>
+    {visualizerStream && (
+      <AudioVisualizer
+        mediaStream={visualizerStream}
+        playerRef={playerRef}
+        showStatus
+        className={`absolute z-20 hidden transition-opacity duration-300 sm:flex ${overlayClass}`}
+      />
+    )}
     {announcement && (
       <span role="status" aria-live="polite" className="sr-only">
         {announcement}
@@ -1055,6 +1062,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         onUserGesture={handleUserGesture}
         stalledCodec={stalledCodec}
         visualizerStream={visualizerStream}
+        playerRef={containerRef}
         overlayClass={overlayControlsClass}
         announcement={replay.snapshot.announcement}
       />

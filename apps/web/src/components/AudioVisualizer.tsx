@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 declare global {
   interface Window {
@@ -9,10 +9,29 @@ declare global {
 
 interface AudioVisualizerProps {
   mediaStream: MediaStream | null;
+  playerRef: React.RefObject<HTMLDivElement | null>;
+  className?: string;
   showStatus?: boolean;
 }
 
+interface RelativePosition {
+  x: number;
+  y: number;
+}
+
+interface DragSession {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  grabOffsetX: number;
+  grabOffsetY: number;
+  hasMoved: boolean;
+}
+
 const AUDIO_UNLOCK_EVENT = 'slopcast-audio-unlock';
+const POSITION_STORAGE_KEY = 'slopcast:audio-visualizer-position';
+const DRAG_THRESHOLD = 3;
+const DOUBLE_TAP_DELAY_MS = 350;
 
 const CANVAS_WIDTH = 80;
 const CANVAS_HEIGHT = 20;
@@ -20,6 +39,56 @@ const CANVAS_HEIGHT = 20;
 export function unlockAudioContexts() {
   window.dispatchEvent(new CustomEvent(AUDIO_UNLOCK_EVENT));
 }
+
+const isRelativePosition = (position: RelativePosition): boolean =>
+  Number.isFinite(position.x) &&
+  Number.isFinite(position.y) &&
+  position.x >= 0 &&
+  position.x <= 1 &&
+  position.y >= 0 &&
+  position.y <= 1;
+
+const readSavedPosition = (): RelativePosition | null => {
+  try {
+    const storedPosition = window.localStorage.getItem(POSITION_STORAGE_KEY);
+    if (!storedPosition) return null;
+
+    const [xValue, yValue] = storedPosition.split(',');
+    const position = { x: Number(xValue), y: Number(yValue) };
+    return isRelativePosition(position) ? position : null;
+  } catch (error) {
+    console.info('[AudioVisualizer] Saved position is unavailable:', error);
+    return null;
+  }
+};
+
+const savePosition = (position: RelativePosition): void => {
+  try {
+    window.localStorage.setItem(POSITION_STORAGE_KEY, `${position.x},${position.y}`);
+  } catch (error) {
+    console.info('[AudioVisualizer] Position could not be saved:', error);
+  }
+};
+
+const clearSavedPosition = (): void => {
+  try {
+    window.localStorage.removeItem(POSITION_STORAGE_KEY);
+  } catch (error) {
+    console.info('[AudioVisualizer] Saved position could not be cleared:', error);
+  }
+};
+
+const clamp = (value: number, maximum: number): number => Math.min(maximum, Math.max(0, value));
+
+const getPositionStyle = (position: RelativePosition | null): React.CSSProperties | undefined => {
+  if (!position) return undefined;
+
+  return {
+    left: `${position.x * 100}%`,
+    top: `${position.y * 100}%`,
+    transform: `translate(${-position.x * 100}%, ${-position.y * 100}%)`,
+  };
+};
 
 const createAudioContext = (): AudioContext | null => {
   const ACtor = window.AudioContext ?? window.webkitAudioContext;
@@ -116,8 +185,103 @@ const startPipeline = (
   return audioCtx;
 };
 
-export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, showStatus }) => {
+export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, playerRef, className, showStatus }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const visualizerRef = useRef<HTMLDivElement | null>(null);
+  const dragSessionRef = useRef<DragSession | null>(null);
+  const lastTapTimeRef = useRef(0);
+  const [position, setPosition] = useState<RelativePosition | null>(readSavedPosition);
+  const positionRef = useRef(position);
+
+  const resetPosition = (): void => {
+    positionRef.current = null;
+    setPosition(null);
+    clearSavedPosition();
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return;
+
+    const player = playerRef.current;
+    const visualizer = visualizerRef.current;
+    if (!player || !visualizer) return;
+
+    const visualizerBounds = visualizer.getBoundingClientRect();
+    dragSessionRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      grabOffsetX: event.clientX - visualizerBounds.left,
+      grabOffsetY: event.clientY - visualizerBounds.top,
+      hasMoved: false,
+    };
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const dragSession = dragSessionRef.current;
+    if (!dragSession || dragSession.pointerId !== event.pointerId) return;
+
+    const player = playerRef.current;
+    const visualizer = visualizerRef.current;
+    if (!player || !visualizer) return;
+
+    const horizontalMovement = Math.abs(event.clientX - dragSession.startX);
+    const verticalMovement = Math.abs(event.clientY - dragSession.startY);
+    if (!dragSession.hasMoved && horizontalMovement <= DRAG_THRESHOLD && verticalMovement <= DRAG_THRESHOLD) return;
+
+    const playerBounds = player.getBoundingClientRect();
+    const visualizerBounds = visualizer.getBoundingClientRect();
+    const maximumLeft = Math.max(0, playerBounds.width - visualizerBounds.width);
+    const maximumTop = Math.max(0, playerBounds.height - visualizerBounds.height);
+    const left = clamp(event.clientX - playerBounds.left - dragSession.grabOffsetX, maximumLeft);
+    const top = clamp(event.clientY - playerBounds.top - dragSession.grabOffsetY, maximumTop);
+    const nextPosition = {
+      x: maximumLeft === 0 ? 0 : left / maximumLeft,
+      y: maximumTop === 0 ? 0 : top / maximumTop,
+    };
+
+    dragSession.hasMoved = true;
+    positionRef.current = nextPosition;
+    setPosition(nextPosition);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const finishDrag = (event: React.PointerEvent<HTMLDivElement>, shouldDetectTap: boolean): void => {
+    const dragSession = dragSessionRef.current;
+    if (!dragSession || dragSession.pointerId !== event.pointerId) return;
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragSessionRef.current = null;
+    event.stopPropagation();
+
+    if (dragSession.hasMoved) {
+      lastTapTimeRef.current = 0;
+      if (positionRef.current) savePosition(positionRef.current);
+      return;
+    }
+    if (!shouldDetectTap || event.pointerType === 'mouse') return;
+
+    const tapTime = performance.now();
+    if (tapTime - lastTapTimeRef.current <= DOUBLE_TAP_DELAY_MS) {
+      lastTapTimeRef.current = 0;
+      resetPosition();
+      return;
+    }
+    lastTapTimeRef.current = tapTime;
+  };
+
+  const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    resetPosition();
+  };
 
   useEffect(() => {
     if (!mediaStream || mediaStream.getAudioTracks().length === 0) return;
@@ -165,10 +329,25 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ mediaStream, s
     };
   }, [mediaStream]);
 
+  const placementClass = position ? '' : 'top-4 right-16';
+
   return (
-    <div className="flex items-center gap-2 bg-black/30 backdrop-blur-sm px-3 py-1.5 rounded-lg border border-white/10">
+    <div
+      ref={visualizerRef}
+      data-audio-visualizer
+      role="img"
+      aria-label="Audio activity visualizer. Drag to move. Double-click or double-tap to reset."
+      title="Drag to move. Double-click or double-tap to reset."
+      className={`${className ?? ''} ${placementClass} flex touch-none cursor-grab active:cursor-grabbing items-center gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-1.5 backdrop-blur-sm`}
+      style={getPositionStyle(position)}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={(event) => finishDrag(event, true)}
+      onPointerCancel={(event) => finishDrag(event, false)}
+      onDoubleClick={handleDoubleClick}
+    >
       {showStatus && (
-        <span className="relative w-1.5 h-1.5">
+        <span aria-hidden="true" className="relative w-1.5 h-1.5">
           <span className="absolute inset-0 rounded-full bg-safelight animate-ping opacity-75" />
           <span className="absolute inset-0 rounded-full bg-safelight" />
         </span>
