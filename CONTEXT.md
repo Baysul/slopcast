@@ -60,8 +60,12 @@ _Avoid_: publisher worker, lifecycle loop
 The irreversible end of a room that disconnects its presenter and spectators and invalidates its room link.
 _Avoid_: room disconnect, stop sharing, end stream
 
+**Replay owner**:
+The one browser tab allowed to retain a viewer-session buffer for a Slopcast origin. Ownership begins when an eligible tab starts buffering and continues while its live or ended buffer remains available, excluding every other tab until release.
+_Avoid_: active replay tab, primary tab, tab leader
+
 **Viewer-session buffer**:
-A spectator-local, temporary history of one share interval received by one browser tab. It remains after sharing stops or the presenter leaves, but disappears when a new share begins or the spectator refreshes or leaves.
+A spectator-local, temporary history of one share interval retained by the replay owner. It remains after sharing stops or the presenter leaves, but disappears when a new share begins or the spectator refreshes or leaves.
 _Avoid_: room DVR, recording, archive
 
 **Rewind window**:

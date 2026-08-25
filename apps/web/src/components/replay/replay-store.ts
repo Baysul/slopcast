@@ -6,12 +6,9 @@ const THUMBNAIL_STORE = 'thumbnails';
 const SESSION_INDEX = 'sessionId';
 const CHUNK_END_INDEX = 'sessionEnd';
 const THUMBNAIL_TIME_INDEX = 'sessionTime';
-const ACTIVE_SESSION_KEY = 'slopcast.replaySessionId';
-const STALE_SESSION_MS = 24 * 60 * 60 * 1000;
 
 interface ReplaySessionRecord {
   id: string;
-  createdAt: number;
 }
 
 export interface StoredReplayChunk {
@@ -109,43 +106,13 @@ const clearSession = async (database: IDBDatabase, sessionId: string): Promise<v
   await transactionDone(transaction);
 };
 
-const readActiveSessionId = (): string | null => {
-  try {
-    return window.sessionStorage.getItem(ACTIVE_SESSION_KEY);
-  } catch (error) {
-    console.info('[Replay] Session cleanup marker is unavailable:', error);
-    return null;
-  }
-};
-
-const saveActiveSessionId = (sessionId: string): void => {
-  try {
-    window.sessionStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
-  } catch (error) {
-    console.info('[Replay] Session cleanup marker could not be saved:', error);
-  }
-};
-
-const removeActiveSessionId = (sessionId: string): void => {
-  try {
-    if (window.sessionStorage.getItem(ACTIVE_SESSION_KEY) === sessionId) {
-      window.sessionStorage.removeItem(ACTIVE_SESSION_KEY);
-    }
-  } catch (error) {
-    console.info('[Replay] Session cleanup marker could not be removed:', error);
-  }
-};
-
-const clearStaleSessions = async (database: IDBDatabase): Promise<void> => {
+const clearPreviousSessions = async (database: IDBDatabase): Promise<void> => {
   const transaction = database.transaction(SESSION_STORE, 'readonly');
   const sessions = await requestResult<ReplaySessionRecord[]>(transaction.objectStore(SESSION_STORE).getAll());
   await transactionDone(transaction);
 
-  const cutoff = Date.now() - STALE_SESSION_MS;
   for (const session of sessions) {
-    if (session.createdAt < cutoff) {
-      await clearSession(database, session.id);
-    }
+    await clearSession(database, session.id);
   }
 };
 
@@ -179,16 +146,11 @@ export class ReplayStore {
 
   static async create(sessionId: string): Promise<ReplayStore> {
     const database = await openReplayDatabase();
-    const previousSessionId = readActiveSessionId();
-    if (previousSessionId && previousSessionId !== sessionId) {
-      await clearSession(database, previousSessionId);
-    }
-    await clearStaleSessions(database);
+    await clearPreviousSessions(database);
 
     const transaction = database.transaction(SESSION_STORE, 'readwrite');
-    transaction.objectStore(SESSION_STORE).put({ id: sessionId, createdAt: Date.now() } satisfies ReplaySessionRecord);
+    transaction.objectStore(SESSION_STORE).put({ id: sessionId } satisfies ReplaySessionRecord);
     await transactionDone(transaction);
-    saveActiveSessionId(sessionId);
 
     return new ReplayStore(database, sessionId);
   }
@@ -218,7 +180,6 @@ export class ReplayStore {
 
   async clear(): Promise<void> {
     await clearSession(this.database, this.sessionId);
-    removeActiveSessionId(this.sessionId);
   }
 
   close(): void {

@@ -34,7 +34,7 @@
     "dist:desktop:linux:deb": "pnpm check && pnpm desktop:prepare-gstreamer && pnpm --filter desktop tauri build --bundles deb",
     "dist:desktop:linux:tar": "pnpm check && pnpm desktop:prepare-gstreamer && pnpm --filter desktop tauri build --bundles deb && cd target/release/bundle/deb && tar -czf ../Slopcast-$npm_package_version-linux-amd64.tar.gz slopcast_$npm_package_version_amd64",
     "dist:desktop:win": "pnpm check && pnpm --filter desktop tauri build --bundles nsis",
-    "test:unit": "pnpm --filter server test && pnpm --filter @slopcast/shared-types test && pnpm --filter desktop test"
+    "test:unit": "pnpm --filter server test && pnpm --filter @slopcast/shared-types test && pnpm --filter desktop test && pnpm --filter web test"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
