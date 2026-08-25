@@ -37,16 +37,16 @@
   @keyframes live-breathe {
     0%,
     100% {
-      opacity: 0.5;
+      opacity: 0.45;
     }
     50% {
-      opacity: 0.85;
+      opacity: 0.8;
     }
   }
 }
 
-@utility bg-live-glow {
-  background-image: linear-gradient(180deg, var(--color-safelight-glow-strong), transparent 150%);
+@utility bg-live-signal {
+  background-color: var(--color-safelight-glow-strong);
 }
 
 @layer base {

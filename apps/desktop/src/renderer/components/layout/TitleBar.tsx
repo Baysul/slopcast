@@ -65,7 +65,7 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
       <AnimatePresence>
         {isLive && (
           <motion.div
-            key="live-glow"
+            key="live-signal"
             aria-hidden="true"
             className="pointer-events-none absolute inset-0 -z-10"
             initial={{ opacity: 0 }}
@@ -73,7 +73,7 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(({ isLive = false, i
             exit={{ opacity: 0 }}
             transition={{ duration: 0.6, ease: 'easeOut' }}
           >
-            <div className="size-full bg-live-glow motion-safe:animate-live-breathe" />
+            <div className="size-full bg-live-signal opacity-60 motion-safe:animate-live-breathe" />
           </motion.div>
         )}
       </AnimatePresence>
