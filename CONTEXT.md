@@ -24,6 +24,10 @@ _Avoid_: restart stream, switch server
 An ephemeral room registration that may issue participant credentials until it is closed, expires, or its server restarts.
 _Avoid_: allocated code, open room
 
+**Audio visualizer**:
+The shared waveform display that represents current audio activity on presenter and spectator surfaces.
+_Avoid_: audio level meter, waveform meter
+
 **Encoder chain**:
 The ordered, probe-gated preference of video encoders for a codec: NVENC → VA-API → software.
 _Avoid_: encoder preference list, codec fallback stack
