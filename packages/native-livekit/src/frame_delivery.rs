@@ -1727,13 +1727,12 @@ mod tests {
         assert_eq!(frames[0], (4, 4, 11, true));
         assert_eq!(frames[1], (4, 4, 11, true));
         drop(frames);
-        let stats = delivery.stats();
+        let stats = delivery
+            .stop()
+            .unwrap_or_else(|error| panic!("delivery stop failed: {error}"));
         assert_eq!(stats.frames_dequeued, 1);
         assert_eq!(stats.frames_pushed, 1);
         assert_eq!(stats.keepalive_pushed, 1);
-        delivery
-            .stop()
-            .unwrap_or_else(|error| panic!("delivery stop failed: {error}"));
     }
 
     #[test]
