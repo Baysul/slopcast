@@ -10,6 +10,7 @@ export const REPLAY_LIVE_TOLERANCE_SECONDS = 2;
 const REPLAY_PREFERENCE_KEY = 'slopcast.replayWindowSeconds';
 const RECORDING_CHUNK_MS = 2000;
 const RECORDING_CHUNK_SECONDS = RECORDING_CHUNK_MS / 1000;
+const THUMBNAIL_INTERVAL_SECONDS = 5;
 const THUMBNAIL_WIDTH = 256;
 const THUMBNAIL_HEIGHT = 144;
 const THUMBNAIL_QUALITY = 0.75;
@@ -175,6 +176,7 @@ export class ViewerReplay {
   private thumbnailEpoch = 0;
   private thumbnailCaptureEpoch: number | null = null;
   private thumbnailCaptureFailed = false;
+  private lastThumbnailAt = 0;
   private thumbnails: ReplayThumbnail[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
   private sequence = 0;
@@ -594,17 +596,20 @@ export class ViewerReplay {
     this.thumbnailEpoch += 1;
     this.thumbnailCaptureEpoch = null;
     this.thumbnailCaptureFailed = false;
+    this.lastThumbnailAt = 0;
   }
 
   private captureThumbnail(mediaTime: number, cutoff: number): void {
     const video = this.thumbnailVideo;
     const thumbnailEpoch = this.thumbnailEpoch;
     if (this.thumbnailCaptureEpoch === thumbnailEpoch || this.thumbnailCaptureFailed) return;
+    if (this.lastThumbnailAt > 0 && mediaTime - this.lastThumbnailAt < THUMBNAIL_INTERVAL_SECONDS) return;
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0 || video.videoHeight === 0) {
       return;
     }
 
     this.thumbnailCaptureEpoch = thumbnailEpoch;
+    this.lastThumbnailAt = mediaTime;
     createThumbnailBlob(video)
       .then((blob) => {
         if (this.states.has('destroyed') || thumbnailEpoch !== this.thumbnailEpoch) return;

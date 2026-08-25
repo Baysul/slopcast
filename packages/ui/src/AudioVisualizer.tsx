@@ -54,19 +54,20 @@ const sleepVisualizer = (draw: VisualizerDraw): void => {
   tickerFrame = null;
 };
 
-const prepareCanvas = (canvas: HTMLCanvasElement, width: number, height: number): CanvasRenderingContext2D | null => {
+const prepareCanvas = (
+  canvas: HTMLCanvasElement,
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): void => {
   const dpr = window.devicePixelRatio || 1;
   if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
     canvas.width = width * dpr;
     canvas.height = height * dpr;
   }
 
-  const context = canvas.getContext('2d');
-  if (!context) return null;
-
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, width, height);
-  return context;
 };
 
 const peakToHeight = (peak: number): number => {
@@ -78,9 +79,9 @@ const peakToHeight = (peak: number): number => {
   return (decibels + PEAK_FLOOR_DB) / PEAK_FLOOR_DB;
 };
 
-const levelPeaks = (levels: readonly number[]): number[] => {
+const updateLevelPeaks = (levels: ArrayLike<number>, peaks: number[]): void => {
+  peaks.fill(0);
   const barCount = Math.max(1, Math.min(DISPLAY_BARS, Math.floor(levels.length / 2)));
-  const peaks = new Array<number>(barCount).fill(0);
   for (let barIndex = 0; barIndex < barCount; barIndex += 1) {
     const start = Math.floor((barIndex * levels.length) / barCount);
     const end = Math.max(start + 1, Math.floor(((barIndex + 1) * levels.length) / barCount));
@@ -90,7 +91,6 @@ const levelPeaks = (levels: readonly number[]): number[] => {
     }
     peaks[barIndex] = peakToHeight(peak);
   }
-  return peaks;
 };
 
 const advanceEnvelope = (peaks: readonly number[], envelope: number[], elapsedSeconds: number): void => {
@@ -128,8 +128,12 @@ const paintBars = (context: CanvasRenderingContext2D, envelope: readonly number[
   }
 };
 
-const levelsAreActive = (levels: readonly number[]): boolean =>
-  levels.some((level) => Math.abs(level) > ACTIVE_AMPLITUDE);
+const levelsAreActive = (levels: ArrayLike<number>): boolean => {
+  for (let index = 0; index < levels.length; index += 1) {
+    if (Math.abs(levels[index] ?? 0) > ACTIVE_AMPLITUDE) return true;
+  }
+  return false;
+};
 
 const useStableDraw = (draw: VisualizerDraw): (() => void) => {
   const drawRef = useRef(draw);
@@ -157,7 +161,9 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
   hideWhenSilent = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const targetLevelsRef = useRef<number[]>([]);
+  const contextRef = useRef<CanvasRenderingContext2D | null>(null);
+  const targetLevelsRef = useRef<ArrayLike<number>>([]);
+  const peaksRef = useRef<number[]>(new Array(DISPLAY_BARS).fill(0));
   const envelopeRef = useRef<number[]>(new Array(DISPLAY_BARS).fill(0));
   const lastActiveAtRef = useRef(0);
   const lastDrawAtRef = useRef<number | null>(null);
@@ -188,15 +194,20 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return false;
 
-    const context = prepareCanvas(canvas, width, height);
-    if (!context) return false;
+    let context = contextRef.current;
+    if (!context) {
+      context = canvas.getContext('2d');
+      if (!context) return false;
+      contextRef.current = context;
+    }
 
     const lastDrawAt = lastDrawAtRef.current ?? now;
     const elapsedSeconds = Math.min(0.5, Math.max(0.001, (now - lastDrawAt) / 1000));
-    const peaks = levelPeaks(targetLevelsRef.current);
-    const isActive = levelsAreActive(peaks);
+    updateLevelPeaks(targetLevelsRef.current, peaksRef.current);
+    const isActive = levelsAreActive(peaksRef.current);
     lastDrawAtRef.current = now;
-    advanceEnvelope(peaks, envelopeRef.current, elapsedSeconds);
+    prepareCanvas(canvas, context, width, height);
+    advanceEnvelope(peaksRef.current, envelopeRef.current, elapsedSeconds);
     paintBars(context, envelopeRef.current, width, height);
     if (isActive) lastActiveAtRef.current = now;
     return isActive || now - lastActiveAtRef.current < SLEEP_COOLDOWN_MS;
@@ -210,9 +221,8 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     isSilentRef.current = true;
     setIsSilent(true);
     const unsubscribe = subscribe((levels) => {
-      const nextLevels = Array.from(levels);
-      const isActive = levelsAreActive(nextLevels);
-      targetLevelsRef.current = nextLevels;
+      const isActive = levelsAreActive(levels);
+      targetLevelsRef.current = levels;
       signalActivity(isActive);
       if (isActive) wake();
     });

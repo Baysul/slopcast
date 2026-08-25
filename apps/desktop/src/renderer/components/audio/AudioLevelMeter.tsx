@@ -30,28 +30,32 @@ const unionColumns = (merged: number[], columns: number[]): void => {
   }
 };
 
-const mergeWaves = (members: ReadonlyMap<number, number[]>): number[] => {
-  const merged = silentWave();
+const mergeWaves = (members: ReadonlyMap<number, number[]>, merged: number[]): void => {
+  merged.fill(0);
   let isFirstWave = true;
   for (const columns of members.values()) {
     if (isFirstWave) {
-      merged.splice(0, merged.length, ...columns.slice(0, merged.length));
+      const columnCount = Math.min(columns.length, merged.length);
+      for (let index = 0; index < columnCount; index += 1) {
+        merged[index] = columns[index] ?? 0;
+      }
       isFirstWave = false;
       continue;
     }
     unionColumns(merged, columns);
   }
-  return merged;
 };
 
 const createSubscription =
   (ids: readonly number[]): AudioLevelSubscription =>
   (listener) => {
     const memberWaves = new Map<number, number[]>();
+    const merged = silentWave();
     const unsubscribe = ids.map((id) =>
       audioWaveStore.subscribe(id, (columns) => {
         memberWaves.set(id, columns);
-        listener(mergeWaves(memberWaves));
+        mergeWaves(memberWaves, merged);
+        listener(merged);
       }),
     );
     return () => {

@@ -45,6 +45,7 @@ const DECODER_STALL_THRESHOLD_MS = 8000;
 const DECODER_STALL_CHECK_MS = 2000;
 const CONNECT_TIMEOUT_MS = 20000;
 const STREAM_END_GRACE_MS = 500;
+const CONTROLS_IDLE_MS = 2500;
 
 const logH264Sdp = (room: Room): void => {
   try {
@@ -303,17 +304,31 @@ export const RoomPage: React.FC = () => {
   const stallCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stallStartRef = useRef<number>(0);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const controlsLastActiveAtRef = useRef(0);
+  const areControlsVisibleRef = useRef(true);
   const streamEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectFailedRef = useRef(false);
 
   const resetControlsIdleTimer = useCallback(() => {
-    setShowControls(true);
-    if (idleTimerRef.current) {
-      clearTimeout(idleTimerRef.current);
+    controlsLastActiveAtRef.current = performance.now();
+    if (!areControlsVisibleRef.current) {
+      areControlsVisibleRef.current = true;
+      setShowControls(true);
     }
-    idleTimerRef.current = setTimeout(() => {
+    if (idleTimerRef.current) return;
+
+    const hideAfterIdle = (): void => {
+      const remainingMs = CONTROLS_IDLE_MS - (performance.now() - controlsLastActiveAtRef.current);
+      if (remainingMs > 0) {
+        idleTimerRef.current = setTimeout(hideAfterIdle, remainingMs);
+        return;
+      }
+
+      idleTimerRef.current = null;
+      areControlsVisibleRef.current = false;
       setShowControls(false);
-    }, 2500);
+    };
+    idleTimerRef.current = setTimeout(hideAfterIdle, CONTROLS_IDLE_MS);
   }, []);
 
   useEffect(() => {
