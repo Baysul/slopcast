@@ -505,6 +505,8 @@ impl Stats {
             pacer_drops: self.pacer_drops.load(Ordering::Relaxed).cast_signed(),
             pacer_depth: self.pacer_depth.load(Ordering::Relaxed).cast_signed(),
             pacer_max_depth: self.pacer_max_depth.load(Ordering::Relaxed).cast_signed(),
+            cursor_frames: 0,
+            cursor_missing: false,
         }
     }
 }

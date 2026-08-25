@@ -17,6 +17,7 @@ struct CaptureSession {
     stop: Arc<AtomicBool>,
     source_join: Option<thread::JoinHandle<()>>,
     delivery: FrameDelivery,
+    real_capture: bool,
 }
 
 struct CaptureCoordinator {
@@ -43,6 +44,11 @@ static CAPTURE: LazyLock<Mutex<CaptureCoordinator>> =
     LazyLock::new(|| Mutex::new(CaptureCoordinator::default()));
 static CAPTURE_ENDED_CALLBACK: ArcSwapOption<CaptureEndedCallback> = ArcSwapOption::const_empty();
 static CAPTURE_ENDED_EMITTED: AtomicBool = AtomicBool::new(false);
+
+/// Frames the cursor must be absent from before we warn. The cursor leaves the
+/// captured region regularly (menus, other monitors), so a single frame is not
+/// evidence of failure; roughly half a second of frames never claiming one is.
+const CURSOR_MISSING_MIN_DELIVERED: u64 = 30;
 
 pub(crate) fn set_preview_callback(callback: Box<dyn Fn(Vec<u8>, i64) + Send + Sync>) {
     let output: PreviewOutput = Arc::from(callback);
@@ -187,6 +193,13 @@ fn start_with(source: CaptureSource) -> Result<bool, String> {
     }
 
     CAPTURE_ENDED_EMITTED.store(false, Ordering::Relaxed);
+    let real_capture_flag = real_capture(&source);
+    if real_capture_flag {
+        // Zero the shim's process-wide cursor counters for this session. The
+        // counters are shared across capturer instances (enumeration also
+        // creates one), so it's the session start that defines the window.
+        webrtc_sys::desktop_capturer::ffi::reset_cursor_stats();
+    }
     let (delivery, ingress) = FrameDelivery::start(
         coordinator.binding.clone(),
         coordinator.preview_output.clone(),
@@ -214,6 +227,7 @@ fn start_with(source: CaptureSource) -> Result<bool, String> {
                 stop,
                 source_join: Some(source_join),
                 delivery,
+                real_capture: real_capture_flag,
             });
             Ok(true)
         }
@@ -231,6 +245,16 @@ fn start_with(source: CaptureSource) -> Result<bool, String> {
             let _ = delivery.stop();
             Err("Timed out starting desktop capture".into())
         }
+    }
+}
+
+fn real_capture(source: &CaptureSource) -> bool {
+    match source {
+        CaptureSource::Synthetic { .. } => false,
+        #[cfg(target_os = "linux")]
+        CaptureSource::Desktop => true,
+        #[cfg(target_os = "windows")]
+        CaptureSource::Wgc { .. } => true,
     }
 }
 
@@ -374,10 +398,26 @@ pub(crate) fn stats() -> crate::DesktopCaptureStats {
     let Ok(coordinator) = CAPTURE.lock() else {
         return crate::DesktopCaptureStats::default();
     };
-    coordinator
+    let mut stats = coordinator
         .session
         .as_ref()
-        .map_or(coordinator.frozen_stats, |session| session.delivery.stats())
+        .map_or(coordinator.frozen_stats, |session| session.delivery.stats());
+    if coordinator
+        .session
+        .as_ref()
+        .is_some_and(|session| session.real_capture)
+    {
+        let cursor = webrtc_sys::desktop_capturer::ffi::get_cursor_stats();
+        stats.cursor_frames = cursor.frames_with_cursor.cast_signed();
+        // A composed frame only claims a cursor after the composer actually
+        // blended metadata into it. The cursor leaves the captured region
+        // often (menus, other monitors), so only warn once enough frames have
+        // flowed with none claiming one — that means the compositor never gave
+        // us anything usable, not that the cursor is briefly elsewhere.
+        stats.cursor_missing = cursor.frames_delivered > CURSOR_MISSING_MIN_DELIVERED
+            && cursor.frames_with_cursor == 0;
+    }
+    stats
 }
 
 #[cfg(test)]
@@ -395,5 +435,13 @@ mod tests {
         assert_eq!(first, same);
         assert_ne!(first, later);
         assert!(first.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn cursor_absence_warns_only_after_enough_frames() {
+        let no_cursor = |delivered: u64| delivered > CURSOR_MISSING_MIN_DELIVERED;
+        assert!(!no_cursor(0));
+        assert!(!no_cursor(CURSOR_MISSING_MIN_DELIVERED));
+        assert!(no_cursor(CURSOR_MISSING_MIN_DELIVERED + 1));
     }
 }

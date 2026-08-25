@@ -169,6 +169,8 @@ pub struct DesktopCaptureStats {
     pub pacer_drops: i64,
     pub pacer_depth: i64,
     pub pacer_max_depth: i64,
+    pub cursor_frames: i64,
+    pub cursor_missing: bool,
 }
 
 #[cfg(not(target_os = "linux"))]
