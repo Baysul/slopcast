@@ -16,6 +16,8 @@
 
 #include "livekit/desktop_capturer.h"
 
+#include <atomic>
+
 #include "modules/desktop_capture/desktop_and_cursor_composer.h"
 #include "modules/desktop_capture/desktop_capture_options.h"
 
@@ -28,16 +30,17 @@ namespace livekit_ffi {
 // only truth we can expose is what the frame reports after composition: whether
 // the frame claims to contain a cursor and how many frames were delivered.
 // These are process-wide because the Rust side resets them per capture session.
-static uint64_t g_frames_delivered = 0;
-static uint64_t g_frames_with_cursor = 0;
+static std::atomic<uint64_t> g_frames_delivered{0};
+static std::atomic<uint64_t> g_frames_with_cursor{0};
 
 CursorStats get_cursor_stats() {
-  return CursorStats{g_frames_delivered, g_frames_with_cursor};
+  return CursorStats{g_frames_delivered.load(std::memory_order_relaxed),
+                     g_frames_with_cursor.load(std::memory_order_relaxed)};
 }
 
 void reset_cursor_stats() {
-  g_frames_delivered = 0;
-  g_frames_with_cursor = 0;
+  g_frames_delivered.store(0, std::memory_order_relaxed);
+  g_frames_with_cursor.store(0, std::memory_order_relaxed);
 }
 
 std::unique_ptr<DesktopCapturer> new_desktop_capturer(
@@ -134,9 +137,9 @@ void DesktopCapturer::OnCaptureResult(
     webrtc::DesktopCapturer::Result result,
     std::unique_ptr<webrtc::DesktopFrame> frame) {
   if (result == webrtc::DesktopCapturer::Result::SUCCESS && frame) {
-    g_frames_delivered++;
+    g_frames_delivered.fetch_add(1, std::memory_order_relaxed);
     if (frame->may_contain_cursor()) {
-      g_frames_with_cursor++;
+      g_frames_with_cursor.fetch_add(1, std::memory_order_relaxed);
     }
   }
 

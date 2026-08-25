@@ -25,6 +25,10 @@ interface DragSession {
   pointerId: number;
   startX: number;
   startY: number;
+  playerLeft: number;
+  playerTop: number;
+  maximumLeft: number;
+  maximumTop: number;
   grabOffsetX: number;
   grabOffsetY: number;
   hasMoved: boolean;
@@ -35,6 +39,7 @@ const POSITION_STORAGE_KEY = 'slopcast:audio-visualizer-position';
 const DRAG_THRESHOLD = 3;
 const DOUBLE_TAP_DELAY_MS = 350;
 const SAMPLE_INTERVAL_MS = 1000 / 30;
+const AUDIO_SAMPLE_COUNT = 128;
 
 export const unlockAudioContexts = (): void => {
   window.dispatchEvent(new CustomEvent(AUDIO_UNLOCK_EVENT));
@@ -105,7 +110,7 @@ const createMediaStreamSubscription =
 
     const analyser = audioContext.createAnalyser();
     const source = audioContext.createMediaStreamSource(mediaStream);
-    const levels = new Float32Array(256);
+    const levels = new Float32Array(AUDIO_SAMPLE_COUNT);
     let animationFrame = 0;
     let lastSampleAt = 0;
     analyser.fftSize = levels.length;
@@ -168,11 +173,16 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     const visualizer = visualizerRef.current;
     if (!player || !visualizer) return;
 
+    const playerBounds = player.getBoundingClientRect();
     const visualizerBounds = visualizer.getBoundingClientRect();
     dragSessionRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
+      playerLeft: playerBounds.left,
+      playerTop: playerBounds.top,
+      maximumLeft: Math.max(0, playerBounds.width - visualizerBounds.width),
+      maximumTop: Math.max(0, playerBounds.height - visualizerBounds.height),
       grabOffsetX: event.clientX - visualizerBounds.left,
       grabOffsetY: event.clientY - visualizerBounds.top,
       hasMoved: false,
@@ -187,23 +197,15 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     const dragSession = dragSessionRef.current;
     if (!dragSession || dragSession.pointerId !== event.pointerId) return;
 
-    const player = playerRef.current;
-    const visualizer = visualizerRef.current;
-    if (!player || !visualizer) return;
-
     const horizontalMovement = Math.abs(event.clientX - dragSession.startX);
     const verticalMovement = Math.abs(event.clientY - dragSession.startY);
     if (!dragSession.hasMoved && horizontalMovement <= DRAG_THRESHOLD && verticalMovement <= DRAG_THRESHOLD) return;
 
-    const playerBounds = player.getBoundingClientRect();
-    const visualizerBounds = visualizer.getBoundingClientRect();
-    const maximumLeft = Math.max(0, playerBounds.width - visualizerBounds.width);
-    const maximumTop = Math.max(0, playerBounds.height - visualizerBounds.height);
-    const left = clamp(event.clientX - playerBounds.left - dragSession.grabOffsetX, maximumLeft);
-    const top = clamp(event.clientY - playerBounds.top - dragSession.grabOffsetY, maximumTop);
+    const left = clamp(event.clientX - dragSession.playerLeft - dragSession.grabOffsetX, dragSession.maximumLeft);
+    const top = clamp(event.clientY - dragSession.playerTop - dragSession.grabOffsetY, dragSession.maximumTop);
     const nextPosition = {
-      x: maximumLeft === 0 ? 0 : left / maximumLeft,
-      y: maximumTop === 0 ? 0 : top / maximumTop,
+      x: dragSession.maximumLeft === 0 ? 0 : left / dragSession.maximumLeft,
+      y: dragSession.maximumTop === 0 ? 0 : top / dragSession.maximumTop,
     };
     dragSession.hasMoved = true;
     positionRef.current = nextPosition;

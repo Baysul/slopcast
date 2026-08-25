@@ -2,7 +2,7 @@ import { codecLabel } from '@slopcast/shared-types';
 import { useCallback, useRef, useState } from 'react';
 import { desktopApi } from '../api/desktop';
 import { idleTelemetry, type StreamTelemetry } from '../components/telemetry/StreamTelemetryBar';
-import type { NativeTelemetry } from '../types';
+import type { DesktopCaptureStats, NativeTelemetry } from '../types';
 
 const STATS_POLL_MS = 1000;
 const STATS_HISTORY_MAX = 48;
@@ -15,6 +15,19 @@ interface StatsPrev {
   aBytes: number;
   aTs: number;
   aInit: boolean;
+}
+
+interface CaptureStatsPrev {
+  dequeued: number;
+  at: number;
+  init: boolean;
+}
+
+interface CaptureSample {
+  fps: number | null;
+  cursorFrames: number;
+  cursorMissing: boolean;
+  next: CaptureStatsPrev;
 }
 
 interface StatsSnapshot {
@@ -61,13 +74,7 @@ const applyAudioDelta = (snap: StatsSnapshot, t: NativeTelemetry, prev: StatsPre
   if (db > 0) snap.audioBps = (db * 8) / dt;
 };
 
-async function sampleCaptureFps(prev: { dequeued: number; at: number; init: boolean }): Promise<{
-  fps: number | null;
-  cursorFrames: number;
-  cursorMissing: boolean;
-  next: { dequeued: number; at: number; init: boolean };
-}> {
-  const stats = await desktopApi.getVideoCaptureStats();
+function sampleCaptureStats(stats: DesktopCaptureStats, prev: CaptureStatsPrev): CaptureSample {
   const nowMs = performance.now();
   let fps: number | null = null;
   if (prev.init && nowMs > prev.at) {
@@ -146,6 +153,11 @@ const smoothTelemetry = (snap: StatsSnapshot, fpsBuf: number[], brBuf: number[],
   }
   const lossPct = snap.packetsSent > 0 ? (snap.packetsLost / (snap.packetsSent + snap.packetsLost)) * 100 : 0;
   return { sFps, sBr, lossPct, bitrateHistory };
+};
+
+const hasSenderTelemetry = (telemetry: NativeTelemetry | null): telemetry is NativeTelemetry => {
+  if (!telemetry) return false;
+  return telemetry.videoBytesSent != null || telemetry.audioBytesSent != null;
 };
 
 const telemetryWithoutSender = (
@@ -276,6 +288,7 @@ export function useStreamTelemetry(spectatorCount: number): UseStreamTelemetryRe
   });
   const capturePrevRef = useRef({ dequeued: 0, at: 0, init: false });
   const bitrateHistoryRef = useRef<number[]>([]);
+  const telemetryGenerationRef = useRef(0);
   const spectatorCountRef = useRef(spectatorCount);
   spectatorCountRef.current = spectatorCount;
 
@@ -285,6 +298,7 @@ export function useStreamTelemetry(spectatorCount: number): UseStreamTelemetryRe
   }, []);
 
   const stopTelemetryPolling = useCallback(() => {
+    telemetryGenerationRef.current += 1;
     if (telemetryPollRef.current) {
       clearInterval(telemetryPollRef.current);
       telemetryPollRef.current = null;
@@ -298,41 +312,49 @@ export function useStreamTelemetry(spectatorCount: number): UseStreamTelemetryRe
     if (telemetryPollRef.current) return;
     broadcastStartRef.current = performance.now();
 
+    const generation = telemetryGenerationRef.current + 1;
     const fpsBuf: number[] = [];
     const brBuf: number[] = [];
+    let isTicking = false;
     let tick = 0;
+    telemetryGenerationRef.current = generation;
 
     const tickStats = async (): Promise<void> => {
+      isTicking = true;
       tick++;
-
-      const inputs = getInputs();
-      const elapsedMs = broadcastStartRef.current ? performance.now() - broadcastStartRef.current : 0;
-      const spectatorCount = spectatorCountRef.current;
-
-      const t = await desktopApi.getNativeTelemetry();
-      if (!t || (t.videoBytesSent == null && t.audioBytesSent == null)) {
-        setTelemetry((p) => telemetryWithoutSender(p, inputs, spectatorCount, elapsedMs));
-        return;
-      }
-
       try {
-        const snap = foldNativeTelemetry(t, statsPrevRef.current);
-        const capture = await sampleCaptureFps(capturePrevRef.current);
+        const inputs = getInputs();
+        const elapsedMs = broadcastStartRef.current ? performance.now() - broadcastStartRef.current : 0;
+        const spectatorCount = spectatorCountRef.current;
+        const [telemetrySample, captureStats] = await Promise.all([
+          desktopApi.getNativeTelemetry(),
+          desktopApi.getVideoCaptureStats(),
+        ]);
+        if (generation !== telemetryGenerationRef.current) return;
+        if (!hasSenderTelemetry(telemetrySample)) {
+          setTelemetry((previous) => telemetryWithoutSender(previous, inputs, spectatorCount, elapsedMs));
+          return;
+        }
+
+        const snap = foldNativeTelemetry(telemetrySample, statsPrevRef.current);
+        const capture = sampleCaptureStats(captureStats, capturePrevRef.current);
         snap.captureFps = capture.fps;
         snap.cursorFrames = capture.cursorFrames;
         snap.cursorMissing = capture.cursorMissing;
         capturePrevRef.current = capture.next;
         const smoothed = smoothTelemetry(snap, fpsBuf, brBuf, bitrateHistoryRef.current);
         bitrateHistoryRef.current = smoothed.bitrateHistory;
-        setTelemetry((p) => buildTelemetryUpdate(p, snap, inputs, smoothed, spectatorCount, elapsedMs));
+        setTelemetry((previous) => buildTelemetryUpdate(previous, snap, inputs, smoothed, spectatorCount, elapsedMs));
         maybeLogTelemetry(tick, snap, inputs, smoothed, spectatorCount);
-      } catch (err) {
-        console.warn('Transient native telemetry failure:', err);
+      } catch (error) {
+        console.warn('Transient native telemetry failure:', error);
+      } finally {
+        isTicking = false;
       }
     };
 
     telemetryPollRef.current = setInterval(() => {
-      void tickStats();
+      if (!isTicking) void tickStats();
     }, STATS_POLL_MS);
   }, []);
 

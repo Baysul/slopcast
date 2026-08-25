@@ -19,14 +19,6 @@ export interface StoredReplayChunk {
   blob: Blob;
 }
 
-const requestResult = <T>(request: IDBRequest<T>): Promise<T> =>
-  new Promise((resolve, reject) => {
-    request.addEventListener('success', () => resolve(request.result), { once: true });
-    request.addEventListener('error', () => reject(request.error ?? new Error('IndexedDB request failed')), {
-      once: true,
-    });
-  });
-
 const transactionDone = (transaction: IDBTransaction): Promise<void> =>
   new Promise((resolve, reject) => {
     transaction.addEventListener('complete', () => resolve(), { once: true });
@@ -100,14 +92,15 @@ const clearSession = async (database: IDBDatabase, sessionId: string): Promise<v
   await transactionDone(transaction);
 };
 
-const clearPreviousSessions = async (database: IDBDatabase): Promise<void> => {
-  const transaction = database.transaction(SESSION_STORE, 'readonly');
-  const sessions = await requestResult<ReplaySessionRecord[]>(transaction.objectStore(SESSION_STORE).getAll());
-  await transactionDone(transaction);
+const initializeSession = async (database: IDBDatabase, sessionId: string): Promise<void> => {
+  const transaction = database.transaction([SESSION_STORE, CHUNK_STORE, THUMBNAIL_STORE], 'readwrite');
+  const sessions = transaction.objectStore(SESSION_STORE);
 
-  for (const session of sessions) {
-    await clearSession(database, session.id);
-  }
+  sessions.clear();
+  transaction.objectStore(CHUNK_STORE).clear();
+  transaction.objectStore(THUMBNAIL_STORE).clear();
+  sessions.put({ id: sessionId } satisfies ReplaySessionRecord);
+  await transactionDone(transaction);
 };
 
 const deleteBefore = (store: IDBObjectStore, indexName: string, sessionId: string, cutoff: number): Promise<void> => {
@@ -140,12 +133,8 @@ export class ReplayStore {
 
   static async create(sessionId: string): Promise<ReplayStore> {
     const database = await openReplayDatabase();
-    await clearPreviousSessions(database);
 
-    const transaction = database.transaction(SESSION_STORE, 'readwrite');
-    transaction.objectStore(SESSION_STORE).put({ id: sessionId } satisfies ReplaySessionRecord);
-    await transactionDone(transaction);
-
+    await initializeSession(database, sessionId);
     return new ReplayStore(database, sessionId);
   }
 
