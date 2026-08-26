@@ -31,7 +31,6 @@
     "targets": ["appimage", "deb", "nsis"],
     "category": "Utility",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"],
-    "resources": ["resources/gstreamer-plugins/*"],
     "linux": {
       "deb": {
         "desktopTemplate": "templates/main.desktop",
