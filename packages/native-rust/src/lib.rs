@@ -275,6 +275,17 @@ pub fn resolve_audio_app_by_name(label: &str) -> Result<Option<AudioApp>, String
     Ok(find_best_audio_match(&apps, label))
 }
 
+/// Resolves the audio application with stream node id `node_id`.
+///
+/// # Errors
+/// Returns an error if audio enumeration fails.
+pub fn resolve_audio_app_by_node_id(node_id: u32) -> Result<Option<AudioApp>, String> {
+    let apps = platform::list_audio_applications()?;
+    Ok(apps
+        .into_iter()
+        .find(|a| a.id > 0 && a.id.cast_unsigned() == node_id))
+}
+
 #[must_use]
 pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     platform::resolve_audio_app_for_captured_window()
