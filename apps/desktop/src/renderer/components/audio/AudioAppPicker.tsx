@@ -4,6 +4,7 @@ import React from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { type AudioAppGroup, groupAudioApps } from '../../utils/audio-grouping';
+import { isGroupSelected, NO_AUDIO_APP } from '../../utils/audio-targets';
 import { AudioLevelMeter } from './AudioLevelMeter';
 
 export interface AudioAppPickerProps {
@@ -66,7 +67,7 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
     const renderBtn = (group: AudioAppGroup) => {
       const { representative, members } = group;
       const isDesktopAudio = representative.id === -1;
-      const isSelected = members.some((m) => m.id === selectedAudioAppId);
+      const isSelected = isGroupSelected(members, selectedAudioAppId);
       const isAutoDetected = members.some((m) => m.id === autoDetectedApp?.id);
       const memberIds = members.map((m) => m.id);
       const btnClass = `flex items-center justify-between p-3 rounded-lg border transition-all cursor-pointer text-left w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background ${pickerRowClass(
@@ -134,10 +135,12 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground leading-relaxed">
             Auto-detected from your window selection. Click an app below to override — only that app's audio is
-            streamed. Select <strong className="text-foreground">Desktop Audio</strong> to capture all system sound.
+            streamed. Select <strong className="text-foreground">No Audio</strong> to skip audio, or{' '}
+            <strong className="text-foreground">Desktop Audio</strong> to capture all system sound.
           </p>
 
           <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+            {renderBtn({ representative: NO_AUDIO_APP, members: [NO_AUDIO_APP] })}
             {renderBtn(DESKTOP_AUDIO_GROUP)}
             {groups.length > 0 && <div className="border-t border-border my-1.5" />}
             {groups.map((group) => renderBtn(group))}

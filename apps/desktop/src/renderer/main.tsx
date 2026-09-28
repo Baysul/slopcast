@@ -31,6 +31,7 @@ import { useStreamSettings } from './hooks/useStreamSettings';
 import { useStreamTelemetry } from './hooks/useStreamTelemetry';
 import { notify, primeAudioContext } from './lib/toast';
 import type { CaptureSourceSelection, CaptureStage, DesktopCaptureConfig, PlatformInfo, PreviewFrame } from './types';
+import { toAudioTargetId } from './utils/audio-targets';
 import { recommendBitrateCap } from './utils/bitrate';
 import { copyText } from './utils/clipboard';
 import { codecOptionSuffix } from './utils/codecs';
@@ -198,8 +199,8 @@ export const PresenterApp: React.FC = () => {
     switchAudioCapture,
     attemptAutoResolve,
     handleSelectApp,
-  } = useAudioCapture(captureStage === 'live');
-  hadAudioCaptureRef.current = audioAppIdRef.current !== null;
+  } = useAudioCapture(captureStage === 'live', platformInfo?.platform === 'linux');
+  hadAudioCaptureRef.current = audioAppIdRef.current !== null && audioAppIdRef.current !== 0;
 
   const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } =
     useStreamTelemetry(spectatorCount);
@@ -437,7 +438,7 @@ export const PresenterApp: React.FC = () => {
     if (targetAudioId === null && !audioAppExplicitlySet) {
       await loadAudioApps();
       const resolved = await attemptAutoResolve();
-      targetAudioId = resolved ? resolved.id : null;
+      targetAudioId = resolved ? toAudioTargetId(resolved, platformInfo?.platform === 'linux') : null;
     }
 
     if (targetAudioId !== null) {
@@ -454,13 +455,16 @@ export const PresenterApp: React.FC = () => {
     attemptAutoResolve,
     resolveSystemAudioFallback,
     setAutoDetectFailed,
+    platformInfo?.platform,
   ]);
 
   const captureAudioForTarget = useCallback(
     async (targetAudioId: number | null): Promise<void> => {
       if (targetAudioId === null) return;
       try {
-        if (audioAppIdRef.current === null) {
+        if (targetAudioId === 0) {
+          await startAudioCapture(0);
+        } else if (audioAppIdRef.current === null || audioAppIdRef.current === 0) {
           await startAudioCapture(targetAudioId);
         } else if (audioAppIdRef.current !== targetAudioId) {
           await switchAudioCapture(targetAudioId);
@@ -488,7 +492,7 @@ export const PresenterApp: React.FC = () => {
       width: dims.width,
       height: dims.height,
       targetFrameRate: streamFpsRef.current,
-      hasAudio: audioAppIdRef.current != null,
+      hasAudio: audioAppIdRef.current != null && audioAppIdRef.current !== 0,
     };
   }, [resolutionRef, streamFpsRef, audioAppIdRef]);
 
