@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct TargetSpec {
     pub(super) node_id: Option<u32>,
     pub(super) pid: Option<u32>,

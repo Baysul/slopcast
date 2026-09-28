@@ -59,6 +59,60 @@ fn parse_target(target: &AudioTarget) -> Result<ParsedTarget, String> {
     }
 }
 
+/// Re-arms a node-id spec as a process spec when the node is resolvable.
+///
+/// `PipeWire` stream nodes are transient: pausing a browser video destroys the
+/// node, so a node-id target never re-links when the app resumes audio. The
+/// process identity survives churn, so specs that start as node ids are
+/// re-armed as pid/client/name specs (whole-app capture) whenever the node's
+/// process can be determined. Unresolvable nodes keep the node-id spec.
+fn upgrade_node_spec(target: TargetSpec, resolved: Option<AppNodeIdentity>) -> TargetSpec {
+    if target.node_id.is_none() {
+        return target;
+    }
+    let Some(identity) = resolved else {
+        return target;
+    };
+    if identity.process_id <= 0 {
+        return target;
+    }
+    TargetSpec {
+        node_id: None,
+        pid: Some(identity.process_id.cast_unsigned()),
+        binary: None,
+        client_id: identity.client_id,
+        app_name: Some(identity.app_name),
+        system_audio: false,
+    }
+}
+
+struct AppNodeIdentity {
+    process_id: i32,
+    client_id: Option<u32>,
+    app_name: String,
+}
+
+impl AppNodeIdentity {
+    fn from_app(app: &crate::AudioApp) -> Option<Self> {
+        if app.process_id <= 0 {
+            return None;
+        }
+        Some(Self {
+            process_id: app.process_id,
+            client_id: app.client_id.filter(|c| *c > 0).map(i32::cast_unsigned),
+            app_name: app.name.clone(),
+        })
+    }
+}
+
+fn resolve_node_identity(node_id: u32) -> Option<AppNodeIdentity> {
+    crate::resolve_audio_app_by_node_id(node_id)
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(AppNodeIdentity::from_app)
+}
+
 struct CaptureState {
     is_active: bool,
     session: Option<CaptureSession>,
@@ -568,7 +622,7 @@ fn stop_session(state: &mut CaptureState) {
 }
 
 pub(crate) fn start_audio_capture(target_app_id: &AudioTarget) -> Result<bool, String> {
-    let target = parse_target(target_app_id)?.into_spec();
+    let target = resolve_capture_target(target_app_id)?;
     let mut state_guard = CAPTURE_STATE
         .lock()
         .map_err(|e| format!("Audio capture state lock poisoned: {e}"))?;
@@ -582,7 +636,7 @@ pub(crate) fn start_audio_capture(target_app_id: &AudioTarget) -> Result<bool, S
 }
 
 pub(crate) fn switch_audio_capture(target_app_id: &AudioTarget) -> Result<bool, String> {
-    let target = parse_target(target_app_id)?.into_spec();
+    let target = resolve_capture_target(target_app_id)?;
     let mut state_guard = CAPTURE_STATE
         .lock()
         .map_err(|e| format!("Audio capture state lock poisoned: {e}"))?;
@@ -598,6 +652,23 @@ pub(crate) fn switch_audio_capture(target_app_id: &AudioTarget) -> Result<bool, 
         .send(target)
         .map_err(|e| format!("Failed to send audio target switch: {e}"))?;
     Ok(true)
+}
+
+/// Parses a capture target and re-arms node-id specs as process specs.
+///
+/// `PipeWire` stream nodes are transient: pausing a browser video destroys the
+/// node, so a node-id target never re-links when the app resumes audio. The
+/// process identity survives churn, so node-id specs are replaced by a
+/// process spec (whole-app capture) whenever the node's identity is
+/// resolvable; unresolvable nodes keep the node-id spec.
+fn resolve_capture_target(target: &AudioTarget) -> Result<TargetSpec, String> {
+    let parsed = parse_target(target)?;
+    let node_id = match &parsed {
+        ParsedTarget::Node(id) => Some(*id),
+        _ => None,
+    };
+    let resolved = node_id.and_then(resolve_node_identity);
+    Ok(upgrade_node_spec(parsed.into_spec(), resolved))
 }
 
 pub(crate) fn stop_audio_capture() -> bool {
@@ -805,5 +876,91 @@ mod tests {
         assert_eq!(parse_json_name(r#"{"description":"no name key"}"#), None);
         assert_eq!(parse_json_name(r#"{"name":"unterminated"#), None);
         assert_eq!(parse_json_name(r#"{"name": 42}"#), None);
+    }
+
+    #[test]
+    fn node_spec_upgrades_to_process_spec_when_resolved() {
+        let spec = TargetSpec {
+            node_id: Some(42),
+            ..TargetSpec::default()
+        };
+        let identity = AppNodeIdentity {
+            process_id: 1234,
+            client_id: Some(7),
+            app_name: "Firefox".into(),
+        };
+        let upgraded = upgrade_node_spec(spec, Some(identity));
+        assert_eq!(upgraded.node_id, None);
+        assert_eq!(upgraded.pid, Some(1234));
+        assert_eq!(upgraded.client_id, Some(7));
+        assert_eq!(upgraded.app_name.as_deref(), Some("Firefox"));
+        assert!(!upgraded.system_audio);
+    }
+
+    #[test]
+    fn node_spec_stays_node_target_when_identity_unresolvable() {
+        let spec = TargetSpec {
+            node_id: Some(42),
+            ..TargetSpec::default()
+        };
+        let upgraded = upgrade_node_spec(spec, None);
+        assert_eq!(upgraded.node_id, Some(42));
+        assert!(upgraded.pid.is_none());
+    }
+
+    #[test]
+    fn node_spec_with_unresolvable_process_id_stays_node_target() {
+        let spec = TargetSpec {
+            node_id: Some(42),
+            ..TargetSpec::default()
+        };
+        let identity = AppNodeIdentity {
+            process_id: 0,
+            client_id: None,
+            app_name: "Unknown".into(),
+        };
+        let upgraded = upgrade_node_spec(spec, Some(identity));
+        assert_eq!(upgraded.node_id, Some(42));
+    }
+
+    #[test]
+    fn non_node_specs_are_untouched_by_upgrade() {
+        let spec = TargetSpec {
+            node_id: None,
+            pid: Some(555),
+            ..TargetSpec::default()
+        };
+        let upgraded = upgrade_node_spec(spec, None);
+        assert_eq!(upgraded.pid, Some(555));
+    }
+
+    #[test]
+    fn app_identity_rejects_non_positive_process_ids() {
+        assert!(
+            AppNodeIdentity::from_app(&crate::AudioApp {
+                id: 9,
+                name: "x".into(),
+                process_id: 0,
+                bundle_id: None,
+                window_title: None,
+                client_id: None,
+                media_title: None,
+            })
+            .is_none()
+        );
+        let app = crate::AudioApp {
+            id: 9,
+            name: "Firefox".into(),
+            process_id: 444,
+            bundle_id: None,
+            window_title: None,
+            client_id: Some(5),
+            media_title: None,
+        };
+        let identity =
+            AppNodeIdentity::from_app(&app).unwrap_or_else(|| panic!("identity must resolve"));
+        assert_eq!(identity.process_id, 444);
+        assert_eq!(identity.client_id, Some(5));
+        assert_eq!(identity.app_name, "Firefox");
     }
 }
