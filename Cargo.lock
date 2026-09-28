@@ -4859,6 +4859,7 @@ dependencies = [
  "livekit",
  "livekit-api",
  "native-rust",
+ "pipewire",
  "tokio",
 ]
 
