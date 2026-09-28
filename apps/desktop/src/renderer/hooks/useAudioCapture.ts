@@ -5,6 +5,7 @@ import { notify } from '../lib/toast';
 import type { CaptureContext } from '../types';
 import { audioAppsEqual, groupAudioApps } from '../utils/audio-grouping';
 import { audioWaveStore } from '../utils/audio-level-store';
+import { toAudioTargetId } from '../utils/audio-targets';
 
 const AUDIO_APPS_POLL_MS = 3000;
 
@@ -77,6 +78,7 @@ export const findBestAudioMatch = (apps: AudioApp[], query: string): AudioApp | 
 export interface UseAudioCaptureReturn {
   audioApps: AudioApp[];
   audioAppGroups: ReturnType<typeof groupAudioApps>;
+  /** The capture target id (negative pid on Linux). 0 means "no audio". */
   selectedAudioAppId: number | null;
   setSelectedAudioAppId: React.Dispatch<React.SetStateAction<number | null>>;
   audioAppExplicitlySet: boolean;
@@ -95,7 +97,7 @@ export interface UseAudioCaptureReturn {
   handleSelectApp: (appId: number | null, explicit?: boolean) => void;
 }
 
-export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
+export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): UseAudioCaptureReturn {
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
   const audioAppGroups = useMemo(() => groupAudioApps(audioApps), [audioApps]);
   const [selectedAudioAppId, setSelectedAudioAppId] = useState<number | null>(null);
@@ -148,26 +150,47 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
     };
   }, []);
 
-  const startAudioCapture = useCallback(async (targetId: number): Promise<boolean> => {
-    const started = await desktopApi.startAudioCapture(targetId);
-    if (!started) {
-      throw new Error('Native audio capture failed to start');
+  const stopAudioCapture = useCallback(async (): Promise<boolean> => {
+    const stopped = await desktopApi.stopAudioCapture();
+    if (!stopped) {
+      throw new Error('Native audio capture failed to stop');
     }
-    audioAppIdRef.current = targetId;
+    audioAppIdRef.current = 0;
     return true;
   }, []);
 
-  const switchAudioCapture = useCallback(async (targetId: number): Promise<boolean> => {
-    let switched = await desktopApi.switchAudioCapture(targetId);
-    if (!switched) {
-      switched = await desktopApi.startAudioCapture(targetId);
-    }
-    if (!switched) {
-      throw new Error('Native audio target switch failed');
-    }
-    audioAppIdRef.current = targetId;
-    return true;
-  }, []);
+  const startAudioCapture = useCallback(
+    async (targetId: number): Promise<boolean> => {
+      if (targetId === 0) {
+        return stopAudioCapture();
+      }
+      const started = await desktopApi.startAudioCapture(targetId);
+      if (!started) {
+        throw new Error('Native audio capture failed to start');
+      }
+      audioAppIdRef.current = targetId;
+      return true;
+    },
+    [stopAudioCapture],
+  );
+
+  const switchAudioCapture = useCallback(
+    async (targetId: number): Promise<boolean> => {
+      if (targetId === 0) {
+        return stopAudioCapture();
+      }
+      let switched = await desktopApi.switchAudioCapture(targetId);
+      if (!switched) {
+        switched = await desktopApi.startAudioCapture(targetId);
+      }
+      if (!switched) {
+        throw new Error('Native audio target switch failed');
+      }
+      audioAppIdRef.current = targetId;
+      return true;
+    },
+    [stopAudioCapture],
+  );
 
   const attemptAutoResolve = useCallback(
     async (nameHint?: string): Promise<AudioApp | null> => {
@@ -187,19 +210,23 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
 
       if (app) {
         setAutoDetectedApp(app);
-        setSelectedAudioAppId(app.id);
+        setSelectedAudioAppId(toAudioTargetId(app, pidBasedTargets));
         return app;
       }
       return null;
     },
-    [audioApps],
+    [audioApps, pidBasedTargets],
   );
 
-  const handleSelectApp = useCallback((appId: number | null, explicit?: boolean) => {
-    setAudioAppExplicitlySet(explicit ?? true);
-    setSelectedAudioAppId(appId);
-    if (!explicit) setAutoDetectedApp(null);
-  }, []);
+  const handleSelectApp = useCallback(
+    (appId: number | null, explicit?: boolean) => {
+      setAudioAppExplicitlySet(explicit ?? true);
+      const app = audioApps.find((a) => a.id === appId) ?? null;
+      setSelectedAudioAppId(app ? toAudioTargetId(app, pidBasedTargets) : appId);
+      if (!explicit) setAutoDetectedApp(null);
+    },
+    [audioApps, pidBasedTargets],
+  );
 
   useEffect(() => {
     if (!isSharing) return;
@@ -211,7 +238,7 @@ export function useAudioCapture(isSharing: boolean): UseAudioCaptureReturn {
 
     const applyAudio = async () => {
       try {
-        if (prevId === null) {
+        if (prevId === null || prevId === 0) {
           await startAudioCapture(newId);
         } else {
           await switchAudioCapture(newId);
