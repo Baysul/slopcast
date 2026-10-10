@@ -305,9 +305,9 @@ export const RoomPage: React.FC = () => {
   const stallStartRef = useRef<number>(0);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controlsLastActiveAtRef = useRef(0);
-  const areControlsVisibleRef = useRef(true);
+  const areControlsVisibleRef = useRef<boolean>(true);
   const streamEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const connectFailedRef = useRef(false);
+  const connectFailedRef = useRef<boolean>(false);
 
   const resetControlsIdleTimer = useCallback(() => {
     controlsLastActiveAtRef.current = performance.now();

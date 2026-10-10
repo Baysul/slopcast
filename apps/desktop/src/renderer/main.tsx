@@ -108,7 +108,7 @@ export const PresenterApp: React.FC = () => {
   } | null>(null);
   const selectedCaptureSourceRef = useRef<CaptureSourceSelection | null>(null);
   const isConfirmingEndpointSwitchRef = useRef(false);
-  const hadAudioCaptureRef = useRef(false);
+  const hadAudioCaptureRef = useRef<boolean>(false);
 
   const {
     apiEndpoint,

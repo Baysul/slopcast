@@ -167,7 +167,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
   const envelopeRef = useRef<number[]>(new Array(DISPLAY_BARS).fill(0));
   const lastActiveAtRef = useRef(0);
   const lastDrawAtRef = useRef<number | null>(null);
-  const isSilentRef = useRef(true);
+  const isSilentRef = useRef<boolean>(true);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isSilent, setIsSilent] = useState(true);
 

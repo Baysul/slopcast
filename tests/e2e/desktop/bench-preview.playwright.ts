@@ -113,7 +113,7 @@ async function transportRun(
       if (!core) throw new Error('window.__TAURI__.core unavailable');
       const Channel = core.Channel;
       const channel = new Channel((raw: ArrayBuffer) => {
-        arrivals.push({ t: performance.now(), len: raw?.byteLength ?? 0 });
+        arrivals.push({ t: performance.now(), len: raw.byteLength });
       });
       await core.invoke('bench_register_channel', { channel });
       await core.invoke('bench_push_frames', { count, size, intervalMs: cadenceMs });

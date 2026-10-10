@@ -493,7 +493,6 @@ async function main(): Promise<void> {
       phase.handoffReady = true;
       writePhase();
 
-      assert(gpu != null, 'GPU probe returned no data');
       assert(gpu.eglVendor != null && gpu.eglVendor.length > 0, 'GPU probe reported no EGL vendor');
       assert(gpu.softwareRasterizer === false, 'GPU is software-rendered (llvmpipe/softpipe)');
       console.log(`[e2e] gpu: vendor=${gpu.eglVendor} renderer=${gpu.glRenderer} version=${gpu.glVersion}`);
