@@ -11,24 +11,23 @@ export default defineConfig({
   plugins: [tailwindcss(), react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   build: {
     sourcemap: false,
-    minify: 'esbuild',
+    minify: 'oxc',
     cssMinify: true,
     reportCompressedSize: false,
     target: 'esnext',
-    rollupOptions: {
-      treeshake: {
-        preset: 'recommended',
+    rolldownOptions: {
+      output: {
+        minify: {
+          compress: { dropDebugger: true },
+          codegen: { legalComments: 'none' },
+        },
       },
     },
-  },
-  esbuild: {
-    legalComments: 'none',
-    drop: ['debugger'],
   },
   server: {
     host: '0.0.0.0',

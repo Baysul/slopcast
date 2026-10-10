@@ -28,7 +28,7 @@ fn main() {
         .with_grants(livekit_api::access_token::VideoGrants {
             room_join: true,
             room: "probe-room".into(),
-            can_publish: true,
+            can_publish: Some(true),
             ..Default::default()
         })
         .to_jwt()

@@ -7,7 +7,7 @@ fn main() {
     let pid: u32 = args
         .get(1)
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| std::process::id());
+        .unwrap_or_else(std::process::id);
 
     println!("[probe] capturing pid {pid} (as -pid target)");
     let target = native_rust::AudioTarget::Id(-(pid as i32));
@@ -94,7 +94,11 @@ print(f'{app_present} {app_link}')
         return (false, false);
     };
     use std::io::Write;
-    let _ = child.stdin.as_mut().expect("stdin").write_all(json.as_bytes());
+    let _ = child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(json.as_bytes());
     let Ok(output) = child.wait_with_output() else {
         return (false, false);
     };
