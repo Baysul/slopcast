@@ -5,47 +5,39 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [tailwindcss(), react()],
-  root: path.resolve(__dirname, 'src/renderer'),
+  root: path.resolve(import.meta.dirname, 'src/renderer'),
   base: './',
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src/renderer'),
+      '@': path.resolve(import.meta.dirname, './src/renderer'),
     },
   },
   build: {
-    outDir: path.resolve(__dirname, 'dist/renderer'),
+    outDir: path.resolve(import.meta.dirname, 'dist/renderer'),
     emptyOutDir: true,
     sourcemap: false,
-    minify: 'esbuild',
+    minify: 'oxc',
     cssMinify: true,
     reportCompressedSize: false,
     target: 'esnext',
-    rollupOptions: {
-      treeshake: {
-        preset: 'recommended',
-      },
+    rolldownOptions: {
       output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom', 'react-dom/client'],
-          'vendor-tauri': ['@tauri-apps/api', '@tauri-apps/plugin-clipboard-manager'],
-          'vendor-ui': [
-            'motion/react',
-            '@radix-ui/react-select',
-            '@radix-ui/react-slot',
-            '@radix-ui/react-switch',
-            'lucide-react',
-            'sonner',
-            'class-variance-authority',
-            'clsx',
-            'tailwind-merge',
+        minify: {
+          compress: { dropDebugger: true },
+          codegen: { legalComments: 'none' },
+        },
+        codeSplitting: {
+          groups: [
+            { name: 'vendor-react', test: /node_modules\/(react|react-dom|scheduler)\// },
+            { name: 'vendor-tauri', test: /node_modules\/@tauri-apps\// },
+            {
+              name: 'vendor-ui',
+              test: /node_modules\/(@radix-ui|motion|motion-dom|motion-utils|framer-motion|lucide-react|sonner|class-variance-authority|clsx|tailwind-merge)\//,
+            },
           ],
         },
       },
     },
-  },
-  esbuild: {
-    legalComments: 'none',
-    drop: ['debugger'],
   },
   server: {
     port: 5173,

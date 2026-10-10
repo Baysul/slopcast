@@ -121,7 +121,7 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
-        .command_line_args([
+        .runtime_init_attrs(tauri::CefRuntimeAttributes::default().command_line_args([
             ("--no-first-run", None),
             ("--no-default-browser-check", None),
             ("--disable-default-apps", None),
@@ -132,7 +132,7 @@ pub fn run() {
             ("--renderer-process-limit", Some("1")),
             ("--disk-cache-size", Some("67108864")),
             ("--log-level", Some("2")),
-        ]);
+        ]));
 
     let builder = builder.register_uri_scheme_protocol("frame", |_app, _request| {
         // The renderer fetches this custom scheme cross-origin, so CORS is required.

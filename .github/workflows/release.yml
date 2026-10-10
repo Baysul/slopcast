@@ -134,7 +134,7 @@ jobs:
 
       - uses: pnpm/action-setup@v6
         with:
-          version: 11.22.0
+          version: 12.10.1
 
       - uses: actions/setup-node@v7
         with:
@@ -165,7 +165,7 @@ jobs:
       - name: Install Tauri CEF CLI
         shell: bash
         run: |
-          cargo install --git https://github.com/tauri-apps/tauri --branch feat/cef tauri-cli --locked --force
+          cargo install --git https://github.com/tauri-apps/tauri --rev 536664d1b34e1989dbd22705e2fde8b57b36aa0c tauri-cli --locked --force
           cargo tauri --version
 
       - name: Verify Tauri CEF runtime

@@ -65,7 +65,9 @@ fn sync_registry(core: &pipewire::core::Core, main_loop: &pipewire::main_loop::M
 )]
 fn main() {
     let (core, main_loop) = pw_init().unwrap_or_else(|e| panic!("pw_init: {e}"));
-    let registry = core.get_registry().unwrap_or_else(|e| panic!("registry: {e}"));
+    let registry = core
+        .get_registry()
+        .unwrap_or_else(|e| panic!("registry: {e}"));
     let _listener = registry.add_listener_local().global(|_g| {}).register();
     sync_registry(&core, &main_loop);
 

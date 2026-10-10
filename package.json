@@ -4,7 +4,7 @@
   "homepage": "https://github.com/Baysul/slopcast",
   "private": true,
   "version": "0.1.0",
-  "packageManager": "pnpm@11.22.0",
+  "packageManager": "pnpm@12.10.1",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -37,9 +37,9 @@
     "test:unit": "pnpm --filter server test && pnpm --filter @slopcast/shared-types test && pnpm --filter desktop test && pnpm --filter web test"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.5",
-    "@oxlint/plugins": "1.79.0",
-    "oxlint": "1.79.0",
-    "playwright": "^1.55.0"
+    "@biomejs/biome": "2.5.15",
+    "@oxlint/plugins": "1.87.0",
+    "oxlint": "1.87.0",
+    "playwright": "^1.64.0"
   }
 }

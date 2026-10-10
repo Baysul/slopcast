@@ -233,22 +233,21 @@ pactl list sinks | grep "Slopcast-Window-Audio"
 
 | Package | Version |
 | --- | --- |
-| Tauri (Rust backend + frontend API) | ^2.11 (@tauri-apps/api ^2.11.1, @tauri-apps/cli ^2.11.4) |
-| React | ^19.2.0 |
-| TypeScript | ^7.0.0 |
-| Vite | ^6.0.0 |
-| Tailwind CSS | ^4.0.0 (via @tailwindcss/vite) |
-| Biome | 2.5.5 |
-| livekit (Rust SDK, bundled libwebrtc) | 0.8 |
-| livekit-server-sdk (Node) | ^2.17.0 |
-| livekit-client (web) | ^2.21.0 |
-| Express / express-rate-limit | 5.2.1 / ^8.6.1 |
-| pipewire (Rust crate) | 0.10.0 |
+| Tauri (Rust backend + frontend API) | ^2.12 (@tauri-apps/api ^2.12.2, @tauri-apps/cli ^2.12.1); CEF backend pinned to `536664d1b34e1989dbd22705e2fde8b57b36aa0c` |
+| React | ^19.3.0 |
+| TypeScript | ^7.0.2 |
+| Vite | ^8.3.4 |
+| Tailwind CSS | ^4.3.3 (via @tailwindcss/vite) |
+| Biome | 2.5.15 |
+| livekit (Rust SDK, bundled libwebrtc) | 0.9.4 (libwebrtc 0.3.51, vendored webrtc-sys 0.3.48) |
+| livekit-server-sdk (Node) | ^2.19.1 |
+| livekit-client (web) | ^2.22.3 |
+| Express / express-rate-limit | 5.2.1 / ^8.7.1 |
+| pipewire (Rust crate) | 0.10.1 |
 | zbus | 5 |
 | windows / windows-core (WASAPI) | 0.62.2 |
-| Playwright | ^1.55.0 |
-| Playwright | ^1.55.0 |
-| Node.js (required) | >= 24.0.0 (pnpm 9.15.4, `.nvmrc`) |
+| Playwright | ^1.64.0 |
+| Node.js (required) | >= 24.0.0 (pnpm 12.10.1, `.nvmrc`) |
 
 ## 9. Git commit conventions
 

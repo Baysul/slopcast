@@ -7,9 +7,9 @@ description = "Probe: does livekit's bundled libwebrtc pull the pw_* dlopen shim
 
 [dependencies]
 native-rust = { path = "../../packages/native-rust" }
-pipewire = "0.10.0"
-livekit = { version = "0.8", features = ["glib-main-loop", "rustls-tls-native-roots"] }
-livekit-api = "0.6"
+pipewire = "0.10.1"
+livekit = { version = "0.9.4", features = ["glib-main-loop", "rustls-tls-native-roots"] }
+livekit-api = "0.8.2"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 env_logger = "0.11"
 gstreamer = "0.25"

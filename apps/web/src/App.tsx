@@ -7,7 +7,7 @@ const RoomPage = lazy(() => import('./pages/RoomPage').then((module) => ({ defau
 
 export const App: React.FC = () => {
   return (
-    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    <BrowserRouter>
       <Suspense
         fallback={
           <div className="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground">

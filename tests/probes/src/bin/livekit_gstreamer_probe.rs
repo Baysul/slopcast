@@ -105,9 +105,9 @@ mod linux {
             .with_grants(VideoGrants {
                 room_join: true,
                 room: room_name.clone(),
-                can_publish: true,
-                can_subscribe: false,
-                can_publish_data: false,
+                can_publish: Some(true),
+                can_subscribe: Some(false),
+                can_publish_data: Some(false),
                 ..Default::default()
             })
             .to_jwt()?;

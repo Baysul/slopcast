@@ -26,14 +26,14 @@ crate-type = ["lib"]
 [build-dependencies]
 tauri-build = {
   git = "https://github.com/tauri-apps/tauri",
-  branch = "feat/cef",
+  rev = "536664d1b34e1989dbd22705e2fde8b57b36aa0c",
   features = []
 }
 
 [dependencies]
 tauri = {
   git = "https://github.com/tauri-apps/tauri",
-  branch = "feat/cef",
+  rev = "536664d1b34e1989dbd22705e2fde8b57b36aa0c",
   default-features = false,
   features = ["cef"]
 }
