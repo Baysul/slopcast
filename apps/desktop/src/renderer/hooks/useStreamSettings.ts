@@ -68,7 +68,7 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   const resolutionRef = useRef(resolution);
   const autoBitrateRef = useRef(autoBitrate);
 
-  const settingsHydratedRef = useRef(false);
+  const settingsHydratedRef = useRef<boolean>(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
 
