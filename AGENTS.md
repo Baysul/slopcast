@@ -233,7 +233,8 @@ pactl list sinks | grep "Slopcast-Window-Audio"
 
 | Package | Version |
 | --- | --- |
-| Tauri (Rust backend + frontend API) | ^2.12 (@tauri-apps/api ^2.12.2, @tauri-apps/cli ^2.12.1); CEF backend pinned to `536664d1b34e1989dbd22705e2fde8b57b36aa0c` |
+| Tauri (Rust backend + frontend API) | 2.11 (@tauri-apps/api ~2.11.1, @tauri-apps/cli ~2.11.5); CEF backend pinned to `536664d1b34e1989dbd22705e2fde8b57b36aa0c` |
+| Tauri version pinning | `tauri-cli` hard-fails the build when an npm package's minor differs from the Rust crate's, and the CEF branch is 2.11.5 at every commit (`feat/cef` head `9d1a5b17` has no `cef` feature), so the npm side stays on `~2.11`. |
 | React | ^19.3.0 |
 | TypeScript | ^7.0.2 |
 | Vite | ^8.3.4 |
