@@ -53,6 +53,9 @@ export function audioAppsEqual(a: readonly AudioApp[], b: readonly AudioApp[]): 
     const other = b[i];
     return (
       app.id === other?.id &&
+      app.processId === other?.processId &&
+      (app.clientId ?? null) === (other?.clientId ?? null) &&
+      (app.bundleId ?? null) === (other?.bundleId ?? null) &&
       app.name === other?.name &&
       (app.mediaTitle ?? null) === (other?.mediaTitle ?? null) &&
       (app.windowTitle ?? null) === (other?.windowTitle ?? null)

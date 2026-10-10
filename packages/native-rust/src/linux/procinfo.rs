@@ -242,10 +242,11 @@ pub(super) fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32
         .find(|e| {
             let comm_lower = e.comm.to_lowercase();
             let comm_stem = comm_lower.trim_end_matches(".exe");
-            if comm_lower == search_lower
-                || comm_stem == search_stem
-                || comm_lower.starts_with(search_stem)
-                || search_stem.starts_with(&comm_lower)
+            if !comm_stem.is_empty()
+                && (comm_lower == search_lower
+                    || comm_stem == search_stem
+                    || comm_lower.starts_with(search_stem)
+                    || search_stem.starts_with(&comm_lower))
             {
                 return true;
             }
@@ -256,9 +257,10 @@ pub(super) fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32
                 .unwrap_or("")
                 .to_lowercase();
             let b_stem = base.trim_end_matches(".exe");
-            b_stem == search_stem
-                || b_stem.starts_with(search_stem)
-                || search_stem.starts_with(b_stem)
+            !b_stem.is_empty()
+                && (b_stem == search_stem
+                    || b_stem.starts_with(search_stem)
+                    || search_stem.starts_with(b_stem))
         })
         .map(|e| e.pid)
 }
