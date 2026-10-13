@@ -15,7 +15,6 @@ interface ApiEndpointFieldProps {
   roomEndpoint: string | null;
   validationRevision: number;
   disabled: boolean;
-  onAvailabilityChange: (availability: ApiEndpointAvailability, endpoint: string) => void;
   onValidated: (endpoint: string) => void;
   onReset: () => void;
 }
@@ -26,7 +25,6 @@ export function ApiEndpointField({
   roomEndpoint,
   validationRevision,
   disabled,
-  onAvailabilityChange,
   onValidated,
   onReset,
 }: ApiEndpointFieldProps): React.ReactNode {
@@ -55,7 +53,6 @@ export function ApiEndpointField({
       abortRef.current = controller;
       setFailure(null);
       setAvailability('checking');
-      onAvailabilityChange('checking', endpoint);
 
       const timeout = setTimeout(() => controller.abort(), ENDPOINT_TIMEOUT_MS);
       const result = await checkApiEndpoint(endpoint, controller.signal);
@@ -66,16 +63,14 @@ export function ApiEndpointField({
       if (!result.ok) {
         setFailure(result);
         setAvailability('error');
-        onAvailabilityChange('error', endpoint);
         return;
       }
 
       setDraft(result.endpoint);
       setAvailability('healthy');
-      onAvailabilityChange('healthy', result.endpoint);
       onValidated(result.endpoint);
     },
-    [clearPendingWork, onAvailabilityChange, onValidated],
+    [clearPendingWork, onValidated],
   );
 
   useEffect(() => {
@@ -90,7 +85,6 @@ export function ApiEndpointField({
     setDraft(value);
     setFailure(null);
     setAvailability('typing');
-    onAvailabilityChange('typing', value);
     debounceRef.current = setTimeout(() => void validate(value), ENDPOINT_DEBOUNCE_MS);
   };
 
