@@ -8,6 +8,12 @@ import { fromNativeCodecInfo, recommendCodec } from '../utils/codecs';
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 800;
 
+function mergeSavedValue<T>(current: T, previous: T | undefined, saved: T): T {
+  if (previous !== undefined && current !== previous) return current;
+
+  return saved;
+}
+
 const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
   a.fps === b.fps &&
   a.bitrateLimit === b.bitrateLimit &&
@@ -26,8 +32,6 @@ export interface UseStreamSettingsReturn {
   setPendingApiEndpoint: React.Dispatch<React.SetStateAction<string | null>>;
   livekitUrl: string;
   setLivekitUrl: React.Dispatch<React.SetStateAction<string>>;
-  streamSettingsOpen: boolean;
-  setStreamSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
   streamFps: number;
   setStreamFps: React.Dispatch<React.SetStateAction<number>>;
   bitrateLimit: number;
@@ -54,7 +58,6 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   const [apiEndpointIsCustom, setApiEndpointIsCustom] = useState(false);
   const [pendingApiEndpoint, setPendingApiEndpoint] = useState<string | null>(null);
   const [livekitUrl, setLivekitUrl] = useState<string>('');
-  const [streamSettingsOpen, setStreamSettingsOpen] = useState(false);
   const [streamFps, setStreamFps] = useState(DEFAULT_STREAM_SETTINGS.fps);
   const [bitrateLimit, setBitrateLimit] = useState(DEFAULT_STREAM_SETTINGS.bitrateLimit);
   const [availableCodecs, setAvailableCodecs] = useState<CodecInfo[]>([]);
@@ -62,63 +65,96 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   const [resolution, setResolution] = useState<ResolutionPreset>(DEFAULT_STREAM_SETTINGS.resolution);
   const [autoBitrate, setAutoBitrate] = useState<boolean>(DEFAULT_STREAM_SETTINGS.autoBitrate);
   const [motionMode, setMotionMode] = useState<MotionMode>(DEFAULT_STREAM_SETTINGS.motionMode);
-
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
   const streamFpsRef = useRef(streamFps);
   const bitrateLimitRef = useRef(bitrateLimit);
   const resolutionRef = useRef(resolution);
   const autoBitrateRef = useRef(autoBitrate);
-
-  const settingsHydratedRef = useRef<boolean>(false);
-  const [settingsHydrated, setSettingsHydrated] = useState(false);
   const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
+  const configEndpointRef = useRef<string>('');
+  const codecsRef = useRef(availableCodecs);
+  const currentSettings: StreamSettings = {
+    fps: streamFps,
+    bitrateLimit,
+    videoCodec,
+    resolution,
+    apiEndpoint,
+    apiEndpointIsCustom,
+    pendingApiEndpoint,
+    autoBitrate,
+    motionMode,
+  };
+  const currentSettingsRef = useRef(currentSettings);
+  currentSettingsRef.current = currentSettings;
+
+  const applySavedSettings = useCallback((saved: StreamSettings) => {
+    const current = currentSettingsRef.current;
+    const previous = lastSavedSettingsRef.current;
+    const codecs = codecsRef.current;
+    const isSupported = codecs.some((codec) => codec.codec === saved.videoCodec);
+    const bestCodec = codecs[0]?.codec ?? 'vp8';
+    const videoCodec = isSupported ? saved.videoCodec : bestCodec;
+    let apiEndpoint = configEndpointRef.current;
+    if (saved.apiEndpointIsCustom || !apiEndpoint) apiEndpoint = saved.apiEndpoint;
+    const hydrated = { ...saved, apiEndpoint, videoCodec };
+
+    // Incoming saves must not discard edits that this window has not saved yet.
+    lastSavedSettingsRef.current = hydrated;
+    setStreamFps(mergeSavedValue(current.fps, previous?.fps, hydrated.fps));
+    setBitrateLimit(mergeSavedValue(current.bitrateLimit, previous?.bitrateLimit, hydrated.bitrateLimit));
+    setVideoCodec(mergeSavedValue(current.videoCodec, previous?.videoCodec, hydrated.videoCodec));
+    setResolution(mergeSavedValue(current.resolution, previous?.resolution, hydrated.resolution));
+    setApiEndpoint(mergeSavedValue(current.apiEndpoint, previous?.apiEndpoint, hydrated.apiEndpoint));
+    setApiEndpointIsCustom(
+      mergeSavedValue(current.apiEndpointIsCustom, previous?.apiEndpointIsCustom, hydrated.apiEndpointIsCustom),
+    );
+    setPendingApiEndpoint(
+      mergeSavedValue(current.pendingApiEndpoint, previous?.pendingApiEndpoint, hydrated.pendingApiEndpoint),
+    );
+    setAutoBitrate(mergeSavedValue(current.autoBitrate, previous?.autoBitrate, hydrated.autoBitrate));
+    setMotionMode(mergeSavedValue(current.motionMode, previous?.motionMode, hydrated.motionMode));
+  }, []);
 
   useEffect(() => {
     streamFpsRef.current = streamFps;
   }, [streamFps]);
-
   useEffect(() => {
     bitrateLimitRef.current = bitrateLimit;
   }, [bitrateLimit]);
-
   useEffect(() => {
     resolutionRef.current = resolution;
   }, [resolution]);
-
   useEffect(() => {
     autoBitrateRef.current = autoBitrate;
   }, [autoBitrate]);
 
   useEffect(() => {
-    (async () => {
+    let disposed = false;
+    const unlisten = desktopApi.onStreamSettingsChanged((saved) => {
+      if (!disposed) applySavedSettings(saved);
+    });
+    void (async () => {
+      await unlisten;
       const config = await desktopApi.getAppConfig();
-      setLivekitUrl(config.livekitUrl);
-
       const codecs = recommendCodec(fromNativeCodecInfo(await desktopApi.getNativeSupportedCodecs()));
-      setAvailableCodecs(codecs);
-
       const saved = await desktopApi.getStreamSettings();
-      const savedOk = codecs.some((c) => c.codec === saved.videoCodec);
-      const bestCodec = codecs[0] ? codecs[0].codec : 'vp8';
-      const hydratedCodec = savedOk ? saved.videoCodec : bestCodec;
-      const hydratedEndpoint = saved.apiEndpointIsCustom ? saved.apiEndpoint : config.apiEndpoint || saved.apiEndpoint;
-      const hydratedSettings = { ...saved, apiEndpoint: hydratedEndpoint, videoCodec: hydratedCodec };
-      lastSavedSettingsRef.current = hydratedSettings;
-      setStreamFps(saved.fps);
-      setBitrateLimit(saved.bitrateLimit);
-      setVideoCodec(hydratedCodec);
-      setResolution(saved.resolution);
-      setApiEndpoint(hydratedEndpoint);
-      setApiEndpointIsCustom(saved.apiEndpointIsCustom);
-      setPendingApiEndpoint(saved.pendingApiEndpoint);
-      setAutoBitrate(saved.autoBitrate);
-      setMotionMode(saved.motionMode);
-      settingsHydratedRef.current = true;
+      if (disposed) return;
+      configEndpointRef.current = config.apiEndpoint;
+      codecsRef.current = codecs;
+      setLivekitUrl(config.livekitUrl);
+      setAvailableCodecs(codecs);
+      lastSavedSettingsRef.current = null;
+      applySavedSettings(saved);
       setSettingsHydrated(true);
     })();
-  }, []);
+    return () => {
+      disposed = true;
+      void unlisten.then((stop) => stop());
+    };
+  }, [applySavedSettings]);
 
   useEffect(() => {
-    if (!settingsHydratedRef.current) return;
+    if (!settingsHydrated) return;
     const current: StreamSettings = {
       fps: streamFps,
       bitrateLimit,
@@ -134,22 +170,39 @@ export function useStreamSettings(): UseStreamSettingsReturn {
     if (last && streamSettingsEqual(last, current)) return;
 
     const timer = setTimeout(() => {
+      const changes: Partial<StreamSettings> = { ...current };
+      const keys = [
+        'fps',
+        'bitrateLimit',
+        'videoCodec',
+        'resolution',
+        'apiEndpoint',
+        'apiEndpointIsCustom',
+        'pendingApiEndpoint',
+        'autoBitrate',
+        'motionMode',
+      ] as const;
+      if (last) {
+        for (const key of keys) {
+          if (current[key] === last[key]) delete changes[key];
+        }
+      }
       void desktopApi
-        .saveStreamSettings(current)
+        .saveStreamSettings(changes)
         .then((ok) => {
           if (!ok) {
-            notify('error', 'Settings save failed', 'The settings file could not be written to disk.');
+            notify('error', 'Settings save failed', 'Changes could not be saved or shared with the app.');
             return;
           }
-          lastSavedSettingsRef.current = current;
           notify('success', 'Stream settings saved');
         })
         .catch((cause: unknown) => {
-          console.error('[useStreamSettings] saveStreamSettings IPC failed:', cause);
+          notify('error', 'Settings save failed', String(cause));
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [
+    settingsHydrated,
     streamFps,
     bitrateLimit,
     videoCodec,
@@ -174,8 +227,6 @@ export function useStreamSettings(): UseStreamSettingsReturn {
     setPendingApiEndpoint,
     livekitUrl,
     setLivekitUrl,
-    streamSettingsOpen,
-    setStreamSettingsOpen,
     streamFps,
     setStreamFps,
     bitrateLimit,

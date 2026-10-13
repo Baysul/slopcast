@@ -4,9 +4,11 @@
 )]
 
 use std::path::PathBuf;
+use std::sync::MutexGuard;
 
 use crate::AppHandle;
-use tauri::Manager;
+use crate::preferences::SettingsStorage;
+use tauri::{Emitter, Manager};
 
 const STREAM_SETTINGS_FILE: &str = "stream-settings.json";
 const ONBOARDING_FILE: &str = "onboarding.json";
@@ -106,17 +108,16 @@ pub fn sanitize_stream_settings(raw: &serde_json::Value) -> StreamSettings {
     }
 }
 
-fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map_err(|e| format!("failed to resolve app config dir: {e}"))
+fn config_dir(app: &AppHandle) -> Result<MutexGuard<'_, PathBuf>, String> {
+    app.state::<SettingsStorage>().inner().directory()
 }
 
 #[tauri::command]
 /// # Errors
 /// Returns an error if the settings directory cannot be read.
 pub fn get_stream_settings(app: AppHandle) -> Result<StreamSettings, String> {
-    let path = config_dir(&app)?.join(STREAM_SETTINGS_FILE);
+    let dir = config_dir(&app)?;
+    let path = dir.join(STREAM_SETTINGS_FILE);
     let parsed = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(value) => value,
@@ -137,24 +138,54 @@ pub fn get_stream_settings(app: AppHandle) -> Result<StreamSettings, String> {
 #[must_use]
 #[tauri::command]
 pub fn save_stream_settings(app: AppHandle, settings: serde_json::Value) -> bool {
-    let sanitized = sanitize_stream_settings(&settings);
-    let Ok(path) = config_dir(&app) else {
+    let serde_json::Value::Object(changes) = settings else {
         return false;
     };
-    let path = path.join(STREAM_SETTINGS_FILE);
-    let Ok(json) = serde_json::to_string_pretty(&sanitized) else {
-        return false;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::write(&path, format!("{json}\n")) {
-        Ok(()) => true,
-        Err(e) => {
-            eprintln!("Failed to write {STREAM_SETTINGS_FILE}: {e}");
-            false
+    let directory = match config_dir(&app) {
+        Ok(directory) => directory,
+        Err(error) => {
+            log::error!("Cannot access stream settings: {error}");
+            return false;
         }
+    };
+
+    let path = directory.join(STREAM_SETTINGS_FILE);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(raw) => raw,
+            Err(error) => {
+                log::error!("Failed to parse {STREAM_SETTINGS_FILE}, using defaults: {error}");
+                serde_json::Value::Null
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Value::Null,
+        Err(error) => {
+            log::error!("Failed to read {STREAM_SETTINGS_FILE}: {error}");
+            return false;
+        }
+    };
+    let mut merged = match raw {
+        serde_json::Value::Object(settings) => settings,
+        _ => serde_json::Map::new(),
+    };
+
+    // Both windows save only their changed fields, under the same storage lock.
+    merged.extend(changes);
+    let sanitized = sanitize_stream_settings(&serde_json::Value::Object(merged));
+    if let Err(error) = std::fs::create_dir_all(directory.as_path()) {
+        log::error!("Cannot create stream settings directory: {error}");
+        return false;
     }
+    if let Err(error) = crate::preferences::write_json(&path, &sanitized) {
+        log::error!("Failed to write {STREAM_SETTINGS_FILE}: {error}");
+        return false;
+    }
+    if let Err(error) = app.emit("stream-settings-changed", &sanitized) {
+        log::error!("Cannot share saved stream settings: {error}");
+        return false;
+    }
+
+    true
 }
 
 #[must_use]
