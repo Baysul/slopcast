@@ -115,17 +115,18 @@ const paintBars = (context: CanvasRenderingContext2D, envelope: readonly number[
 
   context.fillStyle = 'rgba(255, 255, 255, 0.08)';
   context.fillRect(0, center - 0.5, width, 1);
+  context.fillStyle = getComputedStyle(context.canvas).color;
   for (let barIndex = 0; barIndex < envelope.length; barIndex += 1) {
     const level = envelope[barIndex] ?? 0;
     if (level <= 0.001) continue;
 
     const halfHeight = Math.max(1, level * maximumHalfHeight);
-    const fillAlpha = 0.5 + Math.min(1, level * 2) * 0.35;
-    context.fillStyle = `rgba(196, 128, 74, ${fillAlpha})`;
+    context.globalAlpha = 0.5 + Math.min(1, level * 2) * 0.35;
     context.beginPath();
     context.roundRect(barIndex * (barWidth + BAR_GAP), center - halfHeight, barWidth, halfHeight * 2, radius);
     context.fill();
   }
+  context.globalAlpha = 1;
 };
 
 const levelsAreActive = (levels: ArrayLike<number>): boolean => {
@@ -241,7 +242,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
       width={width}
       height={height}
       style={{ width, height }}
-      className={`${visibilityClass} ${className}`}
+      className={`${visibilityClass} text-safelight ${className}`}
     />
   );
 };

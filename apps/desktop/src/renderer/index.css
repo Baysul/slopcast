@@ -213,7 +213,7 @@
   --border: #6272a4;
 }
 
-/* Video and its overlays stay dark regardless of the surrounding interface. */
+/* Keep media text legible on black without replacing the theme accent. */
 .media-surface {
   --foreground: #f5f6f8;
   --card-foreground: #f5f6f8;
@@ -221,8 +221,6 @@
   --muted-foreground: #a1a9b8;
   --caption-text: #a1a9b8;
   --secondary: #263244;
-  --safelight: oklch(0.6594 0.1096 57.8);
-  --safelight-hover: oklch(0.75 0.1 57.8);
 }
 
 @theme {
