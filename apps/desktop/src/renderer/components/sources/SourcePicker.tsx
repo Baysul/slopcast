@@ -3,17 +3,6 @@ import { motion } from 'motion/react';
 import * as React from 'react';
 import { useEffect, useState } from 'react';
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import type { CaptureContext, CaptureSourceSelection, CaptureStage } from '../../types';
@@ -63,6 +52,8 @@ export interface SourcePickerProps {
   onStartShare: () => void;
   onGoLive: () => void;
   onStopShare: () => void;
+  onSwitchSource: () => void;
+  canSwitchSource: boolean;
 }
 
 interface RoomControlsProps {
@@ -144,10 +135,6 @@ function ActiveRoomControls({
   spectatorCount,
 }: ActiveRoomControlsProps): React.ReactNode {
   const spectatorLabel = `${spectatorCount} spectator${spectatorCount === 1 ? '' : 's'}`;
-  let closeDescription = 'Sharing will stop and this room link will stop working. This cannot be undone.';
-  if (spectatorCount > 0) {
-    closeDescription = `Sharing will stop, ${spectatorLabel} will disconnect, and this room link will stop working. This cannot be undone.`;
-  }
 
   return (
     <div className="space-y-3" aria-live="polite">
@@ -174,34 +161,16 @@ function ActiveRoomControls({
           )}
           {copied === 'link' ? 'Link copied' : 'Copy link'}
         </Button>
-        <AlertDialog>
-          <AlertDialogTrigger asChild>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={isClosingRoom}
-              className="gap-1.5 border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
-            >
-              <Link2Off className="size-4" aria-hidden="true" />
-              {isClosingRoom ? 'Closing…' : 'Close room'}
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Close this room?</AlertDialogTitle>
-              <AlertDialogDescription className="leading-relaxed">{closeDescription}</AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Keep room open</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={onCloseRoom}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              >
-                Close room
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isClosingRoom}
+          onClick={onCloseRoom}
+          className="gap-1.5 border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Link2Off className="size-4" aria-hidden="true" />
+          {isClosingRoom ? 'Closing…' : 'Close room'}
+        </Button>
       </div>
     </div>
   );
@@ -244,6 +213,8 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
     onStartShare,
     onGoLive,
     onStopShare,
+    onSwitchSource,
+    canSwitchSource,
     // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: presenter source surface owns room, capture stages, KDE notices and stop-confirm; splitting would trade clarity for indirection
   }) => {
     const shouldReduceMotion = usePrefersReducedMotion();
@@ -298,7 +269,7 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
             <div className="relative bg-secondary border border-border rounded-lg p-3 space-y-1">
               <p className="text-xs font-semibold text-foreground pr-6">KDE Audio Auto-Detection Failed</p>
               <p className="text-sm text-muted-foreground leading-relaxed pr-6">
-                Select an audio app from the panel above, then stop and restart the screenshare.
+                Sharing video only. Select an audio app from Window Audio Capture to add its sound.
               </p>
               <button
                 type="button"
@@ -383,6 +354,12 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
                   : 'Choose what to share in the portal dialog to preview it, then go live.'}
               </p>
             </div>
+          )}
+
+          {captureStage !== 'idle' && (
+            <Button variant="outline" className="w-full" disabled={!canSwitchSource} onClick={onSwitchSource}>
+              Switch screenshare source…
+            </Button>
           )}
 
           {captureStage === 'live' && (

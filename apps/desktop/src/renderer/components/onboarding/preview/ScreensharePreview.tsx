@@ -12,13 +12,14 @@ export interface ScreensharePreviewProps {
   copied: 'link' | 'code' | null;
   previewFrame: PreviewFrame | null;
   telemetry: StreamTelemetry;
+  showTelemetry: boolean;
   onCopyLink: () => void;
 }
 
 const VIEWPORT_REPORT_DEBOUNCE_MS = 150;
 
 export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
-  ({ captureStage, roomCode, copied, previewFrame, telemetry, onCopyLink }) => {
+  ({ captureStage, roomCode, copied, previewFrame, telemetry, showTelemetry, onCopyLink }) => {
     const live = captureStage === 'live';
     const showPreview = previewFrame !== null && captureStage !== 'idle';
     const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -56,7 +57,7 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
         <CardContent className="p-0">
           <div ref={viewportRef} className="relative bg-black aspect-video flex items-center justify-center">
             {showPreview && <PreviewCanvas frame={previewFrame} />}
-            {live && <StreamTelemetryBar telemetry={telemetry} />}
+            {live && showTelemetry && <StreamTelemetryBar telemetry={telemetry} />}
 
             {captureStage === 'previewing' && (
               <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5 rounded-full bg-black/60 backdrop-blur px-2.5 py-1">
