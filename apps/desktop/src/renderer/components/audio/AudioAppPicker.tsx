@@ -1,5 +1,5 @@
 import type { AudioApp } from '@slopcast/shared-types';
-import { Check } from 'lucide-react';
+import { Check, Volume2, VolumeX } from 'lucide-react';
 import React from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,6 +11,9 @@ export interface AudioAppPickerProps {
   audioApps: AudioApp[];
   audioAppGroups?: AudioAppGroup[];
   selectedAudioAppId: number | null;
+  autoSelectAudio: boolean;
+  isMuted: boolean;
+  onToggleMute: () => void;
   autoDetectedApp?: AudioApp | null;
   onSelectApp: (appId: number | null, explicit?: boolean) => void;
   onRefresh?: () => void;
@@ -31,8 +34,23 @@ const DESKTOP_AUDIO_GROUP: AudioAppGroup = {
 };
 
 export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
-  ({ audioApps, audioAppGroups, selectedAudioAppId, autoDetectedApp, onSelectApp, onRefresh, disabled = false }) => {
+  ({
+    audioApps,
+    audioAppGroups,
+    selectedAudioAppId,
+    autoDetectedApp,
+    onSelectApp,
+    onRefresh,
+    autoSelectAudio,
+    isMuted,
+    onToggleMute,
+    disabled = false,
+  }) => {
     const groups = audioAppGroups ?? groupAudioApps(audioApps);
+    const MuteIcon = isMuted ? VolumeX : Volume2;
+    let selectionHint = 'Automatic audio selection is off. No Audio is selected until you choose an app.';
+    if (autoSelectAudio)
+      selectionHint = 'Audio is matched to your shared application when possible. Unmatched sources stay video-only.';
 
     const displayName = (app: AudioApp): string => app.name;
 
@@ -81,8 +99,10 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
           disabled={disabled}
           aria-pressed={isSelected}
           onClick={() => {
-            if (isSelected) {
-              onSelectApp(null, false);
+            if (representative.id === 0) {
+              onSelectApp(0, true);
+            } else if (isSelected) {
+              onSelectApp(autoSelectAudio ? null : 0, false);
             } else {
               onSelectApp(representative.id, true);
             }
@@ -134,11 +154,23 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground leading-relaxed">
-            Auto-detected from your window selection. Click an app below to override — only that app's audio is
-            streamed. Select <strong className="text-foreground">No Audio</strong> to skip audio, or{' '}
-            <strong className="text-foreground">Desktop Audio</strong> to capture all system sound.
+            {selectionHint} Select an app to share only its sound, or choose{' '}
+            <strong className="text-foreground">Desktop Audio</strong> explicitly to capture all system sound.
           </p>
 
+          <Button
+            variant="outline"
+            aria-pressed={isMuted}
+            disabled={disabled}
+            onClick={onToggleMute}
+            className="w-full justify-start"
+          >
+            <MuteIcon aria-hidden="true" />
+            {isMuted ? 'Unmute audio source' : 'Mute audio source'}
+          </Button>
+          <p className="text-xs text-muted-foreground">
+            Mute silences the shared audio without changing your selected source.
+          </p>
           <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
             {renderBtn({ representative: NO_AUDIO_APP, members: [NO_AUDIO_APP] })}
             {renderBtn(DESKTOP_AUDIO_GROUP)}

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tauri::{Emitter, Manager};
@@ -9,9 +10,23 @@ use crate::context::CaptureContextCache;
 use crate::dto::{AudioAppDto, AudioAppWaveDto, CaptureContextDto};
 
 const WAVE_EPSILON: f64 = 0.002;
+static AUDIO_MUTED: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+pub(crate) fn get_audio_muted() -> bool {
+    AUDIO_MUTED.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub(crate) fn toggle_audio_mute() -> bool {
+    !AUDIO_MUTED.fetch_xor(true, Ordering::Relaxed)
+}
 
 pub fn register_audio_callbacks(app: &AppHandle) {
-    native_rust::set_audio_data_callback(Box::new(|pcm| {
+    native_rust::set_audio_data_callback(Box::new(|mut pcm| {
+        if AUDIO_MUTED.load(Ordering::Relaxed) {
+            pcm.fill(0);
+        }
         let _ = native_livekit::feed_pcm(pcm);
     }));
 
