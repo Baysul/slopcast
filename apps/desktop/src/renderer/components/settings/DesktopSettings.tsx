@@ -1,4 +1,4 @@
-import { FolderOpen, Keyboard, Settings2, Video } from 'lucide-react';
+import { FolderOpen, Keyboard, Palette, Settings2, Video } from 'lucide-react';
 import type { KeyboardEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { desktopApi } from '@/api/desktop';
@@ -10,12 +10,14 @@ import { Switch } from '@/components/ui/switch';
 import { useDesktopPreferences } from '@/hooks/useDesktopPreferences';
 import type { ShortcutAction, ShortcutBindings, ShortcutReport } from '@/types/preferences';
 import { formatShortcut, SHORTCUT_ACTIONS } from '@/types/preferences';
+import { AppearanceSettings } from './AppearanceSettings';
 import { StreamSettingsPanel } from './StreamSettingsPanel';
 
 type EditableShortcut = ShortcutAction | 'toggle-telemetry';
 
 const SETTINGS_SECTIONS = [
   { id: 'general', label: 'General', icon: Settings2 },
+  { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'stream', label: 'Stream', icon: Video },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
 ] as const;
@@ -66,7 +68,7 @@ function ShortcutStatus({ report }: { report: ShortcutReport | null }) {
 
 export function DesktopSettings() {
   const { snapshot, setSnapshot, error: loadError, refresh } = useDesktopPreferences();
-  const [section, setSection] = useState<'general' | 'stream' | 'shortcuts'>('general');
+  const [section, setSection] = useState<(typeof SETTINGS_SECTIONS)[number]['id']>('general');
   const [report, setReport] = useState<ShortcutReport | null>(null);
   const [draft, setDraft] = useState<ShortcutBindings | null>(null);
   const [editing, setEditing] = useState<EditableShortcut | null>(null);
@@ -524,6 +526,24 @@ export function DesktopSettings() {
       <main className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
         {!snapshot && <PreferencesLoadState error={loadError} refresh={refresh} />}
         {body}
+        {snapshot && section === 'appearance' && (
+          <AppearanceSettings
+            preferences={snapshot.preferences}
+            busy={busy}
+            onChange={(mode, theme) =>
+              void perform(async () => {
+                setSnapshot(await desktopApi.saveAppearancePreferences(mode, theme));
+                setMessage('Appearance saved.');
+              })
+            }
+            onTypographyChange={(typography) =>
+              void perform(async () => {
+                setSnapshot(await desktopApi.saveTypographyPreferences(typography));
+                setMessage('Typography saved.');
+              })
+            }
+          />
+        )}
       </main>
       <footer className="shrink-0 border-t border-border px-4 py-3 min-h-12 sm:px-6">
         <p className="text-sm text-destructive" role="alert">

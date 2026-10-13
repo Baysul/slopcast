@@ -1,34 +1,228 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Variable fonts from google/fonts@66928797f271fed5ee428544e7229685e2d90127; OFL licenses accompany the local assets. */
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("./assets/fonts/Inter.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: Lora;
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./assets/fonts/Lora.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("./assets/fonts/JetBrainsMono.woff2") format("woff2");
+}
+
 @theme inline {
-  --color-background: oklch(0.1596 0.0203 265.6);
-  --color-foreground: oklch(0.967 0.0029 264.5);
-  --color-card: oklch(0.2101 0.0318 264.7);
-  --color-card-foreground: oklch(0.9846 0.0017 247.8);
-  --color-popover: oklch(0.2101 0.0318 264.7);
-  --color-popover-foreground: oklch(0.9846 0.0017 247.8);
-  --color-safelight: oklch(0.6594 0.1096 57.8);
-  --color-safelight-hover: oklch(0.6036 0.1044 57);
-  --color-safelight-foreground: oklch(0.1596 0.0203 265.6);
-  --color-safelight-glow: oklch(0.6594 0.1096 57.8 / 0.15);
-  --color-safelight-glow-strong: oklch(0.6594 0.1096 57.8 / 0.35);
-  --color-primary: oklch(0.6594 0.1096 57.8);
-  --color-primary-foreground: oklch(0.1596 0.0203 265.6);
+  --font-sans: var(--app-font-family);
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-weight-normal: var(--app-font-weight);
+  --font-weight-medium: min(700, calc(var(--app-font-weight) + 100));
+  --font-weight-semibold: min(700, calc(var(--app-font-weight) + 200));
+  --font-weight-bold: min(700, calc(var(--app-font-weight) + 300));
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--card);
+  --color-popover-foreground: var(--card-foreground);
+  --color-safelight: var(--safelight);
+  --color-safelight-hover: var(--safelight-hover);
+  --color-safelight-foreground: var(--safelight-foreground);
+  --color-safelight-glow: var(--safelight-glow);
+  --color-safelight-glow-strong: var(--safelight-glow-strong);
+  --color-primary: var(--safelight);
+  --color-primary-foreground: var(--safelight-foreground);
   --radius: 0.625rem;
-  --color-secondary: oklch(0.2781 0.0296 256.8);
-  --color-secondary-foreground: oklch(0.967 0.0029 264.5);
-  --color-muted: oklch(0.2781 0.0296 256.8);
-  --color-muted-foreground: oklch(0.7137 0.0192 261.3);
-  --color-accent: oklch(0.3729 0.0306 259.7);
-  --color-accent-foreground: oklch(0.967 0.0029 264.5);
-  --color-destructive: oklch(0.5858 0.222 17.6);
-  --color-destructive-foreground: oklch(1 0 89.9);
-  --color-border: oklch(0.2781 0.0296 256.8);
-  --color-input: oklch(0.3729 0.0306 259.7);
-  --color-ring: oklch(0.6594 0.1096 57.8);
-  --color-body-text: oklch(0.8717 0.0093 258.3);
-  --color-caption-text: oklch(0.64 0.02 260);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--foreground);
+  --color-muted: var(--secondary);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--accent);
+  --color-ring: var(--safelight);
+  --color-body-text: var(--body-text);
+  --color-caption-text: var(--caption-text);
+}
+
+:root {
+  --system-font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --theme-font-family: var(--system-font-family);
+  --app-font-family: var(--theme-font-family);
+  --app-font-size: 14px;
+  --app-font-weight: 400;
+  --app-font-ligatures: common-ligatures contextual;
+}
+
+[data-theme="ayu"],
+[data-theme="dracula"] {
+  --theme-font-family: Inter, var(--system-font-family);
+}
+
+[data-theme="rose-pine"],
+[data-theme="kanagawa"] {
+  --theme-font-family: Lora, Georgia, serif;
+}
+
+:root,
+[data-theme] {
+  --card-foreground: var(--foreground);
+  --safelight-hover: color-mix(in srgb, var(--safelight) 85%, var(--foreground));
+  --safelight-foreground: var(--background);
+  --safelight-glow: color-mix(in srgb, var(--safelight) 15%, transparent);
+  --safelight-glow-strong: color-mix(in srgb, var(--safelight) 35%, transparent);
+  --muted-foreground: color-mix(in srgb, var(--foreground) 75%, var(--background));
+  --body-text: color-mix(in srgb, var(--foreground) 90%, var(--background));
+  --caption-text: var(--muted-foreground);
+  --destructive-foreground: var(--background);
+}
+
+:root:not([data-theme]),
+[data-theme="slopcast"][data-color-mode="dark"] {
+  --background: oklch(0.1596 0.0203 265.6);
+  --foreground: oklch(0.967 0.0029 264.5);
+  --card: oklch(0.2101 0.0318 264.7);
+  --card-foreground: oklch(0.9846 0.0017 247.8);
+  --safelight: oklch(0.6594 0.1096 57.8);
+  --safelight-hover: oklch(0.6036 0.1044 57);
+  --safelight-foreground: oklch(0.1596 0.0203 265.6);
+  --secondary: oklch(0.2781 0.0296 256.8);
+  --muted-foreground: oklch(0.7137 0.0192 261.3);
+  --accent: oklch(0.3729 0.0306 259.7);
+  --destructive: oklch(0.5858 0.222 17.6);
+  --destructive-foreground: oklch(1 0 89.9);
+  --border: oklch(0.2781 0.0296 256.8);
+  --body-text: oklch(0.8717 0.0093 258.3);
+  --caption-text: oklch(0.64 0.02 260);
+}
+
+[data-theme="slopcast"][data-color-mode="light"] {
+  --background: #f6f4f0;
+  --foreground: #20242d;
+  --card: #ffffff;
+  --safelight: #875728;
+  --secondary: #ebe7e0;
+  --accent: #ded8ce;
+  --destructive: #b82945;
+  --border: #d7d1c8;
+}
+
+/* Upstream palettes retain their surfaces; pale syntax accents are darkened for light-mode UI contrast. */
+[data-theme="ayu"][data-color-mode="light"] {
+  --background: #f8f9fa;
+  --foreground: #5c6166;
+  --card: #fcfcfc;
+  --safelight: color-mix(in srgb, #f29718 65%, #000000);
+  --secondary: #ebeef0;
+  --accent: #d9dfe5;
+  --destructive: #ad3232;
+  --border: #ced4db;
+}
+
+[data-theme="ayu"][data-color-mode="dark"] {
+  --background: #0d1017;
+  --foreground: #bfbdb6;
+  --card: #141821;
+  --safelight: #e6b450;
+  --secondary: #1b1f29;
+  --accent: #273244;
+  --destructive: #f07178;
+  --border: #303b4e;
+}
+
+[data-theme="rose-pine"][data-color-mode="light"] {
+  --background: #faf4ed;
+  --foreground: #464261;
+  --card: #fffaf3;
+  --safelight: #286983;
+  --secondary: #f2e9e1;
+  --accent: #dfdad9;
+  --destructive: #a34e65;
+  --border: #cecacd;
+}
+
+[data-theme="rose-pine"][data-color-mode="dark"] {
+  --background: #191724;
+  --foreground: #e0def4;
+  --card: #1f1d2e;
+  --safelight: #c4a7e7;
+  --secondary: #26233a;
+  --accent: #403d52;
+  --destructive: #eb6f92;
+  --border: #524f67;
+}
+
+[data-theme="kanagawa"][data-color-mode="light"] {
+  --background: #f2ecbc;
+  --foreground: #545464;
+  --card: #e7dba0;
+  --safelight: #624c83;
+  --secondary: #e5ddb0;
+  --accent: #dcd5ac;
+  --destructive: #b52d40;
+  --border: #b6ae89;
+}
+
+[data-theme="kanagawa"][data-color-mode="dark"] {
+  --background: #1f1f28;
+  --foreground: #dcd7ba;
+  --card: #2a2a37;
+  --safelight: #957fb8;
+  --secondary: #363646;
+  --accent: #54546d;
+  --destructive: #ff5d62;
+  --border: #54546d;
+}
+
+[data-theme="dracula"][data-color-mode="light"] {
+  --background: #fffbeb;
+  --foreground: #1f1f1f;
+  --card: #efeddc;
+  --safelight: #644ac9;
+  --secondary: #ece9df;
+  --accent: #cfcfde;
+  --destructive: #cb3a2a;
+  --border: #bcbab3;
+}
+
+[data-theme="dracula"][data-color-mode="dark"] {
+  --background: #282a36;
+  --foreground: #f8f8f2;
+  --card: #343746;
+  --safelight: #bd93f9;
+  --secondary: #44475a;
+  --accent: #53576f;
+  --destructive: #ff5555;
+  --border: #6272a4;
+}
+
+/* Video and its overlays stay dark regardless of the surrounding interface. */
+.media-surface {
+  --foreground: #f5f6f8;
+  --card-foreground: #f5f6f8;
+  --body-text: #d2d6df;
+  --muted-foreground: #a1a9b8;
+  --caption-text: #a1a9b8;
+  --secondary: #263244;
+  --safelight: oklch(0.6594 0.1096 57.8);
+  --safelight-hover: oklch(0.75 0.1 57.8);
 }
 
 @theme {
@@ -54,15 +248,15 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
-    font-variant-ligatures: common-ligatures;
+    font-size: calc(var(--app-font-size) * 8 / 7);
+    font-variant-ligatures: var(--app-font-ligatures);
     font-variant-numeric: tabular-nums;
   }
 
   body {
-    color-scheme: dark;
-    font-family:
-      system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans",
-      "Helvetica Neue", sans-serif;
+    color-scheme: inherit;
+    font-family: var(--app-font-family);
+    font-weight: var(--app-font-weight);
     font-size: 0.875rem;
     line-height: 1.6;
     letter-spacing: -0.01em;

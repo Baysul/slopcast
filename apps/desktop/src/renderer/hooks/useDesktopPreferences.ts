@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { desktopApi } from '../api/desktop';
 import type { PreferencesSnapshot } from '../types/preferences';
+import { useAppearance } from './useAppearance';
 
 export function useDesktopPreferences() {
   const [snapshot, setSnapshot] = useState<PreferencesSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const revisionRef = useRef(0);
+  const colorMode = useAppearance(snapshot?.preferences);
   const refresh = useCallback(async () => {
     const revision = revisionRef.current + 1;
     revisionRef.current = revision;
@@ -38,5 +40,5 @@ export function useDesktopPreferences() {
     };
   }, [refresh]);
 
-  return { snapshot, setSnapshot, error, refresh };
+  return { snapshot, setSnapshot, error, refresh, colorMode };
 }

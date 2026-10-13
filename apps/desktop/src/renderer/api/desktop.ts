@@ -18,12 +18,15 @@ import type {
 
 import type {
   ApiEndpointEdit,
+  AppearanceMode,
+  ColorTheme,
   ControlState,
   DesktopAction,
   DesktopPreferences,
   PreferencesSnapshot,
   ShortcutBindings,
   ShortcutReport,
+  TypographyPreferences,
 } from '../types/preferences';
 
 type TauriInvokeArguments = Parameters<typeof invoke>[1];
@@ -82,6 +85,10 @@ export const desktopApi = {
   getDesktopPreferences: (): Promise<PreferencesSnapshot> => invoke('get_desktop_preferences'),
   saveGeneralPreferences: (trayEnabled: boolean, autoSelectAudio: boolean): Promise<PreferencesSnapshot> =>
     invoke('save_general_preferences', { trayEnabled, autoSelectAudio }),
+  saveAppearancePreferences: (appearanceMode: AppearanceMode, colorTheme: ColorTheme): Promise<PreferencesSnapshot> =>
+    invoke('save_appearance_preferences', { appearanceMode, colorTheme }),
+  saveTypographyPreferences: (typography: TypographyPreferences): Promise<PreferencesSnapshot> =>
+    invoke('save_typography_preferences', { typography }),
   chooseSettingsDirectory: (): Promise<PreferencesSnapshot> => invoke('choose_settings_directory'),
   openSettings: (): Promise<void> => invoke('open_settings'),
   showMainWindow: (): Promise<void> => invoke('show_main_window'),

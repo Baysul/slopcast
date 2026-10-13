@@ -55,7 +55,10 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
     return (
       <Card className="overflow-hidden shadow-2xl transition-all duration-300">
         <CardContent className="p-0">
-          <div ref={viewportRef} className="relative bg-black aspect-video flex items-center justify-center">
+          <div
+            ref={viewportRef}
+            className="media-surface relative bg-black aspect-video flex items-center justify-center"
+          >
             {showPreview && <PreviewCanvas frame={previewFrame} />}
             {live && showTelemetry && <StreamTelemetryBar telemetry={telemetry} />}
 

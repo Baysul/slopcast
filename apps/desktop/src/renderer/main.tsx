@@ -186,7 +186,7 @@ export const PresenterApp: React.FC = () => {
   const stopBusyRef = useRef<boolean>(false);
   const roomActionRef = useRef<boolean>(false);
   const muteBusyRef = useRef<boolean>(false);
-  const { snapshot: preferencesSnapshot, error: preferencesError } = useDesktopPreferences();
+  const { snapshot: preferencesSnapshot, error: preferencesError, colorMode } = useDesktopPreferences();
   const autoSelectAudio = preferencesSnapshot?.preferences.autoSelectAudio ?? false;
   const telemetryShortcutRef = useRef('');
   telemetryShortcutRef.current = preferencesSnapshot?.preferences.telemetryShortcut ?? '';
@@ -1239,7 +1239,7 @@ export const PresenterApp: React.FC = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <Toaster />
+      <Toaster theme={colorMode} />
     </div>
   );
 };
