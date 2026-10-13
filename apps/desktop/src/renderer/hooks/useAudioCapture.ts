@@ -9,11 +9,6 @@ import { toAudioTargetId } from '../utils/audio-targets';
 
 const AUDIO_APPS_POLL_MS = 3000;
 
-const wordsOf = (q: string): string[] => q.split(/[^a-z0-9]+/).filter((w) => w.length > 0);
-
-const matchExactName = (apps: AudioApp[], q: string): AudioApp | null =>
-  apps.find((a) => a.name.trim().toLowerCase() === q) ?? null;
-
 const cleanName = (name: string): string =>
   name
     .trim()
@@ -21,58 +16,16 @@ const cleanName = (name: string): string =>
     .replace(/[^a-z0-9]/g, '')
     .replace(/exe$/, '');
 
-const matchCleanedName = (apps: AudioApp[], qClean: string): AudioApp | null => {
-  if (qClean.length < 3) return null;
-  return (
-    apps.find((a) => {
-      const aClean = cleanName(a.name);
-      return aClean.length >= 3 && (aClean === qClean || qClean.includes(aClean) || aClean.includes(qClean));
-    }) ?? null
-  );
-};
+const findBestAudioMatch = (apps: AudioApp[], query: string): AudioApp | null => {
+  const name = cleanName(query);
+  if (name.length < 3) return null;
 
-const matchNameContained = (apps: AudioApp[], q: string): AudioApp | null => {
-  const qLower = q.toLowerCase();
-  return apps.find((a) => qLower.includes(a.name.toLowerCase()) || a.name.toLowerCase().includes(qLower)) ?? null;
-};
+  const candidates = apps.filter((app) => {
+    const candidate = cleanName(app.name);
+    return app.id !== -1 && candidate.length >= 3 && (name.includes(candidate) || candidate.includes(name));
+  });
 
-const matchAcronym = (apps: AudioApp[], q: string): AudioApp | null => {
-  const words = wordsOf(q);
-  if (words.length < 2) return null;
-  const acronym = words.map((w) => w[0]).join('');
-  if (acronym.length < 3) return null;
-  return apps.find((a) => a.name.toLowerCase().includes(acronym)) ?? null;
-};
-
-const matchSignificantWord = (apps: AudioApp[], q: string): AudioApp | null => {
-  for (const word of wordsOf(q)) {
-    if (word.length >= 4) {
-      const best = apps.find((a) => a.name.toLowerCase().includes(word));
-      if (best) return best;
-    }
-  }
-  return null;
-};
-
-const matchFirstWord = (apps: AudioApp[], q: string): AudioApp | null => {
-  const firstWord = wordsOf(q)[0];
-  if (!firstWord) return null;
-  return apps.find((a) => a.name.toLowerCase().includes(firstWord) || firstWord.includes(a.name.toLowerCase())) ?? null;
-};
-
-export const findBestAudioMatch = (apps: AudioApp[], query: string): AudioApp | null => {
-  const q = query.trim().toLowerCase();
-  if (!q) return null;
-
-  const qClean = q.replace(/[^a-z0-9]/g, '');
-  return (
-    matchExactName(apps, q) ??
-    matchCleanedName(apps, qClean) ??
-    matchNameContained(apps, q) ??
-    matchAcronym(apps, q) ??
-    matchSignificantWord(apps, q) ??
-    matchFirstWord(apps, q)
-  );
+  return candidates.length === 1 ? (candidates[0] ?? null) : null;
 };
 
 export interface UseAudioCaptureReturn {
@@ -91,13 +44,25 @@ export interface UseAudioCaptureReturn {
   setCaptureContext: React.Dispatch<React.SetStateAction<CaptureContext | null>>;
   audioAppIdRef: React.RefObject<number | null>;
   loadAudioApps: () => Promise<void>;
+  stopAudioCapture: () => Promise<boolean>;
   startAudioCapture: (targetId: number) => Promise<boolean>;
   switchAudioCapture: (targetId: number) => Promise<boolean>;
   attemptAutoResolve: (nameHint?: string) => Promise<AudioApp | null>;
   handleSelectApp: (appId: number | null, explicit?: boolean) => void;
 }
 
-export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): UseAudioCaptureReturn {
+async function changeAudioTarget(previousId: number | null, targetId: number): Promise<boolean> {
+  if (targetId === 0) return desktopApi.stopAudioCapture();
+  if (previousId === null || previousId === 0) return desktopApi.startAudioCapture(targetId);
+
+  return desktopApi.switchAudioCapture(targetId);
+}
+
+export function useAudioCapture(
+  isSharing: boolean,
+  pidBasedTargets: boolean,
+  autoSelectAudio: boolean,
+): UseAudioCaptureReturn {
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
   const audioAppGroups = useMemo(() => groupAudioApps(audioApps), [audioApps]);
   const [selectedAudioAppId, setSelectedAudioAppId] = useState<number | null>(null);
@@ -107,6 +72,10 @@ export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): U
   const [autoDetectFailed, setAutoDetectFailed] = useState(false);
 
   const audioAppIdRef = useRef<number | null>(null);
+  const audioOperationRef = useRef(Promise.resolve());
+  const audioRevisionRef = useRef(0);
+  const autoSelectAudioRef = useRef(autoSelectAudio);
+  autoSelectAudioRef.current = autoSelectAudio;
 
   const loadAudioApps = useCallback(async () => {
     const apps = await desktopApi.getAudioApps();
@@ -150,62 +119,50 @@ export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): U
     };
   }, []);
 
-  const stopAudioCapture = useCallback(async (): Promise<boolean> => {
-    const stopped = await desktopApi.stopAudioCapture();
-    if (!stopped) {
-      throw new Error('Native audio capture failed to stop');
-    }
-    audioAppIdRef.current = 0;
-    return true;
+  const applyAudioTarget = useCallback((targetId: number): Promise<boolean> => {
+    const revision = audioRevisionRef.current;
+    const operation = audioOperationRef.current.then(async () => {
+      if (revision !== audioRevisionRef.current) return false;
+      const applied = await changeAudioTarget(audioAppIdRef.current, targetId);
+      if (!applied) throw new Error('Native audio target change failed');
+      if (revision !== audioRevisionRef.current) {
+        if (!(await desktopApi.stopAudioCapture())) throw new Error('Cancelled audio capture could not stop');
+        audioAppIdRef.current = 0;
+        return false;
+      }
+      audioAppIdRef.current = targetId;
+      return true;
+    });
+    // Keep the queue usable after failure; the caller still receives the rejection.
+    audioOperationRef.current = operation.then(
+      () => undefined,
+      (cause: unknown) => console.error('Audio target operation failed:', cause),
+    );
+    return operation;
   }, []);
-
-  const startAudioCapture = useCallback(
-    async (targetId: number): Promise<boolean> => {
-      if (targetId === 0) {
-        return stopAudioCapture();
-      }
-      const started = await desktopApi.startAudioCapture(targetId);
-      if (!started) {
-        throw new Error('Native audio capture failed to start');
-      }
-      audioAppIdRef.current = targetId;
-      return true;
-    },
-    [stopAudioCapture],
-  );
-
-  const switchAudioCapture = useCallback(
-    async (targetId: number): Promise<boolean> => {
-      if (targetId === 0) {
-        return stopAudioCapture();
-      }
-      let switched = await desktopApi.switchAudioCapture(targetId);
-      if (!switched) {
-        switched = await desktopApi.startAudioCapture(targetId);
-      }
-      if (!switched) {
-        throw new Error('Native audio target switch failed');
-      }
-      audioAppIdRef.current = targetId;
-      return true;
-    },
-    [stopAudioCapture],
-  );
+  const stopAudioCapture = useCallback(() => {
+    audioRevisionRef.current += 1;
+    return applyAudioTarget(0);
+  }, [applyAudioTarget]);
+  const startAudioCapture = applyAudioTarget;
+  const switchAudioCapture = applyAudioTarget;
 
   const attemptAutoResolve = useCallback(
     async (nameHint?: string): Promise<AudioApp | null> => {
+      if (!autoSelectAudioRef.current) return null;
+      const revision = audioRevisionRef.current;
+      const isCurrent = () => autoSelectAudioRef.current && revision === audioRevisionRef.current;
       let app = await desktopApi.resolveAudioSource(nameHint);
+      if (!isCurrent()) return null;
+      if (app?.id === -1) app = null;
 
-      if (!app && nameHint && audioApps.length > 0) {
-        app = findBestAudioMatch(audioApps, nameHint);
-      }
+      if (nameHint) app ??= findBestAudioMatch(audioApps, nameHint);
 
       if (!app) {
         const ctx = await desktopApi.getCaptureContext();
+        if (!isCurrent()) return null;
         setCaptureContext(ctx);
-        if (ctx?.sourceType === 'monitor') {
-          app = { id: -1, name: 'System Audio', processId: 0 };
-        }
+        setAutoDetectFailed(true);
       }
 
       if (app) {
@@ -218,8 +175,22 @@ export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): U
     [audioApps, pidBasedTargets],
   );
 
+  useEffect(() => {
+    if (audioAppExplicitlySet) return;
+    audioRevisionRef.current += 1;
+    if (!autoSelectAudio) {
+      void stopAudioCapture().catch((cause: unknown) => {
+        notify('error', 'Audio stop failed', String(cause));
+      });
+    }
+    setSelectedAudioAppId(autoSelectAudio ? null : 0);
+    setAutoDetectedApp(null);
+    setAutoDetectFailed(false);
+  }, [autoSelectAudio, audioAppExplicitlySet, stopAudioCapture]);
+
   const handleSelectApp = useCallback(
     (appId: number | null, explicit?: boolean) => {
+      audioRevisionRef.current += 1;
       setAudioAppExplicitlySet(explicit ?? true);
       const app = audioApps.find((a) => a.id === appId) ?? null;
       setSelectedAudioAppId(app ? toAudioTargetId(app, pidBasedTargets) : appId);
@@ -236,16 +207,13 @@ export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): U
     const prevId = audioAppIdRef.current;
     if (prevId === newId) return;
 
+    let cancelled = false;
     const applyAudio = async () => {
       try {
-        if (prevId === null || prevId === 0) {
-          await startAudioCapture(newId);
-        } else {
-          await switchAudioCapture(newId);
-        }
-        setAutoDetectedApp(null);
-        setAudioAppExplicitlySet(true);
+        await applyAudioTarget(newId);
       } catch (err) {
+        if (cancelled) return;
+        setSelectedAudioAppId(audioAppIdRef.current);
         console.error('[useAudioCapture] audio switch failed:', err);
         notify(
           'error',
@@ -257,7 +225,10 @@ export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): U
       }
     };
     void applyAudio();
-  }, [selectedAudioAppId, isSharing, startAudioCapture, switchAudioCapture]);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAudioAppId, isSharing, applyAudioTarget]);
 
   return {
     audioApps,
@@ -274,6 +245,7 @@ export function useAudioCapture(isSharing: boolean, pidBasedTargets: boolean): U
     setCaptureContext,
     audioAppIdRef,
     loadAudioApps,
+    stopAudioCapture,
     startAudioCapture,
     switchAudioCapture,
     attemptAutoResolve,
