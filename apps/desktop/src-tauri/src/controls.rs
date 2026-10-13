@@ -55,6 +55,7 @@ pub(crate) struct DesktopControls {
     state: Mutex<ControlState>,
     tray_items: Mutex<Option<TrayItems>>,
     tray_enabled: Mutex<bool>,
+    tray_pulse: Mutex<Option<crate::tray_pulse::TrayPulse>>,
     pub preferences_lock: Mutex<()>,
 }
 
@@ -234,6 +235,8 @@ pub(crate) fn set_tray_enabled(app: &AppHandle, enabled: bool) -> Result<(), Str
         show_main(app)?;
     }
     *is_enabled = enabled;
+    drop(is_enabled);
+    update_tray_pulse(app)?;
 
     Ok(())
 }
@@ -258,6 +261,45 @@ pub(crate) fn update_control_state(app: AppHandle, state: ControlState) -> Resul
     *current = state;
     app.emit("desktop-control-state-changed", &*current)
         .map_err(|error| error.to_string())?;
+    drop(items);
+    drop(current);
+    update_tray_pulse(&app)?;
+
+    Ok(())
+}
+
+fn update_tray_pulse(app: &AppHandle) -> Result<(), String> {
+    let controls = app.state::<DesktopControls>();
+    let mut pulse = controls
+        .tray_pulse
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let is_enabled = *controls
+        .tray_enabled
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let is_live = controls
+        .state
+        .lock()
+        .map_err(|error| error.to_string())?
+        .capture_stage
+        == "live";
+
+    if is_enabled && is_live {
+        if pulse.is_none() {
+            *pulse = Some(crate::tray_pulse::TrayPulse::start(app)?);
+        }
+    } else if pulse.take().is_some() {
+        let icon = app
+            .default_window_icon()
+            .ok_or("Application icon unavailable")?;
+        if let Some(tray) = app.tray_by_id("slopcast") {
+            tray.set_icon(Some(icon.clone()))
+                .map_err(|error| error.to_string())?;
+            tray.set_tooltip(Some("Slopcast"))
+                .map_err(|error| error.to_string())?;
+        }
+    }
 
     Ok(())
 }
