@@ -12,9 +12,31 @@ export type ShortcutAction = (typeof SHORTCUT_ACTIONS)[number]['id'];
 export type DesktopAction = ShortcutAction | 'quit';
 export type ShortcutBindings = Record<ShortcutAction, string>;
 
+export type AppearanceMode = 'system' | 'light' | 'dark';
+export type ColorTheme = 'slopcast' | 'ayu' | 'rose-pine' | 'kanagawa' | 'dracula';
+
+export type FontFamily = 'theme' | 'system' | 'inter' | 'lora' | 'jetbrains-mono';
+
+export interface TypographyPreferences {
+  fontFamily: FontFamily;
+  fontSize: number | null;
+  fontWeight: number | null;
+  ligatures: boolean;
+}
+
+export const DEFAULT_TYPOGRAPHY: TypographyPreferences = {
+  fontFamily: 'theme',
+  fontSize: null,
+  fontWeight: null,
+  ligatures: true,
+};
+
 export interface DesktopPreferences {
   trayEnabled: boolean;
   autoSelectAudio: boolean;
+  appearanceMode: AppearanceMode;
+  colorTheme: ColorTheme;
+  typography: TypographyPreferences;
   shortcuts: ShortcutBindings;
   telemetryShortcut: string;
 }

@@ -21,11 +21,63 @@ pub(crate) const ACTIONS: [(&str, &str, &str); 5] = [
     ("toggle-mute", "Toggle audio mute", "Control+Shift+F11"),
 ];
 
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum AppearanceMode {
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ColorTheme {
+    Slopcast,
+    Ayu,
+    RosePine,
+    Kanagawa,
+    Dracula,
+}
+
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FontFamily {
+    #[default]
+    Theme,
+    System,
+    Inter,
+    Lora,
+    JetbrainsMono,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct TypographyPreferences {
+    pub font_family: FontFamily,
+    pub font_size: Option<u8>,
+    pub font_weight: Option<u16>,
+    pub ligatures: bool,
+}
+
+impl Default for TypographyPreferences {
+    fn default() -> Self {
+        Self {
+            font_family: FontFamily::Theme,
+            font_size: None,
+            font_weight: None,
+            ligatures: true,
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct DesktopPreferences {
     pub tray_enabled: bool,
     pub auto_select_audio: bool,
+    pub appearance_mode: AppearanceMode,
+    pub color_theme: ColorTheme,
+    pub typography: TypographyPreferences,
     pub shortcuts: BTreeMap<String, String>,
     pub telemetry_shortcut: String,
 }
@@ -35,6 +87,9 @@ impl Default for DesktopPreferences {
         Self {
             tray_enabled: true,
             auto_select_audio: true,
+            appearance_mode: AppearanceMode::Dark,
+            color_theme: ColorTheme::Slopcast,
+            typography: TypographyPreferences::default(),
             telemetry_shortcut: if cfg!(target_os = "macos") {
                 "Command+KeyT"
             } else {
@@ -180,6 +235,63 @@ pub(crate) fn save_general_preferences(
         }
         return Err(error);
     }
+    app.emit("desktop-preferences-changed", &preferences)
+        .map_err(|error| error.to_string())?;
+    drop(operation);
+
+    get_desktop_preferences(app)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) fn save_appearance_preferences(
+    app: AppHandle,
+    appearance_mode: AppearanceMode,
+    color_theme: ColorTheme,
+) -> Result<PreferencesSnapshot, String> {
+    let controls = app.state::<crate::controls::DesktopControls>();
+    let operation = controls
+        .preferences_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut preferences = read_preferences(&app)?;
+
+    preferences.appearance_mode = appearance_mode;
+    preferences.color_theme = color_theme;
+    persist_preferences(&app, &preferences)?;
+    app.emit("desktop-preferences-changed", &preferences)
+        .map_err(|error| error.to_string())?;
+    drop(operation);
+
+    get_desktop_preferences(app)
+}
+
+#[tauri::command]
+pub(crate) fn save_typography_preferences(
+    app: AppHandle,
+    typography: TypographyPreferences,
+) -> Result<PreferencesSnapshot, String> {
+    if typography
+        .font_size
+        .is_some_and(|size| !(12..=18).contains(&size))
+    {
+        return Err("Font size must be between 12 and 18 px".into());
+    }
+    if typography
+        .font_weight
+        .is_some_and(|weight| ![400, 500, 600].contains(&weight))
+    {
+        return Err("Font weight must be 400, 500 or 600".into());
+    }
+
+    let controls = app.state::<crate::controls::DesktopControls>();
+    let operation = controls
+        .preferences_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut preferences = read_preferences(&app)?;
+
+    preferences.typography = typography;
+    persist_preferences(&app, &preferences)?;
     app.emit("desktop-preferences-changed", &preferences)
         .map_err(|error| error.to_string())?;
     drop(operation);

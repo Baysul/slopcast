@@ -225,6 +225,8 @@ pub fn run() {
             controls::update_control_state,
             preferences::get_desktop_preferences,
             preferences::save_general_preferences,
+            preferences::save_appearance_preferences,
+            preferences::save_typography_preferences,
             preferences::save_telemetry_shortcut,
             preferences::choose_settings_directory,
             shortcuts::get_shortcut_status,
