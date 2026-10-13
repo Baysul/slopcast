@@ -35,20 +35,26 @@ tauri = {
   git = "https://github.com/tauri-apps/tauri",
   rev = "536664d1b34e1989dbd22705e2fde8b57b36aa0c",
   default-features = false,
-  features = ["cef"]
+  features = ["cef", "tray-icon"]
 }
 log = "0.4"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-global-shortcut = "=2.3.2"
+rfd = "0.17.2"
 native-livekit = { path = "../../../packages/native-livekit" }
 native-rust = { path = "../../../packages/native-rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+futures-util = "0.3"
+gtk = "0.18"
 
 [features]
 e2e = []
