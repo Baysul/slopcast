@@ -261,6 +261,73 @@ pnpm test:e2e
 
 The end-to-end test launches the desktop app, creates a room, starts a screenshare, and verifies that a headless Chromium spectator connects and receives live video.
 
+### Native GUI automation
+
+Use [kwin-mcp](https://github.com/isac322/kwin-mcp) and KWin's virtual framebuffer
+instead of Xvfb for isolated native Wayland UI checks. This complements—not
+replaces—Playwright's desktop CDP and web spectator tests. The virtual session
+checks windows, input and pixels; it does not establish that a real desktop's
+PipeWire audio or screen-capture portal works.
+
+Requirements: Linux, KWin/Plasma 6, Python 3.12+, `uv` (`uvx`), D-Bus, libei,
+AT-SPI2 and Spectacle. Slopcast's CEF backend also needs `Xwayland`, `xauth` and
+`mcookie` (util-linux). Installing kwin-mcp's Python dependencies needs a C
+compiler, `pkg-config`, Python headers, Cairo, GObject Introspection and libdbus
+development files. See upstream's
+[system dependency instructions](https://github.com/isac322/kwin-mcp#installing-system-dependencies).
+No system packages are installed by the project launcher.
+
+The project MCP entries in `.mcp.json` and `.pi/mcp.json` run
+`bash scripts/kwin-mcp.sh`; restart/reload your MCP client after configuration
+changes. Pi requires project trust before loading `.pi/mcp.json`. For another
+client, use this stdio entry from the repository root:
+
+```json
+{
+  "mcpServers": {
+    "kwin-mcp": {
+      "command": "bash",
+      "args": ["scripts/kwin-mcp.sh"]
+    }
+  }
+}
+```
+
+`pnpm mcp:kwin` starts the same stdio server, not an interactive test runner.
+The launcher pins `kwin-mcp==0.11.0`, creates a private runtime directory, strips
+host display/session-bus addresses and enables screenshot image results. Each
+MCP server owns one virtual session; parallel agents need separate servers.
+
+After building the desktop app, call these MCP tools:
+
+1. `session_start` with `screen_width: 1280`, `screen_height: 800`,
+   `isolate_home: true`. KWin and D-Bus readiness are checked by the server; do
+   not guess with fixed sleeps.
+2. `launch_app` with `command: "bash scripts/kwin-launch-desktop.sh"`. This starts
+   an authenticated, rootful Xwayland window inside virtual KWin, waits for its
+   dynamically allocated display via `-displayfd`, then runs
+   `target/release/slopcast`. The pinned CEF runtime forces X11; a direct native
+   Wayland launch fails to create a window. The helper stops Xwayland when the
+   app exits. Native Wayland apps can use `launch_app` directly.
+3. Observe with `window_geometry`, `accessibility_tree` and `screenshot`; interact
+   with `mouse_click`, `keyboard_type`, `mouse_drag` or `window_set_geometry`.
+   Confirm the resulting UI or geometry after each action. Webview accessibility
+   can be incomplete; retain Playwright DOM assertions for renderer behavior.
+4. Always call `session_stop` in cleanup. Server EOF and normal termination also
+   stop owned sessions; the launcher removes its runtime directory. Set
+   `keep_screenshots: true` in `session_start` only when retaining diagnostics is
+   useful, and remove the reported screenshot/log directory when finished.
+
+Never use `session_connect` or `--default-live-session` for project testing.
+Virtual KWin isolates display, input and the session bus, but is **not** a
+filesystem/network sandbox. `isolate_home` gives applications disposable user
+settings, not restricted filesystem access. KWin's virtual backend does not
+start Xwayland itself; the Slopcast helper supplies it without Xvfb. KWin window
+geometry tools address the outer Xwayland window, not individual X11 windows
+inside it. GPU acceleration, screenshot support and portal availability must
+be verified on each host; do not treat a software-rendered run as GPU or
+capture-path validation.
+
 ## Background
 
 Slopcast is a vibe-coded personal project. I plan to maintain it until *an actually good app* for sharing a screen on Linux and Wayland appears.

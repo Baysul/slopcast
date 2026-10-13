@@ -197,6 +197,27 @@ Agent rules for the e2e test:
 2. The `biome.json` override for `e2e-test.ts` allows `noExplicitAny` for Playwright locator chains. Don't remove it without verifying the test still passes Biome CI.
 3. When adding new UI elements to the desktop or web app, update the Playwright selectors in `presenter.playwright.ts` and the assertions in `e2e-test.ts` to match (`span.font-mono` room code, `[role="status"]` badges, `[data-decoder-stalled]`, preview canvas).
 
+### Native GUI automation with KWin
+
+Use the project `kwin-mcp` server (`scripts/kwin-mcp.sh`) for headless native
+Wayland UI checks instead of Xvfb. Keep Playwright/CDP for renderer assertions
+and the headless Chromium spectator. See README.md, "Native GUI automation".
+
+- Each parallel agent must own a separate MCP server and virtual session.
+- Use `session_start` with `isolate_home: true`; never `session_connect`,
+  `--default-live-session`, the user's display or the user's session bus.
+- For Slopcast's X11-only CEF backend, use `launch_app` with
+  `command: "bash scripts/kwin-launch-desktop.sh"` after building. It owns an
+  authenticated Xwayland window/display inside KWin; never supply a host `DISPLAY`.
+  Native Wayland apps can be launched directly.
+- Observe readiness with MCP tools or bounded health polling, and confirm
+  input/resize results with screenshots
+  or reported geometry. Use the MCP screenshot tool, not shell screen capture.
+- Always call `session_stop`; remove retained screenshot/log directories after
+  inspection. The launcher cleans its private runtime directory on exit.
+- Do not replace existing Playwright tests or equate virtual UI success with
+  real PipeWire/portal capture, GPU acceleration or media-delivery validation.
+
 ## 7. Manual walkthrough for room creation and web spectators
 
 1. One-time dev setup: run `pnpm desktop:install-entry` so the Wayland taskbar shows the real app icon for dev builds.
