@@ -2,10 +2,13 @@ pub mod audio;
 pub mod capture;
 pub mod config;
 pub mod context;
+mod controls;
 pub mod dto;
 pub mod platform;
+mod preferences;
 pub mod room;
 pub mod settings;
+mod shortcuts;
 
 pub type AppHandle = tauri::AppHandle<tauri::Cef>;
 pub type App = tauri::App<tauri::Cef>;
@@ -113,7 +116,11 @@ pub fn run() {
     }
 
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Err(error) = controls::show_main(app) {
+                log::error!("Cannot show Slopcast: {error}");
+            }
+        }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(
@@ -134,6 +141,17 @@ pub fn run() {
             ("--log-level", Some("2")),
         ]));
 
+    let builder = if shortcuts::is_wayland() {
+        builder
+    } else {
+        builder.plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    shortcuts::dispatch(app, shortcut, event.state);
+                })
+                .build(),
+        )
+    };
     let builder = builder.register_uri_scheme_protocol("frame", |_app, _request| {
         // The renderer fetches this custom scheme cross-origin, so CORS is required.
         let body = crate::capture::LATEST_FRAME
@@ -184,6 +202,14 @@ pub fn run() {
             }
             app.manage(context::CaptureContextCache::default());
             app.manage(config::AppConfigState::load()?);
+            app.manage(preferences::SettingsStorage::load(app.handle()).map_err(std::io::Error::other)?);
+            app.manage(controls::DesktopControls::default());
+            app.manage(shortcuts::ShortcutService::default());
+            let preferences = preferences::read_preferences(app.handle()).map_err(std::io::Error::other)?;
+            if let Err(error) = controls::set_tray_enabled(app.handle(), preferences.tray_enabled) {
+                log::error!("Tray unavailable: {error}");
+            }
+            tauri::async_runtime::spawn(shortcuts::initialize(app.handle().clone()));
             audio::register_audio_callbacks(app.handle());
             capture::register_preview_frame_callback();
             capture::register_capture_ended_callback(app.handle());
@@ -191,6 +217,21 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             config::get_app_config,
+            controls::open_settings,
+            controls::show_main_window,
+            controls::get_control_state,
+            controls::quit_app,
+            controls::update_control_state,
+            preferences::get_desktop_preferences,
+            preferences::save_general_preferences,
+            preferences::save_telemetry_shortcut,
+            preferences::choose_settings_directory,
+            shortcuts::get_shortcut_status,
+            shortcuts::set_shortcut_recording,
+            shortcuts::save_shortcuts,
+            shortcuts::configure_portal_shortcuts,
+            audio::toggle_audio_mute,
+            audio::get_audio_muted,
             platform::get_platform_info,
             platform::probe_gpu_info,
             audio::get_audio_apps,
@@ -237,7 +278,36 @@ pub fn run() {
         return;
     };
 
-    app.run(|_app_handle, event| {
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } = &event
+            && label == "settings"
+        {
+            shortcuts::set_shortcut_recording(app_handle.clone(), false);
+        }
+        if let tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } = &event
+        {
+            if label == "main" {
+                api.prevent_close();
+                controls::close_main(app_handle);
+            } else if label == "settings" {
+                // CEF leaves closed windows registered, so keep the Settings browser alive.
+                api.prevent_close();
+                shortcuts::set_shortcut_recording(app_handle.clone(), false);
+                if let Some(window) = app_handle.get_webview_window("settings")
+                    && let Err(error) = window.hide()
+                {
+                    log::error!("Cannot hide Settings: {error}");
+                }
+            }
+        }
         if let tauri::RunEvent::ExitRequested { .. } = event {
             let _ = native_rust::stop_audio_capture();
             let _ = native_rust::stop_audio_metering();
