@@ -192,6 +192,62 @@ app.example.com {
 }
 ```
 
+## Desktop shortcuts, tray and settings
+
+Open **Settings** from the title bar or tray, or press **Ctrl+,** (**Cmd+,** on macOS).
+Settings opens in its own window, can be resized, and closes with **Esc**; closing it
+does not stop sharing.
+**Settings → Stream** contains the video codec, resolution, frame rate, bitrate,
+content motion and API endpoint controls. Changes are shared with the main window
+and saved automatically; changing the API endpoint during a room still requires
+confirmation.
+
+**Ctrl+T** (**Cmd+T** on macOS) toggles the telemetry overlay only while the main
+window is focused. This does not stop streaming or audio. Edit, clear or reset this
+local shortcut in **Settings → Shortcuts**.
+
+Default global shortcuts (editable or clearable in **Settings → Shortcuts**):
+
+| Action | Default |
+| --- | --- |
+| Start screenshare / go live from preview | Ctrl+Shift+F7 |
+| Stop screenshare, keeping the room open | Ctrl+Shift+F8 |
+| Close room (with confirmation) | Ctrl+Shift+F9 |
+| Switch screenshare source | Ctrl+Shift+F10 |
+| Mute/unmute the selected audio source | Ctrl+Shift+F11 |
+
+Starting opens the source picker and preview; use the start shortcut again, Go Live,
+or the tray's **Go live** item to publish. The tray item is available whenever nothing
+is live; with no room open it creates one first, prompts for a window, and the main
+window appears with the preview once a source is chosen. Changing sources keeps the
+room and audio selection. Cancelling a Linux source picker leaves sharing stopped
+rather than silently sharing another source.
+
+On Wayland, global shortcuts use the **GlobalShortcuts desktop portal**, not X11
+key grabs. Your desktop must support that portal and approve the bindings. The
+Shortcuts page shows the actual approved keys and availability; preferred keys may
+be changed by the desktop. Portal version 2 provides a desktop shortcut editor;
+on version 1, persistent desktop assignments may need changing in the desktop's
+own shortcut settings. Missing or revoked portal access is reported, never treated
+as working global shortcuts.
+
+Direct Linux binary launches register a portal identity using hidden desktop metadata
+(`org.slopcast.Slopcast.desktop`) in the OS application-data directory. This does not
+change the app's settings directory or add a visible launcher.
+
+Right-click the tray icon for sharing, room, audio and Quit controls. Closing the
+main window keeps the app running while the tray is enabled; **Quit** stops capture
+and closes the room. Linux needs an AppIndicator runtime and a desktop tray host
+(GNOME may need an AppIndicator extension).
+
+**Settings → General** can disable the tray, choose a settings folder, and disable
+automatic application-audio selection. Folder changes copy preferences, stream
+settings and onboarding state safely, retain originals, and reject destinations
+containing Slopcast settings. A location pointer remains in the default config
+folder; logs, browser data and packaged server configuration are not moved.
+Disabling automatic audio starts with **No Audio** unless you explicitly choose a
+source. Automatic matching never falls back to capturing all system sound.
+
 ## Testing
 
 Tests live under [`tests/`](tests/). Unit tests are grouped by package in `unit/`, cross-application browser tests live in `e2e/`, and native regression probes live in `probes/`.
