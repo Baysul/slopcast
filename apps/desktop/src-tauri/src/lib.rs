@@ -9,6 +9,7 @@ mod preferences;
 pub mod room;
 pub mod settings;
 mod shortcuts;
+mod tray_pulse;
 
 pub type AppHandle = tauri::AppHandle<tauri::Cef>;
 pub type App = tauri::App<tauri::Cef>;
