@@ -74,7 +74,7 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
                 {!roomCode ? (
                   <>
                     <span className="p-3 rounded-full bg-safelight/10 mb-1">
-                      <ScreenShare className="size-7 text-safelight/60" aria-hidden="true" />
+                      <ScreenShare className="size-7 text-safelight" aria-hidden="true" />
                     </span>
                     <p className="text-sm text-foreground font-semibold">No room yet</p>
                     <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
