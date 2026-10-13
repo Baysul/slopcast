@@ -1,7 +1,7 @@
 import type { AudioApp, AudioAppWave, StreamSettings } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppConfig,
   CaptureContext,
@@ -15,6 +15,16 @@ import type {
   NativeTelemetry,
   PlatformInfo,
 } from '../types';
+
+import type {
+  ApiEndpointEdit,
+  ControlState,
+  DesktopAction,
+  DesktopPreferences,
+  PreferencesSnapshot,
+  ShortcutBindings,
+  ShortcutReport,
+} from '../types/preferences';
 
 type TauriInvokeArguments = Parameters<typeof invoke>[1];
 
@@ -69,6 +79,40 @@ async function subscribe<T>(event: string, callback: (payload: T) => void): Prom
 }
 
 export const desktopApi = {
+  getDesktopPreferences: (): Promise<PreferencesSnapshot> => invoke('get_desktop_preferences'),
+  saveGeneralPreferences: (trayEnabled: boolean, autoSelectAudio: boolean): Promise<PreferencesSnapshot> =>
+    invoke('save_general_preferences', { trayEnabled, autoSelectAudio }),
+  chooseSettingsDirectory: (): Promise<PreferencesSnapshot> => invoke('choose_settings_directory'),
+  openSettings: (): Promise<void> => invoke('open_settings'),
+  showMainWindow: (): Promise<void> => invoke('show_main_window'),
+  getControlState: (): Promise<ControlState> => invoke('get_control_state'),
+  saveTelemetryShortcut: (chord: string | null): Promise<PreferencesSnapshot> =>
+    invoke('save_telemetry_shortcut', { chord }),
+  editApiEndpoint: (edit: ApiEndpointEdit): Promise<void> => emitTo('main', 'api-endpoint-edited', edit),
+  onApiEndpointEdit: (callback: (edit: ApiEndpointEdit) => void): Promise<UnlistenFn> =>
+    subscribe('api-endpoint-edited', callback),
+  onControlStateChanged: (callback: (state: ControlState) => void): Promise<UnlistenFn> =>
+    subscribe('desktop-control-state-changed', callback),
+  onStreamSettingsChanged: (callback: (settings: StreamSettings) => void): Promise<UnlistenFn> =>
+    subscribe('stream-settings-changed', callback),
+  quitApp: (): Promise<void> => invoke('quit_app'),
+  updateControlState: (state: ControlState): Promise<void> => invoke('update_control_state', { state }),
+  getShortcutStatus: (): Promise<ShortcutReport> => invoke('get_shortcut_status'),
+  saveShortcuts: (bindings: ShortcutBindings): Promise<ShortcutReport> => invoke('save_shortcuts', { bindings }),
+  configurePortalShortcuts: (): Promise<void> => invoke('configure_portal_shortcuts'),
+  setShortcutRecording: (recording: boolean): Promise<void> => invoke('set_shortcut_recording', { recording }),
+  getAudioMuted: (): Promise<boolean> => invoke('get_audio_muted'),
+  toggleAudioMute: (): Promise<boolean> => invoke('toggle_audio_mute'),
+  onDesktopAction: (callback: (action: DesktopAction) => void): Promise<UnlistenFn> =>
+    subscribe('desktop-action', callback),
+  onDesktopPreferences: (callback: (preferences: DesktopPreferences) => void): Promise<UnlistenFn> =>
+    subscribe('desktop-preferences-changed', callback),
+  onShortcutsChanged: (callback: (report: ShortcutReport) => void): Promise<UnlistenFn> =>
+    subscribe('shortcuts-changed', callback),
+  onSettingsDirectoryChanged: (callback: () => void): Promise<UnlistenFn> =>
+    subscribe('settings-directory-changed', callback),
+  onSettingsCloseRequested: (callback: () => void): Promise<UnlistenFn> =>
+    subscribe('tauri://close-requested', callback),
   getAppConfig: (): Promise<AppConfig> => invokeOr('get_app_config', undefined, { apiEndpoint: '', livekitUrl: '' }),
   getPlatformInfo: (): Promise<PlatformInfo> =>
     invokeOr('get_platform_info', undefined, {
@@ -89,7 +133,7 @@ export const desktopApi = {
   inspectCaptureContext: (): Promise<CaptureContext | null> => invokeOr('inspect_capture_context', undefined, null),
   getStreamSettings: (): Promise<StreamSettings> =>
     invokeOr('get_stream_settings', undefined, { ...DEFAULT_STREAM_SETTINGS }),
-  saveStreamSettings: (settings: StreamSettings): Promise<boolean> =>
+  saveStreamSettings: (settings: Partial<StreamSettings>): Promise<boolean> =>
     invokeOr('save_stream_settings', { settings }, false),
   getOnboardingCompleted: (): Promise<boolean> => invokeOr('get_onboarding_completed', undefined, false),
   setOnboardingCompleted: (): Promise<boolean> => invokeOr('set_onboarding_completed', undefined, false),
