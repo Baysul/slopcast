@@ -32,6 +32,7 @@ npm-debug.log*
 .opencode/
 opencode.json
 .mcp*
+!.mcp.json
 .hermes/
 .obsidian/
 .agents/
@@ -62,4 +63,5 @@ apps/desktop/src-tauri/resources/gstreamer-plugins/runtime-manifest.txt
 .forgejo/
 
 *.so
-.pi/
+.pi/*
+!.pi/mcp.json
