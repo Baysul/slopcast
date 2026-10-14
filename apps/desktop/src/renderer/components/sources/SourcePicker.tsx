@@ -147,7 +147,7 @@ function ActiveRoomControls({
           </span>
         )}
       </div>
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         <Button variant="secondary" size="sm" onClick={onCopyCode} className="gap-1.5">
           {copied === 'code' ? <Check className="w-3.5 h-3.5 text-safelight" aria-hidden="true" /> : null}
           {copied === 'code' ? 'Copied' : 'Copy code'}
@@ -165,7 +165,7 @@ function ActiveRoomControls({
           size="sm"
           disabled={isClosingRoom}
           onClick={onCloseRoom}
-          className="gap-1.5 border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          className="col-span-2 gap-1.5 border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
         >
           <Link2Off className="size-4" aria-hidden="true" />
           {isClosingRoom ? 'Closing…' : 'Close room'}
