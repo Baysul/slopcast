@@ -10,40 +10,25 @@ if [[ -z "${WAYLAND_DISPLAY:-}" || ! -x "$ROOT/target/release/slopcast" ]]; then
   printf 'Start an isolated KWin session and build Slopcast first.\n' >&2
   exit 1
 fi
-for command in Xwayland xauth mcookie; do
-  if ! command -v "$command" >/dev/null 2>&1; then
-    printf 'Slopcast on virtual KWin requires %s.\n' "$command" >&2
-    exit 1
-  fi
-done
-
-auth_file="$(mktemp "$XDG_RUNTIME_DIR/slopcast-xauth.XXXXXX")"
-xwayland_pid=""
-cleanup() {
-  if [[ -n "$xwayland_pid" ]] && kill -0 "$xwayland_pid" 2>/dev/null; then
-    kill -TERM "$xwayland_pid"
-    local status=0
-    wait "$xwayland_pid" || status=$?
-    if (( status != 0 && status != 143 )); then
-      printf 'Xwayland exited with status %s during cleanup.\n' "$status" >&2
-    fi
-  fi
-  rm -f -- "$auth_file"
-}
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-cookie="$(mcookie)"
-xauth -f "$auth_file" add :0 . "$cookie"
-# CEF requires X11; a rootful window needs no additional X11 window manager.
-coproc XWAYLAND { exec Xwayland -auth "$auth_file" -displayfd 1 -nolisten tcp -geometry 1280x800; }
-xwayland_pid=$XWAYLAND_PID
-if ! read -r -t 15 display <&"${XWAYLAND[0]}" || [[ ! "$display" =~ ^[0-9]+$ ]]; then
-  printf 'Xwayland did not report a ready display within 15 seconds.\n' >&2
+kwin_pid="$(cat "$XDG_RUNTIME_DIR/kwin.pid" 2>/dev/null || true)"
+if [[ ! "$kwin_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$kwin_pid" 2>/dev/null; then
+  printf 'The session KWin is not running; restart it with session_start.\n' >&2
   exit 1
 fi
-xauth -f "$auth_file" add ":$display" . "$cookie"
-DISPLAY=":$display" XAUTHORITY="$auth_file" GDK_BACKEND=x11 QT_QPA_PLATFORM=xcb \
-  "$ROOT/target/release/slopcast" "$@"
+
+# KWin starts Xwayland on the first connection to the X11 display it reserved. Display
+# numbers are shared with the host, so find the one whose lock file holds KWin's PID.
+display=""
+for lock in /tmp/.X*-lock; do
+  if [[ "$(tr -d ' \n' < "$lock")" == "$kwin_pid" ]]; then
+    display="${lock#/tmp/.X}"
+    display="${display%-lock}"
+    break
+  fi
+done
+if [[ -z "$display" ]]; then
+  printf 'The session KWin has no Xwayland display; start it through scripts/kwin-mcp.sh.\n' >&2
+  exit 1
+fi
+
+DISPLAY=":$display" GDK_BACKEND=x11 QT_QPA_PLATFORM=xcb exec "$ROOT/target/release/slopcast" "$@"
