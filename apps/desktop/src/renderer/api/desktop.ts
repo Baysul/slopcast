@@ -93,6 +93,7 @@ export const desktopApi = {
   saveTypographyPreferences: (typography: TypographyPreferences): Promise<PreferencesSnapshot> =>
     invoke('save_typography_preferences', { typography }),
   chooseSettingsDirectory: (): Promise<PreferencesSnapshot> => invoke('choose_settings_directory'),
+  setSettingsDirectory: (path: string): Promise<PreferencesSnapshot> => invoke('set_settings_directory', { path }),
   openSettings: (): Promise<void> => invoke('open_settings'),
   beginWindowDrag: (kind: ResizeDirection | 'Move'): Promise<void> => invoke('begin_window_drag', { kind }),
   showMainWindow: (): Promise<void> => invoke('show_main_window'),

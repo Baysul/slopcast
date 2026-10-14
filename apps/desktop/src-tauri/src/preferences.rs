@@ -333,10 +333,30 @@ pub(crate) async fn choose_settings_directory(
     let Some(selected) = selected else {
         return get_desktop_preferences(app);
     };
-    let target = selected
-        .path()
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
+
+    move_settings_directory(app, selected.path())
+}
+
+#[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized into owned values"
+)]
+pub(crate) fn set_settings_directory(
+    app: AppHandle,
+    path: String,
+) -> Result<PreferencesSnapshot, String> {
+    let path = Path::new(path.trim());
+    if !path.is_absolute() {
+        return Err("Enter an absolute folder path.".into());
+    }
+    std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
+
+    move_settings_directory(app, path)
+}
+
+fn move_settings_directory(app: AppHandle, selected: &Path) -> Result<PreferencesSnapshot, String> {
+    let target = selected.canonicalize().map_err(|error| error.to_string())?;
 
     migrate_settings(&app, target)?;
     app.emit("settings-directory-changed", ())
