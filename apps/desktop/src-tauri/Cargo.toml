@@ -58,6 +58,8 @@ tempfile = "3"
 libc = "0.2"
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
 futures-util = "0.3"
+raw-window-handle = "0.6"
+x11-dl = "2.21"
 
 [features]
 e2e = []
