@@ -6,6 +6,7 @@ import { windowControls } from '@/api/windowControls';
 import { TitleBar } from '@/components/layout/TitleBar';
 import { WindowResizeHandles } from '@/components/layout/WindowResizeHandles';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { useDesktopPreferences } from '@/hooks/useDesktopPreferences';
 import type { ShortcutAction, ShortcutBindings, ShortcutReport } from '@/types/preferences';
@@ -78,6 +79,7 @@ export function DesktopSettings() {
   const busyRef = useRef<boolean>(false);
   const recordButtonRef = useRef<HTMLButtonElement>(null);
   const lastEditingRef = useRef<EditableShortcut | null>(null);
+  const pathInputRef = useRef<HTMLInputElement>(null);
   const savedBindingsRef = useRef<ShortcutBindings | null>(null);
 
   const perform = useCallback(async (operation: () => Promise<void>) => {
@@ -230,22 +232,44 @@ export function DesktopSettings() {
             Keep your preferences, stream settings and onboarding state in a folder you choose. Existing settings are
             copied safely; originals are kept as a backup.
           </p>
-          <p className="rounded-md border border-border bg-secondary/40 p-3 font-mono text-xs break-all select-text">
-            {settingsDirectory}
-          </p>
-          <Button
-            variant="outline"
-            disabled={busy}
-            onClick={() =>
+          <form
+            className="flex flex-wrap gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const path = pathInputRef.current?.value ?? '';
               void perform(async () => {
-                setSnapshot(await desktopApi.chooseSettingsDirectory());
+                setSnapshot(await desktopApi.setSettingsDirectory(path));
                 setMessage('Settings folder confirmed.');
-              })
-            }
+              });
+            }}
           >
-            <FolderOpen aria-hidden="true" />
-            Choose folder…
-          </Button>
+            <Input
+              key={settingsDirectory}
+              ref={pathInputRef}
+              aria-label="Settings folder path"
+              defaultValue={settingsDirectory}
+              disabled={busy}
+              spellCheck={false}
+              className="min-w-0 flex-1 basis-64 font-mono text-xs"
+            />
+            <Button type="submit" variant="outline" disabled={busy}>
+              Apply
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() =>
+                void perform(async () => {
+                  setSnapshot(await desktopApi.chooseSettingsDirectory());
+                  setMessage('Settings folder confirmed.');
+                })
+              }
+            >
+              <FolderOpen aria-hidden="true" />
+              Choose folder…
+            </Button>
+          </form>
           <p className="text-xs text-muted-foreground">
             Choose a folder without existing Slopcast settings. Packaged server configuration, logs and browser data are
             not moved.

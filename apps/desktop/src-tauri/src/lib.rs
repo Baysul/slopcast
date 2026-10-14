@@ -227,6 +227,7 @@ pub fn run() {
             preferences::save_typography_preferences,
             preferences::save_telemetry_shortcut,
             preferences::choose_settings_directory,
+            preferences::set_settings_directory,
             shortcuts::get_shortcut_status,
             shortcuts::set_shortcut_recording,
             shortcuts::save_shortcuts,
