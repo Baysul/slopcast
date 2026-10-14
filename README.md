@@ -270,8 +270,7 @@ checks windows, input and pixels; it does not establish that a real desktop's
 PipeWire audio or screen-capture portal works.
 
 Requirements: Linux, KWin/Plasma 6, Python 3.12+, `uv` (`uvx`), D-Bus, libei,
-AT-SPI2 and Spectacle. Slopcast's CEF backend also needs `Xwayland`, `xauth` and
-`mcookie` (util-linux). Installing kwin-mcp's Python dependencies needs a C
+AT-SPI2 and Spectacle. Slopcast's CEF backend also needs `Xwayland`. Installing kwin-mcp's Python dependencies needs a C
 compiler, `pkg-config`, Python headers, Cairo, GObject Introspection and libdbus
 development files. See upstream's
 [system dependency instructions](https://github.com/isac322/kwin-mcp#installing-system-dependencies).
@@ -295,36 +294,37 @@ client, use this stdio entry from the repository root:
 
 `pnpm mcp:kwin` starts the same stdio server, not an interactive test runner.
 The launcher pins `kwin-mcp==0.11.0`, creates a private runtime directory, strips
-host display/session-bus addresses and enables screenshot image results. Each
+host display/session-bus addresses, enables screenshot image results and starts
+KWin with `--xwayland` so X11 windows are managed like on a real Plasma session. Each
 MCP server owns one virtual session; parallel agents need separate servers.
 
 After building the desktop app, call these MCP tools:
 
-1. `session_start` with `screen_width: 1280`, `screen_height: 800`,
+1. `session_start` with `screen_width: 1920`, `screen_height: 1080`,
    `isolate_home: true`. KWin and D-Bus readiness are checked by the server; do
    not guess with fixed sleeps.
-2. `launch_app` with `command: "bash scripts/kwin-launch-desktop.sh"`. This starts
-   an authenticated, rootful Xwayland window inside virtual KWin, waits for its
-   dynamically allocated display via `-displayfd`, then runs
-   `target/release/slopcast`. The pinned CEF runtime forces X11; a direct native
-   Wayland launch fails to create a window. The helper stops Xwayland when the
-   app exits. Native Wayland apps can use `launch_app` directly.
+2. `launch_app` with `command: "bash scripts/kwin-launch-desktop.sh"`. This finds
+   the session KWin's rootless Xwayland display (by the PID in its
+   `/tmp/.X<N>-lock` file) and runs `target/release/slopcast` on it. The pinned
+   CEF runtime forces X11; a direct native Wayland launch fails to create a
+   window. Native Wayland apps can use `launch_app` directly.
 3. Observe with `window_geometry`, `accessibility_tree` and `screenshot`; interact
    with `mouse_click`, `keyboard_type`, `mouse_drag` or `window_set_geometry`.
    Confirm the resulting UI or geometry after each action. Webview accessibility
    can be incomplete; retain Playwright DOM assertions for renderer behavior.
 4. Always call `session_stop` in cleanup. Server EOF and normal termination also
-   stop owned sessions; the launcher removes its runtime directory. Set
+   stop owned sessions; the MCP launcher then kills any process still using its
+   private runtime directory (portals and AT-SPI outlive the session bus) and
+   removes it. Set
    `keep_screenshots: true` in `session_start` only when retaining diagnostics is
    useful, and remove the reported screenshot/log directory when finished.
 
 Never use `session_connect` or `--default-live-session` for project testing.
 Virtual KWin isolates display, input and the session bus, but is **not** a
 filesystem/network sandbox. `isolate_home` gives applications disposable user
-settings, not restricted filesystem access. KWin's virtual backend does not
-start Xwayland itself; the Slopcast helper supplies it without Xvfb. KWin window
-geometry tools address the outer Xwayland window, not individual X11 windows
-inside it. GPU acceleration, screenshot support and portal availability must
+settings, not restricted filesystem access. KWin is the X11 window manager, so
+window geometry, maximize and focus tools address Slopcast's window directly.
+GPU acceleration, screenshot support and portal availability must
 be verified on each host; do not treat a software-rendered run as GPU or
 capture-path validation.
 
