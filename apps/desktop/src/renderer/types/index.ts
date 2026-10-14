@@ -21,7 +21,15 @@ export interface AppConfig {
 export interface PlatformInfo {
   platform: string;
   isWayland: boolean;
+  desktopEnvironment: string;
   videoCaptureAvailable: boolean;
+}
+
+export interface WindowButtonIcons {
+  minimize: string | null;
+  maximize: string | null;
+  restore: string | null;
+  close: string | null;
 }
 
 export type CaptureSourceKind = 'screen' | 'window';
