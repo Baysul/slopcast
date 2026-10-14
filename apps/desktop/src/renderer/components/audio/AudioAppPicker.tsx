@@ -1,8 +1,7 @@
 import type { AudioApp } from '@slopcast/shared-types';
-import { Check, Volume2, VolumeX } from 'lucide-react';
+import { AudioLines, Check, Volume2, VolumeX } from 'lucide-react';
 import React from 'react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { type AudioAppGroup, groupAudioApps } from '../../utils/audio-grouping';
 import { isGroupSelected, NO_AUDIO_APP } from '../../utils/audio-targets';
 import { AudioLevelMeter } from './AudioLevelMeter';
@@ -133,52 +132,54 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
     };
 
     return (
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
-              Window Audio Capture
-            </CardTitle>
-            {onRefresh && (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={disabled}
-                onClick={onRefresh}
-                className="text-xs text-muted-foreground hover:text-foreground h-auto px-2"
-              >
-                Refresh
-              </Button>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground leading-relaxed">
-            {selectionHint} Select an app to share only its sound, or choose{' '}
-            <strong className="text-foreground">Desktop Audio</strong> explicitly to capture all system sound.
-          </p>
-
-          <Button
-            variant="outline"
-            aria-pressed={isMuted}
-            disabled={disabled}
-            onClick={onToggleMute}
-            className="w-full justify-start"
+      <section aria-labelledby="audio-heading" className="space-y-4 p-5">
+        <div className="flex items-center justify-between">
+          <h2
+            id="audio-heading"
+            className="flex items-center gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
           >
-            <MuteIcon aria-hidden="true" />
-            {isMuted ? 'Unmute audio source' : 'Mute audio source'}
-          </Button>
-          <p className="text-xs text-muted-foreground">
-            Mute silences the shared audio without changing your selected source.
-          </p>
-          <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-            {renderBtn({ representative: NO_AUDIO_APP, members: [NO_AUDIO_APP] })}
-            {renderBtn(DESKTOP_AUDIO_GROUP)}
-            {groups.length > 0 && <div className="border-t border-border my-1.5" />}
-            {groups.map((group) => renderBtn(group))}
-          </div>
-        </CardContent>
-      </Card>
+            <span className="grid size-7 place-items-center rounded-md bg-safelight-glow text-safelight">
+              <AudioLines className="size-4" aria-hidden="true" />
+            </span>
+            Window Audio Capture
+          </h2>
+          {onRefresh && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={disabled}
+              onClick={onRefresh}
+              className="text-xs text-muted-foreground hover:text-foreground h-auto px-2"
+            >
+              Refresh
+            </Button>
+          )}
+        </div>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          {selectionHint} Select an app to share only its sound, or choose{' '}
+          <strong className="text-foreground">Desktop Audio</strong> explicitly to capture all system sound.
+        </p>
+
+        <Button
+          variant="outline"
+          aria-pressed={isMuted}
+          disabled={disabled}
+          onClick={onToggleMute}
+          className="w-full justify-start"
+        >
+          <MuteIcon aria-hidden="true" />
+          {isMuted ? 'Unmute audio source' : 'Mute audio source'}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Mute silences the shared audio without changing your selected source.
+        </p>
+        <div className="space-y-1.5">
+          {renderBtn({ representative: NO_AUDIO_APP, members: [NO_AUDIO_APP] })}
+          {renderBtn(DESKTOP_AUDIO_GROUP)}
+          {groups.length > 0 && <div className="border-t border-border my-1.5" />}
+          {groups.map((group) => renderBtn(group))}
+        </div>
+      </section>
     );
   },
 );
