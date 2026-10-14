@@ -1,6 +1,8 @@
-pub fn with_command_line_args(builder: tauri::Builder<tauri::Cef>) -> tauri::Builder<tauri::Cef> {
-    builder.command_line_args([(
-        "--remote-debugging-port".to_string(),
-        Some("9222".to_string()),
-    )])
+use tauri_runtime_cef::{Cef, RemoteDebugging};
+
+pub fn with_remote_debugging(cef: Cef) -> Cef {
+    cef.remote_debugging(RemoteDebugging::Port {
+        port: 9222,
+        allowed_origins: Vec::new(),
+    })
 }

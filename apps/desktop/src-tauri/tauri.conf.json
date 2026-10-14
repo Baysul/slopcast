@@ -35,8 +35,7 @@
       "deb": {
         "desktopTemplate": "templates/main.desktop",
         "depends": [
-          "libgtk-3-0",
-          "libayatana-appindicator3-1",
+          "libgtk-4-1",
           "libpipewire-0.3-0",
           "libgstreamer1.0-0",
           "libgstreamer-plugins-base1.0-0",
