@@ -141,7 +141,7 @@ The renderer is a sandboxed webview with no Node in it. All privileged work runs
 | `pnpm dev:desktop` | Run the desktop app in dev mode (`tauri dev`, renderer on :5173) |
 | `pnpm dev:web` / `pnpm dev:server` | Web spectator / API server dev servers |
 | `pnpm build:desktop` | Runs `pnpm check`, then `pnpm --filter desktop tauri build --no-bundle` (binary only) |
-| `pnpm package:desktop` | Runs `pnpm check`, then `pnpm --filter desktop tauri build` (AppImage + deb + nsis) |
+| `pnpm package:desktop` | Runs `pnpm check`, then `scripts/tauri-bundle.sh` (`cargo tauri build`: AppImage + deb + nsis) |
 | `pnpm dist:desktop` | Build and produce all configured bundles (appimage, deb, nsis) |
 | `pnpm dist:desktop:linux` | Build Linux AppImage + deb (`--bundles deb,appimage`) |
 | `pnpm dist:desktop:linux:appimage` | Build Linux AppImage only |
@@ -207,14 +207,20 @@ and the headless Chromium spectator. See README.md, "Native GUI automation".
 - Use `session_start` with `isolate_home: true`; never `session_connect`,
   `--default-live-session`, the user's display or the user's session bus.
 - For Slopcast's X11-only CEF backend, use `launch_app` with
-  `command: "bash scripts/kwin-launch-desktop.sh"` after building. It owns an
-  authenticated Xwayland window/display inside KWin; never supply a host `DISPLAY`.
+  `command: "bash scripts/kwin-launch-desktop.sh"` after building. It runs the app
+  on the session KWin's rootless Xwayland; never supply a host `DISPLAY`.
   Native Wayland apps can be launched directly.
 - Observe readiness with MCP tools or bounded health polling, and confirm
   input/resize results with screenshots
   or reported geometry. Use the MCP screenshot tool, not shell screen capture.
 - Always call `session_stop`; remove retained screenshot/log directories after
-  inspection. The launcher cleans its private runtime directory on exit.
+  inspection. On exit the launcher kills every process still using its private
+  runtime directory (D-Bus-activated portals and AT-SPI outlive the session bus)
+  and removes it.
+- Any harness that starts a session bus (`dbus-run-session`, `dbus-launch`) must
+  run with its own `XDG_RUNTIME_DIR`, never `/run/user/$UID`, and kill what it
+  activated on exit. `scripts/tauri-bundle.sh` does this for quick-sharun's AppImage
+  tracing run, which `dbus-launch`es a bus and starts the app.
 - Do not replace existing Playwright tests or equate virtual UI success with
   real PipeWire/portal capture, GPU acceleration or media-delivery validation.
 
@@ -254,8 +260,8 @@ pactl list sinks | grep "Slopcast-Window-Audio"
 
 | Package | Version |
 | --- | --- |
-| Tauri (Rust backend + frontend API) | 2.11 (@tauri-apps/api ~2.11.1, @tauri-apps/cli ~2.11.5); CEF backend pinned to `536664d1b34e1989dbd22705e2fde8b57b36aa0c` |
-| Tauri version pinning | `tauri-cli` hard-fails the build when an npm package's minor differs from the Rust crate's, and the CEF branch is 2.11.5 at every commit (`feat/cef` head `9d1a5b17` has no `cef` feature), so the npm side stays on `~2.11`. |
+| Tauri (Rust backend + frontend API) | 2.11 (@tauri-apps/api ~2.11.1, @tauri-apps/cli ~2.11.5); `tauri` and `tauri-runtime-cef` pinned to `feat/cef` `9d1a5b176e337c8395362a4e7c99bac99b36a1d1` |
+| Tauri version pinning | `tauri-cli` hard-fails the build when an npm package's minor differs from the Rust crate's, and the CEF branch is 2.11.5, so the npm side stays on `~2.11`. The runtime is selected by the `tauri-runtime-cef` dependency (no `cef` feature). Packaging uses `cargo tauri` installed from the same rev. The root `[patch.crates-io]` points the Tauri plugins at `plugins-workspace` `feat/cef` and unifies `tauri-plugin`, `tauri-utils` and `dpi` with the branch. |
 | React | ^19.3.0 |
 | TypeScript | ^7.0.2 |
 | Vite | ^8.3.4 |
