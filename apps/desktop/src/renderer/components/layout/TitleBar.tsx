@@ -1,8 +1,11 @@
 import { Copy, Minus, Settings, Square, X } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { windowControls } from '@/api/windowControls';
 import appIcon from '../../../../src-tauri/icons/128x128.png';
+
+const DOUBLE_CLICK_MS = 400;
+const DRAG_THRESHOLD_PX = 4;
 
 export interface TitleBarProps {
   isLive?: boolean;
@@ -31,14 +34,39 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(
     const [maximized, setMaximized] = useState(false);
     const centerLayout = title ? 'absolute inset-0' : 'flex-1';
 
+    const pressRef = useRef<{ x: number; y: number; time: number; isArmed: boolean } | null>(null);
+
+    // Starting the move on press would hand the release to the window manager, so a double-click
+    // would never arrive. The move starts once the pointer actually travels.
     const handlePointerDown = (event: React.PointerEvent<HTMLElement>): void => {
       if (event.button !== 0) return;
       if (event.target instanceof Element && event.target.closest('button')) return;
-      if (event.detail === 2) {
+
+      const previous = pressRef.current;
+      const isDoubleClick =
+        previous !== null &&
+        event.timeStamp - previous.time < DOUBLE_CLICK_MS &&
+        Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < DRAG_THRESHOLD_PX;
+      if (isDoubleClick) {
+        pressRef.current = null;
         void windowControls.toggleMaximize();
         return;
       }
-      windowControls.dragFromPointer(event);
+
+      pressRef.current = { x: event.clientX, y: event.clientY, time: event.timeStamp, isArmed: true };
+    };
+
+    const handlePointerMove = (event: React.PointerEvent<HTMLElement>): void => {
+      const press = pressRef.current;
+      if (press === null || !press.isArmed) return;
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < DRAG_THRESHOLD_PX) return;
+
+      press.isArmed = false;
+      windowControls.startMove();
+    };
+
+    const handlePointerEnd = (): void => {
+      if (pressRef.current) pressRef.current.isArmed = false;
     };
 
     useEffect(() => {
@@ -64,6 +92,9 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(
     return (
       <header
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
         className="relative isolate h-10 shrink-0 flex items-stretch border-b border-border bg-background select-none"
       >
         <AnimatePresence>

@@ -22,7 +22,7 @@ export const WindowResizeHandles: React.FC = () => (
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           event.preventDefault();
-          windowControls.resizeFromPointer(direction, event);
+          windowControls.startResize(direction);
         }}
       />
     ))}

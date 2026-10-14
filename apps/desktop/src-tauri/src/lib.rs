@@ -10,6 +10,8 @@ pub mod room;
 pub mod settings;
 mod shortcuts;
 mod tray_pulse;
+#[cfg(target_os = "linux")]
+mod window_drag;
 
 pub type AppHandle = tauri::AppHandle<CefRuntime>;
 pub type App = tauri::App<CefRuntime>;
@@ -213,6 +215,8 @@ pub fn run() {
             controls::get_control_state,
             controls::quit_app,
             controls::update_control_state,
+            #[cfg(target_os = "linux")]
+            window_drag::begin_window_drag,
             preferences::get_desktop_preferences,
             preferences::save_general_preferences,
             preferences::save_appearance_preferences,

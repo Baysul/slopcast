@@ -5623,6 +5623,7 @@ dependencies = [
  "log",
  "native-livekit",
  "native-rust",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
@@ -5635,6 +5636,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-runtime-cef",
  "tempfile",
+ "x11-dl",
 ]
 
 [[package]]
