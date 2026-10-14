@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_runtime_cef::CefRuntime;
 
 #[allow(
     clippy::struct_excessive_bools,
@@ -21,10 +22,10 @@ pub(crate) struct ControlState {
 }
 
 struct TrayItems {
-    start: MenuItem<tauri::Cef>,
-    stop: MenuItem<tauri::Cef>,
-    close: MenuItem<tauri::Cef>,
-    mute: MenuItem<tauri::Cef>,
+    start: MenuItem<CefRuntime>,
+    stop: MenuItem<CefRuntime>,
+    close: MenuItem<CefRuntime>,
+    mute: MenuItem<CefRuntime>,
 }
 
 impl TrayItems {
@@ -132,7 +133,7 @@ pub(crate) fn open_settings(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn tray_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Cef>, TrayItems)> {
+fn tray_menu(app: &AppHandle) -> tauri::Result<(Menu<CefRuntime>, TrayItems)> {
     let show = MenuItem::with_id(app, "show", "Show Slopcast", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let start = MenuItem::with_id(
@@ -184,9 +185,6 @@ pub(crate) fn set_tray_enabled(app: &AppHandle, enabled: bool) -> Result<(), Str
         tray.set_visible(enabled)
             .map_err(|error| error.to_string())?;
     } else if enabled {
-        // CEF pumps GLib, but gtk-rs must also initialize before constructing tray menus.
-        #[cfg(target_os = "linux")]
-        gtk::init().map_err(|error| format!("Cannot initialize tray menus: {error}"))?;
         let state = controls.state.lock().map_err(|error| error.to_string())?;
         let (menu, items) = tray_menu(app).map_err(|error| error.to_string())?;
         items.update(&state).map_err(|error| error.to_string())?;

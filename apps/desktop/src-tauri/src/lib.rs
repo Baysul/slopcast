@@ -11,8 +11,8 @@ pub mod settings;
 mod shortcuts;
 mod tray_pulse;
 
-pub type AppHandle = tauri::AppHandle<tauri::Cef>;
-pub type App = tauri::App<tauri::Cef>;
+pub type AppHandle = tauri::AppHandle<CefRuntime>;
+pub type App = tauri::App<CefRuntime>;
 
 #[cfg(feature = "e2e")]
 mod e2e;
@@ -22,6 +22,7 @@ use std::path::Path;
 
 use tauri::Manager;
 use tauri::http;
+use tauri_runtime_cef::{Cef, CefRuntime};
 
 const _FRONTEND_STAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/slopcast-frontend-stamp"));
 
@@ -106,17 +107,21 @@ fn serve_frontend(host: &str, port: u16, handle: &AppHandle) -> std::io::Result<
     reason = "app bootstrap is inherently sequential"
 )]
 pub fn run() {
-    #[cfg(target_os = "linux")]
-    if std::env::var("APPDIR").is_ok()
-        && std::env::var("WAYLAND_DISPLAY").is_ok()
-        && std::env::var("GDK_BACKEND").as_deref() == Ok("x11")
-    {
-        // Packaged AppImages can force X11 on Wayland; remove that override for the custom titlebar.
-        // SAFETY: this runs before GTK or any other thread reads the environment.
-        unsafe { std::env::remove_var("GDK_BACKEND") };
-    }
+    let cef = Cef::default().component_updates(false).command_line_args([
+        ("--no-default-browser-check", None),
+        ("--disable-default-apps", None),
+        ("--disable-background-networking", None),
+        ("--disable-breakpad", None),
+        ("--enable-gpu-rasterization", None),
+        ("--renderer-process-limit", Some("1")),
+        ("--disk-cache-size", Some("67108864")),
+        ("--log-level", Some("2")),
+    ]);
+    #[cfg(feature = "e2e")]
+    let cef = e2e::with_remote_debugging(cef);
 
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::<CefRuntime>::new()
+        .runtime(cef)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Err(error) = controls::show_main(app) {
                 log::error!("Cannot show Slopcast: {error}");
@@ -128,19 +133,7 @@ pub fn run() {
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
                 .build(),
-        )
-        .runtime_init_attrs(tauri::CefRuntimeAttributes::default().command_line_args([
-            ("--no-first-run", None),
-            ("--no-default-browser-check", None),
-            ("--disable-default-apps", None),
-            ("--disable-component-update", None),
-            ("--disable-background-networking", None),
-            ("--disable-breakpad", None),
-            ("--enable-gpu-rasterization", None),
-            ("--renderer-process-limit", Some("1")),
-            ("--disk-cache-size", Some("67108864")),
-            ("--log-level", Some("2")),
-        ]));
+        );
 
     let builder = if shortcuts::is_wayland() {
         builder
@@ -170,9 +163,6 @@ pub fn run() {
             Err(_) => unreachable!("valid header and body"),
         }
     });
-
-    #[cfg(feature = "e2e")]
-    let builder = e2e::with_command_line_args(builder);
 
     let app = builder
         .setup(|app| {

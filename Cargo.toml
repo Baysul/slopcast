@@ -21,5 +21,35 @@ webrtc-sys = { path = "vendor/webrtc-sys" }
 
 tauri = {
   git = "https://github.com/tauri-apps/tauri",
-  rev = "536664d1b34e1989dbd22705e2fde8b57b36aa0c"
+  rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1"
+}
+tauri-plugin = {
+  git = "https://github.com/tauri-apps/tauri",
+  rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1"
+}
+tauri-utils = {
+  git = "https://github.com/tauri-apps/tauri",
+  rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1"
+}
+# Unifies `tauri`'s `dpi` with the copy inside `tauri-runtime-cef`'s winit fork.
+dpi = { git = "https://github.com/tauri-apps/winit-gtk4", branch = "master" }
+tauri-plugin-clipboard-manager = {
+  git = "https://github.com/tauri-apps/plugins-workspace",
+  rev = "835adce473e8f059f6ba84660dd07bcb19fb9030"
+}
+tauri-plugin-global-shortcut = {
+  git = "https://github.com/tauri-apps/plugins-workspace",
+  rev = "835adce473e8f059f6ba84660dd07bcb19fb9030"
+}
+tauri-plugin-log = {
+  git = "https://github.com/tauri-apps/plugins-workspace",
+  rev = "835adce473e8f059f6ba84660dd07bcb19fb9030"
+}
+tauri-plugin-opener = {
+  git = "https://github.com/tauri-apps/plugins-workspace",
+  rev = "835adce473e8f059f6ba84660dd07bcb19fb9030"
+}
+tauri-plugin-single-instance = {
+  git = "https://github.com/tauri-apps/plugins-workspace",
+  rev = "835adce473e8f059f6ba84660dd07bcb19fb9030"
 }

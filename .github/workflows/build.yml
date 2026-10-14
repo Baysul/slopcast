@@ -91,7 +91,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libgtk-3-dev \
+            libgtk-4-dev \
             libdbus-1-dev \
             libwayland-dev \
             librsvg2-dev \
@@ -153,7 +153,7 @@ jobs:
       - name: Install Tauri CEF CLI
         shell: bash
         run: |
-          cargo install --git https://github.com/tauri-apps/tauri --rev 536664d1b34e1989dbd22705e2fde8b57b36aa0c tauri-cli --locked --force
+          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked --force
           cargo tauri --version
 
       - name: Verify Tauri CEF runtime
@@ -182,10 +182,10 @@ jobs:
             pnpm check
             pnpm desktop:prepare-gstreamer
             case "${{ matrix.name }}" in
-              linux-appimage) cargo tauri build --bundles appimage --verbose ;;
-              linux-deb) cargo tauri build --bundles deb --verbose ;;
+              linux-appimage) bash scripts/tauri-bundle.sh --bundles appimage --verbose ;;
+              linux-deb) bash scripts/tauri-bundle.sh --bundles deb --verbose ;;
               linux-tar)
-                cargo tauri build --bundles deb --verbose
+                bash scripts/tauri-bundle.sh --bundles deb --verbose
                 ver=$(node -p "require('./package.json').version")
                 cd target/release/bundle/deb && tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_*_amd64.deb 2>/dev/null || tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_"$ver"_amd64 2>/dev/null || tar -czf ../Slopcast-0.1.0-linux-amd64.tar.gz slopcast_*_amd64*
                 ;;
@@ -194,7 +194,7 @@ jobs:
             export CEF_PATH="$LOCALAPPDATA/tauri-cef"
             pnpm check
             pnpm desktop:prepare-gstreamer
-            cargo tauri build --features tauri/cef --bundles nsis --verbose
+            bash scripts/tauri-bundle.sh --bundles nsis --verbose
           fi
 
       - name: Upload artifacts
