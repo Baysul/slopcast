@@ -302,6 +302,33 @@ fn update_tray_pulse(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// A hidden or minimized window gives no sign that the screen is still being shared.
+pub(crate) fn notify_if_streaming(app: &AppHandle) {
+    let controls = app.state::<DesktopControls>();
+    let is_live = match controls.state.lock() {
+        Ok(state) => state.capture_stage == "live",
+        Err(error) => {
+            log::error!("Cannot read control state: {error}");
+            false
+        }
+    };
+    if !is_live {
+        return;
+    }
+
+    // Showing blocks on the notification service, which must not stall the event loop.
+    std::thread::spawn(|| {
+        let result = notify_rust::Notification::new()
+            .appname("Slopcast")
+            .summary("Your stream is still live")
+            .body("Slopcast is sharing your screen in the background. Open it to stop sharing.")
+            .show();
+        if let Err(error) = result {
+            log::error!("Cannot show the streaming notification: {error}");
+        }
+    });
+}
+
 pub(crate) fn close_main(app: &AppHandle) {
     let controls = app.state::<DesktopControls>();
     let enabled = match controls.tray_enabled.lock() {
@@ -318,6 +345,7 @@ pub(crate) fn close_main(app: &AppHandle) {
         {
             log::error!("Cannot hide Slopcast: {error}");
         }
+        notify_if_streaming(app);
     } else {
         emit_action(app, "quit");
     }
