@@ -126,7 +126,7 @@ export function ApiEndpointField({
           aria-invalid={failure !== null}
           aria-describedby="api-endpoint-status"
           placeholder="http://localhost:3001"
-          className={`w-full bg-secondary pr-10 text-sm text-foreground ${failure ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+          className={`w-full pr-10 text-sm text-foreground ${failure ? 'border-destructive focus-visible:ring-destructive' : ''}`}
         />
         <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center" aria-hidden="true">
           {availability === 'checking' && <LoaderCircle className="size-4 animate-spin text-muted-foreground" />}

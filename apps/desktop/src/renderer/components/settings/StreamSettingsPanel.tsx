@@ -286,7 +286,7 @@ export const StreamSettingsPanel: React.FC = memo(() => {
                   setBitrateLimit(boundedMegabits * BITS_PER_MEGABIT);
                 }}
                 disabled={autoBitrate}
-                className="w-20 shrink-0 bg-secondary text-center font-mono tabular-nums text-foreground"
+                className="w-20 shrink-0 text-center font-mono tabular-nums text-foreground"
               />
               <span className="shrink-0 text-sm text-muted-foreground">Mbps</span>
               <Slider
