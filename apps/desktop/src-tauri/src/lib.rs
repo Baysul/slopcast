@@ -309,6 +309,18 @@ pub fn run() {
                 }
             }
         }
+        if let tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Focused(false),
+            ..
+        } = &event
+            && label == "main"
+            && app_handle
+                .get_webview_window("main")
+                .is_some_and(|window| window.is_minimized().unwrap_or(false))
+        {
+            controls::notify_if_streaming(app_handle);
+        }
         if let tauri::RunEvent::ExitRequested { .. } = event {
             let _ = native_rust::stop_audio_capture();
             let _ = native_rust::stop_audio_metering();
