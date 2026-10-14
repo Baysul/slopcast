@@ -14,6 +14,7 @@ import type {
   NativeCodecInfo,
   NativeTelemetry,
   PlatformInfo,
+  WindowButtonIcons,
 } from '../types';
 
 import type {
@@ -128,8 +129,11 @@ export const desktopApi = {
     invokeOr('get_platform_info', undefined, {
       platform: 'unknown',
       isWayland: false,
+      desktopEnvironment: '',
       videoCaptureAvailable: false,
     }),
+  getWindowButtonIcons: (): Promise<WindowButtonIcons> =>
+    invokeOr('get_window_button_icons', undefined, { minimize: null, maximize: null, restore: null, close: null }),
   getAudioApps: (): Promise<AudioApp[]> => invokeOr('get_audio_apps', undefined, []),
   dumpAudioSources: (): Promise<Array<Record<string, string>>> => invokeOr('dump_audio_sources', undefined, []),
   startAudioCapture: (targetId: number): Promise<boolean> => invokeOr('start_audio_capture', { targetId }, false),

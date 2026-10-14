@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub struct PlatformInfo {
     pub platform: String,
     pub is_wayland: bool,
+    pub desktop_environment: String,
     pub video_capture_available: bool,
 }
 
@@ -33,6 +34,9 @@ pub fn get_platform_info() -> PlatformInfo {
     PlatformInfo {
         platform: std::env::consts::OS.into(),
         is_wayland: is_wayland(),
+        desktop_environment: std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase(),
         video_capture_available: video_capture_available(),
     }
 }
