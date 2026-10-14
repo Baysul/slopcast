@@ -1135,67 +1135,69 @@ export const PresenterApp: React.FC = () => {
     );
   } else if (platformInfo) {
     content = (
-      <div className="flex-1 overflow-y-auto">
-        <main className="max-w-5xl mx-auto w-full px-6 py-6 space-y-6">
+      <div className="flex-1 flex min-h-0">
+        <main className="flex-1 min-w-0 flex flex-col p-6">
           <WelcomeBanner />
 
-          <ScreensharePreview
-            captureStage={captureStage}
-            roomCode={roomCode}
-            copied={copied}
-            previewFrame={previewFrame}
-            telemetry={telemetry}
-            showTelemetry={showTelemetry}
-            onCopyLink={handleCopyLink}
-          />
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <SourcePicker
-              roomCode={roomCode}
-              isCreatingRoom={isCreatingRoom}
-              isClosingRoom={isClosingRoom}
-              isRoomTransitioning={isRoomTransitioning}
-              canCreateRoom={canCreateRoom}
-              roomCreateDisabledReason={roomCreateDisabledReason()}
-              hasRetryableRoom={retryableReplacement !== null}
-              copied={copied}
-              onCreateRoom={handleCreateRoom}
-              onRetryRoomConnection={() => void handleRetryRoomConnection()}
-              onCloseRoom={() => setConfirmation('close-room')}
-              onCopyCode={handleCopyCode}
-              onCopyLink={handleCopyLink}
-              captureContext={captureContext}
-              autoDetectFailed={autoDetectFailed}
+          <div className="flex-1 min-h-0 flex items-center justify-center [container-type:size]">
+            <ScreensharePreview
               captureStage={captureStage}
-              showStopConfirm={showStopConfirm}
-              setShowStopConfirm={setShowStopConfirm}
-              spectatorCount={spectatorCount}
-              canStartShare={canStartShare}
-              canGoLive={canGoLive}
-              disabledReason={disabledReason}
-              pickerOpen={pickerOpen}
-              setPickerOpen={setPickerOpen}
-              onSourceSelected={handleSourceSelected}
-              onStartShare={handleStartShare}
-              onGoLive={handleGoLive}
-              onStopShare={handleStopShare}
-              onSwitchSource={handleSwitchSource}
-              canSwitchSource={!isCaptureBusy && !isRoomTransitioning && !pickerOpen}
-            />
-
-            <AudioAppPicker
-              audioApps={audioApps}
-              audioAppGroups={audioAppGroups}
-              selectedAudioAppId={selectedAudioAppId}
-              autoDetectedApp={autoDetectedApp}
-              onSelectApp={handleSelectApp}
-              onRefresh={loadAudioApps}
-              autoSelectAudio={autoSelectAudio}
-              isMuted={isMuted}
-              onToggleMute={handleToggleMute}
+              roomCode={roomCode}
+              copied={copied}
+              previewFrame={previewFrame}
+              telemetry={telemetry}
+              showTelemetry={showTelemetry}
+              onCopyLink={handleCopyLink}
             />
           </div>
         </main>
+
+        <aside className="w-[22rem] shrink-0 overflow-y-auto border-l border-border bg-card/60 backdrop-blur-md divide-y divide-border">
+          <SourcePicker
+            roomCode={roomCode}
+            isCreatingRoom={isCreatingRoom}
+            isClosingRoom={isClosingRoom}
+            isRoomTransitioning={isRoomTransitioning}
+            canCreateRoom={canCreateRoom}
+            roomCreateDisabledReason={roomCreateDisabledReason()}
+            hasRetryableRoom={retryableReplacement !== null}
+            copied={copied}
+            onCreateRoom={handleCreateRoom}
+            onRetryRoomConnection={() => void handleRetryRoomConnection()}
+            onCloseRoom={() => setConfirmation('close-room')}
+            onCopyCode={handleCopyCode}
+            onCopyLink={handleCopyLink}
+            captureContext={captureContext}
+            autoDetectFailed={autoDetectFailed}
+            captureStage={captureStage}
+            showStopConfirm={showStopConfirm}
+            setShowStopConfirm={setShowStopConfirm}
+            spectatorCount={spectatorCount}
+            canStartShare={canStartShare}
+            canGoLive={canGoLive}
+            disabledReason={disabledReason}
+            pickerOpen={pickerOpen}
+            setPickerOpen={setPickerOpen}
+            onSourceSelected={handleSourceSelected}
+            onStartShare={handleStartShare}
+            onGoLive={handleGoLive}
+            onStopShare={handleStopShare}
+            onSwitchSource={handleSwitchSource}
+            canSwitchSource={!isCaptureBusy && !isRoomTransitioning && !pickerOpen}
+          />
+
+          <AudioAppPicker
+            audioApps={audioApps}
+            audioAppGroups={audioAppGroups}
+            selectedAudioAppId={selectedAudioAppId}
+            autoDetectedApp={autoDetectedApp}
+            onSelectApp={handleSelectApp}
+            onRefresh={loadAudioApps}
+            autoSelectAudio={autoSelectAudio}
+            isMuted={isMuted}
+            onToggleMute={handleToggleMute}
+          />
+        </aside>
       </div>
     );
   }

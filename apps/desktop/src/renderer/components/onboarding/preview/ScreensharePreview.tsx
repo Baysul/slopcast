@@ -53,12 +53,10 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
     }, []);
 
     return (
-      <Card className="overflow-hidden shadow-2xl transition-all duration-300">
-        <CardContent className="p-0">
-          <div
-            ref={viewportRef}
-            className="media-surface relative bg-black aspect-video flex items-center justify-center"
-          >
+      // The parent is a size container; fitting by width or height keeps 16:9 inside it.
+      <Card className="aspect-video w-[min(100cqw,calc(100cqh*16/9))] overflow-hidden shadow-2xl">
+        <CardContent className="h-full p-0">
+          <div ref={viewportRef} className="media-surface relative bg-black h-full flex items-center justify-center">
             {showPreview && <PreviewCanvas frame={previewFrame} />}
             {live && showTelemetry && <StreamTelemetryBar telemetry={telemetry} />}
 
