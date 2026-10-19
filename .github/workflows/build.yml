@@ -5,13 +5,31 @@ on:
     branches:
       - main
       - refactor
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build only this target
+        type: choice
+        default: all
+        options:
+          - all
+          - docker
+          - linux-appimage
+          - linux-deb
+          - linux-tar
+          - win
 
 jobs:
   build-docker:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'docker'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    env:
+      # Forgejo's container registry. The automatic token cannot push packages,
+      # so REGISTRY_TOKEN is an access token with the write:package scope.
+      REGISTRY: forge.cunny.cat
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +50,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
+          # buildkitd shares the Docker daemon's network and hosts file, so it
+          # reaches the registry the way the daemon does.
+          driver-opts: network=host
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -40,17 +61,17 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}/${{ matrix.target }}
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.target }}
           tags: |
             type=sha,prefix=
             type=ref,event=branch
 
-      - name: Login to GitHub Container Registry
+      - name: Login to Forgejo Container Registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -65,32 +86,28 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-desktop:
-    runs-on: ${{ matrix.os }}
+    if: github.event_name != 'workflow_dispatch' || inputs.target != 'docker'
+    # Every bundle is built on Ubuntu. The Windows installer is cross-compiled
+    # with clang-cl + lld-link against the MSVC CRT/SDK that
+    # scripts/setup-windows-cross.sh provisions.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            name: linux-appimage
-            asset-path: target/release/bundle/appimage/*.AppImage
-          - os: ubuntu-24.04
-            name: linux-deb
-            asset-path: target/release/bundle/deb/*.deb
-          - os: ubuntu-24.04
-            name: linux-tar
-            asset-path: target/release/bundle/*.tar.gz
-          # The Windows installer is cross-compiled on Ubuntu: the runner image
-          # ships clang-cl + lld-link + the MSVC CRT/SDK, so one Linux runner can
-          # produce every desktop bundle.
-          - os: ubuntu-24.04
-            name: win
-            asset-path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+        # A manual run builds only the bundle picked in `target`.
+        name: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all') && '["linux-appimage", "linux-deb", "linux-tar", "win"]' || format('["{0}"]', inputs.target)) }}
+    env:
+      ASSET_PATHS: >-
+        {"linux-appimage": "target/release/bundle/appimage/*.AppImage",
+        "linux-deb": "target/release/bundle/deb/*.deb",
+        "linux-tar": "target/release/bundle/*.tar.gz",
+        "win": "target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe"}
 
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Linux system deps
-        if: runner.os == 'Linux'
+        if: matrix.name != 'win'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -215,9 +232,10 @@ jobs:
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        # v4+ needs GitHub's artifact service; Forgejo implements the v3 protocol.
+        uses: actions/upload-artifact@v3
         with:
           name: desktop-${{ matrix.name }}
-          path: ${{ matrix.asset-path }}
+          path: ${{ fromJSON(env.ASSET_PATHS)[matrix.name] }}
           retention-days: 7
           if-no-files-found: error
