@@ -74,29 +74,28 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-desktop:
-    runs-on: ${{ matrix.os }}
+    # Linux builds run in matching-architecture containers; Windows cross-compiles
+    # on ARM64 with clang-cl + lld-link and the MSVC CRT/SDK.
+    runs-on: ${{ matrix.name == 'win' && 'ubuntu-24.04-arm64' || format('ubuntu-24.04-{0}', matrix.arch) }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            name: linux-appimage
-            asset-path: target/release/bundle/appimage/*.AppImage
-          - os: ubuntu-24.04
-            name: linux-deb
-            asset-path: target/release/bundle/deb/*.deb
-          - os: ubuntu-24.04
-            name: linux-tar
-            asset-path: target/release/bundle/*.tar.gz
-          # The Windows installer is cross-compiled on Ubuntu: the runner image
-          # ships clang-cl + lld-link + the MSVC CRT/SDK, so one Linux runner can
-          # produce every desktop bundle.
-          - os: ubuntu-24.04
-            name: win
-            asset-path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+        name: [linux, win]
+        arch: [arm64, amd64]
+        exclude:
+          - name: win
+            arch: arm64
+    env:
+      ASSET_PATHS: >-
+        {"linux": "target/release/bundle/appimage/*.AppImage\ntarget/release/bundle/deb/*.deb\ntarget/release/bundle/*.tar.gz",
+        "win": "target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe"}
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Verify Linux build architecture
+        if: matrix.name != 'win'
+        run: test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
 
       - name: Install Linux system deps
         if: matrix.name != 'win'
@@ -154,9 +153,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/tauri-cef
-          key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cef-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cef-${{ runner.os }}-
+            cef-linux-${{ matrix.arch }}-
 
       - name: Cache CEF (Windows)
         if: matrix.name == 'win'
@@ -176,10 +175,17 @@ jobs:
             ~/.cargo/bin/xwin
           key: xwin-${{ runner.arch }}-v1
 
+      - name: Cache GStreamer build
+        if: matrix.name != 'win'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/slopcast/gstreamer-runtime
+          key: gstreamer-linux-${{ matrix.arch }}-${{ hashFiles('scripts/prepare-gstreamer-runtime.sh') }}
+
       - name: Install Tauri CEF CLI
         shell: bash
         run: |
-          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked --force
+          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked
           cargo tauri --version
 
       - name: Verify Tauri CEF runtime
@@ -212,23 +218,16 @@ jobs:
             export CUDA_HOME=/usr
             pnpm check
             pnpm desktop:prepare-gstreamer
-            case "${{ matrix.name }}" in
-              linux-appimage) bash scripts/tauri-bundle.sh --bundles appimage --verbose ;;
-              linux-deb) bash scripts/tauri-bundle.sh --bundles deb --verbose ;;
-              linux-tar)
-                bash scripts/tauri-bundle.sh --bundles deb --verbose
-                ver=$(node -p "require('./package.json').version")
-                cd target/release/bundle/deb && tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_*_amd64.deb 2>/dev/null || tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_"$ver"_amd64 2>/dev/null || tar -czf ../Slopcast-0.1.0-linux-amd64.tar.gz slopcast_*_amd64*
-                ;;
-            esac
+            bash scripts/tauri-bundle.sh --bundles deb,appimage --verbose
+            bash scripts/package-linux-tar.sh
           fi
 
       - name: Upload artifacts
         # v4+ needs GitHub's artifact service; Forgejo implements the v3 protocol.
         uses: actions/upload-artifact@v3
         with:
-          name: desktop-${{ matrix.name }}
-          path: ${{ matrix.asset-path }}
+          name: desktop-${{ matrix.name }}-${{ matrix.arch }}
+          path: ${{ fromJSON(env.ASSET_PATHS)[matrix.name] }}
           if-no-files-found: error
 
   create-release:

@@ -146,7 +146,7 @@ The renderer is a sandboxed webview with no Node in it. All privileged work runs
 | `pnpm dist:desktop:linux` | Build Linux AppImage + deb (`--bundles deb,appimage`) |
 | `pnpm dist:desktop:linux:appimage` | Build Linux AppImage only |
 | `pnpm dist:desktop:linux:deb` | Build Linux deb only |
-| `pnpm dist:desktop:linux:tar` | Build deb, then tarball its payload to `target/release/bundle/Slopcast-<version>-linux-amd64.tar.gz` |
+| `pnpm dist:desktop:linux:tar` | Build deb, then tarball its payload to `target/release/bundle/Slopcast-<version>-linux-<amd64\|arm64>.tar.gz` |
 | `pnpm dist:desktop:win` | Build Windows NSIS installer |
 | `pnpm test:unit` | Unit tests for the server, shared-types, and desktop renderer |
 | `pnpm test:e2e` | Full end-to-end harness (see section 6) |

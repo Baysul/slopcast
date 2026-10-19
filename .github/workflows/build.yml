@@ -14,6 +14,7 @@ on:
         options:
           - all
           - docker
+          - linux
           - linux-appimage
           - linux-deb
           - linux-tar
@@ -87,24 +88,32 @@ jobs:
 
   build-desktop:
     if: github.event_name != 'workflow_dispatch' || inputs.target != 'docker'
-    # Every bundle is built on Ubuntu. The Windows installer is cross-compiled
-    # with clang-cl + lld-link against the MSVC CRT/SDK that
-    # scripts/setup-windows-cross.sh provisions.
-    runs-on: ubuntu-24.04
+    # Linux builds run in matching-architecture containers. Windows still
+    # cross-compiles on ARM64 with clang-cl + lld-link and the MSVC CRT/SDK.
+    runs-on: ${{ matrix.name == 'win' && 'ubuntu-24.04-arm64' || format('ubuntu-24.04-{0}', matrix.arch) }}
     strategy:
       fail-fast: false
       matrix:
-        # A manual run builds only the bundle picked in `target`.
-        name: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all') && '["linux-appimage", "linux-deb", "linux-tar", "win"]' || format('["{0}"]', inputs.target)) }}
+        # A manual run builds only the bundle picked in `target`, for both arches.
+        name: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all') && '["linux", "win"]' || format('["{0}"]', inputs.target)) }}
+        arch: [arm64, amd64]
+        exclude:
+          - name: win
+            arch: arm64
     env:
       ASSET_PATHS: >-
-        {"linux-appimage": "target/release/bundle/appimage/*.AppImage",
+        {"linux": "target/release/bundle/appimage/*.AppImage\ntarget/release/bundle/deb/*.deb\ntarget/release/bundle/*.tar.gz",
+        "linux-appimage": "target/release/bundle/appimage/*.AppImage",
         "linux-deb": "target/release/bundle/deb/*.deb",
         "linux-tar": "target/release/bundle/*.tar.gz",
         "win": "target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe"}
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Verify Linux build architecture
+        if: matrix.name != 'win'
+        run: test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
 
       - name: Install Linux system deps
         if: matrix.name != 'win'
@@ -162,9 +171,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/tauri-cef
-          key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cef-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cef-${{ runner.os }}-
+            cef-linux-${{ matrix.arch }}-
 
       - name: Cache CEF (Windows)
         if: matrix.name == 'win'
@@ -184,10 +193,17 @@ jobs:
             ~/.cargo/bin/xwin
           key: xwin-${{ runner.arch }}-v1
 
+      - name: Cache GStreamer build
+        if: matrix.name != 'win'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/slopcast/gstreamer-runtime
+          key: gstreamer-linux-${{ matrix.arch }}-${{ hashFiles('scripts/prepare-gstreamer-runtime.sh') }}
+
       - name: Install Tauri CEF CLI
         shell: bash
         run: |
-          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked --force
+          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked
           cargo tauri --version
 
       - name: Verify Tauri CEF runtime
@@ -221,12 +237,15 @@ jobs:
             pnpm check
             pnpm desktop:prepare-gstreamer
             case "${{ matrix.name }}" in
+              linux)
+                bash scripts/tauri-bundle.sh --bundles deb,appimage --verbose
+                bash scripts/package-linux-tar.sh
+                ;;
               linux-appimage) bash scripts/tauri-bundle.sh --bundles appimage --verbose ;;
               linux-deb) bash scripts/tauri-bundle.sh --bundles deb --verbose ;;
               linux-tar)
                 bash scripts/tauri-bundle.sh --bundles deb --verbose
-                ver=$(node -p "require('./package.json').version")
-                cd target/release/bundle/deb && tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_*_amd64.deb 2>/dev/null || tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_"$ver"_amd64 2>/dev/null || tar -czf ../Slopcast-0.1.0-linux-amd64.tar.gz slopcast_*_amd64*
+                bash scripts/package-linux-tar.sh
                 ;;
             esac
           fi
@@ -235,7 +254,7 @@ jobs:
         # v4+ needs GitHub's artifact service; Forgejo implements the v3 protocol.
         uses: actions/upload-artifact@v3
         with:
-          name: desktop-${{ matrix.name }}
+          name: desktop-${{ matrix.name }}-${{ matrix.arch }}
           path: ${{ fromJSON(env.ASSET_PATHS)[matrix.name] }}
           retention-days: 7
           if-no-files-found: error
