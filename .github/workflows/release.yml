@@ -238,7 +238,7 @@ jobs:
       contents: write
 
     steps:
-      # v3 puts each artifact in its own directory: release-artifacts/desktop-*/
+      # v3 puts each artifact in its own directory and preserves bundle subdirs.
       - uses: actions/download-artifact@v3
         with:
           path: release-artifacts
@@ -253,13 +253,18 @@ jobs:
           API: ${{ github.api_url }}/repos/${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
+          mapfile -d '' files < <(find release-artifacts -type f -print0)
+          if (( ${#files[@]} == 0 )); then
+            echo '::error::No release assets were downloaded'
+            exit 1
+          fi
           api() { curl -sS --fail-with-body -H "Authorization: token $TOKEN" "$@"; }
           if ! release=$(api "$API/releases/tags/$TAG" 2>/dev/null); then
             release=$(jq -n --arg tag "$TAG" '{tag_name: $tag, name: $tag, draft: false, prerelease: false}' |
               api -H 'Content-Type: application/json' --data @- "$API/releases")
           fi
           id=$(jq -r .id <<<"$release")
-          for file in release-artifacts/*/*; do
+          for file in "${files[@]}"; do
             name=$(basename "$file")
             for old in $(jq -r --arg name "$name" '.assets[]? | select(.name == $name) | .id' <<<"$release"); do
               api -X DELETE "$API/releases/$id/assets/$old"
