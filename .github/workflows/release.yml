@@ -13,8 +13,10 @@ jobs:
     permissions:
       contents: read
       packages: write
-      attestations: write
-      id-token: write
+    env:
+      # Forgejo's container registry. The automatic token cannot push packages,
+      # so REGISTRY_TOKEN is an access token with the write:package scope.
+      REGISTRY: forge.cunny.cat
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +37,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
+          # buildkitd shares the Docker daemon's network and hosts file, so it
+          # reaches the registry the way the daemon does.
+          driver-opts: network=host
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -43,21 +48,20 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}/${{ matrix.target }}
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.target }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
 
-      - name: Login to GitHub Container Registry
+      - name: Login to Forgejo Container Registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
 
       - name: Build and push
-        id: push
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -68,13 +72,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-name: ghcr.io/${{ github.repository }}/${{ matrix.target }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
 
   build-desktop:
     runs-on: ${{ matrix.os }}
@@ -102,7 +99,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Linux system deps
-        if: runner.os == 'Linux'
+        if: matrix.name != 'win'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -227,7 +224,8 @@ jobs:
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        # v4+ needs GitHub's artifact service; Forgejo implements the v3 protocol.
+        uses: actions/upload-artifact@v3
         with:
           name: desktop-${{ matrix.name }}
           path: ${{ matrix.asset-path }}
@@ -241,17 +239,32 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v8
+      # v3 puts each artifact in its own directory: release-artifacts/desktop-*/
+      - uses: actions/download-artifact@v3
         with:
-          pattern: desktop-*
           path: release-artifacts
-          merge-multiple: true
 
       - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: release-artifacts/*
-          draft: false
-          prerelease: false
+        # Forgejo's release API is not GitHub's, so this talks to it directly.
+        # Like action-gh-release, it reuses the tag's release if one exists and
+        # replaces assets that have the same name.
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API: ${{ github.api_url }}/repos/${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          api() { curl -sS --fail-with-body -H "Authorization: token $TOKEN" "$@"; }
+          if ! release=$(api "$API/releases/tags/$TAG" 2>/dev/null); then
+            release=$(jq -n --arg tag "$TAG" '{tag_name: $tag, name: $tag, draft: false, prerelease: false}' |
+              api -H 'Content-Type: application/json' --data @- "$API/releases")
+          fi
+          id=$(jq -r .id <<<"$release")
+          for file in release-artifacts/*/*; do
+            name=$(basename "$file")
+            for old in $(jq -r --arg name "$name" '.assets[]? | select(.name == $name) | .id' <<<"$release"); do
+              api -X DELETE "$API/releases/$id/assets/$old"
+            done
+            api -F "attachment=@$file" "$API/releases/$id/assets" | jq -r '"Uploaded \(.name) (\(.size) bytes)"'
+          done
+          jq -r .html_url <<<"$release"
