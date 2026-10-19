@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn process_display_name_falls_back_for_unknown_processes() {
         assert_eq!(process_display_name(999_999_999, "fallback"), "fallback");
-        assert!(!process_display_name(std::process::id(), "fallback").is_empty());
+        assert_ne!(process_display_name(std::process::id(), "fallback"), "");
     }
 
     #[test]
