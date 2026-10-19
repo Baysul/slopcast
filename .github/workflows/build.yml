@@ -19,6 +19,14 @@ on:
           - linux-deb
           - linux-tar
           - win
+      linux_arch:
+        description: Architecture for a Linux-only target (all builds both)
+        type: choice
+        default: both
+        options:
+          - both
+          - arm64
+          - amd64
 
 jobs:
   build-docker:
@@ -96,7 +104,7 @@ jobs:
       matrix:
         # A manual run builds only the bundle picked in `target`, for both arches.
         name: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all') && '["linux", "win"]' || format('["{0}"]', inputs.target)) }}
-        arch: [arm64, amd64]
+        arch: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'win' || inputs.linux_arch == 'both') && '["arm64", "amd64"]' || format('["{0}"]', inputs.linux_arch)) }}
         exclude:
           - name: win
             arch: arm64
