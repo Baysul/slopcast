@@ -328,18 +328,18 @@ export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
         console.info('[PreviewCanvas] preview renderer: WebGPU');
         return;
       }
-      const canvas2d = tryCanvas2d(canvas);
-      if (canvas2d) {
-        rendererRef.current = canvas2d;
-        window.__PREVIEW_RENDERER__ = 'canvas2d';
-        console.warn('[PreviewCanvas] TEMP: forced Canvas2D renderer');
-        return;
-      }
       const gl = tryWebGl2(canvas);
       if (gl) {
         rendererRef.current = gl;
         window.__PREVIEW_RENDERER__ = 'webgl2';
         console.info('[PreviewCanvas] preview renderer: WebGL2');
+        return;
+      }
+      const canvas2d = tryCanvas2d(canvas);
+      if (canvas2d) {
+        rendererRef.current = canvas2d;
+        window.__PREVIEW_RENDERER__ = 'canvas2d';
+        console.info('[PreviewCanvas] preview renderer: Canvas2D');
         return;
       }
       window.__PREVIEW_RENDERER__ = 'none';
