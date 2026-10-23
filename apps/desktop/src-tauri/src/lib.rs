@@ -21,9 +21,6 @@ pub type App = tauri::App<CefRuntime>;
 #[cfg(feature = "e2e")]
 mod e2e;
 
-#[cfg(target_os = "linux")]
-use std::path::Path;
-
 use tauri::Manager;
 use tauri::http;
 use tauri_runtime_cef::{Cef, CefRuntime};
@@ -177,30 +174,19 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             {
                 let resource_dir = app.path().resource_dir()?;
-                let exe_dir = std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| exe.parent().map(Path::to_path_buf));
-                let mut candidates = vec![resource_dir.join("gstreamer-plugins")];
-                if let Some(exe_dir) = exe_dir {
-                    candidates.push(exe_dir.join("resources/gstreamer-plugins"));
-                }
-                let plugin_dir = candidates
-                    .into_iter()
-                    .find(|dir| dir.join("libgstrswebrtc.so").is_file())
-                    .ok_or_else(|| {
-                        std::io::Error::other(
-                            "Bundled GStreamer plugin directory not found (looked in the resource and executable dirs)",
-                        )
-                    })?;
+                let plugin_dir = resource_dir.join("resources/gstreamer-plugins");
                 native_livekit::load_gstreamer_plugins(&plugin_dir)
                     .map_err(std::io::Error::other)?;
             }
             app.manage(context::CaptureContextCache::default());
             app.manage(config::AppConfigState::load()?);
-            app.manage(preferences::SettingsStorage::load(app.handle()).map_err(std::io::Error::other)?);
+            app.manage(
+                preferences::SettingsStorage::load(app.handle()).map_err(std::io::Error::other)?,
+            );
             app.manage(controls::DesktopControls::default());
             app.manage(shortcuts::ShortcutService::default());
-            let preferences = preferences::read_preferences(app.handle()).map_err(std::io::Error::other)?;
+            let preferences =
+                preferences::read_preferences(app.handle()).map_err(std::io::Error::other)?;
             if let Err(error) = controls::set_tray_enabled(app.handle(), preferences.tray_enabled) {
                 log::error!("Tray unavailable: {error}");
             }
