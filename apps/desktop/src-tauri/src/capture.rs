@@ -1,9 +1,7 @@
 use std::sync::Mutex;
-use std::time::Duration;
 
 use native_livekit::{CaptureConfig, DesktopCaptureStats};
 use tauri::Emitter;
-use tauri::ipc::{Channel, InvokeResponseBody};
 
 use crate::AppHandle;
 use crate::platform::video_capture_available;
@@ -380,42 +378,4 @@ pub async fn get_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     {
         Err("get_capture_sources is only supported on Windows".into())
     }
-}
-
-static BENCH_CHANNEL: Mutex<Option<Channel<InvokeResponseBody>>> = Mutex::new(None);
-
-#[tauri::command(rename_all = "camelCase")]
-/// # Errors
-/// Returns an error if the benchmark channel lock is unavailable.
-pub async fn bench_register_channel(channel: Channel<InvokeResponseBody>) -> Result<(), String> {
-    let Ok(mut guard) = BENCH_CHANNEL.lock() else {
-        return Err("bench channel lock poisoned".into());
-    };
-    *guard = Some(channel);
-    Ok(())
-}
-
-#[tauri::command(rename_all = "camelCase")]
-/// # Errors
-/// Returns an error if the benchmark channel is unavailable.
-pub async fn bench_push_frames(count: u32, size: usize, interval_ms: u64) -> Result<(), String> {
-    let channel = {
-        let Ok(guard) = BENCH_CHANNEL.lock() else {
-            return Err("bench channel lock poisoned".into());
-        };
-        let Some(channel) = guard.as_ref() else {
-            return Err("no bench channel registered".into());
-        };
-        channel.clone()
-    };
-    tauri::async_runtime::spawn_blocking(move || {
-        let payload = vec![0xA5u8; size];
-        for _ in 0..count {
-            let _ = channel.send(InvokeResponseBody::Raw(payload.clone()));
-            if interval_ms > 0 {
-                std::thread::sleep(Duration::from_millis(interval_ms));
-            }
-        }
-    });
-    Ok(())
 }

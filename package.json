@@ -9,21 +9,18 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "check": "biome ci && oxlint && pnpm --recursive check",
+    "check": "biome ci && pnpm --recursive check",
     "check:fix": "biome check --write",
-    "lint": "biome lint && oxlint",
+    "lint": "biome lint",
     "lint:fix": "biome lint --write",
-    "lint:anti-slop": "oxlint",
     "format": "biome format --write && pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:fmt": "pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:check": "pnpm --filter @slopcast/native-rust rust:check",
-    "probe:capture": "bash tests/probes/probe-capture.sh",
     "dev": "pnpm --parallel --recursive dev",
     "dev:desktop": "pnpm desktop:prepare-gstreamer && pnpm --filter desktop dev",
     "dev:web": "pnpm --filter web dev",
     "dev:server": "pnpm --filter server dev",
     "desktop:install-entry": "bash scripts/install-dev-desktop-entry.sh",
-    "mcp:kwin": "bash scripts/kwin-mcp.sh",
     "desktop:prepare-gstreamer": "bash scripts/prepare-gstreamer-runtime.sh",
     "test:e2e": "pnpm --filter server test:e2e",
     "build": "pnpm check && pnpm --recursive build",
@@ -39,8 +36,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@oxlint/plugins": "1.87.0",
-    "oxlint": "1.87.0",
     "playwright": "^1.64.0"
   }
 }

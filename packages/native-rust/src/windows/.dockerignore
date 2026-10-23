@@ -10,8 +10,6 @@ test-output/
 Thumbs.db
 *.log
 .env*
-.opencode/
-.impeccable/
 .cache/
 .tmp/
 apps/desktop/release/

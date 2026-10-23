@@ -29,21 +29,7 @@ Thumbs.db
 *.log
 npm-debug.log*
 
-.opencode/
-opencode.json
-.mcp*
-!.mcp.json
-.hermes/
-.obsidian/
-.agents/
-.jspace/
-
-MIGRATION.md
-SCREEN-CAPTURE-INHOUSE.md
-
 test-output/
-probe/
-docs/
 
 slopcast.config.json
 
@@ -58,10 +44,6 @@ apps/desktop/src-tauri/resources/gstreamer-plugins/*.so
 apps/desktop/src-tauri/resources/gstreamer-plugins/gst-plugin-scanner
 apps/desktop/src-tauri/resources/gstreamer-plugins/runtime-manifest.txt
 
-.worktrees/
-
 .forgejo/
 
 *.so
-.pi/*
-!.pi/mcp.json

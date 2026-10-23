@@ -269,8 +269,6 @@ pub fn run() {
             capture::get_capture_sources,
             capture::set_preview_viewport,
             capture::clear_preview_viewport,
-            capture::bench_register_channel,
-            capture::bench_push_frames,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| eprintln!("failed to build tauri application: {e}"))
