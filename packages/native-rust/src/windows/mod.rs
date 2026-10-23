@@ -1632,7 +1632,7 @@ mod tests {
         let mut resampler = StereoResampler::new(44_100, 48_000);
         let mut outputs = Vec::new();
         resampler.process_frame((1.0, 1.0), |frame| outputs.push(frame));
-        assert!(!outputs.is_empty());
+        assert_ne!(outputs, []);
         assert_eq!(outputs[0], (1.0, 1.0));
     }
 
