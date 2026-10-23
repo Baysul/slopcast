@@ -98,6 +98,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Add the LLVM apt repo for clang 23
+        if: runner.os == 'Linux'
+        run: |
+          # libwebrtc bundles Chromium's hermetic libc++, whose floor is clang 21+
+          # (vendor/webrtc-sys/build.rs enforces it); noble's clang is 18.
+          sudo curl -fsSL -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          . /etc/os-release
+          codename="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+          echo "deb https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-23.list > /dev/null
+
       - name: Install Linux system deps
         if: runner.os == 'Linux'
         run: |
@@ -125,7 +137,7 @@ jobs:
             libnice-dev \
             libx11-dev \
             pkg-config \
-            clang \
+            clang-23 \
             nvidia-cuda-dev
 
       - name: Read pinned Rust toolchain
@@ -204,6 +216,7 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             export CEF_PATH="$HOME/.cache/tauri-cef"
             export CUDA_HOME=/usr
+            export CXX="clang++-23"
             pnpm check
             pnpm desktop:prepare-gstreamer
             case "${{ matrix.name }}" in
