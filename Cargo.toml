@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["packages/native-rust", "packages/native-livekit", "apps/desktop/src-tauri", "tests/probes"]
+members = ["packages/native-rust", "packages/native-livekit", "apps/desktop/src-tauri"]
 exclude = ["packages/native-rust/xtask"]
 
 [profile.release]

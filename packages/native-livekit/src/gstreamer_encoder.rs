@@ -1015,9 +1015,8 @@ fn apply_encoder_ceiling(encoder: &gst::Element, ceiling_kbps: u32, rate_mode: R
         }
         if !NVENC_RETARGET_WARNED.swap(true, Ordering::Relaxed) {
             log::warn!(
-                "GStreamer NVENC mid-stream bitrate re-targeting is unverified \
-                 (docs/adr/0001-nvenc-bitrate-retarget.md): attempting it and \
-                 bookkeeping it as applied"
+                "GStreamer NVENC mid-stream bitrate re-targeting is unverified; \
+                 attempting it and bookkeeping it as applied"
             );
         }
         return true;
