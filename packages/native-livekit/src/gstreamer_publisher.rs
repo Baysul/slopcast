@@ -1925,7 +1925,7 @@ mod tests {
     fn available_video_codecs_derives_labels_and_hardware_from_the_selection_chain() {
         init_gst();
         let codecs = available_video_codecs();
-        assert!(!codecs.is_empty());
+        assert_ne!(codecs, []);
         for (codec, label, hardware) in &codecs {
             let selected = selected_encoder_name(codec);
             let is_hardware = selected.starts_with("nv") || selected.starts_with("va");
