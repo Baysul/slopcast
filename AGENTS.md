@@ -53,6 +53,7 @@ Follow these rules:
 - Don't extract shared code until it's duplicated 3+ times. Keep the `pub` surface minimal. Prefer `pub(crate)`.
 - Don't add crates, config, or files that aren't needed for the stated goal.
 - Code must pass `rustfmt` and `cargo clippy --all-targets -- -D warnings`. No blanket lint suppressions. A targeted `#[allow(..., reason = "...")]` is fine.
+- The toolchain is pinned in `rust-toolchain.toml`, and CI installs exactly that channel, so new-rustc lints surface locally before a push. Bump the pin as a deliberate change together with any lint fixes it needs; never let CI float onto a newer compiler.
 
 ## 3. Style rules
 
@@ -275,6 +276,7 @@ pactl list sinks | grep "Slopcast-Window-Audio"
 | zbus | 5 |
 | windows / windows-core (WASAPI) | 0.62.2 |
 | Playwright | ^1.64.0 |
+| Rust | 1.99.1 (`rust-toolchain.toml`, read by CI) |
 | Node.js (required) | >= 24.0.0 (pnpm 12.10.1, `.nvmrc`) |
 
 ## 9. Git commit conventions
