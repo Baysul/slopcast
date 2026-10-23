@@ -171,17 +171,18 @@ jobs:
       - name: Verify Tauri CEF runtime
         shell: bash
         run: |
-          if cargo tree --workspace | grep -q 'tauri-runtime-wry '; then
+          tree=$(cargo tree --workspace)
+
+          if [[ $tree == *"tauri-runtime-wry "* ]]; then
             echo "::error::tauri-runtime-wry is present in the dependency graph"
             cargo tree --workspace -i tauri-runtime-wry || true
             exit 1
           fi
 
-          if ! cargo tree --workspace | grep -q 'tauri-runtime-cef '; then
+          if [[ $tree != *"tauri-runtime-cef "* ]]; then
             echo "::error::tauri-runtime-cef is missing from the dependency graph"
             exit 1
           fi
-          cargo tauri --version
 
       - name: Build desktop
         env:
