@@ -1,18 +1,32 @@
-import { normalizeLivekitUrl } from '@slopcast/shared-types';
-import { ConnectionState, type RemoteTrack, Room, RoomEvent } from 'livekit-client';
+import { isJsonObject, normalizeLivekitUrl, readFiniteNumber, readString } from '@slopcast/shared-types';
+import { ConnectionState, Room, RoomEvent, Track } from 'livekit-client';
+import type { DisconnectReason, RemoteTrack } from 'livekit-client';
 import { AlertCircle, ArrowLeft, Check, Copy, RefreshCw } from 'lucide-react';
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+
 import { Button } from '@/components/ui/button';
+
 import { SpectatorBanner } from '../components/SpectatorBanner';
 import { VideoPlayer } from '../components/VideoPlayer';
+import {
+  RECONNECT_ATTEMPTS_BEFORE_NOTICE,
+  TokenRequestError,
+  classifyDisconnect,
+  isRoomGone,
+  reconnectDelayMs,
+} from '../lib/reconnect';
 
 type StatusVariant = 'live' | 'disconnected' | 'info';
 
 declare global {
   interface Window {
-    __slopcastReceiverStats?: () => Promise<RTCStatsReport | null>;
+    slopcastReceiverStats?: () => Promise<RTCStatsReport | null>;
+    slopcastConfig?: {
+      apiEndpoint?: string;
+      livekitUrl?: string;
+    };
     __SLOPCAST_CONFIG__?: {
       apiEndpoint?: string;
       livekitUrl?: string;
@@ -23,13 +37,11 @@ declare global {
 const diagnosticEnabled = (): boolean => new URLSearchParams(window.location.search).has('diagnostics');
 
 const StatusSignal: React.FC<{ variant: StatusVariant; children: React.ReactNode }> = ({ variant, children }) => {
-  let dotClass: string;
+  let dotClass = 'bg-muted-foreground/60';
   if (variant === 'live') {
     dotClass = 'bg-safelight motion-safe:animate-pulse';
   } else if (variant === 'info') {
     dotClass = 'bg-white/60';
-  } else {
-    dotClass = 'bg-muted-foreground/60';
   }
   const textClass = variant === 'live' ? 'text-safelight' : 'text-muted-foreground';
 
@@ -51,11 +63,15 @@ const logH264Sdp = (room: Room): void => {
   try {
     // SAFETY: this diagnostic reads LiveKit's current internal subscriber shape without mutating it.
     const sub = (
-      room as { engine?: { pcManager?: { subscriber?: { getRemoteDescription(): RTCSessionDescription | null } } } }
+      room as { engine?: { pcManager?: { subscriber?: { getRemoteDescription: () => RTCSessionDescription | null } } } }
     ).engine?.pcManager?.subscriber;
-    if (!sub) return;
+    if (!sub) {
+      return;
+    }
     const desc = sub.getRemoteDescription();
-    if (!desc) return;
+    if (!desc) {
+      return;
+    }
     const h264Lines = desc.sdp
       .split('\n')
       .filter((line) => line.startsWith('a=fmtp:') && line.includes('profile-level-id'));
@@ -82,7 +98,7 @@ const collectExistingTracks = (room: Room): MediaStreamTrack[] => {
 // Audio persists for the room lifetime; a live video publication means the presenter is sharing.
 const hasRemoteVideo = (room: Room): boolean =>
   [...room.remoteParticipants.values()].some((participant) =>
-    [...participant.videoTrackPublications.values()].some((publication) => publication.track != null),
+    [...participant.videoTrackPublications.values()].some((publication) => publication.track !== undefined),
   );
 
 const ensureManagedStream = (room: Room, managedStreamRef: React.RefObject<MediaStream | null>): MediaStream => {
@@ -131,9 +147,7 @@ const attachExistingTracks = (
     }
     return;
   }
-  if (!managedStreamRef.current) {
-    managedStreamRef.current = new MediaStream();
-  }
+  managedStreamRef.current ??= new MediaStream();
   for (const track of existingTracks) {
     if (!managedStreamRef.current.getTracks().includes(track)) {
       managedStreamRef.current.addTrack(track);
@@ -152,9 +166,11 @@ const attachExistingTracks = (
 const firstVideoReceiver = (room: Room): RTCRtpReceiver | undefined => {
   for (const participant of room.remoteParticipants.values()) {
     for (const publication of participant.videoTrackPublications.values()) {
-      // SAFETY: subscribed LiveKit remote tracks expose the underlying WebRTC receiver at runtime.
-      const receiver = (publication.track as { receiver?: RTCRtpReceiver } | undefined)?.receiver;
-      if (receiver) return receiver;
+      const track: unknown = publication.track;
+      const receiver = isJsonObject(track) ? track.receiver : undefined;
+      if (receiver instanceof RTCRtpReceiver) {
+        return receiver;
+      }
     }
   }
   return undefined;
@@ -170,13 +186,13 @@ interface VideoStatSnapshot {
 
 const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapshot> => {
   const empty: VideoStatSnapshot = {
-    packetsReceived: 0,
-    framesReceived: 0,
-    framesDecoded: 0,
     codecMime: null,
     decoderImpl: null,
+    framesDecoded: 0,
+    framesReceived: 0,
+    packetsReceived: 0,
   };
-  let stats: RTCStatsReport;
+  let stats: RTCStatsReport | undefined = undefined;
   try {
     stats = await receiver.getStats();
   } catch (err) {
@@ -185,26 +201,20 @@ const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapsh
   }
 
   const snapshot: VideoStatSnapshot = { ...empty };
-  for (const reportRaw of stats.values()) {
-    // SAFETY: browser RTCStatsReport entries use the standardized inbound RTP fields below.
-    const report = reportRaw as {
-      type: string;
-      kind?: string;
-      codecId?: string;
-      packetsReceived?: number;
-      framesReceived?: number;
-      framesDecoded?: number;
-      decoderImplementation?: string;
-    };
-    if (report.type === 'inbound-rtp' && report.kind === 'video') {
-      snapshot.packetsReceived = report.packetsReceived ?? 0;
-      snapshot.framesReceived = report.framesReceived ?? 0;
-      snapshot.framesDecoded = report.framesDecoded ?? 0;
-      snapshot.decoderImpl = report.decoderImplementation ?? null;
-      if (report.codecId) {
-        // SAFETY: codecId references a codec stats entry in the same RTCStatsReport.
-        const codec = stats.get(report.codecId) as { mimeType?: string } | undefined;
-        snapshot.codecMime = codec?.mimeType ?? null;
+  for (const reportRaw of stats.values() as Iterable<unknown>) {
+    if (
+      isJsonObject(reportRaw) &&
+      readString(reportRaw, 'type') === 'inbound-rtp' &&
+      readString(reportRaw, 'kind') === 'video'
+    ) {
+      snapshot.packetsReceived = readFiniteNumber(reportRaw, 'packetsReceived') ?? 0;
+      snapshot.framesReceived = readFiniteNumber(reportRaw, 'framesReceived') ?? 0;
+      snapshot.framesDecoded = readFiniteNumber(reportRaw, 'framesDecoded') ?? 0;
+      snapshot.decoderImpl = readString(reportRaw, 'decoderImplementation') ?? null;
+      const codecId = readString(reportRaw, 'codecId');
+      if (codecId !== undefined && codecId !== '') {
+        const codecRaw: unknown = stats.get(codecId);
+        snapshot.codecMime = isJsonObject(codecRaw) ? (readString(codecRaw, 'mimeType') ?? null) : null;
       }
     }
   }
@@ -214,10 +224,13 @@ const readVideoStats = async (receiver: RTCRtpReceiver): Promise<VideoStatSnapsh
 const evaluateNegotiationFailure = (
   stats: VideoStatSnapshot,
   stallStartRef: React.RefObject<number>,
+  decoderStalledRef: React.RefObject<boolean>,
   setDecoderStalled: (v: boolean) => void,
   setStalledCodec: (v: string | null) => void,
 ): boolean => {
-  if (!(stats.packetsReceived > 0 && stats.codecMime == null)) return false;
+  if (!(stats.packetsReceived > 0 && stats.codecMime === null)) {
+    return false;
+  }
 
   if (stallStartRef.current === 0) {
     stallStartRef.current = Date.now();
@@ -229,6 +242,7 @@ const evaluateNegotiationFailure = (
   }
 
   if (Date.now() - stallStartRef.current >= DECODER_STALL_THRESHOLD_MS) {
+    decoderStalledRef.current = true;
     setDecoderStalled(true);
     setStalledCodec(null);
     console.error(
@@ -247,7 +261,9 @@ const evaluateStall = (
   setDecoderStalled: (v: boolean) => void,
   setStalledCodec: (v: string | null) => void,
 ): void => {
-  if (evaluateNegotiationFailure(stats, stallStartRef, setDecoderStalled, setStalledCodec)) return;
+  if (evaluateNegotiationFailure(stats, stallStartRef, decoderStalledRef, setDecoderStalled, setStalledCodec)) {
+    return;
+  }
 
   if (stats.packetsReceived > 0 && stats.framesDecoded === 0) {
     if (stallStartRef.current === 0) {
@@ -259,9 +275,10 @@ const evaluateStall = (
     }
 
     if (Date.now() - stallStartRef.current >= DECODER_STALL_THRESHOLD_MS) {
+      decoderStalledRef.current = true;
       setDecoderStalled(true);
-      if (stats.codecMime) {
-        setStalledCodec(stats.codecMime.replace(/^video\//i, '').toUpperCase());
+      if (stats.codecMime !== null && stats.codecMime !== '') {
+        setStalledCodec(stats.codecMime.replace(/^video\//iu, '').toUpperCase());
       }
       console.error(
         `[Room] Decoder stall confirmed after ${DECODER_STALL_THRESHOLD_MS}ms: ` +
@@ -275,6 +292,7 @@ const evaluateStall = (
   if (stats.framesDecoded > 0) {
     stallStartRef.current = 0;
     if (decoderStalledRef.current) {
+      decoderStalledRef.current = false;
       setDecoderStalled(false);
       setStalledCodec(null);
     }
@@ -298,16 +316,79 @@ export const RoomPage: React.FC = () => {
   const [decoderStalled, setDecoderStalled] = useState(false);
   const [stalledCodec, setStalledCodec] = useState<string | null>(null);
 
+  const resetConnectionView = (): void => {
+    setConnectionStatus('connecting');
+    setStatusText('Connecting...');
+    setErrorMsg(null);
+    setMediaStream(null);
+    setDecoderStalled(false);
+    setStalledCodec(null);
+  };
+
+  const [connectionRoomId, setConnectionRoomId] = useState(roomId);
+  if (connectionRoomId !== roomId) {
+    // React's "adjust state when a prop changes" pattern: a new room resets the connection view
+    // During render instead of in an effect that would otherwise trigger a second render pass.
+    setConnectionRoomId(roomId);
+    resetConnectionView();
+  }
+
   const roomRef = useRef<Room | null>(null);
   const connectGenRef = useRef(0);
   const managedStreamRef = useRef<MediaStream | null>(null);
   const stallCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stallStartRef = useRef<number>(0);
+  const stallGenerationRef = useRef(0);
+  const decoderStalledRef = useRef(false);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controlsLastActiveAtRef = useRef(0);
   const areControlsVisibleRef = useRef<boolean>(true);
   const streamEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectFailedRef = useRef<boolean>(false);
+  const rejoinTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rejoinAttemptRef = useRef(0);
+  const hasJoinedRef = useRef(false);
+  const initializeConnectionRef = useRef<() => void>(() => undefined);
+
+  const clearRejoinTimer = useCallback((): void => {
+    if (rejoinTimerRef.current !== null) {
+      clearTimeout(rejoinTimerRef.current);
+      rejoinTimerRef.current = null;
+    }
+  }, []);
+
+  // Rejoin with a fresh token after LiveKit gave up on its own resume, or after a failed join.
+  // The view keeps its last state (and the presenter's last frame) instead of resetting.
+  // A failed join reports twice: LiveKit's Disconnected event (no cause) and then the rejected
+  // Connect promise (with the cause). The first schedules; the second only fills in the notice.
+  const scheduleRejoin = useCallback((cause: string | null): void => {
+    if (rejoinTimerRef.current === null) {
+      const attempt = rejoinAttemptRef.current;
+      rejoinAttemptRef.current += 1;
+      const delay = reconnectDelayMs(attempt);
+      console.warn(`[Room] rejoining in ${delay}ms (attempt ${attempt + 1})`);
+      setConnectionStatus('disconnected');
+      setStatusText(hasJoinedRef.current ? 'Connection lost — reconnecting...' : 'Connecting...');
+      rejoinTimerRef.current = setTimeout(() => {
+        rejoinTimerRef.current = null;
+        initializeConnectionRef.current();
+      }, delay);
+    }
+    if (cause !== null) {
+      console.warn(`[Room] join failed: ${cause}`);
+      if (rejoinAttemptRef.current >= RECONNECT_ATTEMPTS_BEFORE_NOTICE) {
+        setErrorMsg(`Still trying to connect: ${cause}`);
+      }
+    }
+  }, []);
+
+  const resetDecoderStall = useCallback((): void => {
+    stallGenerationRef.current += 1;
+    stallStartRef.current = 0;
+    decoderStalledRef.current = false;
+    setDecoderStalled(false);
+    setStalledCodec(null);
+  }, []);
 
   const resetControlsIdleTimer = useCallback(() => {
     controlsLastActiveAtRef.current = performance.now();
@@ -315,7 +396,9 @@ export const RoomPage: React.FC = () => {
       areControlsVisibleRef.current = true;
       setShowControls(true);
     }
-    if (idleTimerRef.current) return;
+    if (idleTimerRef.current !== null) {
+      return;
+    }
 
     const hideAfterIdle = (): void => {
       const remainingMs = CONTROLS_IDLE_MS - (performance.now() - controlsLastActiveAtRef.current);
@@ -333,7 +416,7 @@ export const RoomPage: React.FC = () => {
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      setIsFullscreen(Boolean(document.fullscreenElement));
       resetControlsIdleTimer();
     };
 
@@ -359,7 +442,7 @@ export const RoomPage: React.FC = () => {
       window.removeEventListener('pointerdown', handleActivity);
       window.removeEventListener('touchstart', handleActivity);
       window.removeEventListener('keydown', handleActivity);
-      if (idleTimerRef.current) {
+      if (idleTimerRef.current !== null) {
         clearTimeout(idleTimerRef.current);
       }
     };
@@ -370,29 +453,32 @@ export const RoomPage: React.FC = () => {
       console.warn('[Room] copy link failed:', err);
     });
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => {
+      setCopied(false);
+    }, 2000);
   };
 
   const initializeConnection = useCallback(() => {
-    if (!roomId) return;
+    if (roomId === undefined || roomId === '') {
+      return;
+    }
 
     const gen = ++connectGenRef.current;
     const isStale = () => connectGenRef.current !== gen;
 
-    setConnectionStatus('connecting');
-    setStatusText('Connecting...');
-    setErrorMsg(null);
-    setMediaStream(null);
-    setDecoderStalled(false);
-    setStalledCodec(null);
+    clearRejoinTimer();
     connectFailedRef.current = false;
+    // The initial render, room-ID change, or reconnect action resets the view.
+    // Here only invalidate outstanding decoder observations before connecting.
+    stallGenerationRef.current += 1;
+    stallStartRef.current = 0;
+    decoderStalledRef.current = false;
 
-    if (stallCheckRef.current) {
+    if (stallCheckRef.current !== null) {
       clearInterval(stallCheckRef.current);
       stallCheckRef.current = null;
     }
-    stallStartRef.current = 0;
-    if (streamEndTimerRef.current) {
+    if (streamEndTimerRef.current !== null) {
       clearTimeout(streamEndTimerRef.current);
       streamEndTimerRef.current = null;
     }
@@ -405,7 +491,7 @@ export const RoomPage: React.FC = () => {
     }
     if (roomRef.current) {
       roomRef.current.removeAllListeners();
-      roomRef.current.disconnect();
+      void roomRef.current.disconnect();
       roomRef.current = null;
     }
 
@@ -413,17 +499,22 @@ export const RoomPage: React.FC = () => {
     roomRef.current = room;
 
     room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
-      if (isStale()) return;
-      if (streamEndTimerRef.current) {
+      if (isStale()) {
+        return;
+      }
+      if (streamEndTimerRef.current !== null) {
         clearTimeout(streamEndTimerRef.current);
         streamEndTimerRef.current = null;
+      }
+      if (track.kind === Track.Kind.Video) {
+        resetDecoderStall();
       }
       const stream = ensureManagedStream(room, managedStreamRef);
       if (!stream.getTracks().includes(track.mediaStreamTrack)) {
         stream.addTrack(track.mediaStreamTrack);
       }
       setMediaStream(stream);
-      if (track.kind === 'video') {
+      if (track.kind === Track.Kind.Video) {
         setConnectionStatus('live');
         setStatusText('Live');
         logH264Sdp(room);
@@ -434,25 +525,38 @@ export const RoomPage: React.FC = () => {
     });
 
     room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
-      if (isStale()) return;
-      if (track.kind !== 'video') return;
+      if (isStale()) {
+        return;
+      }
+      if (track.kind !== Track.Kind.Video) {
+        return;
+      }
+      resetDecoderStall();
       if (managedStreamRef.current) {
         managedStreamRef.current.removeTrack(track.mediaStreamTrack);
       }
-      if (streamEndTimerRef.current) {
+      if (streamEndTimerRef.current !== null) {
         clearTimeout(streamEndTimerRef.current);
       }
       streamEndTimerRef.current = setTimeout(() => {
         streamEndTimerRef.current = null;
-        if (isStale()) return;
-        if (hasRemoteVideo(room)) return;
-        if (room.remoteParticipants.size === 0) return;
+        if (isStale()) {
+          return;
+        }
+        if (hasRemoteVideo(room)) {
+          return;
+        }
+        if (room.remoteParticipants.size === 0) {
+          return;
+        }
         endStream(managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
       }, STREAM_END_GRACE_MS);
     });
 
     room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
-      if (isStale()) return;
+      if (isStale()) {
+        return;
+      }
       switch (state) {
         case ConnectionState.Connected:
           if (managedStreamRef.current && managedStreamRef.current.getVideoTracks().length > 0) {
@@ -466,36 +570,58 @@ export const RoomPage: React.FC = () => {
           setStatusText('Reconnecting...');
           break;
         case ConnectionState.Disconnected:
-          if (connectFailedRef.current) return;
-          setConnectionStatus('disconnected');
-          setStatusText('Connection lost');
+          // The Disconnected event carries the reason and decides between rejoining and ending.
+          resetDecoderStall();
           break;
-        default:
+        case ConnectionState.Connecting:
+        case ConnectionState.SignalReconnecting:
           break;
       }
     });
 
-    room.on(RoomEvent.Disconnected, () => {
-      if (isStale()) return;
-      if (connectFailedRef.current) return;
-      setConnectionStatus('closed');
-      setStatusText('Room closed');
+    room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+      if (isStale()) {
+        return;
+      }
+      if (connectFailedRef.current) {
+        return;
+      }
+      resetDecoderStall();
+      switch (classifyDisconnect(reason)) {
+        case 'ignore':
+          return;
+        case 'ended':
+          setConnectionStatus('closed');
+          setStatusText('Stream ended');
+          return;
+        case 'rejoin':
+          scheduleRejoin(null);
+      }
     });
 
     room.on(RoomEvent.TrackPublished, () => {
-      if (isStale()) return;
+      if (isStale()) {
+        return;
+      }
       const unsupported = [...room.remoteParticipants.values()]
         .flatMap((p) => [...p.videoTrackPublications.values()])
         .find((pub) => {
-          if (pub.track) return false;
+          if (pub.track) {
+            return false;
+          }
           const mime = pub.mimeType?.toUpperCase();
-          if (!mime) return false;
+          if (mime === undefined || mime === '') {
+            return false;
+          }
           const receiverCodecs =
             RTCRtpReceiver.getCapabilities('video')?.codecs.map((codec) => codec.mimeType.toUpperCase()) ?? [];
-          return !receiverCodecs.some((m) => m.includes(mime.replace(/^VIDEO\//, '')));
+          return !receiverCodecs.some((m) => m.includes(mime.replace(/^VIDEO\//u, '')));
         });
-      if (!unsupported) return;
-      const codec = unsupported.mimeType?.replace(/^video\//i, '').toUpperCase();
+      if (!unsupported) {
+        return;
+      }
+      const codec = unsupported.mimeType?.replace(/^video\//iu, '').toUpperCase();
+      resetDecoderStall();
       setConnectionStatus('error');
       setStatusText(`This browser cannot decode ${codec} video`);
       setErrorMsg(
@@ -505,38 +631,58 @@ export const RoomPage: React.FC = () => {
     });
 
     room.on(RoomEvent.ParticipantDisconnected, () => {
-      if (isStale()) return;
+      if (isStale()) {
+        return;
+      }
+      // The presenter app rejoins on its own after network trouble; the server ends the room
+      // (and this page) if they do not come back within its grace period.
       if (room.remoteParticipants.size === 0) {
-        setConnectionStatus('closed');
-        setStatusText('Presenter left');
+        resetDecoderStall();
+        setConnectionStatus('disconnected');
+        setStatusText('Presenter disconnected — waiting for them to reconnect...');
       }
     });
 
-    const apiEndpoint = window.__SLOPCAST_CONFIG__?.apiEndpoint;
-    const injectedLivekitUrl = window.__SLOPCAST_CONFIG__?.livekitUrl;
+    // Older deployments may still inject the legacy global.
+    const { slopcastConfig, __SLOPCAST_CONFIG__: legacyConfig } = window;
+    const config = slopcastConfig ?? legacyConfig;
+    const apiEndpoint = config?.apiEndpoint;
+    const injectedLivekitUrl = config?.livekitUrl;
 
     let baseUrl = `${window.location.protocol}//${window.location.hostname}:3001`;
-    if (apiEndpoint) {
+    if (apiEndpoint !== undefined && apiEndpoint !== '') {
       baseUrl = apiEndpoint;
-    } else if (injectedLivekitUrl) {
-      baseUrl = injectedLivekitUrl.replace(/^ws(s?):\/\//, 'http$1://');
+    } else if (injectedLivekitUrl !== undefined && injectedLivekitUrl !== '') {
+      baseUrl = injectedLivekitUrl.replace(/^ws(?<secure>s?):\/\//u, 'http$<secure>://');
     }
 
     const getToken = async (): Promise<{ token: string; livekitUrl: string }> => {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      const timeout = setTimeout(() => {
+        controller.abort();
+      }, 15000);
       try {
         const res = await fetch(`${baseUrl}/api/rooms/${roomId}/token`, {
           signal: controller.signal,
         });
         if (!res.ok) {
-          // SAFETY: room token errors use the server's JSON error contract.
-          const errData = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(errData.error || `Failed to fetch spectator token (${res.status})`);
+          const errData: unknown = await res.json().catch(() => ({}));
+          const message = isJsonObject(errData) ? readString(errData, 'error') : undefined;
+          throw new TokenRequestError(
+            message !== undefined && message !== '' ? message : `Failed to fetch spectator token (${res.status})`,
+            res.status,
+          );
         }
-        // SAFETY: a successful token response is produced by the colocated server route.
-        const data = (await res.json()) as { token: string; livekitUrl: string };
-        return data;
+        const data: unknown = await res.json();
+        if (!isJsonObject(data)) {
+          throw new Error('Spectator token response was not a JSON object');
+        }
+        const token = readString(data, 'token');
+        const livekitUrl = readString(data, 'livekitUrl');
+        if (token === undefined || livekitUrl === undefined) {
+          throw new Error('Spectator token response is missing token or livekitUrl');
+        }
+        return { livekitUrl, token };
       } finally {
         clearTimeout(timeout);
       }
@@ -544,13 +690,16 @@ export const RoomPage: React.FC = () => {
 
     getToken()
       .then(async ({ token, livekitUrl }) => {
-        if (isStale()) return;
+        if (isStale()) {
+          return;
+        }
         const livekitUrlForClient = normalizeLivekitUrl(
-          livekitUrl || injectedLivekitUrl || `ws://${window.location.hostname}:7880`,
+          [livekitUrl, injectedLivekitUrl].find((url) => url !== undefined && url !== '') ??
+            `ws://${window.location.hostname}:7880`,
           window.location.protocol === 'https:',
         );
         try {
-          let timeout: ReturnType<typeof setTimeout> | undefined;
+          let timeout: ReturnType<typeof setTimeout> | undefined = undefined;
           const connectPromise = room.connect(livekitUrlForClient, token);
           const timeoutPromise = new Promise<never>((_, reject) => {
             timeout = setTimeout(() => {
@@ -564,36 +713,70 @@ export const RoomPage: React.FC = () => {
           try {
             await Promise.race([connectPromise, timeoutPromise]);
           } finally {
-            if (timeout) clearTimeout(timeout);
+            clearTimeout(timeout);
           }
         } catch (err) {
           void room.disconnect().catch(() => undefined);
           throw err;
         }
         if (isStale()) {
-          room.disconnect();
+          void room.disconnect();
           return;
         }
+        hasJoinedRef.current = true;
+        rejoinAttemptRef.current = 0;
+        setErrorMsg(null);
         attachExistingTracks(room, managedStreamRef, setMediaStream, setConnectionStatus, setStatusText);
       })
       .catch((err) => {
-        if (isStale()) return;
+        if (isStale()) {
+          return;
+        }
         connectFailedRef.current = true;
-        setConnectionStatus('error');
-        setStatusText('Connection failed');
-        setErrorMsg(`Connection failed: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        if (isRoomGone(err)) {
+          setConnectionStatus('closed');
+          setStatusText(hasJoinedRef.current ? 'Stream ended' : 'Room not found');
+          setErrorMsg(hasJoinedRef.current ? null : `${message}. Check the link with the presenter.`);
+          return;
+        }
+        scheduleRejoin(message);
       });
-  }, [roomId]);
+  }, [clearRejoinTimer, roomId, resetDecoderStall, scheduleRejoin]);
 
   useEffect(() => {
+    initializeConnectionRef.current = initializeConnection;
+  }, [initializeConnection]);
+
+  // Coming back online or to the foreground should not wait out a long backoff.
+  useEffect(() => {
+    const rejoinNow = (): void => {
+      if (rejoinTimerRef.current === null || document.visibilityState === 'hidden') {
+        return;
+      }
+      clearRejoinTimer();
+      initializeConnectionRef.current();
+    };
+    window.addEventListener('online', rejoinNow);
+    document.addEventListener('visibilitychange', rejoinNow);
+    return () => {
+      window.removeEventListener('online', rejoinNow);
+      document.removeEventListener('visibilitychange', rejoinNow);
+    };
+  }, [clearRejoinTimer]);
+
+  useEffect(() => {
+    hasJoinedRef.current = false;
+    rejoinAttemptRef.current = 0;
     initializeConnection();
     return () => {
       connectGenRef.current += 1;
-      if (stallCheckRef.current) {
+      clearRejoinTimer();
+      if (stallCheckRef.current !== null) {
         clearInterval(stallCheckRef.current);
         stallCheckRef.current = null;
       }
-      if (streamEndTimerRef.current) {
+      if (streamEndTimerRef.current !== null) {
         clearTimeout(streamEndTimerRef.current);
         streamEndTimerRef.current = null;
       }
@@ -605,57 +788,72 @@ export const RoomPage: React.FC = () => {
       }
       if (roomRef.current) {
         roomRef.current.removeAllListeners();
-        roomRef.current.disconnect();
+        void roomRef.current.disconnect();
         roomRef.current = null;
       }
     };
-  }, [initializeConnection]);
+  }, [clearRejoinTimer, initializeConnection]);
 
-  const decoderStalledRef = useRef(false);
-  useEffect(() => {
-    decoderStalledRef.current = decoderStalled;
-  }, [decoderStalled]);
+  const isDecoderStalled = connectionStatus === 'live' && decoderStalled;
+  const stalledCodecName = connectionStatus === 'live' ? stalledCodec : null;
 
   useEffect(() => {
     if (connectionStatus !== 'live') {
-      if (stallCheckRef.current) {
+      if (stallCheckRef.current !== null) {
         clearInterval(stallCheckRef.current);
         stallCheckRef.current = null;
       }
       stallStartRef.current = 0;
-      setDecoderStalled(false);
-      setStalledCodec(null);
-      return;
+      return undefined;
     }
 
     stallStartRef.current = 0;
-
-    stallCheckRef.current = setInterval(async () => {
+    let isActive = true;
+    const checkDecoder = async (): Promise<void> => {
       const room = roomRef.current;
-      if (!room) return;
-
+      if (!room) {
+        return;
+      }
       const receiver = firstVideoReceiver(room);
-      if (!receiver) return;
-
+      if (!receiver) {
+        return;
+      }
+      const generation = stallGenerationRef.current;
       const stats = await readVideoStats(receiver);
+      if (!isActive || roomRef.current !== room || stallGenerationRef.current !== generation) {
+        return;
+      }
       evaluateStall(stats, stallStartRef, decoderStalledRef, setDecoderStalled, setStalledCodec);
+    };
+
+    stallCheckRef.current = setInterval(() => {
+      void checkDecoder();
     }, DECODER_STALL_CHECK_MS);
 
     return () => {
-      if (stallCheckRef.current) {
+      isActive = false;
+      if (stallCheckRef.current !== null) {
         clearInterval(stallCheckRef.current);
         stallCheckRef.current = null;
       }
     };
   }, [connectionStatus]);
 
-  const handleResync = () => initializeConnection();
+  const handleResync = () => {
+    rejoinAttemptRef.current = 0;
+    resetConnectionView();
+    initializeConnection();
+  };
 
   const getStatsFn = useCallback(async (): Promise<RTCStatsReport | null> => {
     const room = roomRef.current;
-    if (!room) return null;
+    if (!room) {
+      return null;
+    }
     const receiver = firstVideoReceiver(room);
-    if (!receiver) return null;
+    if (!receiver) {
+      return null;
+    }
     try {
       return await receiver.getStats();
     } catch (err) {
@@ -665,16 +863,22 @@ export const RoomPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!diagnosticEnabled()) return;
-    window.__slopcastReceiverStats = getStatsFn;
+    if (!diagnosticEnabled()) {
+      return undefined;
+    }
+    window.slopcastReceiverStats = getStatsFn;
     return () => {
-      delete window.__slopcastReceiverStats;
+      delete window.slopcastReceiverStats;
     };
   }, [getStatsFn]);
 
   const statusVariant = (): StatusVariant => {
-    if (connectionStatus === 'live') return 'live';
-    if (connectionStatus === 'connecting') return 'info';
+    if (connectionStatus === 'live') {
+      return 'live';
+    }
+    if (connectionStatus === 'connecting') {
+      return 'info';
+    }
     return 'disconnected';
   };
   const variant = statusVariant();
@@ -692,8 +896,8 @@ export const RoomPage: React.FC = () => {
           onResync={handleResync}
           fullBleed
           getStatsFn={getStatsFn}
-          decoderStalled={decoderStalled}
-          stalledCodec={stalledCodec}
+          decoderStalled={isDecoderStalled}
+          stalledCodec={stalledCodecName}
           isFullscreen={isFullscreen}
           showControls={showControls}
           onControlsActivity={resetControlsIdleTimer}
@@ -707,20 +911,21 @@ export const RoomPage: React.FC = () => {
           <div className="flex items-center gap-2 min-w-0 pointer-events-auto">
             <button
               type="button"
-              onClick={() => navigate('/')}
+              onClick={() => {
+                void navigate('/');
+              }}
               aria-label="Leave room"
               title="Leave room"
               className="p-2 text-muted-foreground hover:text-foreground hover:bg-white/10 rounded-lg transition-colors duration-200 shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
-            <span
-              role="status"
+            <output
               aria-live="polite"
               className="inline-flex items-center min-w-0 max-w-[60vw] sm:max-w-[320px] shrink"
             >
               <StatusSignal variant={variant}>{statusText}</StatusSignal>
-            </span>
+            </output>
           </div>
           <button
             type="button"
@@ -740,7 +945,7 @@ export const RoomPage: React.FC = () => {
         <SpectatorBanner compact />
       </div>
 
-      {errorMsg && (
+      {errorMsg !== null && errorMsg !== '' && (
         <div className="fixed bottom-6 inset-x-0 flex justify-center px-4 z-30 pointer-events-none">
           <div
             role="alert"
