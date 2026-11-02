@@ -31,7 +31,7 @@ gstreamer-app = { version = "0.25", features = ["v1_20"] }
 gstreamer-video = { version = "0.25", features = ["v1_20"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-tokio = { version = "1", features = ["rt", "sync", "macros"] }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_System_Com"] }

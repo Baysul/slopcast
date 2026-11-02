@@ -1,8 +1,19 @@
+import { isJsonObject, readFiniteNumber, readString } from '@slopcast/shared-types';
+import type { JsonObject } from '@slopcast/shared-types';
 import { useCallback, useEffect, useRef, useState } from 'react';
+
 import { desktopApi } from '../api/desktop';
 import { notify, primeAudioContext } from '../lib/toast';
+import { sendPresenterHeartbeat } from '../utils/presenter-heartbeat';
 
 const POLL_MS = 1000;
+// Well inside the server's presenter grace period, so a reachable presenter is never reaped.
+const HEARTBEAT_MS = 20_000;
+const HEARTBEAT_TIMEOUT_MS = 10_000;
+// Brief blips that LiveKit resumes on its own are not worth a toast.
+const RECONNECT_NOTICE_DELAY_MS = 3000;
+
+export type RoomConnectionState = 'connecting' | 'connected' | 'reconnecting';
 
 export interface PreparedRoom {
   apiEndpoint: string;
@@ -19,63 +30,89 @@ interface RoomOperationResult {
   error?: string;
 }
 
-async function readErrorMessage(response: Response, fallback: string): Promise<string> {
+const readRequiredString = (body: JsonObject, key: string): string => {
+  const value = readString(body, key);
+  if (value === undefined) {
+    throw new Error(`Room response is missing ${key}`);
+  }
+  return value;
+};
+
+const readErrorMessage = async (response: Response, fallback: string): Promise<string> => {
   try {
-    // SAFETY: room API errors use this colocated JSON contract.
-    const body = (await response.json()) as { error?: string };
-    if (body.error) return body.error;
+    const body: unknown = await response.json();
+    const message = isJsonObject(body) ? readString(body, 'error') : undefined;
+    if (message !== undefined && message.length > 0) {
+      return message;
+    }
   } catch {
     return fallback;
   }
 
   return fallback;
-}
+};
 
-async function fetchSpectatorCount(room: PreparedRoom): Promise<number | null> {
+const fetchSpectatorCount = async (room: PreparedRoom): Promise<number | null> => {
   try {
     const response = await fetch(`${room.apiEndpoint}/api/rooms/${room.code}/spectators`);
-    if (!response.ok) return null;
+    if (!response.ok) {
+      return null;
+    }
 
-    // SAFETY: the spectator-count endpoint uses this colocated JSON contract.
-    const body = (await response.json()) as { count?: number };
-    if (body.count == null || !Number.isFinite(body.count)) return null;
+    const body: unknown = await response.json();
+    const count = isJsonObject(body) ? readFiniteNumber(body, 'count') : undefined;
+    if (count === undefined) {
+      return null;
+    }
 
-    return body.count;
+    return count;
   } catch (error) {
     console.warn('Transient spectator count failure:', error);
     return null;
   }
-}
+};
 
-async function requestRoom(apiEndpoint: string): Promise<PreparedRoom> {
+const requestRoom = async (apiEndpoint: string): Promise<PreparedRoom> => {
   const response = await fetch(`${apiEndpoint}/api/rooms`, {
-    method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Client-Origin': 'desktop' },
+    method: 'POST',
   });
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, `Server returned ${response.status}`));
   }
 
-  // SAFETY: the successful room endpoint uses this colocated JSON contract.
-  const body = (await response.json()) as Omit<PreparedRoom, 'apiEndpoint'>;
+  const body: unknown = await response.json();
+  if (!isJsonObject(body)) {
+    throw new Error('Room response was not a JSON object');
+  }
 
-  return { apiEndpoint, ...body };
-}
+  return {
+    apiEndpoint,
+    closeKey: readRequiredString(body, 'closeKey'),
+    code: readRequiredString(body, 'code'),
+    identity: readRequiredString(body, 'identity'),
+    livekitUrl: readRequiredString(body, 'livekitUrl'),
+    shareUrl: readRequiredString(body, 'shareUrl'),
+    token: readRequiredString(body, 'token'),
+  };
+};
 
-async function deleteRoom(room: PreparedRoom, keepalive = false): Promise<RoomOperationResult> {
+const deleteRoom = async (room: PreparedRoom, keepalive = false): Promise<RoomOperationResult> => {
   try {
     const response = await fetch(`${room.apiEndpoint}/api/rooms/${room.code}`, {
-      method: 'DELETE',
       headers: { 'X-Room-Close-Key': room.closeKey },
       keepalive,
+      method: 'DELETE',
     });
-    if (response.ok || response.status === 404) return { ok: true };
+    if (response.ok || response.status === 404) {
+      return { ok: true };
+    }
 
-    return { ok: false, error: await readErrorMessage(response, `Server returned ${response.status}`) };
+    return { error: await readErrorMessage(response, `Server returned ${response.status}`), ok: false };
   } catch {
-    return { ok: false, error: 'The API could not be reached. Check the endpoint and try again.' };
+    return { error: 'The API could not be reached. Check the endpoint and try again.', ok: false };
   }
-}
+};
 
 export interface UseNativeRoomOptions {
   apiEndpoint: string;
@@ -85,6 +122,7 @@ export interface UseNativeRoomOptions {
 
 export interface UseNativeRoomReturn {
   roomCode: string;
+  connectionState: RoomConnectionState | null;
   roomEndpoint: string | null;
   shareUrl: string;
   spectatorCount: number;
@@ -98,19 +136,25 @@ export interface UseNativeRoomReturn {
   closeRoomBestEffort: () => void;
 }
 
-export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNativeRoomOptions): UseNativeRoomReturn {
+export const useNativeRoom = ({ apiEndpoint, livekitUrl, onDisconnect }: UseNativeRoomOptions): UseNativeRoomReturn => {
   const [activeRoom, setActiveRoom] = useState<PreparedRoom | null>(null);
   const [spectatorCount, setSpectatorCount] = useState(0);
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [isClosingRoom, setIsClosingRoom] = useState(false);
+  const [connectionState, setConnectionState] = useState<RoomConnectionState | null>(null);
   const activeRoomRef = useRef<PreparedRoom | null>(null);
   const sawConnectedRef = useRef(false);
   const isTransitioningRef = useRef(false);
+  const lostSinceRef = useRef<number | null>(null);
+  const announcedLossRef = useRef(false);
 
   const clearRoom = useCallback((): void => {
     activeRoomRef.current = null;
     sawConnectedRef.current = false;
+    lostSinceRef.current = null;
+    announcedLossRef.current = false;
     setActiveRoom(null);
+    setConnectionState(null);
     setSpectatorCount(0);
   }, []);
 
@@ -133,11 +177,16 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
     async (room: PreparedRoom): Promise<RoomOperationResult> => {
       const resolvedLivekitUrl = room.livekitUrl || livekitUrl;
       const error = await desktopApi.connectNativeRoom(resolvedLivekitUrl, room.token, room.code, room.identity);
-      if (error !== null) return { ok: false, error };
+      if (error !== null) {
+        return { error, ok: false };
+      }
 
       activeRoomRef.current = room;
       sawConnectedRef.current = false;
+      lostSinceRef.current = null;
+      announcedLossRef.current = false;
       setActiveRoom(room);
+      setConnectionState('connecting');
       setSpectatorCount(0);
       return { ok: true };
     },
@@ -146,16 +195,24 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
 
   const discardPreparedRoom = useCallback(async (room: PreparedRoom): Promise<void> => {
     const result = await deleteRoom(room);
-    if (!result.ok) console.warn(`Failed to discard prepared room ${room.code}: ${result.error}`);
+    if (!result.ok) {
+      console.warn(`Failed to discard prepared room ${room.code}: ${result.error}`);
+    }
   }, []);
 
   const createRoom = useCallback(async (): Promise<boolean> => {
-    if (isCreatingRoom || activeRoomRef.current) return false;
+    if (isCreatingRoom || activeRoomRef.current) {
+      return false;
+    }
     const room = await prepareRoom(apiEndpoint);
-    if (!room) return false;
+    if (!room) {
+      return false;
+    }
 
     const result = await connectPreparedRoom(room);
-    if (result.ok) return true;
+    if (result.ok) {
+      return true;
+    }
 
     await discardPreparedRoom(room);
     notify('error', 'Room connection failed', result.error ?? 'The LiveKit room could not be reached.');
@@ -164,7 +221,9 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
 
   const closeRoom = useCallback(async (): Promise<RoomOperationResult> => {
     const room = activeRoomRef.current;
-    if (!room) return { ok: true };
+    if (!room) {
+      return { ok: true };
+    }
     setIsClosingRoom(true);
     isTransitioningRef.current = true;
 
@@ -184,32 +243,68 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
 
   const closeRoomBestEffort = useCallback((): void => {
     const room = activeRoomRef.current;
-    if (room) void deleteRoom(room, true);
+    if (room) {
+      void deleteRoom(room, true);
+    }
     void desktopApi.disconnectNativeRoom();
     clearRoom();
   }, [clearRoom]);
 
-  useEffect(() => {
-    return () => {
+  useEffect(
+    () => () => {
       const room = activeRoomRef.current;
-      if (room) void deleteRoom(room, true);
+      if (room) {
+        void deleteRoom(room, true);
+      }
       void desktopApi.disconnectNativeRoom();
-    };
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (!activeRoom) return;
+    if (!activeRoom) {
+      return undefined;
+    }
 
     const poll = async (): Promise<void> => {
       const nextSpectatorCount = await fetchSpectatorCount(activeRoom);
-      if (nextSpectatorCount !== null) setSpectatorCount(nextSpectatorCount);
+      if (nextSpectatorCount !== null) {
+        setSpectatorCount(nextSpectatorCount);
+      }
 
       const connected = await desktopApi.isNativeRoomConnected();
-      if (connected === true) sawConnectedRef.current = true;
-      if (connected !== false || !sawConnectedRef.current || isTransitioningRef.current) return;
+      if (activeRoomRef.current?.code !== activeRoom.code || isTransitioningRef.current) {
+        return undefined;
+      }
+      if (connected) {
+        sawConnectedRef.current = true;
+        lostSinceRef.current = null;
+        if (announcedLossRef.current) {
+          announcedLossRef.current = false;
+          notify('success', 'Reconnected', 'Spectators are receiving your stream again.');
+        }
+        setConnectionState('connected');
+        return undefined;
+      }
+      if (!sawConnectedRef.current) {
+        return undefined;
+      }
 
       const hasSession = await desktopApi.hasNativeRoomSession();
-      if (hasSession || activeRoomRef.current?.code !== activeRoom.code) return;
+      if (activeRoomRef.current?.code !== activeRoom.code || isTransitioningRef.current) {
+        return undefined;
+      }
+      if (hasSession) {
+        // The native session is rejoining the room on its own; surface it, but keep the room.
+        setConnectionState('reconnecting');
+        const now = Date.now();
+        lostSinceRef.current ??= now;
+        if (!announcedLossRef.current && now - lostSinceRef.current >= RECONNECT_NOTICE_DELAY_MS) {
+          announcedLossRef.current = true;
+          notify('info', 'Connection lost', 'Reconnecting to the room. Your stream resumes automatically.');
+        }
+        return undefined;
+      }
 
       notify('error', 'Room disconnected', 'The connection to the room was lost. Create a new room to continue.');
       clearRoom();
@@ -218,21 +313,66 @@ export function useNativeRoom({ apiEndpoint, livekitUrl, onDisconnect }: UseNati
 
     void poll();
     const interval = setInterval(() => void poll(), POLL_MS);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+    };
+  }, [activeRoom, clearRoom, onDisconnect]);
+
+  // Presenter heartbeat: keeps the room alive on the server while the stream reconnects, and
+  // Keeps the native session's rejoin token fresh for streams that outlive the original token.
+  useEffect(() => {
+    if (!activeRoom) {
+      return undefined;
+    }
+
+    let isActive = true;
+    const beat = async (): Promise<void> => {
+      const result = await sendPresenterHeartbeat(activeRoom, HEARTBEAT_TIMEOUT_MS);
+      if (!isActive || activeRoomRef.current?.code !== activeRoom.code || isTransitioningRef.current) {
+        return;
+      }
+
+      switch (result.kind) {
+        case 'ok': {
+          const error = await desktopApi.updateNativeRoomToken(result.token);
+          if (error !== null) {
+            console.warn('Failed to refresh the presenter token:', error);
+          }
+          return;
+        }
+        case 'retry':
+          console.warn(`Presenter heartbeat failed, retrying: ${result.reason}`);
+          return;
+        case 'unsupported':
+          return;
+        case 'closed':
+          notify('error', 'Room closed', 'The server closed this room. Create a new room to continue.');
+          await desktopApi.disconnectNativeRoom();
+          clearRoom();
+          onDisconnect?.();
+      }
+    };
+
+    const interval = setInterval(() => void beat(), HEARTBEAT_MS);
+    return () => {
+      isActive = false;
+      clearInterval(interval);
+    };
   }, [activeRoom, clearRoom, onDisconnect]);
 
   return {
+    closeRoom,
+    connectionState,
+    closeRoomBestEffort,
+    connectPreparedRoom,
+    createRoom,
+    discardPreparedRoom,
+    isClosingRoom,
+    isCreatingRoom,
+    prepareRoom,
     roomCode: activeRoom?.code ?? '',
     roomEndpoint: activeRoom?.apiEndpoint ?? null,
     shareUrl: activeRoom?.shareUrl ?? '',
     spectatorCount,
-    isCreatingRoom,
-    isClosingRoom,
-    createRoom,
-    prepareRoom,
-    connectPreparedRoom,
-    discardPreparedRoom,
-    closeRoom,
-    closeRoomBestEffort,
   };
-}
+};

@@ -31,6 +31,13 @@ pub async fn disconnect_native_room() -> Result<(), String> {
         .map_err(|e| format!("disconnect room task failed: {e}"))?
 }
 
+#[tauri::command(rename_all = "camelCase")]
+/// # Errors
+/// Returns an error if no room session exists or the token is empty.
+pub fn update_native_room_token(token: String) -> Result<(), String> {
+    native_livekit::update_livekit_token(token)
+}
+
 #[must_use]
 #[tauri::command(rename_all = "camelCase")]
 pub fn is_native_room_connected() -> bool {

@@ -1,6 +1,7 @@
 import { loadConfig } from '@slopcast/shared-types/config';
 import express from 'express';
 import { rateLimit } from 'express-rate-limit';
+
 import { initRoutes } from './routes.js';
 
 const config = loadConfig();
@@ -10,27 +11,36 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '16kb' }));
 
 const roomCreateLimiter = rateLimit({
-  windowMs: 60_000,
-  max: 10,
-  standardHeaders: true,
   legacyHeaders: false,
+  limit: 10,
   message: { error: 'Too many room creation requests, please try again later' },
+  standardHeaders: true,
+  windowMs: 60_000,
 });
 
 const spectatorTokenLimiter = rateLimit({
-  windowMs: 60_000,
-  max: 30,
-  standardHeaders: true,
   legacyHeaders: false,
+  limit: 30,
   message: { error: 'Too many token requests, please try again later' },
+  standardHeaders: true,
+  windowMs: 60_000,
 });
 
 const spectatorCountLimiter = rateLimit({
-  windowMs: 60_000,
-  max: 120,
-  standardHeaders: true,
   legacyHeaders: false,
+  limit: 120,
   message: { error: 'Too many spectator count requests, please try again later' },
+  standardHeaders: true,
+  windowMs: 60_000,
+});
+
+// Presenters heartbeat every ~20s; leave headroom for retries after a network blip.
+const presenterTokenLimiter = rateLimit({
+  legacyHeaders: false,
+  limit: 30,
+  message: { error: 'Too many presenter heartbeats, please try again later' },
+  standardHeaders: true,
+  windowMs: 60_000,
 });
 
 const desktopOrigins = new Set([
@@ -48,8 +58,8 @@ const allowedOrigins = new Set([
   ...desktopOrigins,
 ]);
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && allowedOrigins.has(origin)) {
+  const { origin } = req.headers;
+  if (origin !== undefined && allowedOrigins.has(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'DELETE, GET, POST, OPTIONS');
     const allowedHeaders = desktopOrigins.has(origin)
@@ -69,14 +79,13 @@ app.use((req, res, next) => {
 app.post('/api/rooms', roomCreateLimiter);
 app.use('/api/rooms/:code/token', spectatorTokenLimiter);
 app.use('/api/rooms/:code/spectators', spectatorCountLimiter);
+app.use('/api/rooms/:code/presenter-token', presenterTokenLimiter);
+let livekitClientUrl = process.env.LIVEKIT_CLIENT_URL;
+if (livekitClientUrl === '') {
+  livekitClientUrl = undefined;
+}
 app.use(
-  initRoutes(
-    config.livekitUrl,
-    config.livekitApiKey,
-    config.livekitApiSecret,
-    config.websiteUrl,
-    process.env.LIVEKIT_CLIENT_URL || undefined,
-  ),
+  initRoutes(config.livekitUrl, config.livekitApiKey, config.livekitApiSecret, config.websiteUrl, livekitClientUrl),
 );
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

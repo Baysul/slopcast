@@ -1,29 +1,36 @@
-import { Check, Copy, Link2Off, MonitorUp, Video, X } from 'lucide-react';
+import { Check, Copy, Link2Off, MonitorUp, RefreshCw, Video, X } from 'lucide-react';
 import { motion } from 'motion/react';
-import * as React from 'react';
-import { useEffect, useState } from 'react';
+import type { FC, ReactNode } from 'react';
+import { memo, useEffect, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+
+import type { RoomConnectionState } from '../../hooks/useNativeRoom';
 import type { CaptureContext, CaptureSourceSelection, CaptureStage } from '../../types';
 import { CaptureSourcePicker } from './CaptureSourcePicker';
 
-function usePrefersReducedMotion(): boolean {
-  const [prefersReduced, setPrefersReduced] = useState(false);
+const usePrefersReducedMotion = (): boolean => {
+  const [prefersReduced, setPrefersReduced] = useState(
+    () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-    setPrefersReduced(mediaQuery.matches);
-
-    const handleChange = (): void => setPrefersReduced(mediaQuery.matches);
+    const handleChange = (): void => {
+      setPrefersReduced(mediaQuery.matches);
+    };
     mediaQuery.addEventListener('change', handleChange);
-    return () => mediaQuery.removeEventListener('change', handleChange);
+    return () => {
+      mediaQuery.removeEventListener('change', handleChange);
+    };
   }, []);
 
   return prefersReduced;
-}
+};
 
 export interface SourcePickerProps {
   roomCode: string;
+  roomConnectionState: RoomConnectionState | null;
   isCreatingRoom: boolean;
   isClosingRoom: boolean;
   isRoomTransitioning: boolean;
@@ -57,6 +64,7 @@ export interface SourcePickerProps {
 
 interface RoomControlsProps {
   roomCode: string;
+  roomConnectionState: RoomConnectionState | null;
   isCreatingRoom: boolean;
   isClosingRoom: boolean;
   canCreateRoom: boolean;
@@ -81,17 +89,20 @@ type EmptyRoomControlsProps = Pick<
   | 'roomCreateDisabledReason'
 >;
 
-function EmptyRoomControls({
+const EmptyRoomControls = ({
   canCreateRoom,
   hasRetryableRoom,
   isCreatingRoom,
   onCreateRoom,
   onRetryRoomConnection,
   roomCreateDisabledReason,
-}: EmptyRoomControlsProps): React.ReactNode {
+}: EmptyRoomControlsProps): ReactNode => {
   let buttonLabel = 'Create Live Room';
-  if (isCreatingRoom) buttonLabel = 'Connecting Room…';
-  else if (hasRetryableRoom) buttonLabel = 'Retry connection';
+  if (isCreatingRoom) {
+    buttonLabel = 'Connecting Room…';
+  } else if (hasRetryableRoom) {
+    buttonLabel = 'Retry connection';
+  }
 
   return (
     <div className="space-y-2">
@@ -100,12 +111,14 @@ function EmptyRoomControls({
         onClick={hasRetryableRoom ? onRetryRoomConnection : onCreateRoom}
         disabled={isCreatingRoom || (!hasRetryableRoom && !canCreateRoom)}
         aria-busy={isCreatingRoom}
-        aria-describedby={roomCreateDisabledReason ? 'create-room-hint' : undefined}
+        aria-describedby={
+          roomCreateDisabledReason !== null && roomCreateDisabledReason !== '' ? 'create-room-hint' : undefined
+        }
         className="w-full font-bold"
       >
         {buttonLabel}
       </Button>
-      {roomCreateDisabledReason && !hasRetryableRoom && (
+      {roomCreateDisabledReason !== null && roomCreateDisabledReason !== '' && !hasRetryableRoom && (
         <p id="create-room-hint" className="text-sm leading-relaxed text-muted-foreground">
           {roomCreateDisabledReason}
         </p>
@@ -117,23 +130,32 @@ function EmptyRoomControls({
       )}
     </div>
   );
-}
+};
 
 type ActiveRoomControlsProps = Pick<
   RoomControlsProps,
-  'copied' | 'isClosingRoom' | 'onCloseRoom' | 'onCopyCode' | 'onCopyLink' | 'roomCode' | 'spectatorCount'
+  | 'copied'
+  | 'isClosingRoom'
+  | 'onCloseRoom'
+  | 'onCopyCode'
+  | 'onCopyLink'
+  | 'roomCode'
+  | 'roomConnectionState'
+  | 'spectatorCount'
 >;
 
-function ActiveRoomControls({
+const ActiveRoomControls = ({
   copied,
   isClosingRoom,
   onCloseRoom,
   onCopyCode,
   onCopyLink,
   roomCode,
+  roomConnectionState,
   spectatorCount,
-}: ActiveRoomControlsProps): React.ReactNode {
+}: ActiveRoomControlsProps): ReactNode => {
   const spectatorLabel = `${spectatorCount} spectator${spectatorCount === 1 ? '' : 's'}`;
+  const isReconnecting = roomConnectionState === 'reconnecting';
 
   return (
     <div className="space-y-3" aria-live="polite">
@@ -145,6 +167,15 @@ function ActiveRoomControls({
           <span className="inline-flex items-center rounded-md border border-border bg-background/60 px-2 py-1 text-xs font-medium tabular-nums text-muted-foreground">
             {spectatorLabel}
           </span>
+        )}
+        {isReconnecting && (
+          <output
+            title="The connection to the room dropped. Your stream resumes automatically once it is back."
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background/60 px-2 py-1 text-xs font-medium text-muted-foreground"
+          >
+            <RefreshCw className="size-3 motion-safe:animate-spin" aria-hidden="true" />
+            Reconnecting…
+          </output>
         )}
       </div>
       <div className="grid grid-cols-2 gap-2">
@@ -173,18 +204,21 @@ function ActiveRoomControls({
       </div>
     </div>
   );
-}
+};
 
-const RoomControls: React.FC<RoomControlsProps> = React.memo((props) => {
-  if (!props.roomCode) return <EmptyRoomControls {...props} />;
+const RoomControls: FC<RoomControlsProps> = memo((props) => {
+  if (!props.roomCode) {
+    return <EmptyRoomControls {...props} />;
+  }
   return <ActiveRoomControls {...props} />;
 });
 
 RoomControls.displayName = 'RoomControls';
 
-export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
+export const SourcePicker: FC<SourcePickerProps> = memo(
   ({
     roomCode,
+    roomConnectionState,
     isCreatingRoom,
     isClosingRoom,
     isRoomTransitioning,
@@ -214,7 +248,7 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
     onStopShare,
     onSwitchSource,
     canSwitchSource,
-    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: presenter source surface owns room, capture stages, KDE notices and stop-confirm; splitting would trade clarity for indirection
+    // Biome-ignore lint/complexity/noExcessiveCognitiveComplexity: presenter source surface owns room, capture stages, KDE notices and stop-confirm; splitting would trade clarity for indirection
   }) => {
     const shouldReduceMotion = usePrefersReducedMotion();
     const [kdeNoticeDismissed, setKdeNoticeDismissed] = useState(false);
@@ -233,6 +267,7 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
         </h2>
         <RoomControls
           roomCode={roomCode}
+          roomConnectionState={roomConnectionState}
           isCreatingRoom={isCreatingRoom}
           isClosingRoom={isClosingRoom || isRoomTransitioning}
           canCreateRoom={canCreateRoom}
@@ -258,7 +293,9 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
               </p>
               <button
                 type="button"
-                onClick={() => setKdeNoticeDismissed(true)}
+                onClick={() => {
+                  setKdeNoticeDismissed(true);
+                }}
                 className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
                 aria-label="Dismiss audio detection notice"
               >
@@ -275,7 +312,9 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
             </p>
             <button
               type="button"
-              onClick={() => setKdeFailedNoticeDismissed(true)}
+              onClick={() => {
+                setKdeFailedNoticeDismissed(true);
+              }}
               className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
               aria-label="Dismiss KDE auto-detection failure notice"
             >
@@ -284,7 +323,14 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
           </div>
         )}
 
-        {pickerOpen && <CaptureSourcePicker onSelect={onSourceSelected} onCancel={() => setPickerOpen(false)} />}
+        {pickerOpen && (
+          <CaptureSourcePicker
+            onSelect={onSourceSelected}
+            onCancel={() => {
+              setPickerOpen(false);
+            }}
+          />
+        )}
 
         {captureStage === 'idle' && (
           <div className="space-y-2.5">
@@ -292,7 +338,11 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
               variant="default"
               onClick={onStartShare}
               disabled={!canStartShare || isRoomTransitioning}
-              aria-describedby={disabledReason ? 'start-screenshare-hint' : 'start-screenshare-ready-hint'}
+              aria-describedby={
+                disabledReason !== null && disabledReason !== ''
+                  ? 'start-screenshare-hint'
+                  : 'start-screenshare-ready-hint'
+              }
               className="group relative w-full font-bold overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.14)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] active:shadow-[inset_0_1px_1px_rgba(0,0,0,0.2)] active:scale-[0.99] transition-[transform,box-shadow,background-color] duration-200 ease-out disabled:shadow-none disabled:active:scale-100"
             >
               {canStartShare && !shouldReduceMotion && (
@@ -313,17 +363,17 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
               )}
               <span
                 aria-hidden="true"
-                className={`pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/[0.1] to-transparent opacity-0 transition-[transform,opacity] duration-[520ms] ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-full group-hover:opacity-100 group-focus-visible:translate-x-full group-focus-visible:opacity-100 motion-reduce:hidden ${!canStartShare ? 'hidden' : ''}`}
+                className={`pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/[0.1] to-transparent opacity-0 transition-[transform,opacity] duration-[520ms] ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-full group-hover:opacity-100 group-focus-visible:translate-x-full group-focus-visible:opacity-100 motion-reduce:hidden ${canStartShare ? '' : 'hidden'}`}
               />
               <span className="relative flex items-center justify-center gap-2.5">
                 <Video
                   aria-hidden="true"
-                  className={`h-4 w-4 shrink-0 transition-[transform,opacity] duration-200 ease-out motion-reduce:transition-none ${!canStartShare ? 'opacity-60' : 'group-hover:scale-[1.08] group-focus-visible:scale-[1.08] group-active:scale-95'}`}
+                  className={`h-4 w-4 shrink-0 transition-[transform,opacity] duration-200 ease-out motion-reduce:transition-none ${canStartShare ? 'group-hover:scale-[1.08] group-focus-visible:scale-[1.08] group-active:scale-95' : 'opacity-60'}`}
                 />
                 Start Screenshare
               </span>
             </Button>
-            {disabledReason ? (
+            {disabledReason !== null && disabledReason !== '' ? (
               <p id="start-screenshare-hint" className="text-sm leading-relaxed text-muted-foreground">
                 {disabledReason}
               </p>
@@ -366,16 +416,7 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
 
         {captureStage === 'live' && (
           <div className="space-y-2">
-            {!showStopConfirm ? (
-              <Button
-                variant="destructive"
-                onClick={() => setShowStopConfirm(true)}
-                disabled={isRoomTransitioning}
-                className="w-full font-bold"
-              >
-                Stop Screenshare
-              </Button>
-            ) : (
+            {showStopConfirm ? (
               <div className="space-y-2">
                 <p className="text-sm text-muted-foreground text-center">
                   {spectatorCount > 0
@@ -393,11 +434,28 @@ export const SourcePicker: React.FC<SourcePickerProps> = React.memo(
                   >
                     Stop
                   </Button>
-                  <Button variant="secondary" onClick={() => setShowStopConfirm(false)} className="flex-1">
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setShowStopConfirm(false);
+                    }}
+                    className="flex-1"
+                  >
                     Cancel
                   </Button>
                 </div>
               </div>
+            ) : (
+              <Button
+                variant="destructive"
+                onClick={() => {
+                  setShowStopConfirm(true);
+                }}
+                disabled={isRoomTransitioning}
+                className="w-full font-bold"
+              >
+                Stop Screenshare
+              </Button>
             )}
           </div>
         )}

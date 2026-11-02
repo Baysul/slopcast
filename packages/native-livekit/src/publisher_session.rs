@@ -12,6 +12,10 @@ const TELEMETRY_TIMEOUT: Duration = Duration::from_millis(500);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const RECONNECT_DELAY_BASE: Duration = Duration::from_secs(1);
 const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(15);
+// A rebuild "succeeds" as soon as the pipeline starts because LiveKit signalling is asynchronous.
+// Only a connection that survived this long resets the backoff, so an offline presenter does not
+// Rebuild the whole encoder pipeline every second.
+const STABLE_CONNECTION: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const RATE_BACKPRESSURE_INTERVAL: Duration = Duration::from_millis(200);
 const RATE_ADAPT_INTERVAL: Duration = Duration::from_secs(1);
@@ -194,6 +198,8 @@ pub(crate) struct SessionMachine<E> {
     last_error: Option<SessionError>,
     retry_at: Duration,
     retry_delay: Duration,
+    connected_at: Duration,
+    short_sessions: u32,
     next_backpressure_at: Duration,
     next_rate_at: Duration,
 }
@@ -209,6 +215,8 @@ impl<E: LifecycleEffects> SessionMachine<E> {
             last_error: None,
             retry_at: Duration::ZERO,
             retry_delay: RECONNECT_DELAY_BASE,
+            connected_at: Duration::ZERO,
+            short_sessions: 0,
             next_backpressure_at: Duration::ZERO,
             next_rate_at: Duration::ZERO,
         }
@@ -598,14 +606,24 @@ impl<E: LifecycleEffects> SessionMachine<E> {
     fn enter_connected(&mut self, now: Duration) {
         self.phase = SessionPhase::Connected;
         self.retry_delay = RECONNECT_DELAY_BASE;
+        self.connected_at = now;
         self.next_backpressure_at = now + RATE_BACKPRESSURE_INTERVAL;
         self.next_rate_at = now + RATE_ADAPT_INTERVAL;
     }
 
     fn enter_recovery(&mut self, now: Duration) {
         self.phase = SessionPhase::Recovery;
-        self.retry_delay = RECONNECT_DELAY_BASE;
+        if now.saturating_sub(self.connected_at) >= STABLE_CONNECTION {
+            self.short_sessions = 0;
+        }
+        self.retry_delay = reconnect_delay(self.short_sessions);
+        self.short_sessions = self.short_sessions.saturating_add(1);
         self.retry_at = now + self.retry_delay;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_at(&self) -> Duration {
+        self.retry_at
     }
 
     fn schedule_retry(&mut self, now: Duration) {
@@ -631,6 +649,12 @@ impl<E: LifecycleEffects> SessionMachine<E> {
 enum RateObservationKind {
     Backpressure,
     Loss,
+}
+
+fn reconnect_delay(short_sessions: u32) -> Duration {
+    RECONNECT_DELAY_BASE
+        .saturating_mul(1_u32 << short_sessions.min(8))
+        .min(RECONNECT_DELAY_MAX)
 }
 
 fn advance_deadline(deadline: Duration, now: Duration, interval: Duration) -> Duration {
@@ -1615,6 +1639,36 @@ mod tests {
             .rposition(|operation| *operation == "live");
         assert!(rate_index.is_some_and(|rate| live_index.is_some_and(|live| rate < live)));
         assert_eq!(machine.snapshot().current_ceiling_kbps, Some(15_000));
+    }
+
+    #[test]
+    fn reconnect_backoff_escalates_for_flapping_connections_and_resets_after_stability() {
+        let (mut machine, state) = connected_machine();
+        let fault = |at: Duration, machine: &mut SessionMachine<TestEffects>| {
+            state
+                .lock()
+                .unwrap_or_else(|_| panic!("state lock poisoned"))
+                .fault = Some(EffectError::new("poll", "connection lost"));
+            machine.tick(at);
+            assert_eq!(machine.snapshot().phase, SessionPhase::Recovery);
+            machine.retry_at().saturating_sub(at)
+        };
+
+        let mut now = Duration::from_millis(20);
+        let mut delays = Vec::new();
+        for _ in 0..6 {
+            let delay = fault(now, &mut machine);
+            delays.push(delay.as_secs());
+            now += delay;
+            machine.tick(now);
+            assert_eq!(machine.snapshot().phase, SessionPhase::Connected);
+            now += Duration::from_millis(500);
+        }
+        assert_eq!(delays, vec![1, 2, 4, 8, 15, 15]);
+
+        now += STABLE_CONNECTION;
+        machine.tick(now);
+        assert_eq!(fault(now, &mut machine), RECONNECT_DELAY_BASE);
     }
 
     #[test]

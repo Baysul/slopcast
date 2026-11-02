@@ -32,6 +32,9 @@ use arc_swap::ArcSwapOption;
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 #[cfg(not(target_os = "linux"))]
 use livekit::prelude::*;
+// `RoomEvent::Disconnected` carries the protocol enum, not the participant one in the prelude.
+#[cfg(not(target_os = "linux"))]
+use livekit::DisconnectReason as RoomDisconnectReason;
 #[cfg(not(target_os = "linux"))]
 use livekit::track::{LocalTrack, LocalVideoTrack, TrackSource};
 #[cfg(not(target_os = "linux"))]
@@ -68,6 +71,10 @@ pub const CHANNELS: u32 = 2;
 
 #[cfg(not(target_os = "linux"))]
 const MAX_AUDIO_BACKLOG_MS: usize = 100;
+#[cfg(not(target_os = "linux"))]
+const RECONNECT_DELAY_BASE: Duration = Duration::from_secs(1);
+#[cfg(not(target_os = "linux"))]
+const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +189,7 @@ enum WorkerCmd {
     GetTelemetry {
         reply: std::sync::mpsc::Sender<NativeTelemetry>,
     },
+    UpdateToken(String),
     Shutdown,
 }
 
@@ -189,7 +197,7 @@ enum WorkerCmd {
 struct NativeLiveKit {
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WorkerCmd>,
     stop: tokio::sync::oneshot::Sender<()>,
-    _join: std::thread::JoinHandle<()>,
+    join: std::thread::JoinHandle<()>,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -318,7 +326,7 @@ pub fn connect_livekit_room(
         *guard = Some(NativeLiveKit {
             cmd_tx,
             stop: stop_tx,
-            _join: handle,
+            join: handle,
         });
         Ok(())
     }
@@ -369,6 +377,7 @@ pub fn is_livekit_room_connected() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
+/// True while a publisher session exists, including while it is reconnecting.
 #[must_use]
 pub fn has_livekit_room_session() -> bool {
     #[cfg(target_os = "linux")]
@@ -377,7 +386,34 @@ pub fn has_livekit_room_session() -> bool {
     }
 
     #[cfg(not(target_os = "linux"))]
-    ROOM_CONNECTED.load(Ordering::Relaxed)
+    LIVEKIT.lock().is_ok_and(|guard| {
+        guard
+            .as_ref()
+            .is_some_and(|state| !state.join.is_finished())
+    })
+}
+
+/// Replaces the token used for future reconnects to the current room.
+///
+/// # Errors
+/// Returns an error if no room session exists or the token is empty.
+pub fn update_livekit_token(token: String) -> Result<(), String> {
+    if token.is_empty() {
+        return Err("LiveKit token must not be empty".into());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        gstreamer_publisher::update_token(token)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    with_guard(|state| {
+        state
+            .cmd_tx
+            .send(WorkerCmd::UpdateToken(token))
+            .map_err(|_| "Worker channel closed".into())
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -671,6 +707,64 @@ fn fold_stats(telemetry: &mut NativeTelemetry, stats: &[RtcStats]) {
 }
 
 #[cfg(not(target_os = "linux"))]
+enum SessionEnd {
+    Shutdown,
+    Lost(String),
+    Terminal(String),
+}
+
+#[cfg(not(target_os = "linux"))]
+struct WorkerState {
+    url: String,
+    token: String,
+    desired_video: Option<CaptureConfig>,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl WorkerState {
+    /// Applies a command that does not need a room. Returns false on shutdown.
+    fn absorb_offline(&mut self, cmd: Option<WorkerCmd>) -> bool {
+        match cmd {
+            Some(WorkerCmd::StartVideo { config }) => self.desired_video = Some(config),
+            Some(WorkerCmd::StopVideo) => self.desired_video = None,
+            Some(WorkerCmd::GetTelemetry { reply }) => {
+                let _ = reply.send(NativeTelemetry::default());
+            }
+            Some(WorkerCmd::UpdateToken(token)) => self.token = token,
+            Some(WorkerCmd::Shutdown) | None => return false,
+        }
+        true
+    }
+}
+
+/// The SDK resumes and reconnects on its own; it only reports `Disconnected` once it gave up.
+/// Reasons where rejoining would fight the server or another session end the worker instead.
+#[cfg(not(target_os = "linux"))]
+fn is_terminal_disconnect(reason: RoomDisconnectReason) -> bool {
+    matches!(
+        reason,
+        RoomDisconnectReason::ClientInitiated
+            | RoomDisconnectReason::DuplicateIdentity
+            | RoomDisconnectReason::ParticipantRemoved
+            | RoomDisconnectReason::RoomDeleted
+            | RoomDisconnectReason::RoomClosed
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn next_reconnect_delay(delay: Duration) -> Duration {
+    (delay * 2).min(RECONNECT_DELAY_MAX)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn store_spectator_count(room: &Room) {
+    SPECTATOR_COUNT.store(
+        u32::try_from(room.remote_participants().len()).unwrap_or(u32::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
 async fn run_worker(
     url: String,
     token: String,
@@ -679,29 +773,10 @@ async fn run_worker(
     mut stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let audio = NativeAudioSource::new(AudioSourceOptions::default(), SAMPLE_RATE, CHANNELS, 0);
-
-    let (room, mut room_events) = Room::connect(&url, &token, RoomOptions::default()).await?;
-
-    let audio_track = livekit::track::LocalAudioTrack::create_audio_track(
-        "screen_audio",
-        RtcAudioSource::Native(audio.clone()),
-    );
-
-    room.local_participant()
-        .publish_track(
-            livekit::track::LocalTrack::Audio(audio_track),
-            TrackPublishOptions {
-                source: TrackSource::ScreenshareAudio,
-                ..Default::default()
-            },
-        )
-        .await?;
-
-    log::info!("[livekit] audio track published");
-    ROOM_CONNECTED.store(true, Ordering::SeqCst);
-
     let samples_per_10ms = (SAMPLE_RATE / 100 * CHANNELS) as usize;
 
+    // The audio source outlives individual room connections, so PCM keeps flowing into
+    // Whichever track is currently published and is simply dropped while reconnecting.
     let audio_pump = {
         let audio = audio.clone();
         tokio::spawn(async move {
@@ -729,56 +804,153 @@ async fn run_worker(
         })
     };
 
+    let mut state = WorkerState {
+        url,
+        token,
+        desired_video: None,
+    };
+    let mut retry_delay = RECONNECT_DELAY_BASE;
+
     loop {
-        tokio::select! {
-            biased;
-            _ = &mut stop_rx => {
+        let end = run_session(&audio, &mut state, &mut cmd_rx, &mut stop_rx).await;
+
+        let reason = match end {
+            SessionEnd::Shutdown => break,
+            SessionEnd::Terminal(reason) => {
+                log::warn!("[livekit] room session ended for good: {reason}");
                 break;
             }
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else {
-                    break;
-                };
-                match cmd {
-                    WorkerCmd::StartVideo { config } => {
-                        handle_start_video(&room, &config).await;
-                    }
-                    WorkerCmd::StopVideo => {
-                        handle_stop_video(&room).await;
-                    }
-                    WorkerCmd::GetTelemetry { reply } => {
-                        let telemetry = collect_telemetry(&room).await;
-                        let _ = reply.send(telemetry);
-                    }
-                    WorkerCmd::Shutdown => {
-                        break;
+            SessionEnd::Lost(reason) => reason,
+        };
+
+        log::warn!("[livekit] room connection lost ({reason}); retrying in {retry_delay:?}");
+        let deadline = tokio::time::sleep(retry_delay);
+        tokio::pin!(deadline);
+        let keep_running = loop {
+            tokio::select! {
+                biased;
+                _ = &mut stop_rx => break false,
+                () = &mut deadline => break true,
+                cmd = cmd_rx.recv() => {
+                    if !state.absorb_offline(cmd) {
+                        break false;
                     }
                 }
             }
-            event = room_events.recv() => {
-                if let Some(
+        };
+        if !keep_running {
+            break;
+        }
+        retry_delay = next_reconnect_delay(retry_delay);
+    }
+
+    audio_pump.abort();
+    VIDEO_SOURCE.store(None);
+    VIDEO_ACTIVE.store(false, Ordering::SeqCst);
+    ROOM_CONNECTED.store(false, Ordering::SeqCst);
+    SPECTATOR_COUNT.store(0, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Connects, publishes, and serves one room connection until it ends.
+#[cfg(not(target_os = "linux"))]
+async fn run_session(
+    audio: &NativeAudioSource,
+    state: &mut WorkerState,
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<WorkerCmd>,
+    stop_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) -> SessionEnd {
+    let connect = tokio::select! {
+        biased;
+        _ = &mut *stop_rx => return SessionEnd::Shutdown,
+        connect = Room::connect(&state.url, &state.token, RoomOptions::default()) => connect,
+    };
+    let (room, mut room_events) = match connect {
+        Ok(connected) => connected,
+        Err(error) => return SessionEnd::Lost(format!("connect failed: {error}")),
+    };
+
+    let audio_track = livekit::track::LocalAudioTrack::create_audio_track(
+        "screen_audio",
+        RtcAudioSource::Native(audio.clone()),
+    );
+    if let Err(error) = room
+        .local_participant()
+        .publish_track(
+            LocalTrack::Audio(audio_track),
+            TrackPublishOptions {
+                source: TrackSource::ScreenshareAudio,
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        let _ = room.close().await;
+        return SessionEnd::Lost(format!("audio publish failed: {error}"));
+    }
+
+    log::info!("[livekit] audio track published");
+    ROOM_CONNECTED.store(true, Ordering::SeqCst);
+    store_spectator_count(&room);
+    if let Some(config) = state.desired_video.clone() {
+        handle_start_video(&room, &config).await;
+    }
+
+    let end = loop {
+        tokio::select! {
+            biased;
+            _ = &mut *stop_rx => break SessionEnd::Shutdown,
+            cmd = cmd_rx.recv() => match cmd {
+                Some(WorkerCmd::StartVideo { config }) => {
+                    handle_start_video(&room, &config).await;
+                    state.desired_video = Some(config);
+                }
+                Some(WorkerCmd::StopVideo) => {
+                    state.desired_video = None;
+                    handle_stop_video(&room).await;
+                }
+                Some(WorkerCmd::GetTelemetry { reply }) => {
+                    let _ = reply.send(collect_telemetry(&room).await);
+                }
+                Some(WorkerCmd::UpdateToken(token)) => state.token = token,
+                Some(WorkerCmd::Shutdown) | None => break SessionEnd::Shutdown,
+            },
+            event = room_events.recv() => match event {
+                None => break SessionEnd::Lost("room event stream closed".into()),
+                Some(RoomEvent::Reconnecting) => {
+                    log::warn!("[livekit] connection interrupted; resuming");
+                    ROOM_CONNECTED.store(false, Ordering::SeqCst);
+                }
+                Some(RoomEvent::Reconnected) => {
+                    log::info!("[livekit] connection resumed");
+                    ROOM_CONNECTED.store(true, Ordering::SeqCst);
+                    store_spectator_count(&room);
+                }
+                Some(RoomEvent::Disconnected { reason }) => {
+                    let message = format!("{reason:?}");
+                    break if is_terminal_disconnect(reason) {
+                        SessionEnd::Terminal(message)
+                    } else {
+                        SessionEnd::Lost(message)
+                    };
+                }
+                Some(
                     RoomEvent::ParticipantConnected(_)
                     | RoomEvent::ParticipantDisconnected(_)
                     | RoomEvent::ParticipantsUpdated { .. },
-                ) = event
-                {
-                    SPECTATOR_COUNT.store(
-                        u32::try_from(room.remote_participants().len()).unwrap_or(u32::MAX),
-                        Ordering::Relaxed,
-                    );
-                }
-            }
+                ) => store_spectator_count(&room),
+                Some(_) => {}
+            },
         }
-    }
-
-    drop(audio_pump);
+    };
 
     handle_stop_video(&room).await;
-
     ROOM_CONNECTED.store(false, Ordering::SeqCst);
     SPECTATOR_COUNT.store(0, Ordering::Relaxed);
-    room.close().await?;
-    Ok(())
+    if let Err(error) = room.close().await {
+        log::debug!("[livekit] room close after session end: {error}");
+    }
+    end
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1098,6 +1270,35 @@ mod tests {
         drain_pcm_chunks(&mut buffer, 960, &mut chunks);
         assert_eq!(chunks.len(), 2);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn rejoins_after_transient_disconnects_but_not_after_the_room_is_gone() {
+        assert!(!is_terminal_disconnect(RoomDisconnectReason::SignalClose));
+        assert!(!is_terminal_disconnect(RoomDisconnectReason::UnknownReason));
+        assert!(!is_terminal_disconnect(
+            RoomDisconnectReason::ServerShutdown
+        ));
+        assert!(!is_terminal_disconnect(RoomDisconnectReason::StateMismatch));
+        assert!(!is_terminal_disconnect(RoomDisconnectReason::JoinFailure));
+        assert!(is_terminal_disconnect(RoomDisconnectReason::RoomDeleted));
+        assert!(is_terminal_disconnect(
+            RoomDisconnectReason::DuplicateIdentity
+        ));
+        assert!(is_terminal_disconnect(
+            RoomDisconnectReason::ClientInitiated
+        ));
+    }
+
+    #[test]
+    fn reconnect_delay_doubles_up_to_the_cap() {
+        let mut delay = RECONNECT_DELAY_BASE;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            seen.push(delay.as_secs());
+            delay = next_reconnect_delay(delay);
+        }
+        assert_eq!(seen, vec![1, 2, 4, 8, 15, 15]);
     }
 
     #[test]

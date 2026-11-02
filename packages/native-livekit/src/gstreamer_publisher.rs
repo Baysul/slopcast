@@ -30,6 +30,9 @@ static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VIDEO_FRAMES_SUBMITTED: AtomicU64 = AtomicU64::new(0);
 static WORKER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_PCM_DROPS: AtomicU64 = AtomicU64::new(0);
+// The newest presenter token for a generation. Recovery rebuilds join with it, so a stream that
+// Outlives the token minted at room creation can still reconnect.
+static REFRESHED_TOKEN: LazyLock<Mutex<Option<(u64, String)>>> = LazyLock::new(|| Mutex::new(None));
 static LAST_AUDIO_DROP_WARN_AT: AtomicU64 = AtomicU64::new(0);
 static AUDIO_PUBLICATION_DISABLED: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("SLOPCAST_DISABLE_AUDIO").is_some());
@@ -188,6 +191,31 @@ pub(crate) fn is_connected() -> bool {
     ROOM_CONNECTED.load(Ordering::Relaxed)
 }
 
+pub(crate) fn update_token(token: String) -> Result<(), String> {
+    if token.is_empty() {
+        return Err("LiveKit token must not be empty".into());
+    }
+    let _gate = publish_state_guard();
+    let generation = WORKER_GENERATION.load(Ordering::Relaxed);
+    *REFRESHED_TOKEN
+        .lock()
+        .map_err(|_| "LiveKit token lock poisoned".to_string())? = Some((generation, token));
+    Ok(())
+}
+
+fn token_for_generation(generation: u64, initial: &str) -> String {
+    REFRESHED_TOKEN
+        .lock()
+        .ok()
+        .and_then(|refreshed| {
+            refreshed
+                .as_ref()
+                .filter(|(token_generation, _)| *token_generation == generation)
+                .map(|(_, token)| token.clone())
+        })
+        .unwrap_or_else(|| initial.to_string())
+}
+
 pub(crate) fn has_active_session() -> bool {
     crate::publisher_session::has_active()
 }
@@ -337,6 +365,7 @@ impl PublisherPipeline {
             .add(&sink)
             .map_err(|error| format!("Failed to add livekitwebrtcsink: {error}"))?;
         configure_signaller(&sink, &pipeline, connection, generation);
+        watch_publication_loss(&sink, &pipeline, generation);
         let audio_input = if *AUDIO_PUBLICATION_DISABLED {
             log::info!("GStreamer audio publication disabled for diagnostic isolation");
             None
@@ -703,7 +732,10 @@ fn configure_signaller(
 ) {
     let signaller = sink.property::<gst::glib::Object>("signaller");
     signaller.set_property("ws-url", &config.url);
-    signaller.set_property("auth-token", &config.token);
+    signaller.set_property(
+        "auth-token",
+        token_for_generation(generation, &config.token),
+    );
     signaller.set_property("room-name", &config.room_name);
     signaller.set_property("identity", &config.identity);
     signaller.connect_notify(Some("connection-state"), move |obj, _| {
@@ -733,6 +765,31 @@ fn configure_signaller(
             let _ = pipeline_for_error.post_message(gst::message::Error::new(
                 gst::LibraryError::Failed,
                 &format!("LiveKit signaller: {message}"),
+            ));
+        }
+        None
+    });
+}
+
+// webrtcsink drops a session whose ICE or peer connection failed without posting a bus error, so
+// The publisher would sit in a connected-looking pipeline that sends nothing. Every
+// `consumer-removed` emission is such a failure (teardown never emits it), so turn it into a
+// Fault that the session machine recovers from by rejoining.
+fn watch_publication_loss(sink: &gst::Element, pipeline: &gst::Pipeline, generation: u64) {
+    let pipeline = pipeline.downgrade();
+    sink.connect("consumer-removed", false, move |values| {
+        if WORKER_GENERATION.load(Ordering::Relaxed) != generation {
+            return None;
+        }
+        let peer = values
+            .get(1)
+            .and_then(|value| value.get::<String>().ok())
+            .unwrap_or_default();
+        log::warn!("LiveKit publisher connection to {peer} failed; rejoining the room");
+        if let Some(pipeline) = pipeline.upgrade() {
+            let _ = pipeline.post_message(gst::message::Error::new(
+                gst::ResourceError::Failed,
+                "LiveKit publisher peer connection failed",
             ));
         }
         None
@@ -1872,6 +1929,18 @@ mod tests {
 
         controller = snapshot;
         assert_eq!(controller.current_kbps(), 15_000);
+    }
+
+    #[test]
+    fn rebuilds_join_with_the_refreshed_token_of_their_own_generation_only() {
+        let generation = u64::MAX - 7;
+        *REFRESHED_TOKEN
+            .lock()
+            .unwrap_or_else(|_| panic!("token lock poisoned")) =
+            Some((generation, "refreshed".into()));
+        assert_eq!(token_for_generation(generation, "initial"), "refreshed");
+        assert_eq!(token_for_generation(generation - 1, "initial"), "initial");
+        assert!(update_token(String::new()).is_err());
     }
 
     #[test]

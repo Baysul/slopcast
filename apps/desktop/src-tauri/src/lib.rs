@@ -240,6 +240,7 @@ pub fn run() {
             room::disconnect_native_room,
             room::is_native_room_connected,
             room::has_native_room_session,
+            room::update_native_room_token,
             room::get_spectator_count,
             room::get_native_telemetry,
             room::get_native_supported_codecs,
