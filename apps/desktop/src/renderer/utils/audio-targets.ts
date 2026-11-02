@@ -23,7 +23,7 @@ export const toAudioTargetId = (app: AudioApp, pidBasedTargets: boolean): number
  * (`-pid` encodings). `-1` (system audio) and `0` (no audio) are not pids.
  */
 export const selectedTargetProcessId = (selectedAudioAppId: number | null): number | null =>
-  selectedAudioAppId != null && selectedAudioAppId < -1 ? -selectedAudioAppId : null;
+  selectedAudioAppId !== null && selectedAudioAppId < -1 ? -selectedAudioAppId : null;
 
 /**
  * True when the selected capture target is a negative pid whose process owns
@@ -35,5 +35,5 @@ export const isGroupSelected = (members: AudioApp[], selectedAudioAppId: number 
   if (targetProcessId !== null) {
     return members.some((m) => m.processId === targetProcessId);
   }
-  return selectedAudioAppId != null && members.some((m) => m.id === selectedAudioAppId);
+  return selectedAudioAppId !== null && members.some((m) => m.id === selectedAudioAppId);
 };

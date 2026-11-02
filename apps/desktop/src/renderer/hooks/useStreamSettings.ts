@@ -1,18 +1,21 @@
-import type { MotionMode, ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
 import { DEFAULT_STREAM_SETTINGS } from '@slopcast/shared-types';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import type { MotionMode, ResolutionPreset, StreamSettings, VideoCodec } from '@slopcast/shared-types';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
 import { desktopApi } from '../api/desktop';
 import { notify } from '../lib/toast';
-import type { CodecInfo } from '../utils/codecs';
 import { fromNativeCodecInfo, recommendCodec } from '../utils/codecs';
+import type { CodecInfo } from '../utils/codecs';
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 800;
 
-function mergeSavedValue<T>(current: T, previous: T | undefined, saved: T): T {
-  if (previous !== undefined && current !== previous) return current;
+const mergeSavedValue = <T>(current: T, previous: T | undefined, saved: T): T => {
+  if (previous !== undefined && current !== previous) {
+    return current;
+  }
 
   return saved;
-}
+};
 
 const streamSettingsEqual = (a: StreamSettings, b: StreamSettings): boolean =>
   a.fps === b.fps &&
@@ -53,7 +56,7 @@ export interface UseStreamSettingsReturn {
   settingsHydrated: boolean;
 }
 
-export function useStreamSettings(): UseStreamSettingsReturn {
+export const useStreamSettings = (): UseStreamSettingsReturn => {
   const [apiEndpoint, setApiEndpoint] = useState<string>('http://localhost:3001');
   const [apiEndpointIsCustom, setApiEndpointIsCustom] = useState(false);
   const [pendingApiEndpoint, setPendingApiEndpoint] = useState<string | null>(null);
@@ -73,30 +76,47 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   const lastSavedSettingsRef = useRef<StreamSettings | null>(null);
   const configEndpointRef = useRef<string>('');
   const codecsRef = useRef(availableCodecs);
-  const currentSettings: StreamSettings = {
-    fps: streamFps,
-    bitrateLimit,
-    videoCodec,
-    resolution,
-    apiEndpoint,
-    apiEndpointIsCustom,
-    pendingApiEndpoint,
-    autoBitrate,
-    motionMode,
-  };
+  const currentSettings: StreamSettings = useMemo(
+    () => ({
+      apiEndpoint,
+      apiEndpointIsCustom,
+      autoBitrate,
+      bitrateLimit,
+      fps: streamFps,
+      motionMode,
+      pendingApiEndpoint,
+      resolution,
+      videoCodec,
+    }),
+    [
+      apiEndpoint,
+      apiEndpointIsCustom,
+      autoBitrate,
+      bitrateLimit,
+      streamFps,
+      motionMode,
+      pendingApiEndpoint,
+      resolution,
+      videoCodec,
+    ],
+  );
   const currentSettingsRef = useRef(currentSettings);
-  currentSettingsRef.current = currentSettings;
+  useEffect(() => {
+    currentSettingsRef.current = currentSettings;
+  }, [currentSettings]);
 
   const applySavedSettings = useCallback((saved: StreamSettings) => {
-    const current = currentSettingsRef.current;
+    const { current } = currentSettingsRef;
     const previous = lastSavedSettingsRef.current;
     const codecs = codecsRef.current;
     const isSupported = codecs.some((codec) => codec.codec === saved.videoCodec);
     const bestCodec = codecs[0]?.codec ?? 'vp8';
-    const videoCodec = isSupported ? saved.videoCodec : bestCodec;
-    let apiEndpoint = configEndpointRef.current;
-    if (saved.apiEndpointIsCustom || !apiEndpoint) apiEndpoint = saved.apiEndpoint;
-    const hydrated = { ...saved, apiEndpoint, videoCodec };
+    const nextVideoCodec = isSupported ? saved.videoCodec : bestCodec;
+    let nextApiEndpoint = configEndpointRef.current;
+    if (saved.apiEndpointIsCustom || !nextApiEndpoint) {
+      nextApiEndpoint = saved.apiEndpoint;
+    }
+    const hydrated = { ...saved, apiEndpoint: nextApiEndpoint, videoCodec: nextVideoCodec };
 
     // Incoming saves must not discard edits that this window has not saved yet.
     lastSavedSettingsRef.current = hydrated;
@@ -129,16 +149,20 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   }, [autoBitrate]);
 
   useEffect(() => {
-    let disposed = false;
+    const lifecycle = { disposed: false };
     const unlisten = desktopApi.onStreamSettingsChanged((saved) => {
-      if (!disposed) applySavedSettings(saved);
+      if (!lifecycle.disposed) {
+        applySavedSettings(saved);
+      }
     });
     void (async () => {
       await unlisten;
       const config = await desktopApi.getAppConfig();
       const codecs = recommendCodec(fromNativeCodecInfo(await desktopApi.getNativeSupportedCodecs()));
       const saved = await desktopApi.getStreamSettings();
-      if (disposed) return;
+      if (lifecycle.disposed) {
+        return;
+      }
       configEndpointRef.current = config.apiEndpoint;
       codecsRef.current = codecs;
       setLivekitUrl(config.livekitUrl);
@@ -148,26 +172,32 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       setSettingsHydrated(true);
     })();
     return () => {
-      disposed = true;
-      void unlisten.then((stop) => stop());
+      lifecycle.disposed = true;
+      void unlisten.then((stop) => {
+        stop();
+      });
     };
   }, [applySavedSettings]);
 
   useEffect(() => {
-    if (!settingsHydrated) return;
+    if (!settingsHydrated) {
+      return undefined;
+    }
     const current: StreamSettings = {
-      fps: streamFps,
-      bitrateLimit,
-      videoCodec,
-      resolution,
       apiEndpoint,
       apiEndpointIsCustom,
-      pendingApiEndpoint,
       autoBitrate,
+      bitrateLimit,
+      fps: streamFps,
       motionMode,
+      pendingApiEndpoint,
+      resolution,
+      videoCodec,
     };
     const last = lastSavedSettingsRef.current;
-    if (last && streamSettingsEqual(last, current)) return;
+    if (last && streamSettingsEqual(last, current)) {
+      return undefined;
+    }
 
     const timer = setTimeout(() => {
       const changes: Partial<StreamSettings> = { ...current };
@@ -184,7 +214,9 @@ export function useStreamSettings(): UseStreamSettingsReturn {
       ] as const;
       if (last) {
         for (const key of keys) {
-          if (current[key] === last[key]) delete changes[key];
+          if (current[key] === last[key]) {
+            delete changes[key];
+          }
         }
       }
       void desktopApi
@@ -200,7 +232,9 @@ export function useStreamSettings(): UseStreamSettingsReturn {
           notify('error', 'Settings save failed', String(cause));
         });
     }, SETTINGS_SAVE_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+    };
   }, [
     settingsHydrated,
     streamFps,
@@ -221,30 +255,30 @@ export function useStreamSettings(): UseStreamSettingsReturn {
   }, []);
 
   return {
-    apiEndpoint,
     activateApiEndpoint,
-    pendingApiEndpoint,
-    setPendingApiEndpoint,
-    livekitUrl,
-    setLivekitUrl,
-    streamFps,
-    setStreamFps,
-    bitrateLimit,
-    setBitrateLimit,
-    availableCodecs,
-    setAvailableCodecs,
-    videoCodec,
-    setVideoCodec,
-    resolution,
-    setResolution,
+    apiEndpoint,
     autoBitrate,
-    setAutoBitrate,
-    motionMode,
-    setMotionMode,
-    streamFpsRef,
-    bitrateLimitRef,
-    resolutionRef,
     autoBitrateRef,
+    availableCodecs,
+    bitrateLimit,
+    bitrateLimitRef,
+    livekitUrl,
+    motionMode,
+    pendingApiEndpoint,
+    resolution,
+    resolutionRef,
+    setAutoBitrate,
+    setAvailableCodecs,
+    setBitrateLimit,
+    setLivekitUrl,
+    setMotionMode,
+    setPendingApiEndpoint,
+    setResolution,
+    setStreamFps,
+    setVideoCodec,
     settingsHydrated,
+    streamFps,
+    streamFpsRef,
+    videoCodec,
   };
-}
+};

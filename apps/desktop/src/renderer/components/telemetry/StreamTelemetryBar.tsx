@@ -3,63 +3,63 @@ import { TriangleAlert } from 'lucide-react';
 import React from 'react';
 
 export interface StreamTelemetry {
-  live: boolean;
-  videoCodec: string | null;
-  videoEncoder: string | null;
-  audioCodec: string | null;
-  width: number | null;
-  height: number | null;
-  frameRate: number | null;
-  captureFps: number | null;
-  targetFrameRate: number | null;
-  videoBitrate: number | null;
-  audioBitrate: number | null;
-  packetLossPct: number | null;
-  rttMs: number | null;
-  spectatorCount: number;
-  bitrateHistory: number[];
-  elapsedMs: number;
-  hasAudio: boolean;
-  cursorFrames: number;
-  cursorMissing: boolean;
+  readonly live: boolean;
+  readonly videoCodec: string | null;
+  readonly videoEncoder: string | null;
+  readonly audioCodec: string | null;
+  readonly width: number | null;
+  readonly height: number | null;
+  readonly frameRate: number | null;
+  readonly captureFps: number | null;
+  readonly targetFrameRate: number | null;
+  readonly videoBitrate: number | null;
+  readonly audioBitrate: number | null;
+  readonly packetLossPct: number | null;
+  readonly rttMs: number | null;
+  readonly spectatorCount: number;
+  readonly bitrateHistory: readonly number[];
+  readonly elapsedMs: number;
+  readonly hasAudio: boolean;
+  readonly cursorFrames: number;
+  readonly cursorMissing: boolean;
 }
 
-export function idleTelemetry(): StreamTelemetry {
-  return {
-    live: false,
-    videoCodec: null,
-    videoEncoder: null,
-    audioCodec: null,
-    width: null,
-    height: null,
-    frameRate: null,
-    captureFps: null,
-    targetFrameRate: null,
-    videoBitrate: null,
-    audioBitrate: null,
-    packetLossPct: null,
-    rttMs: null,
-    spectatorCount: 0,
-    bitrateHistory: [],
-    elapsedMs: 0,
-    hasAudio: false,
-    cursorFrames: 0,
-    cursorMissing: false,
-  };
-}
+export const idleTelemetry = (): StreamTelemetry => ({
+  audioBitrate: null,
+  audioCodec: null,
+  bitrateHistory: [],
+  captureFps: null,
+  cursorFrames: 0,
+  cursorMissing: false,
+  elapsedMs: 0,
+  frameRate: null,
+  hasAudio: false,
+  height: null,
+  live: false,
+  packetLossPct: null,
+  rttMs: null,
+  spectatorCount: 0,
+  targetFrameRate: null,
+  videoBitrate: null,
+  videoCodec: null,
+  videoEncoder: null,
+  width: null,
+});
 
-export function fmtDuration(ms: number): string {
+export const fmtDuration = (ms: number): string => {
   const totalSec = Math.floor(ms / 1000);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+};
+
+interface SparklineProps {
+  readonly data: readonly number[];
+  readonly width?: number;
+  readonly height?: number;
 }
 
-const Sparkline: React.FC<{ data: number[]; width?: number; height?: number }> = ({
-  data,
-  width = 88,
-  height = 22,
-}) => {
+const Sparkline: React.FC<SparklineProps> = ({ data, width = 88, height = 22 }: SparklineProps) => {
   let points = '';
   let areaPoints = '';
   if (data.length >= 2) {
@@ -112,18 +112,20 @@ const TelemetryCell: React.FC<{
   sub?: React.ReactNode;
   degrade?: boolean;
 }> = ({ label, value, sub, degrade }) => {
-  const labelClass = degrade ? 'text-destructive/75' : 'text-muted-foreground';
-  const valueClass = degrade ? 'text-destructive' : 'text-foreground';
+  const labelClass = degrade === true ? 'text-destructive/75' : 'text-muted-foreground';
+  const valueClass = degrade === true ? 'text-destructive' : 'text-foreground';
 
   return (
     <div className="flex flex-col gap-1 min-w-0 shrink-0">
       <span className={`text-xs font-semibold uppercase tracking-wider leading-none ${labelClass}`}>{label}</span>
       <span className="flex items-baseline gap-1.5 leading-none">
         <span className={`text-sm font-mono font-semibold tabular-nums leading-none ${valueClass}`}>
-          {degrade && <TriangleAlert className="inline size-3 mr-1 -mt-0.5" aria-hidden="true" />}
+          {degrade === true && <TriangleAlert className="inline size-3 mr-1 -mt-0.5" aria-hidden="true" />}
           {value}
         </span>
-        {sub != null && <span className="text-xs font-mono tabular-nums leading-none text-caption-text">{sub}</span>}
+        {sub !== null && sub !== undefined && (
+          <span className="text-xs font-mono tabular-nums leading-none text-caption-text">{sub}</span>
+        )}
       </span>
     </div>
   );
@@ -138,7 +140,7 @@ const AudioTelemetryValue: React.FC<{ telemetry: StreamTelemetry }> = ({ telemet
       <span className="text-sm font-mono font-semibold tabular-nums leading-none text-foreground">
         {t.audioCodec ?? '\u2014'}
       </span>
-      {t.audioBitrate != null && (
+      {t.audioBitrate !== null && (
         <span className="text-xs font-mono tabular-nums leading-none text-muted-foreground">
           {fmtBitrate(t.audioBitrate)}
         </span>
@@ -178,80 +180,91 @@ const CursorCell: React.FC<{ telemetry: StreamTelemetry }> = ({ telemetry: t }) 
   );
 };
 
-export const StreamTelemetryBar: React.FC<{ telemetry: StreamTelemetry }> = React.memo(({ telemetry: t }) => {
-  const fpsDegrade = t.frameRate != null && t.targetFrameRate != null && t.frameRate < t.targetFrameRate * 0.75;
-  const lossDegrade = t.packetLossPct != null && t.packetLossPct > 1;
-  let fpsValue = '—';
-  let fpsSub: string | undefined;
-  if (t.frameRate != null) {
-    fpsValue = `${Math.round(t.frameRate)} fps`;
-  }
-  if (t.targetFrameRate != null) {
-    fpsSub = `/ ${Math.round(t.targetFrameRate)}`;
-  }
-  const captureValue = t.captureFps != null ? `${Math.round(t.captureFps)} fps` : '—';
+interface StreamTelemetryBarProps {
+  readonly telemetry: StreamTelemetry;
+}
 
-  const sparklineSub = t.bitrateHistory.length > 0 ? `bitrate · last ${t.bitrateHistory.length}s` : 'awaiting uplink';
+export const StreamTelemetryBar: React.FC<StreamTelemetryBarProps> = React.memo(
+  ({ telemetry: t }: StreamTelemetryBarProps) => {
+    const fpsDegrade = t.frameRate !== null && t.targetFrameRate !== null && t.frameRate < t.targetFrameRate * 0.75;
+    const lossDegrade = t.packetLossPct !== null && t.packetLossPct > 1;
+    let fpsValue = '—';
+    let fpsSub: string | undefined = undefined;
+    if (t.frameRate !== null) {
+      fpsValue = `${Math.round(t.frameRate)} fps`;
+    }
+    if (t.targetFrameRate !== null) {
+      fpsSub = `/ ${Math.round(t.targetFrameRate)}`;
+    }
+    const captureValue = t.captureFps === null ? '—' : `${Math.round(t.captureFps)} fps`;
 
-  return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 select-none">
-      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/75 to-transparent" />
-      <div className="relative px-4 pt-12 pb-3">
-        <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span className="w-2 h-2 rounded-full bg-safelight motion-safe:animate-pulse" />
-            <span className="text-xs font-semibold uppercase tracking-wider text-safelight">On Air</span>
-          </div>
+    const sparklineSub = t.bitrateHistory.length > 0 ? `bitrate · last ${t.bitrateHistory.length}s` : 'awaiting uplink';
 
-          <TelemetryCell label="Codec" value={t.videoCodec ?? '—'} />
-          <TelemetryCell label="Resolution" value={t.width && t.height ? `${t.width}×${t.height}` : '—'} />
-          <TelemetryCell
-            label="Frame Rate"
-            value={
-              <span data-testid="telemetry-fps" className="tabular-nums">
-                {fpsValue}
-              </span>
-            }
-            sub={fpsSub}
-            degrade={fpsDegrade}
-          />
-          <TelemetryCell label="Capture" value={<span data-testid="telemetry-capture">{captureValue}</span>} />
-          <CursorCell telemetry={t} />
-          <TelemetryCell
-            label="Bitrate"
-            value={
-              <span data-testid="telemetry-bitrate" className="tabular-nums">
-                {fmtBitrate(t.videoBitrate)}
-              </span>
-            }
-          />
-          <TelemetryCell label="Loss" value={fmtLoss(t.packetLossPct)} degrade={lossDegrade} />
-
-          <div className="flex flex-col gap-1 shrink-0 min-w-0">
-            <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
-              Audio
-            </span>
-            <AudioTelemetryValue telemetry={t} />
-          </div>
-
-          <div className="grow basis-0 min-w-0" />
-
-          <div className="flex items-end gap-3 shrink-0">
-            <div className="flex flex-col items-end gap-1">
-              <Sparkline data={t.bitrateHistory} />
-              <span className="text-xs uppercase tracking-wider text-caption-text leading-none">{sparklineSub}</span>
+    return (
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 select-none">
+        <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/75 to-transparent" />
+        <div className="relative px-4 pt-12 pb-3">
+          <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="w-2 h-2 rounded-full bg-safelight motion-safe:animate-pulse" />
+              <span className="text-xs font-semibold uppercase tracking-wider text-safelight">On Air</span>
             </div>
-            <div className="flex flex-col gap-1 items-end">
+
+            <TelemetryCell label="Codec" value={t.videoCodec ?? '—'} />
+            <TelemetryCell
+              label="Resolution"
+              value={Boolean(t.width) && Boolean(t.height) ? `${t.width}×${t.height}` : '—'}
+            />
+            <TelemetryCell
+              label="Frame Rate"
+              value={
+                <span data-testid="telemetry-fps" className="tabular-nums">
+                  {fpsValue}
+                </span>
+              }
+              sub={fpsSub}
+              degrade={fpsDegrade}
+            />
+            <TelemetryCell label="Capture" value={<span data-testid="telemetry-capture">{captureValue}</span>} />
+            <CursorCell telemetry={t} />
+            <TelemetryCell
+              label="Bitrate"
+              value={
+                <span data-testid="telemetry-bitrate" className="tabular-nums">
+                  {fmtBitrate(t.videoBitrate)}
+                </span>
+              }
+            />
+            <TelemetryCell label="Loss" value={fmtLoss(t.packetLossPct)} degrade={lossDegrade} />
+
+            <div className="flex flex-col gap-1 shrink-0 min-w-0">
               <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
-                Elapsed
+                Audio
               </span>
-              <span className="text-xs font-mono font-semibold tabular-nums leading-none text-foreground">
-                {fmtDuration(t.elapsedMs)}
-              </span>
+              <AudioTelemetryValue telemetry={t} />
+            </div>
+
+            <div className="grow basis-0 min-w-0" />
+
+            <div className="flex items-end gap-3 shrink-0">
+              <div className="flex flex-col items-end gap-1">
+                <Sparkline data={t.bitrateHistory} />
+                <span className="text-xs uppercase tracking-wider text-caption-text leading-none">{sparklineSub}</span>
+              </div>
+              <div className="flex flex-col gap-1 items-end">
+                <span className="text-xs font-semibold uppercase tracking-wider leading-none text-muted-foreground">
+                  Elapsed
+                </span>
+                <span className="text-xs font-mono font-semibold tabular-nums leading-none text-foreground">
+                  {fmtDuration(t.elapsedMs)}
+                </span>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  );
-});
+    );
+  },
+);
+
+StreamTelemetryBar.displayName = 'StreamTelemetryBar';

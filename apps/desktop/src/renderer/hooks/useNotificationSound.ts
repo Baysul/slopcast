@@ -7,11 +7,15 @@ declare global {
 let audioCtx: AudioContext | null = null;
 
 const getAudioCtx = (): AudioContext | null => {
-  const Ctor = window.AudioContext ?? window.webkitAudioContext;
-  if (!Ctor) return null;
+  const Ctor = typeof window.AudioContext === 'function' ? window.AudioContext : window.webkitAudioContext;
+  if (Ctor === undefined) {
+    return null;
+  }
   try {
-    if (!audioCtx) audioCtx = new Ctor();
-    if (audioCtx.state === 'suspended') void audioCtx.resume();
+    audioCtx ??= new Ctor();
+    if (audioCtx.state === 'suspended') {
+      void audioCtx.resume();
+    }
     return audioCtx;
   } catch (err) {
     console.warn('AudioContext creation failed:', err);
@@ -33,7 +37,9 @@ interface ToneSpec {
 
 const playChime = (tones: ToneSpec[]): void => {
   const ctx = getAudioCtx();
-  if (!ctx) return;
+  if (!ctx) {
+    return;
+  }
   const now = ctx.currentTime;
   const master = ctx.createGain();
   master.gain.setValueAtTime(0.0001, now);
@@ -75,23 +81,25 @@ export type NotificationVariant = 'success' | 'info' | 'error';
 
 export const playNotificationSound = (variant: NotificationVariant): void => {
   const now = Date.now();
-  if (now - lastSoundTime < SOUND_THROTTLE_MS) return;
+  if (now - lastSoundTime < SOUND_THROTTLE_MS) {
+    return;
+  }
   lastSoundTime = now;
   try {
     switch (variant) {
       case 'success':
         playChime([
-          { freq: 659.25, start: 0, dur: 0.15 },
-          { freq: 987.77, start: 0.075, dur: 0.22 },
+          { dur: 0.15, freq: 659.25, start: 0 },
+          { dur: 0.22, freq: 987.77, start: 0.075 },
         ]);
         break;
       case 'info':
-        playChime([{ freq: 880, start: 0, dur: 0.16, peak: 0.5, type: 'triangle' }]);
+        playChime([{ dur: 0.16, freq: 880, peak: 0.5, start: 0, type: 'triangle' }]);
         break;
       case 'error':
         playChime([
-          { freq: 440, start: 0, dur: 0.16, type: 'triangle' },
-          { freq: 349.23, start: 0.09, dur: 0.24, type: 'triangle' },
+          { dur: 0.16, freq: 440, start: 0, type: 'triangle' },
+          { dur: 0.24, freq: 349.23, start: 0.09, type: 'triangle' },
         ]);
         break;
     }

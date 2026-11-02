@@ -1,6 +1,8 @@
 import { AppWindow, Monitor } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
+
 import { Button } from '@/components/ui/button';
+
 import { desktopApi } from '../../api/desktop';
 import type { CaptureSourceInfo, CaptureSourceSelection } from '../../types';
 
@@ -17,7 +19,9 @@ export const CaptureSourcePicker: React.FC<CaptureSourcePickerProps> = React.mem
   useEffect(() => {
     let disposed = false;
     void desktopApi.getCaptureSources().then((list) => {
-      if (disposed) return;
+      if (disposed) {
+        return;
+      }
       if (list.length === 0) {
         setError('No capture sources found — open a window or connect a display, then retry.');
         return;
@@ -56,7 +60,9 @@ export const CaptureSourcePicker: React.FC<CaptureSourcePickerProps> = React.mem
                 size="sm"
                 className="w-full justify-start gap-2 font-normal"
                 aria-pressed={isSelected(source)}
-                onClick={() => setSelected({ kind: 'screen', id: source.id })}
+                onClick={() => {
+                  setSelected({ id: source.id, kind: 'screen' });
+                }}
               >
                 <Monitor className="size-4 shrink-0" aria-hidden="true" />
                 {screenLabel(source)}
@@ -75,7 +81,9 @@ export const CaptureSourcePicker: React.FC<CaptureSourcePickerProps> = React.mem
                 size="sm"
                 className="w-full justify-start gap-2 font-normal truncate"
                 aria-pressed={isSelected(source)}
-                onClick={() => setSelected({ kind: 'window', id: source.id })}
+                onClick={() => {
+                  setSelected({ id: source.id, kind: 'window' });
+                }}
               >
                 <AppWindow className="size-4 shrink-0" aria-hidden="true" />
                 {source.title}
@@ -88,7 +96,9 @@ export const CaptureSourcePicker: React.FC<CaptureSourcePickerProps> = React.mem
           className="w-full font-bold"
           disabled={selected === null}
           onClick={() => {
-            if (selected !== null) onSelect(selected);
+            if (selected !== null) {
+              onSelect(selected);
+            }
           }}
         >
           Share

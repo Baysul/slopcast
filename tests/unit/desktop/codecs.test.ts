@@ -1,18 +1,23 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+
+import { test } from 'vite-plus/test';
+
 import type { NativeCodecInfo } from '../../../apps/desktop/src/renderer/types/index.ts';
 import {
-  type CodecInfo,
   codecOptionSuffix,
   fromNativeCodecInfo,
   groupCodecsByHardware,
   recommendCodec,
   sortByCodecPreference,
 } from '../../../apps/desktop/src/renderer/utils/codecs.ts';
+import type { CodecInfo } from '../../../apps/desktop/src/renderer/utils/codecs.ts';
 
-function info(codec: CodecInfo['codec'], hardware = false, recommended = false): CodecInfo {
-  return { codec, label: codec.toUpperCase(), hardware, recommended };
-}
+const info = (codec: CodecInfo['codec'], hardware = false, recommended = false): CodecInfo => ({
+  codec,
+  hardware,
+  label: codec.toUpperCase(),
+  recommended,
+});
 
 test('sortByCodecPreference orders h264 > h265 > vp8 > vp9 > av1', () => {
   const sorted = sortByCodecPreference([info('av1'), info('h265'), info('h264'), info('vp9'), info('vp8')]);
@@ -49,11 +54,11 @@ test('codecOptionSuffix marks only the recommended codec (labels carry the encod
 
 test('fromNativeCodecInfo maps the native stack list and sorts by preference', () => {
   const native: NativeCodecInfo[] = [
-    { codec: 'h264', label: 'H.264', hardware: true },
-    { codec: 'h265', label: 'H.265', hardware: true },
-    { codec: 'vp8', label: 'VP8', hardware: false },
-    { codec: 'vp9', label: 'VP9', hardware: false },
-    { codec: 'av1', label: 'AV1', hardware: false },
+    { codec: 'h264', hardware: true, label: 'H.264' },
+    { codec: 'h265', hardware: true, label: 'H.265' },
+    { codec: 'vp8', hardware: false, label: 'VP8' },
+    { codec: 'vp9', hardware: false, label: 'VP9' },
+    { codec: 'av1', hardware: false, label: 'AV1' },
   ];
   const codecs = fromNativeCodecInfo(native);
   assert.deepEqual(
@@ -70,8 +75,8 @@ test('fromNativeCodecInfo maps the native stack list and sorts by preference', (
 
 test('fromNativeCodecInfo keeps h265 and drops unknown codecs', () => {
   const native: NativeCodecInfo[] = [
-    { codec: 'h265', label: 'H.265', hardware: true },
-    { codec: 'theora', label: 'Theora', hardware: false },
+    { codec: 'h265', hardware: true, label: 'H.265' },
+    { codec: 'theora', hardware: false, label: 'Theora' },
   ];
   assert.deepEqual(
     fromNativeCodecInfo(native).map((c) => c.codec),
@@ -132,11 +137,11 @@ test('recommendCodec returns an empty list unchanged', () => {
 test('groupCodecsByHardware puts hardware first, preserving order within each group', () => {
   const codecs = recommendCodec(
     fromNativeCodecInfo([
-      { codec: 'h264', label: 'H.264 (NVENC)', hardware: true },
-      { codec: 'h265', label: 'H.265 (NVENC)', hardware: true },
-      { codec: 'vp8', label: 'VP8', hardware: false },
-      { codec: 'vp9', label: 'VP9', hardware: false },
-      { codec: 'av1', label: 'AV1', hardware: false },
+      { codec: 'h264', hardware: true, label: 'H.264 (NVENC)' },
+      { codec: 'h265', hardware: true, label: 'H.265 (NVENC)' },
+      { codec: 'vp8', hardware: false, label: 'VP8' },
+      { codec: 'vp9', hardware: false, label: 'VP9' },
+      { codec: 'av1', hardware: false, label: 'AV1' },
     ]),
   );
   const { hardware, software } = groupCodecsByHardware(codecs);

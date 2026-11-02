@@ -1,6 +1,7 @@
 import { Settings } from 'lucide-react';
 import type React from 'react';
 import { useEffect, useState } from 'react';
+
 import { desktopApi } from '@/api/desktop';
 import { windowControls } from '@/api/windowControls';
 import type { WindowButtonIcons } from '@/types';
@@ -10,39 +11,43 @@ type ButtonKind = keyof WindowButtonIcons;
 
 // Used only when the icon theme provides no window icons.
 const FALLBACK_PATHS = {
-  minimize: 'M3 8.5H13',
-  maximize: 'M3.5 3.5H12.5V12.5H3.5Z',
-  restore: 'M5.5 3.5H12.5V10.5M3.5 5.5H10.5V12.5H3.5Z',
   close: 'M3.5 3.5 12.5 12.5M12.5 3.5 3.5 12.5',
+  maximize: 'M3.5 3.5H12.5V12.5H3.5Z',
+  minimize: 'M3 8.5H13',
+  restore: 'M5.5 3.5H12.5V10.5M3.5 5.5H10.5V12.5H3.5Z',
 } satisfies Record<ButtonKind, string>;
 
 const LAYOUTS = {
-  windows: {
-    group: 'items-stretch',
-    button: 'w-11 text-muted-foreground hover:bg-accent/60 hover:text-foreground',
+  gnome: {
+    button: 'size-6 rounded-full bg-foreground/10 text-foreground hover:bg-foreground/20',
+    group: 'items-center gap-2 pl-1 pr-3',
   },
   kde: {
-    group: 'items-center gap-1 pl-1 pr-2.5',
     button: 'size-6 rounded-full text-muted-foreground hover:bg-foreground/15 hover:text-foreground',
+    group: 'items-center gap-1 pl-1 pr-2.5',
   },
-  gnome: {
-    group: 'items-center gap-2 pl-1 pr-3',
-    button: 'size-6 rounded-full bg-foreground/10 text-foreground hover:bg-foreground/20',
+  windows: {
+    button: 'w-11 text-muted-foreground hover:bg-accent/60 hover:text-foreground',
+    group: 'items-stretch',
   },
 } satisfies Record<ButtonStyle, { group: string; button: string }>;
 
 const CLOSE_HOVER = 'hover:bg-destructive hover:text-destructive-foreground';
 
-function pickButtonStyle(platform: string, desktopEnvironment: string): ButtonStyle {
-  if (platform !== 'linux') return 'windows';
-  if (desktopEnvironment.includes('kde')) return 'kde';
+const pickButtonStyle = (platform: string, desktopEnvironment: string): ButtonStyle => {
+  if (platform !== 'linux') {
+    return 'windows';
+  }
+  if (desktopEnvironment.includes('kde')) {
+    return 'kde';
+  }
   return 'gnome';
-}
+};
 
 // Icon themes draw these at 16px with the glyph centred in the box, so the box is centred in the
-// button. The SVG is a mask so it takes the button's colour whatever colours the theme baked in.
+// Button. The SVG is a mask so it takes the button's colour whatever colours the theme baked in.
 const ThemeGlyph: React.FC<{ kind: ButtonKind; svg: string | null }> = ({ kind, svg }) => {
-  if (!svg) {
+  if (svg === null || svg === '') {
     return (
       <svg
         viewBox="0 0 16 16"
@@ -62,7 +67,7 @@ const ThemeGlyph: React.FC<{ kind: ButtonKind; svg: string | null }> = ({ kind, 
     <span
       aria-hidden="true"
       className="size-4 bg-current"
-      style={{ maskImage: mask, maskSize: '16px 16px', maskPosition: 'center', maskRepeat: 'no-repeat' }}
+      style={{ maskImage: mask, maskPosition: 'center', maskRepeat: 'no-repeat', maskSize: '16px 16px' }}
     />
   );
 };

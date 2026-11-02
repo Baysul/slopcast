@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+
+import { test } from 'vite-plus/test';
 
 import {
-  isGroupSelected,
   NO_AUDIO_APP,
+  isGroupSelected,
   selectedTargetProcessId,
   toAudioTargetId,
 } from '../../../apps/desktop/src/renderer/utils/audio-targets.ts';

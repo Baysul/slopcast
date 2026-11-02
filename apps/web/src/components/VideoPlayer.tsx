@@ -11,22 +11,16 @@ import {
   VolumeX,
 } from 'lucide-react';
 import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
 import { AudioVisualizer, unlockAudioContexts } from './AudioVisualizer';
 import { REPLAY_BLOCKED_MESSAGE } from './replay/replay-ownership';
-import { type UseViewerReplayResult, useViewerReplay } from './replay/use-viewer-replay';
-import {
-  REPLAY_LIVE_TOLERANCE_SECONDS,
-  REPLAY_MAX_SECONDS,
-  REPLAY_STEP_SECONDS,
-  type ViewerReplaySnapshot,
-} from './replay/viewer-replay';
-import {
-  computeTelemetry,
-  createStatsPrev,
-  type SpectatorTelemetry,
-  SpectatorTelemetryBar,
-} from './SpectatorTelemetryBar';
+import { useViewerReplay } from './replay/use-viewer-replay';
+import type { UseViewerReplayResult } from './replay/use-viewer-replay';
+import { REPLAY_LIVE_TOLERANCE_SECONDS, REPLAY_MAX_SECONDS, REPLAY_STEP_SECONDS } from './replay/viewer-replay';
+import type { ViewerReplaySnapshot } from './replay/viewer-replay';
+import { SpectatorTelemetryBar, computeTelemetry, createStatsPrev } from './SpectatorTelemetryBar';
+import type { SpectatorTelemetry } from './SpectatorTelemetryBar';
 import { Button } from './ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Slider } from './ui/slider';
@@ -98,31 +92,33 @@ interface PlaybackDiagnostics {
 
 declare global {
   interface Window {
-    __slopcastPlaybackDiagnostics?: PlaybackDiagnostics;
+    slopcastPlaybackDiagnostics?: PlaybackDiagnostics;
   }
 }
 
 const diagnosticEnabled = (): boolean => new URLSearchParams(window.location.search).has('diagnostics');
 
 const percentile = (values: number[], percentileValue: number): number | null => {
-  if (values.length === 0) return null;
+  if (values.length === 0) {
+    return null;
+  }
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * percentileValue))] ?? null;
 };
 
 const summarizePresentation = (frames: PresentationFrame[], fps = 60): PresentationSummary => {
   const frameInterval = 1000 / fps;
-  const gaps = frames.flatMap((frame) => (frame.presentationGap == null ? [] : [frame.presentationGap]));
+  const gaps = frames.flatMap((frame) => (frame.presentationGap === null ? [] : [frame.presentationGap]));
   const maximumGap = gaps.length === 0 ? null : Math.max(...gaps);
 
   return {
+    aboveOnePointFiveIntervals: gaps.filter((gap) => gap > frameInterval * 1.5).length,
+    aboveTwoIntervals: gaps.filter((gap) => gap > frameInterval * 2).length,
     frameInterval,
+    maximumGap,
     medianGap: percentile(gaps, 0.5),
     p95Gap: percentile(gaps, 0.95),
     p99Gap: percentile(gaps, 0.99),
-    maximumGap,
-    aboveOnePointFiveIntervals: gaps.filter((gap) => gap > frameInterval * 1.5).length,
-    aboveTwoIntervals: gaps.filter((gap) => gap > frameInterval * 2).length,
     presentedFrames: frames.length,
   };
 };
@@ -130,7 +126,9 @@ const summarizePresentation = (frames: PresentationFrame[], fps = 60): Presentat
 const usePlaybackDiagnostics = (videoRef: React.RefObject<HTMLVideoElement | null>): void => {
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !diagnosticEnabled()) return;
+    if (!video || !diagnosticEnabled()) {
+      return undefined;
+    }
 
     const frames: PresentationFrame[] = [];
     let previous: PresentationFrame | null = null;
@@ -139,23 +137,25 @@ const usePlaybackDiagnostics = (videoRef: React.RefObject<HTMLVideoElement | nul
       frames,
       summary: (fps = 60) => summarizePresentation(frames, fps),
     };
-    window.__slopcastPlaybackDiagnostics = diagnostics;
+    window.slopcastPlaybackDiagnostics = diagnostics;
 
     const recordFrame = (now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata): void => {
       const frame: PresentationFrame = {
+        callbackGap: previous === null ? null : now - previous.callbackTime,
         callbackTime: now,
-        callbackGap: previous == null ? null : now - previous.callbackTime,
-        mediaTime: metadata.mediaTime,
-        mediaTimeGap: previous == null ? null : metadata.mediaTime - previous.mediaTime,
-        presentationTime: metadata.presentationTime,
-        presentationGap: previous == null ? null : metadata.presentationTime - previous.presentationTime,
-        expectedDisplayTime: metadata.expectedDisplayTime,
         expectedDisplayLead: metadata.expectedDisplayTime - now,
+        expectedDisplayTime: metadata.expectedDisplayTime,
+        mediaTime: metadata.mediaTime,
+        mediaTimeGap: previous === null ? null : metadata.mediaTime - previous.mediaTime,
+        presentationGap: previous === null ? null : metadata.presentationTime - previous.presentationTime,
+        presentationTime: metadata.presentationTime,
         presentedFrames: metadata.presentedFrames,
         processingDuration: metadata.processingDuration ?? null,
       };
       frames.push(frame);
-      if (frames.length > MAX_PRESENTATION_TRACE_FRAMES) frames.shift();
+      if (frames.length > MAX_PRESENTATION_TRACE_FRAMES) {
+        frames.shift();
+      }
       previous = frame;
       callbackId = video.requestVideoFrameCallback(recordFrame);
     };
@@ -167,7 +167,7 @@ const usePlaybackDiagnostics = (videoRef: React.RefObject<HTMLVideoElement | nul
   }, [videoRef]);
 };
 
-async function playWithMuteFallback(video: HTMLVideoElement): Promise<boolean> {
+const playWithMuteFallback = async (video: HTMLVideoElement): Promise<boolean> => {
   try {
     await video.play();
     return false;
@@ -180,7 +180,7 @@ async function playWithMuteFallback(video: HTMLVideoElement): Promise<boolean> {
       return true;
     }
   }
-}
+};
 
 const getOverlayClass = (showControls: boolean): string =>
   showControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none';
@@ -211,28 +211,33 @@ interface SpectatorTelemetryState {
 }
 
 const useSpectatorTelemetry = (
-  isVisible: boolean,
-  isLive: boolean,
-  getStatsFn: (() => Promise<RTCStatsReport | null>) | undefined,
+  getStatsFn: () => Promise<RTCStatsReport | null>,
   mediaStream: MediaStream | null,
 ): SpectatorTelemetryState => {
-  const [telemetry, setTelemetry] = useState<SpectatorTelemetry | null>(null);
+  const [telemetrySnapshot, setTelemetrySnapshot] = useState<{
+    getStatsFn: typeof getStatsFn;
+    mediaStream: MediaStream | null;
+    telemetry: SpectatorTelemetry;
+  } | null>(null);
+  const telemetry =
+    telemetrySnapshot?.getStatsFn === getStatsFn && telemetrySnapshot.mediaStream === mediaStream
+      ? telemetrySnapshot.telemetry
+      : null;
 
   useEffect(() => {
-    setTelemetry(null);
-    if (!isVisible || !isLive || !getStatsFn) return;
-
     let isCancelled = false;
     let statsPrev: ReturnType<typeof createStatsPrev> = null;
     const pollTelemetry = async (): Promise<void> => {
       const report = await getStatsFn();
-      if (!report || isCancelled) return;
+      if (report === null || isCancelled) {
+        return;
+      }
 
       const hasAudio = mediaStream?.getAudioTracks().some((track) => track.enabled) ?? false;
       const nextTelemetry = computeTelemetry(report, statsPrev, hasAudio);
       statsPrev = createStatsPrev(report) ?? statsPrev;
 
-      setTelemetry(nextTelemetry);
+      setTelemetrySnapshot({ getStatsFn, mediaStream, telemetry: nextTelemetry });
     };
     const interval = setInterval(() => {
       void pollTelemetry();
@@ -243,9 +248,24 @@ const useSpectatorTelemetry = (
       isCancelled = true;
       clearInterval(interval);
     };
-  }, [isVisible, isLive, getStatsFn, mediaStream]);
+  }, [getStatsFn, mediaStream]);
 
   return { telemetry };
+};
+
+const SpectatorTelemetryDisplay: React.FC<{
+  getStatsFn: () => Promise<RTCStatsReport | null>;
+  mediaStream: MediaStream | null;
+}> = ({ getStatsFn, mediaStream }) => {
+  const { telemetry } = useSpectatorTelemetry(getStatsFn, mediaStream);
+  if (telemetry?.hasVideo !== true) {
+    return <div className="hidden sm:block" />;
+  }
+  return (
+    <div className="min-w-0">
+      <SpectatorTelemetryBar telemetry={telemetry} />
+    </div>
+  );
 };
 
 interface PlaybackControls {
@@ -265,9 +285,9 @@ interface PlaybackControls {
 
 const fullscreenTarget = (container: HTMLDivElement | null, fullBleed: boolean): HTMLElement => {
   if (!fullBleed) {
-    return container || document.documentElement;
+    return container ?? document.documentElement;
   }
-  return container?.closest<HTMLElement>('.min-h-screen') || container || document.documentElement;
+  return container?.closest<HTMLElement>('.min-h-screen') ?? container ?? document.documentElement;
 };
 
 const usePlaybackControls = (
@@ -278,35 +298,66 @@ const usePlaybackControls = (
   replay: UseViewerReplayResult,
 ): PlaybackControls => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(1);
-  const [hasVideoTrack, setHasVideoTrack] = useState(false);
-  const [needsUserGesture, setNeedsUserGesture] = useState(false);
+  const [trackSnapshot, setTrackSnapshot] = useState<{ stream: MediaStream | null; hasVideoTrack: boolean } | null>(
+    null,
+  );
+  const [playSnapshot, setPlaySnapshot] = useState<{
+    isPlaying: boolean;
+    needsUserGesture: boolean;
+    stream: MediaStream | null;
+  } | null>(null);
+  // Playback and track state describe a specific stream. Reading it during render keeps a new
+  // Stream from briefly showing the previous stream's state.
+  const hasVideoTrack =
+    trackSnapshot?.stream === mediaStream
+      ? trackSnapshot.hasVideoTrack
+      : (mediaStream?.getVideoTracks().at(0)?.enabled ?? false);
+  const playStateForStream = playSnapshot?.stream === mediaStream ? playSnapshot : null;
+  const isPlaying = playStateForStream !== null && playStateForStream.isPlaying;
+  const needsUserGesture = playStateForStream !== null && playStateForStream.needsUserGesture;
+  const setIsPlaying = useCallback(
+    (value: boolean): void => {
+      setPlaySnapshot((current) => ({
+        ...(current?.stream === mediaStream ? current : { isPlaying: false, needsUserGesture: false }),
+        isPlaying: value,
+        stream: mediaStream,
+      }));
+    },
+    [mediaStream],
+  );
+  const setNeedsUserGesture = useCallback(
+    (value: boolean): void => {
+      setPlaySnapshot((current) => ({
+        ...(current?.stream === mediaStream ? current : { isPlaying: false, needsUserGesture: false }),
+        needsUserGesture: value,
+        stream: mediaStream,
+      }));
+    },
+    [mediaStream],
+  );
   const audioTrackCount = mediaStream?.getAudioTracks().length ?? 0;
 
   useEffect(() => {
     const video = liveVideoRef.current;
-    if (!video) return;
+    if (!video) {
+      return undefined;
+    }
 
     const applyTracks = (): void => {
       const videoTracks = mediaStream?.getVideoTracks() ?? [];
-      setHasVideoTrack(videoTracks.at(0)?.enabled === true);
+      setTrackSnapshot({ hasVideoTrack: videoTracks.at(0)?.enabled === true, stream: mediaStream });
     };
 
     if (!mediaStream) {
       video.srcObject = null;
-      applyTracks();
-      setNeedsUserGesture(false);
-      setIsPlaying(false);
-      return;
+      return undefined;
     }
 
     video.srcObject = mediaStream;
-    applyTracks();
-    setNeedsUserGesture(false);
 
-    playWithMuteFallback(video).then((needsGesture) => {
+    void playWithMuteFallback(video).then((needsGesture) => {
       applyPlayResult(video, needsGesture, setIsPlaying, setIsMuted, setNeedsUserGesture, false);
     });
     mediaStream.addEventListener('addtrack', applyTracks);
@@ -315,13 +366,15 @@ const usePlaybackControls = (
       mediaStream.removeEventListener('addtrack', applyTracks);
       mediaStream.removeEventListener('removetrack', applyTracks);
     };
-  }, [liveVideoRef, mediaStream]);
+  }, [liveVideoRef, mediaStream, setNeedsUserGesture, setIsPlaying]);
 
   useEffect(() => {
     const liveVideo = liveVideoRef.current;
     const replayVideo = replayVideoRef.current;
     const activeVideo = replay.snapshot.mode === 'replay' ? replayVideo : liveVideo;
-    if (!activeVideo) return;
+    if (!activeVideo) {
+      return undefined;
+    }
 
     if (liveVideo) {
       liveVideo.volume = volume;
@@ -332,7 +385,9 @@ const usePlaybackControls = (
       replayVideo.muted = replay.snapshot.mode === 'live' || isMuted;
     }
 
-    const syncPlaying = (): void => setIsPlaying(!activeVideo.paused);
+    const syncPlaying = (): void => {
+      setIsPlaying(!activeVideo.paused);
+    };
     syncPlaying();
     activeVideo.addEventListener('play', syncPlaying);
     activeVideo.addEventListener('pause', syncPlaying);
@@ -340,11 +395,13 @@ const usePlaybackControls = (
       activeVideo.removeEventListener('play', syncPlaying);
       activeVideo.removeEventListener('pause', syncPlaying);
     };
-  }, [isMuted, liveVideoRef, replay.snapshot.mode, replayVideoRef, volume]);
+  }, [isMuted, liveVideoRef, replay.snapshot.mode, replayVideoRef, setIsPlaying, volume]);
 
   const handleUserGesture = () => {
     const video = liveVideoRef.current;
-    if (!video) return;
+    if (!video) {
+      return;
+    }
 
     video.muted = false;
     setIsMuted(false);
@@ -362,7 +419,9 @@ const usePlaybackControls = (
 
   const toggleReplayPlayback = (): void => {
     const replayVideo = replayVideoRef.current;
-    if (!replayVideo) return;
+    if (!replayVideo) {
+      return;
+    }
 
     if (replayVideo.paused) {
       replay.playReplay();
@@ -373,10 +432,12 @@ const usePlaybackControls = (
 
   const toggleLivePlayback = (): void => {
     const liveVideo = liveVideoRef.current;
-    if (!liveVideo) return;
+    if (!liveVideo) {
+      return;
+    }
 
     if (!liveVideo.paused) {
-      const range = replay.snapshot.range;
+      const { range } = replay.snapshot;
       if (range) {
         replay.seek(Math.max(range.start, range.end - 0.05), false);
         return;
@@ -408,8 +469,12 @@ const usePlaybackControls = (
     const replayVideo = replayVideoRef.current;
 
     setIsMuted(nextMuted);
-    if (liveVideo) liveVideo.muted = replay.snapshot.mode === 'replay' || nextMuted;
-    if (replayVideo) replayVideo.muted = replay.snapshot.mode === 'live' || nextMuted;
+    if (liveVideo) {
+      liveVideo.muted = replay.snapshot.mode === 'replay' || nextMuted;
+    }
+    if (replayVideo) {
+      replayVideo.muted = replay.snapshot.mode === 'live' || nextMuted;
+    }
   };
 
   const handleVolumeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -435,22 +500,22 @@ const usePlaybackControls = (
       document.exitFullscreen().catch(console.error);
       return;
     }
-    fullscreenTarget(containerRef.current, !!fullBleed).requestFullscreen().catch(console.error);
+    fullscreenTarget(containerRef.current, Boolean(fullBleed)).requestFullscreen().catch(console.error);
   };
 
   return {
-    containerRef,
-    isPlaying,
-    isMuted,
-    volume,
-    hasVideoTrack,
-    needsUserGesture,
     audioTrackCount,
+    containerRef,
     handleUserGesture,
-    togglePlay,
-    toggleMute,
     handleVolumeChange,
+    hasVideoTrack,
+    isMuted,
+    isPlaying,
+    needsUserGesture,
     toggleFullscreen,
+    toggleMute,
+    togglePlay,
+    volume,
   };
 };
 
@@ -461,7 +526,7 @@ const WaitingOverlay: React.FC<{ statusText: string | undefined; onResync: (() =
   <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-6 text-center z-10">
     <Radio className="w-8 h-8 text-white/20 mb-3" />
     <p className="max-w-sm text-base font-medium leading-relaxed text-white/60">
-      {statusText || 'Waiting for presenter...'}
+      {statusText !== undefined && statusText !== '' ? statusText : 'Waiting for presenter...'}
     </p>
     {onResync && (
       <Button
@@ -505,9 +570,10 @@ const DecoderStallOverlay: React.FC<{
   stalledCodec: string | null | undefined;
   onResync: (() => void) | undefined;
 }> = ({ stalledCodec, onResync }) => {
-  const detail = stalledCodec
-    ? `Receiving ${stalledCodec} packets but no frames are decoding. The stream may use an incompatible codec profile.`
-    : 'Receiving video data but frames are not displaying.';
+  const detail =
+    stalledCodec !== undefined && stalledCodec !== null && stalledCodec !== ''
+      ? `Receiving ${stalledCodec} packets but no frames are decoding. The stream may use an incompatible codec profile.`
+      : 'Receiving video data but frames are not displaying.';
   return (
     <div
       data-decoder-stalled="true"
@@ -540,11 +606,15 @@ const formatReplayTime = (seconds: number): string => {
 };
 
 const replayPositionLabel = (snapshot: ViewerReplaySnapshot, mediaTime: number): string => {
-  const range = snapshot.range;
-  if (!range) return 'LIVE';
+  const { range } = snapshot;
+  if (!range) {
+    return 'LIVE';
+  }
 
   const behindSeconds = Math.max(0, range.end - mediaTime);
-  if (!snapshot.isShareEnded && behindSeconds <= REPLAY_LIVE_TOLERANCE_SECONDS) return 'LIVE';
+  if (!snapshot.isShareEnded && behindSeconds <= REPLAY_LIVE_TOLERANCE_SECONDS) {
+    return 'LIVE';
+  }
 
   return `-${formatReplayTime(behindSeconds)}`;
 };
@@ -553,20 +623,22 @@ const ReplayTimeline: React.FC<{
   replay: UseViewerReplayResult;
   isPlaying: boolean;
 }> = ({ replay, isPlaying }) => {
-  const { snapshot } = replay;
-  const range = snapshot.range;
+  const { goLive: handleGoLive, snapshot } = replay;
+  const { range } = snapshot;
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const timelineBoundsRef = useRef<DOMRect | null>(null);
   const [dragPosition, setDragPosition] = useState<number | null>(null);
   const [hoverPosition, setHoverPosition] = useState<number | null>(null);
-  if (!range) return null;
+  if (!range) {
+    return null;
+  }
 
   const position = Math.min(range.end, Math.max(range.start, dragPosition ?? snapshot.position));
   const previewPosition = hoverPosition ?? dragPosition;
   const behindSeconds = Math.max(0, range.end - position);
   const isBehindLive = snapshot.mode === 'replay' && behindSeconds > REPLAY_LIVE_TOLERANCE_SECONDS;
   let previewPercent = 0;
-  if (previewPosition != null && range.end !== range.start) {
+  if (previewPosition !== null && range.end !== range.start) {
     previewPercent = ((previewPosition - range.start) / (range.end - range.start)) * 100;
   }
   let positionStatus = replayPositionLabel(snapshot, position);
@@ -577,11 +649,21 @@ const ReplayTimeline: React.FC<{
 
   const seekByKeyboard = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     let target: number | null = null;
-    if (event.key === 'ArrowLeft') target = position - 5;
-    if (event.key === 'ArrowRight') target = position + 5;
-    if (event.key === 'Home') target = range.start;
-    if (event.key === 'End') target = range.end;
-    if (target == null) return;
+    if (event.key === 'ArrowLeft') {
+      target = position - 5;
+    }
+    if (event.key === 'ArrowRight') {
+      target = position + 5;
+    }
+    if (event.key === 'Home') {
+      target = range.start;
+    }
+    if (event.key === 'End') {
+      target = range.end;
+    }
+    if (target === null) {
+      return;
+    }
 
     event.preventDefault();
     const clamped = Math.min(range.end, Math.max(range.start, target));
@@ -594,7 +676,9 @@ const ReplayTimeline: React.FC<{
 
   const updatePointerPreview = (event: React.PointerEvent<HTMLDivElement>): void => {
     const bounds = timelineBoundsRef.current ?? timelineRef.current?.getBoundingClientRect();
-    if (!bounds || bounds.width === 0) return;
+    if (!bounds || bounds.width === 0) {
+      return;
+    }
 
     timelineBoundsRef.current = bounds;
     const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
@@ -617,7 +701,7 @@ const ReplayTimeline: React.FC<{
       onPointerMove={updatePointerPreview}
       onPointerLeave={clearPointerPreview}
     >
-      {previewPosition != null && (
+      {previewPosition !== null && (
         <div
           className="pointer-events-none absolute bottom-[calc(50%+0.75rem)] z-10 -translate-x-1/2"
           style={{ left: `clamp(8rem, ${previewPercent}%, calc(100% - 8rem))` }}
@@ -647,15 +731,19 @@ const ReplayTimeline: React.FC<{
         aria-valuetext={replayPositionLabel(snapshot, position)}
         onKeyDown={seekByKeyboard}
         onValueChange={(values) => {
-          const next = values[0];
-          if (next == null) return;
+          const [next] = values;
+          if (next === undefined) {
+            return;
+          }
           setDragPosition(next);
           replay.preview(next);
         }}
         onValueCommit={(values) => {
-          const next = values[0];
+          const [next] = values;
           setDragPosition(null);
-          if (next != null) replay.seek(next, isPlaying);
+          if (next !== undefined) {
+            replay.seek(next, isPlaying);
+          }
         }}
         className="h-11 cursor-pointer [&_[data-slot=slider-track]]:h-1 [&_[data-slot=slider-range]]:bg-white/70 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-white/80 [&_[data-slot=slider-thumb]]:bg-white"
       />
@@ -663,16 +751,14 @@ const ReplayTimeline: React.FC<{
       <div className="absolute inset-x-0 top-[calc(50%+0.625rem)] grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-xs font-mono tabular-nums text-white/55">
         <span>-{formatReplayTime(range.end - range.start)}</span>
         {shouldShowPositionStatus ? (
-          <span role="status" aria-live="polite" className="min-w-0 truncate text-center text-white/75">
-            {positionStatus}
-          </span>
+          <output className="min-w-0 truncate text-center text-white/75">{positionStatus}</output>
         ) : (
           <span aria-hidden="true" />
         )}
         {isBehindLive && !snapshot.isShareEnded ? (
           <button
             type="button"
-            onClick={replay.goLive}
+            onClick={handleGoLive}
             className="justify-self-end rounded-sm font-sans font-semibold text-safelight hover:text-safelight-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70"
           >
             Go Live
@@ -688,22 +774,17 @@ const ReplayTimeline: React.FC<{
 const PlayerSettings: React.FC<{
   replay: UseViewerReplayResult;
   controlClass: string;
-  areControlsVisible: boolean;
   isTelemetryVisible: boolean;
   onTelemetryVisibilityChange: (isVisible: boolean) => void;
-}> = ({ replay, controlClass, areControlsVisible, isTelemetryVisible, onTelemetryVisibilityChange }) => {
+}> = ({ replay, controlClass, isTelemetryVisible, onTelemetryVisibilityChange }) => {
   const { snapshot } = replay;
   const [isOpen, setIsOpen] = useState(false);
   const isReplayAvailable = snapshot.availability === 'available';
   const settingLabel = snapshot.windowSeconds === 0 ? 'Off' : formatReplayTime(snapshot.windowSeconds);
   const retainedSeconds = snapshot.range ? snapshot.range.end - snapshot.range.start : 0;
 
-  useEffect(() => {
-    if (!areControlsVisible) setIsOpen(false);
-  }, [areControlsVisible]);
-
   return (
-    <Popover open={areControlsVisible && isOpen} onOpenChange={setIsOpen}>
+    <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
         <button type="button" className={controlClass} title="Player settings" aria-label="Player settings">
           <Settings2 className="w-4 h-4" />
@@ -739,20 +820,22 @@ const PlayerSettings: React.FC<{
           {snapshot.availability === 'blocked' && (
             <div className="border-t border-white/10 pt-4" data-testid="replay-owner-notice">
               <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay</p>
-              <p role="status" className="mt-1 text-sm leading-relaxed text-caption-text">
-                {REPLAY_BLOCKED_MESSAGE}
-              </p>
+              <output className="mt-1 block text-sm leading-relaxed text-caption-text">{REPLAY_BLOCKED_MESSAGE}</output>
             </div>
           )}
 
-          {snapshot.availability === 'unavailable' && snapshot.unavailableReason && (
-            <div className="border-t border-white/10 pt-4">
-              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Replay unavailable</p>
-              <p role="status" className="mt-1 text-sm leading-relaxed text-caption-text">
-                {snapshot.unavailableReason}
-              </p>
-            </div>
-          )}
+          {snapshot.availability === 'unavailable' &&
+            snapshot.unavailableReason !== null &&
+            snapshot.unavailableReason !== '' && (
+              <div className="border-t border-white/10 pt-4">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Replay unavailable
+                </p>
+                <output className="mt-1 block text-sm leading-relaxed text-caption-text">
+                  {snapshot.unavailableReason}
+                </output>
+              </div>
+            )}
 
           {isReplayAvailable && (
             <div className="space-y-4 border-t border-white/10 pt-4">
@@ -772,8 +855,10 @@ const PlayerSettings: React.FC<{
                 aria-label="Replay buffer duration"
                 aria-valuetext={settingLabel}
                 onValueChange={(values) => {
-                  const next = values[0];
-                  if (next != null) replay.setWindowSeconds(next);
+                  const [next] = values;
+                  if (next !== undefined) {
+                    replay.setWindowSeconds(next);
+                  }
                 }}
               />
 
@@ -782,16 +867,16 @@ const PlayerSettings: React.FC<{
                 <span>5 min</span>
               </div>
 
-              {snapshot.limitationReason && (
-                <p role="status" className="text-sm leading-relaxed text-safelight">
-                  {snapshot.limitationReason}
-                </p>
+              {snapshot.limitationReason !== null && snapshot.limitationReason !== '' && (
+                <output className="block text-sm leading-relaxed text-safelight">{snapshot.limitationReason}</output>
               )}
-              {!snapshot.limitationReason && retainedSeconds > 0 && snapshot.windowSeconds > 0 && (
-                <p className="text-sm leading-relaxed text-caption-text">
-                  {formatReplayTime(retainedSeconds)} currently available
-                </p>
-              )}
+              {(snapshot.limitationReason === null || snapshot.limitationReason === '') &&
+                retainedSeconds > 0 &&
+                snapshot.windowSeconds > 0 && (
+                  <p className="text-sm leading-relaxed text-caption-text">
+                    {formatReplayTime(retainedSeconds)} currently available
+                  </p>
+                )}
             </div>
           )}
         </div>
@@ -801,7 +886,9 @@ const PlayerSettings: React.FC<{
 };
 
 const MediaControls: React.FC<{
-  telemetry: SpectatorTelemetry | null;
+  getStatsFn: VideoPlayerProps['getStatsFn'];
+  mediaStream: MediaStream | null;
+  isLive: boolean;
   isTelemetryVisible: boolean;
   onTelemetryVisibilityChange: (isVisible: boolean) => void;
   replay: UseViewerReplayResult;
@@ -817,7 +904,9 @@ const MediaControls: React.FC<{
   areControlsVisible: boolean;
   overlayClass: string;
 }> = ({
-  telemetry,
+  getStatsFn,
+  mediaStream,
+  isLive,
   isTelemetryVisible,
   onTelemetryVisibilityChange,
   replay,
@@ -843,7 +932,7 @@ const MediaControls: React.FC<{
   const controlClass =
     'p-2 text-white/70 hover:text-white bg-black/30 hover:bg-black/50 rounded-xl transition-colors backdrop-blur-sm cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-safelight/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black';
   const showTimeline =
-    replay.snapshot.availability === 'available' && replay.snapshot.windowSeconds > 0 && replay.snapshot.range != null;
+    replay.snapshot.availability === 'available' && replay.snapshot.windowSeconds > 0 && replay.snapshot.range !== null;
 
   return (
     <div
@@ -853,10 +942,8 @@ const MediaControls: React.FC<{
         {showTimeline && <ReplayTimeline replay={replay} isPlaying={isPlaying} />}
 
         <div className="flex flex-col items-stretch gap-3 sm:grid sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-end sm:gap-4">
-          {isTelemetryVisible && telemetry?.hasVideo ? (
-            <div className="min-w-0">
-              <SpectatorTelemetryBar telemetry={telemetry} />
-            </div>
+          {isTelemetryVisible && isLive && getStatsFn ? (
+            <SpectatorTelemetryDisplay getStatsFn={getStatsFn} mediaStream={mediaStream} />
           ) : (
             <div className="hidden sm:block" />
           )}
@@ -894,13 +981,14 @@ const MediaControls: React.FC<{
               />
             </div>
 
-            <PlayerSettings
-              replay={replay}
-              controlClass={controlClass}
-              areControlsVisible={areControlsVisible}
-              isTelemetryVisible={isTelemetryVisible}
-              onTelemetryVisibilityChange={onTelemetryVisibilityChange}
-            />
+            {areControlsVisible && (
+              <PlayerSettings
+                replay={replay}
+                controlClass={controlClass}
+                isTelemetryVisible={isTelemetryVisible}
+                onTelemetryVisibilityChange={onTelemetryVisibilityChange}
+              />
+            )}
 
             {onResync && (
               <button
@@ -960,7 +1048,7 @@ const VideoLayers: React.FC<{
         className={`${layerClass} ${liveVideoClass}`}
         aria-label={playbackLabel}
       >
-        {/* biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
+        {/* Biome-ignore lint/a11y/useMediaCaption: streamed screen-share video does not provide captions */}
         <video ref={liveVideoRef} playsInline className="h-full w-full pointer-events-none object-contain" />
       </button>
       <button
@@ -970,7 +1058,7 @@ const VideoLayers: React.FC<{
         className={`${layerClass} ${replayVideoClass}`}
         aria-label={playbackLabel}
       >
-        {/* biome-ignore lint/a11y/useMediaCaption: locally buffered screen-share video does not provide captions */}
+        {/* Biome-ignore lint/a11y/useMediaCaption: locally buffered screen-share video does not provide captions */}
         <video ref={replayVideoRef} playsInline className="h-full w-full pointer-events-none object-contain" />
       </button>
     </>
@@ -980,7 +1068,7 @@ const VideoLayers: React.FC<{
 const PlayerOverlays: React.FC<{
   showWaiting: boolean;
   showGesture: boolean;
-  showStall: boolean | undefined;
+  showStall: boolean;
   statusText: string | undefined;
   onResync: (() => void) | undefined;
   isPlaying: boolean;
@@ -1023,10 +1111,10 @@ const PlayerOverlays: React.FC<{
         className={`absolute z-40 hidden transition-opacity duration-300 sm:flex ${overlayClass}`}
       />
     )}
-    {announcement && (
-      <span role="status" aria-live="polite" className="sr-only">
+    {announcement !== null && announcement !== '' && (
+      <output className="sr-only" aria-live="polite">
         {announcement}
-      </span>
+      </output>
     )}
   </>
 );
@@ -1036,9 +1124,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   isLive,
   statusText,
   onResync,
-  fullBleed,
+  fullBleed = false,
   getStatsFn,
-  decoderStalled,
+  decoderStalled = false,
   stalledCodec,
   isFullscreen: propIsFullscreen,
   showControls = true,
@@ -1048,8 +1136,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const replayVideoRef = useRef<HTMLVideoElement | null>(null);
   const isFullscreen = propIsFullscreen ?? false;
   const [isTelemetryVisible, setIsTelemetryVisible] = useState(readTelemetryVisibility);
-  const replay = useViewerReplay({ mediaStream, isLive, liveVideoRef, replayVideoRef });
-  const { telemetry } = useSpectatorTelemetry(isTelemetryVisible, isLive, getStatsFn, mediaStream);
+  const replay = useViewerReplay({ isLive, liveVideoRef, mediaStream, replayVideoRef });
   const {
     containerRef,
     isPlaying,
@@ -1072,7 +1159,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     onControlsActivity?.();
   };
   const overlayControlsClass = getOverlayClass(showControls);
-  const hasReplay = replay.snapshot.availability === 'available' && replay.snapshot.range != null;
+  const hasReplay = replay.snapshot.availability === 'available' && replay.snapshot.range !== null;
   const isShowingReplay = replay.snapshot.mode === 'replay' && hasReplay;
   const showWaiting = (!isLive || !hasVideoTrack) && !hasReplay;
   const showGesture = needsUserGesture && isLive && hasVideoTrack && !isShowingReplay;
@@ -1117,7 +1204,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       />
 
       <MediaControls
-        telemetry={telemetry}
+        getStatsFn={getStatsFn}
+        mediaStream={mediaStream}
+        isLive={isLive}
         isTelemetryVisible={isTelemetryVisible}
         onTelemetryVisibilityChange={handleTelemetryVisibilityChange}
         replay={replay}

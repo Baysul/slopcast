@@ -1,12 +1,14 @@
 import type React from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { readReplayWindowSeconds, ViewerReplay, type ViewerReplaySnapshot } from './viewer-replay';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { ViewerReplay, readReplayWindowSeconds } from './viewer-replay';
+import type { ViewerReplaySnapshot } from './viewer-replay';
 
 interface UseViewerReplayOptions {
-  mediaStream: MediaStream | null;
-  isLive: boolean;
-  liveVideoRef: React.RefObject<HTMLVideoElement | null>;
-  replayVideoRef: React.RefObject<HTMLVideoElement | null>;
+  readonly mediaStream: MediaStream | null;
+  readonly isLive: boolean;
+  readonly liveVideoRef: React.RefObject<HTMLVideoElement | null>;
+  readonly replayVideoRef: React.RefObject<HTMLVideoElement | null>;
 }
 
 export interface UseViewerReplayResult {
@@ -26,19 +28,19 @@ export const useViewerReplay = ({
   liveVideoRef,
   replayVideoRef,
 }: UseViewerReplayOptions): UseViewerReplayResult => {
-  const [initialWindow] = useState(readReplayWindowSeconds);
+  const initialWindow = useMemo(() => readReplayWindowSeconds(), []);
   const [snapshot, setSnapshot] = useState<ViewerReplaySnapshot>(() => ({
+    announcement: null,
     availability: 'checking',
-    unavailableReason: null,
-    mode: 'live',
-    windowSeconds: initialWindow,
     effectiveWindowSeconds: initialWindow,
-    range: null,
-    position: 0,
     isShareEnded: false,
     limitationReason: null,
-    announcement: null,
+    mode: 'live',
+    position: 0,
     preview: null,
+    range: null,
+    unavailableReason: null,
+    windowSeconds: initialWindow,
   }));
   const controllerRef = useRef<ViewerReplay | null>(null);
   const activeStreamRef = useRef<MediaStream | null>(null);
@@ -46,11 +48,15 @@ export const useViewerReplay = ({
   useEffect(() => {
     const liveVideo = liveVideoRef.current;
     const replayVideo = replayVideoRef.current;
-    if (!liveVideo || !replayVideo) return;
+    if (!liveVideo || !replayVideo) {
+      return undefined;
+    }
 
     const controller = new ViewerReplay(replayVideo, liveVideo, initialWindow, setSnapshot);
     const handlePageHide = (event: PageTransitionEvent): void => {
-      if (!event.persisted) controller.destroy();
+      if (!event.persisted) {
+        controller.destroy();
+      }
     };
     controllerRef.current = controller;
     setSnapshot(controller.getSnapshot());
@@ -67,10 +73,14 @@ export const useViewerReplay = ({
   useEffect(() => {
     const controller = controllerRef.current;
     const hasVideo = mediaStream?.getVideoTracks().some((track) => track.readyState === 'live') ?? false;
-    if (!controller) return;
+    if (!controller) {
+      return;
+    }
 
     if (isLive && mediaStream && hasVideo) {
-      if (activeStreamRef.current === mediaStream) return;
+      if (activeStreamRef.current === mediaStream) {
+        return;
+      }
 
       activeStreamRef.current = mediaStream;
       controller.startShare(mediaStream).catch((error) => {
@@ -87,10 +97,14 @@ export const useViewerReplay = ({
 
   useEffect(() => {
     const controller = controllerRef.current;
-    if (!controller || !mediaStream) return;
+    if (!controller || !mediaStream) {
+      return undefined;
+    }
 
     const handleTrackChange = (event: MediaStreamTrackEvent): void => {
-      if (event.track.kind !== 'video') return;
+      if (event.track.kind !== 'video') {
+        return undefined;
+      }
 
       const hasVideo = mediaStream.getVideoTracks().some((track) => track.readyState === 'live');
       if (isLive && hasVideo) {
@@ -98,7 +112,7 @@ export const useViewerReplay = ({
         controller.startShare(mediaStream).catch((error) => {
           console.info('[Replay] Could not restart buffering after a video track change:', error);
         });
-        return;
+        return undefined;
       }
       if (activeStreamRef.current) {
         activeStreamRef.current = null;
@@ -137,13 +151,13 @@ export const useViewerReplay = ({
   }, []);
 
   return {
-    snapshot,
-    setWindowSeconds,
-    seek,
-    goLive,
-    playReplay,
-    pauseReplay,
-    preview,
     clearAnnouncement,
+    goLive,
+    pauseReplay,
+    playReplay,
+    preview,
+    seek,
+    setWindowSeconds,
+    snapshot,
   };
 };

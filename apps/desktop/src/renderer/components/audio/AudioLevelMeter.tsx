@@ -1,7 +1,9 @@
-import { type AudioLevelSubscription, AudioVisualizer } from '@slopcast/ui';
+import { AudioVisualizer } from '@slopcast/ui';
+import type { AudioLevelSubscription } from '@slopcast/ui';
 import type React from 'react';
 import { useMemo } from 'react';
-import { audioWaveStore, silentWave, WAVE_COLUMN_COUNT } from '../../utils/audio-level-store';
+
+import { WAVE_COLUMN_COUNT, audioWaveStore, silentWave } from '../../utils/audio-level-store';
 
 const DEFAULT_WIDTH = 96;
 const DEFAULT_HEIGHT = 20;
@@ -15,8 +17,12 @@ export interface AudioLevelMeterProps {
 }
 
 const resolveIds = (appId?: number, memberIds?: number[]): number[] => {
-  if (memberIds && memberIds.length > 0) return memberIds;
-  if (appId !== undefined) return [appId];
+  if (memberIds && memberIds.length > 0) {
+    return memberIds;
+  }
+  if (appId !== undefined) {
+    return [appId];
+  }
   return [];
 };
 
@@ -25,8 +31,12 @@ const unionColumns = (merged: number[], columns: number[]): void => {
   for (let index = 0; index < pairs * 2; index += 1) {
     const level = columns[index] ?? 0;
     const current = merged[index] ?? 0;
-    if (index % 2 === 0 && level < current) merged[index] = level;
-    if (index % 2 !== 0 && level > current) merged[index] = level;
+    if (index % 2 === 0 && level < current) {
+      merged[index] = level;
+    }
+    if (index % 2 !== 0 && level > current) {
+      merged[index] = level;
+    }
   }
 };
 
@@ -40,9 +50,9 @@ const mergeWaves = (members: ReadonlyMap<number, number[]>, merged: number[]): v
         merged[index] = columns[index] ?? 0;
       }
       isFirstWave = false;
-      continue;
+    } else {
+      unionColumns(merged, columns);
     }
-    unionColumns(merged, columns);
   }
 };
 
@@ -59,7 +69,9 @@ const createSubscription =
       }),
     );
     return () => {
-      for (const stopListening of unsubscribe) stopListening();
+      for (const stopListening of unsubscribe) {
+        stopListening();
+      }
     };
   };
 

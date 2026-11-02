@@ -1,6 +1,7 @@
 import { FolderOpen, Keyboard, Palette, Settings2, Video } from 'lucide-react';
-import type { KeyboardEvent, ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
+
 import { desktopApi } from '@/api/desktop';
 import { windowControls } from '@/api/windowControls';
 import { TitleBar } from '@/components/layout/TitleBar';
@@ -9,41 +10,51 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { useDesktopPreferences } from '@/hooks/useDesktopPreferences';
+import { SHORTCUT_ACTIONS, formatShortcut } from '@/types/preferences';
 import type { ShortcutAction, ShortcutBindings, ShortcutReport } from '@/types/preferences';
-import { formatShortcut, SHORTCUT_ACTIONS } from '@/types/preferences';
+
 import { AppearanceSettings } from './AppearanceSettings';
 import { StreamSettingsPanel } from './StreamSettingsPanel';
 
 type EditableShortcut = ShortcutAction | 'toggle-telemetry';
 
 const SETTINGS_SECTIONS = [
-  { id: 'general', label: 'General', icon: Settings2 },
-  { id: 'appearance', label: 'Appearance', icon: Palette },
-  { id: 'stream', label: 'Stream', icon: Video },
-  { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
+  { icon: Settings2, id: 'general', label: 'General' },
+  { icon: Palette, id: 'appearance', label: 'Appearance' },
+  { icon: Video, id: 'stream', label: 'Stream' },
+  { icon: Keyboard, id: 'shortcuts', label: 'Shortcuts' },
 ] as const;
 
-function readChord(event: KeyboardEvent<HTMLButtonElement>, isGlobal: boolean): string | null {
-  if (!event.ctrlKey && !event.metaKey) return null;
-  if (isGlobal && !event.shiftKey && !event.altKey) return null;
+const readChord = (event: KeyboardEvent<HTMLButtonElement>, isGlobal: boolean): string | null => {
+  if (!event.ctrlKey && !event.metaKey) {
+    return null;
+  }
+  if (isGlobal && !event.shiftKey && !event.altKey) {
+    return null;
+  }
 
   const parts: string[] = [];
-  if (event.ctrlKey) parts.push('Control');
-  if (event.metaKey) parts.push('Command');
-  if (event.altKey) parts.push('Alt');
-  if (event.shiftKey) parts.push('Shift');
+  if (event.ctrlKey) {
+    parts.push('Control');
+  }
+  if (event.metaKey) {
+    parts.push('Command');
+  }
+  if (event.altKey) {
+    parts.push('Alt');
+  }
+  if (event.shiftKey) {
+    parts.push('Shift');
+  }
   parts.push(event.code);
 
   return parts.join('+');
-}
+};
 
-function PreferencesLoadState({ error, refresh }: { error: string | null; refresh: () => Promise<void> }) {
-  if (!error)
-    return (
-      <p className="text-sm text-muted-foreground" role="status">
-        Loading preferences…
-      </p>
-    );
+const PreferencesLoadState = ({ error, refresh }: { error: string | null; refresh: () => Promise<void> }) => {
+  if (error === null || error === '') {
+    return <output className="block text-sm text-muted-foreground">Loading preferences…</output>;
+  }
 
   return (
     <div className="space-y-3">
@@ -55,19 +66,21 @@ function PreferencesLoadState({ error, refresh }: { error: string | null; refres
       </Button>
     </div>
   );
-}
+};
 
-function ShortcutStatus({ report }: { report: ShortcutReport | null }) {
-  if (report && !report.status) return null;
+const ShortcutStatus = ({ report }: { report: ShortcutReport | null }) => {
+  if (report && !report.status) {
+    return null;
+  }
 
   return (
-    <div className="rounded-md border border-border bg-secondary/40 p-3 text-sm" role="status">
-      <p>{report?.status ?? 'Connecting to the desktop shortcut service…'}</p>
-    </div>
+    <output className="block rounded-md border border-border bg-secondary/40 p-3 text-sm">
+      <span className="block">{report?.status ?? 'Connecting to the desktop shortcut service…'}</span>
+    </output>
   );
-}
+};
 
-export function DesktopSettings() {
+export const DesktopSettings = () => {
   const { snapshot, setSnapshot, error: loadError, refresh } = useDesktopPreferences();
   const [section, setSection] = useState<(typeof SETTINGS_SECTIONS)[number]['id']>('general');
   const [report, setReport] = useState<ShortcutReport | null>(null);
@@ -83,7 +96,9 @@ export function DesktopSettings() {
   const savedBindingsRef = useRef<ShortcutBindings | null>(null);
 
   const perform = useCallback(async (operation: () => Promise<void>) => {
-    if (busyRef.current) return;
+    if (busyRef.current) {
+      return;
+    }
     busyRef.current = true;
     setBusy(true);
     setError('');
@@ -99,13 +114,16 @@ export function DesktopSettings() {
   }, []);
 
   useEffect(() => {
-    if (!snapshot) return;
-    const shortcuts = snapshot.preferences.shortcuts;
+    if (!snapshot) {
+      return;
+    }
+    const { shortcuts } = snapshot.preferences;
     if (
       savedBindingsRef.current &&
       SHORTCUT_ACTIONS.every((action) => savedBindingsRef.current?.[action.id] === shortcuts[action.id])
-    )
+    ) {
       return;
+    }
     savedBindingsRef.current = shortcuts;
     setDraft(shortcuts);
   }, [snapshot]);
@@ -119,13 +137,19 @@ export function DesktopSettings() {
     void desktopApi
       .getShortcutStatus()
       .then(setReport)
-      .catch((cause: unknown) => setError(String(cause)));
+      .catch((cause: unknown) => {
+        setError(String(cause));
+      });
     return () => {
-      void unlisten.then((stop) => stop());
-      void unlistenClose.then((stop) => stop());
-      void desktopApi
-        .setShortcutRecording(false)
-        .catch((cause: unknown) => console.error('Cannot end shortcut recording:', cause));
+      void unlisten.then((stop) => {
+        stop();
+      });
+      void unlistenClose.then((stop) => {
+        stop();
+      });
+      void desktopApi.setShortcutRecording(false).catch((cause: unknown) => {
+        console.error('Cannot end shortcut recording:', cause);
+      });
     };
   }, []);
 
@@ -145,26 +169,38 @@ export function DesktopSettings() {
   }, []);
 
   useEffect(() => {
-    if (!editing) return;
+    if (!editing) {
+      return undefined;
+    }
     const cancel = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape') {
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       void perform(endRecording);
     };
     window.addEventListener('keydown', cancel, true);
-    return () => window.removeEventListener('keydown', cancel, true);
+    return () => {
+      window.removeEventListener('keydown', cancel, true);
+    };
   }, [editing, endRecording, perform]);
 
   useEffect(() => {
-    if (editing) return;
+    if (editing) {
+      return undefined;
+    }
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (event.key !== 'Escape' || event.defaultPrevented) {
+        return;
+      }
       event.preventDefault();
       void windowControls.close();
     };
     window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('keydown', closeOnEscape);
+    };
   }, [editing]);
 
   const saveRecordedGlobalShortcut = (action: ShortcutAction, chord: string) => {
@@ -184,20 +220,25 @@ export function DesktopSettings() {
   };
 
   const recordShortcut = (event: KeyboardEvent<HTMLButtonElement>, action: EditableShortcut) => {
-    if (event.key === 'Tab') return;
+    if (event.key === 'Tab') {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     if (event.key === 'Escape') {
       void perform(endRecording);
       return;
     }
-    if (event.repeat || event.nativeEvent.isComposing || ['Control', 'Shift', 'Alt', 'Meta'].includes(event.key))
+    if (event.repeat || event.nativeEvent.isComposing || ['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) {
       return;
+    }
     const isGlobal = action !== 'toggle-telemetry';
     const chord = readChord(event, isGlobal);
-    if (!chord) {
+    if (chord === null || chord === '') {
       let hint = 'Include Ctrl or Cmd.';
-      if (isGlobal) hint = 'Include Ctrl or Cmd, plus Shift or Alt. Editing and desktop-reserved keys stay available.';
+      if (isGlobal) {
+        hint = 'Include Ctrl or Cmd, plus Shift or Alt. Editing and desktop-reserved keys stay available.';
+      }
       setError(hint);
       return;
     }
@@ -293,7 +334,9 @@ export function DesktopSettings() {
             aria-describedby="tray-hint"
             checked={preferences.trayEnabled}
             disabled={busy}
-            onCheckedChange={(value) => saveGeneral(value, preferences.autoSelectAudio)}
+            onCheckedChange={(value) => {
+              saveGeneral(value, preferences.autoSelectAudio);
+            }}
           />
         </section>
         <section
@@ -317,16 +360,20 @@ export function DesktopSettings() {
             aria-describedby="audio-hint"
             checked={preferences.autoSelectAudio}
             disabled={busy}
-            onCheckedChange={(value) => saveGeneral(preferences.trayEnabled, value)}
+            onCheckedChange={(value) => {
+              saveGeneral(preferences.trayEnabled, value);
+            }}
           />
         </section>
       </div>
     );
   }
-  if (snapshot && section === 'stream') body = <StreamSettingsPanel />;
+  if (snapshot && section === 'stream') {
+    body = <StreamSettingsPanel />;
+  }
   if (snapshot && draft && section === 'shortcuts') {
-    const telemetryShortcut = snapshot.preferences.telemetryShortcut;
-    let telemetryControls: ReactNode;
+    const { telemetryShortcut } = snapshot.preferences;
+    let telemetryControls: ReactNode = null;
     if (editing === 'toggle-telemetry') {
       telemetryControls = (
         <>
@@ -334,7 +381,9 @@ export function DesktopSettings() {
             ref={recordButtonRef}
             variant="outline"
             aria-labelledby="telemetry-shortcut-heading"
-            onKeyDown={(event) => recordShortcut(event, 'toggle-telemetry')}
+            onKeyDown={(event) => {
+              recordShortcut(event, 'toggle-telemetry');
+            }}
           >
             Press shortcut…
           </Button>
@@ -404,7 +453,7 @@ export function DesktopSettings() {
         <ShortcutStatus report={report} />
         <div className="divide-y divide-border border-y border-border">
           {SHORTCUT_ACTIONS.map((action) => {
-            let controls: ReactNode;
+            let controls: ReactNode = null;
             if (editing === action.id) {
               controls = (
                 <>
@@ -412,7 +461,9 @@ export function DesktopSettings() {
                     ref={recordButtonRef}
                     variant="outline"
                     aria-labelledby={`shortcut-${action.id}`}
-                    onKeyDown={(event) => recordShortcut(event, action.id)}
+                    onKeyDown={(event) => {
+                      recordShortcut(event, action.id);
+                    }}
                   >
                     Press shortcut…
                   </Button>
@@ -444,7 +495,9 @@ export function DesktopSettings() {
                     size="sm"
                     disabled={busy || editing !== null || !draft[action.id]}
                     aria-label={`Clear shortcut for ${action.label}`}
-                    onClick={() => setDraft({ ...draft, [action.id]: '' })}
+                    onClick={() => {
+                      setDraft({ ...draft, [action.id]: '' });
+                    }}
                   >
                     Clear
                   </Button>
@@ -453,7 +506,9 @@ export function DesktopSettings() {
                     size="sm"
                     disabled={isShortcutControlDisabled}
                     aria-label={`Reset shortcut for ${action.label}`}
-                    onClick={() => setDraft({ ...draft, [action.id]: action.defaultChord })}
+                    onClick={() => {
+                      setDraft({ ...draft, [action.id]: action.defaultChord });
+                    }}
                   >
                     Reset
                   </Button>
@@ -488,7 +543,7 @@ export function DesktopSettings() {
           >
             {busy ? 'Applying…' : 'Apply shortcuts'}
           </Button>
-          {report?.canConfigure && (
+          {report?.canConfigure === true && (
             <Button
               variant="outline"
               disabled={isShortcutControlDisabled}
@@ -539,7 +594,9 @@ export function DesktopSettings() {
               aria-current={section === id ? 'page' : undefined}
               className="rounded-b-none"
               disabled={editing !== null}
-              onClick={() => setSection(id)}
+              onClick={() => {
+                setSection(id);
+              }}
             >
               <Icon aria-hidden="true" />
               {label}
@@ -573,10 +630,10 @@ export function DesktopSettings() {
         <p className="text-sm text-destructive" role="alert">
           {error}
         </p>
-        <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
+        <output className="block text-sm text-muted-foreground" aria-live="polite">
           {message}
-        </p>
+        </output>
       </footer>
     </div>
   );
-}
+};

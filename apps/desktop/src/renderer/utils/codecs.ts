@@ -1,5 +1,6 @@
+import { DEFAULT_STREAM_SETTINGS, VIDEO_CODECS, isVideoCodec } from '@slopcast/shared-types';
 import type { VideoCodec } from '@slopcast/shared-types';
-import { DEFAULT_STREAM_SETTINGS, isVideoCodec, VIDEO_CODECS } from '@slopcast/shared-types';
+
 import type { NativeCodecInfo } from '../types';
 
 export interface CodecInfo {
@@ -19,8 +20,8 @@ export const fromNativeCodecInfo = (infos: NativeCodecInfo[]): CodecInfo[] => {
     .filter((info): info is NativeCodecInfo & { codec: VideoCodec } => isVideoCodec(info.codec))
     .map((info) => ({
       codec: info.codec,
-      label: info.label,
       hardware: info.hardware,
+      label: info.label,
       recommended: false,
     }));
   return sortByCodecPreference(codecs);
@@ -31,7 +32,9 @@ export const recommendCodec = (codecs: CodecInfo[]): CodecInfo[] => {
     codecs.find((c) => c.hardware && c.codec === 'h264') ??
     codecs.find((c) => c.codec === DEFAULT_STREAM_SETTINGS.videoCodec) ??
     codecs.at(0);
-  if (!recommended) return [];
+  if (!recommended) {
+    return [];
+  }
 
   return [{ ...recommended, recommended: true }, ...codecs.filter((c) => c.codec !== recommended.codec)];
 };

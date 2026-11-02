@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+
+import { test } from 'vite-plus/test';
+
 import {
   manualBitrateOptions,
   recommendBitrateCap,
@@ -7,42 +9,30 @@ import {
 } from '../../../apps/desktop/src/renderer/utils/bitrate.ts';
 
 test('recommendBitrateCap picks the static 1080p60 AV1 sweet spot (8 Mbps)', () => {
-  assert.equal(
-    recommendBitrateCap({ codec: 'av1', resolution: '1080p', fps: 60, hardware: false, motionTier: 'static' }),
-    8_000_000,
-  );
+  assert.equal(recommendBitrateCap({ codec: 'av1', fps: 60, motionTier: 'static', resolution: '1080p' }), 8_000_000);
 });
 
 test('recommendBitrateCap picks the 1440p60 AV1 sweet spot (12 Mbps)', () => {
-  assert.equal(
-    recommendBitrateCap({ codec: 'av1', resolution: '1440p', fps: 60, hardware: false, motionTier: 'static' }),
-    12_000_000,
-  );
+  assert.equal(recommendBitrateCap({ codec: 'av1', fps: 60, motionTier: 'static', resolution: '1440p' }), 12_000_000);
 });
 
 test('recommendBitrateCap scales AV1 up with dynamic motion', () => {
-  assert.equal(
-    recommendBitrateCap({ codec: 'av1', resolution: '1080p', fps: 60, hardware: false, motionTier: 'dynamic' }),
-    12_000_000,
-  );
-  assert.equal(
-    recommendBitrateCap({ codec: 'av1', resolution: '1440p', fps: 60, hardware: false, motionTier: 'dynamic' }),
-    18_000_000,
-  );
+  assert.equal(recommendBitrateCap({ codec: 'av1', fps: 60, motionTier: 'dynamic', resolution: '1080p' }), 12_000_000);
+  assert.equal(recommendBitrateCap({ codec: 'av1', fps: 60, motionTier: 'dynamic', resolution: '1440p' }), 18_000_000);
 });
 
 test('recommendBitrateCap gives H.264 a higher ceiling than AV1 at the same resolution', () => {
   const h264 = recommendBitrateCap({
     codec: 'h264',
-    resolution: '1080p',
     fps: 60,
     motionTier: 'static',
+    resolution: '1080p',
   });
   const av1 = recommendBitrateCap({
     codec: 'av1',
-    resolution: '1080p',
     fps: 60,
     motionTier: 'static',
+    resolution: '1080p',
   });
   assert.ok(h264 > av1);
 });
@@ -50,21 +40,21 @@ test('recommendBitrateCap gives H.264 a higher ceiling than AV1 at the same reso
 test('recommendBitrateCap treats H.265 like VP9 (same efficiency class)', () => {
   const h265 = recommendBitrateCap({
     codec: 'h265',
-    resolution: '1080p',
     fps: 60,
     motionTier: 'static',
+    resolution: '1080p',
   });
   const vp9 = recommendBitrateCap({
     codec: 'vp9',
-    resolution: '1080p',
     fps: 60,
     motionTier: 'static',
+    resolution: '1080p',
   });
   const av1 = recommendBitrateCap({
     codec: 'av1',
-    resolution: '1080p',
     fps: 60,
     motionTier: 'static',
+    resolution: '1080p',
   });
   assert.equal(h265, vp9);
   assert.ok(h265 > av1);
@@ -74,15 +64,15 @@ test('recommendBitrateCap treats H.265 like VP9 (same efficiency class)', () => 
 test('recommendBitrateCap scales down for 30 fps', () => {
   const sixty = recommendBitrateCap({
     codec: 'av1',
-    resolution: '1080p',
     fps: 60,
     motionTier: 'static',
+    resolution: '1080p',
   });
   const thirty = recommendBitrateCap({
     codec: 'av1',
-    resolution: '1080p',
     fps: 30,
     motionTier: 'static',
+    resolution: '1080p',
   });
   assert.ok(thirty < sixty);
 });
@@ -90,16 +80,16 @@ test('recommendBitrateCap scales down for 30 fps', () => {
 test('recommendBitrateCap snaps to an allowed option', () => {
   const cap = recommendBitrateCap({
     codec: 'av1',
-    resolution: '1080p',
     fps: 60,
     motionTier: 'static',
+    resolution: '1080p',
   });
   assert.ok(manualBitrateOptions('av1').includes(cap));
 });
 
 test('recommendedBitrateRange gives 1080p60 H.264 an 8–12 Mbps band', () => {
   assert.deepEqual(
-    recommendedBitrateRange({ codec: 'h264', resolution: '1080p', fps: 60, motionTier: 'static' }),
+    recommendedBitrateRange({ codec: 'h264', fps: 60, motionTier: 'static', resolution: '1080p' }),
     [8_000_000, 12_000_000],
   );
 });

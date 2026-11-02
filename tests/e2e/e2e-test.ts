@@ -1,19 +1,31 @@
 #!/usr/bin/env node
 
-import { type ChildProcess, execSync, spawn } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 
-import { isResolutionPreset, RESOLUTION_DIMENSIONS, type ResolutionPreset } from '@slopcast/shared-types';
-import { type AppConfig, loadConfig } from '@slopcast/shared-types/config';
+import {
+  RESOLUTION_DIMENSIONS,
+  isJsonObject,
+  isResolutionPreset,
+  readFiniteNumber,
+  readString,
+} from '@slopcast/shared-types';
+import type { JsonObject, ResolutionPreset } from '@slopcast/shared-types';
+import { loadConfig } from '@slopcast/shared-types/config';
+import type { AppConfig } from '@slopcast/shared-types/config';
 import { RoomServiceClient } from 'livekit-server-sdk';
-
 import type { Browser, Page } from 'playwright';
 
+import { delay, pollUntil, sequentially } from './async-helpers.ts';
+
 const parseResolution = (value: string): ResolutionPreset => {
-  if (!isResolutionPreset(value)) throw new Error(`Unsupported E2E resolution: ${value}`);
+  if (!isResolutionPreset(value)) {
+    throw new Error(`Unsupported E2E resolution: ${value}`);
+  }
   return value;
 };
 
@@ -30,27 +42,89 @@ interface GpuInfo {
   softwareRasterizer: boolean;
 }
 
-async function logRoomPublications(config: AppConfig, roomCode: string): Promise<void> {
-  const host = config.livekitUrl.replace(/^ws(s?):\/\//, 'http$1://');
-  const roomClient = new RoomServiceClient(host, config.livekitApiKey, config.livekitApiSecret);
-  const deadline = Date.now() + 10_000;
-  let summary: Array<{ identity: string; tracks: Array<{ sid: string; mimeType: string }> }> = [];
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((entry) => typeof entry === 'string');
 
-  while (Date.now() < deadline) {
-    const participants = await roomClient.listParticipants(roomCode);
-    summary = participants.map((participant) => ({
-      identity: participant.identity,
-      tracks: participant.tracks.map((track) => ({ sid: track.sid, mimeType: track.mimeType })),
-    }));
-    if (summary.some((participant) => participant.tracks.some((track) => track.mimeType.startsWith('video/')))) {
-      log('LIVEKIT', `Room publications: ${JSON.stringify(summary)}`);
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+const isTrue = (value: unknown): boolean => value === true;
+
+const readGpuInfo = (value: JsonObject): GpuInfo => ({
+  eglVendor: readString(value, 'eglVendor') ?? null,
+  glRenderer: readString(value, 'glRenderer') ?? null,
+  glVersion: readString(value, 'glVersion') ?? null,
+  softwareRasterizer: isTrue(value.softwareRasterizer),
+});
+
+const readPresenterPhase = (text: string): PresenterPhase | null => {
+  const parsed: unknown = JSON.parse(text);
+  if (!isJsonObject(parsed)) {
+    return null;
+  }
+  const { errors } = parsed;
+  if (!isStringArray(errors)) {
+    return null;
+  }
+  const gpu = parsed.gpuReport;
+  return {
+    captureFramesPushed: readFiniteNumber(parsed, 'captureFramesPushed') ?? 0,
+    captureMode: readString(parsed, 'captureMode') ?? '',
+    codec: readString(parsed, 'codec') ?? '',
+    encoderImplementation: readString(parsed, 'encoderImplementation') ?? null,
+    errors,
+    gpuReport: isJsonObject(gpu) ? readGpuInfo(gpu) : null,
+    handoffReady: isTrue(parsed.handoffReady),
+    isWayland: isTrue(parsed.isWayland),
+    ok: isTrue(parsed.ok),
+    postSubscriptionTelemetryReady: isTrue(parsed.postSubscriptionTelemetryReady),
+    previewFramesSent: readFiniteNumber(parsed, 'previewFramesSent') ?? 0,
+    roomCode: readString(parsed, 'roomCode') ?? '',
+    senderBitrateBps: readFiniteNumber(parsed, 'senderBitrateBps') ?? 0,
+    senderBitrateSampleMs: readFiniteNumber(parsed, 'senderBitrateSampleMs') ?? 0,
+    shareUrl: readString(parsed, 'shareUrl') ?? '',
+    telemetryFlowing: isTrue(parsed.telemetryFlowing),
+    telemetryFps: readFiniteNumber(parsed, 'telemetryFps') ?? 0,
+    videoBytesSent: readFiniteNumber(parsed, 'videoBytesSent') ?? 0,
+    videoCodecReported: readString(parsed, 'videoCodecReported') ?? null,
+    videoFramesEncoded: readFiniteNumber(parsed, 'videoFramesEncoded') ?? 0,
+  };
+};
+
+const readPresenterPhaseFile = (file: string): PresenterPhase | null => {
+  try {
+    return readPresenterPhase(readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+
+const logRoomPublications = async (config: AppConfig, roomCode: string): Promise<void> => {
+  const host = config.livekitUrl.replace(/^ws(?<secure>s?):\/\//u, 'http$<secure>://');
+  const roomClient = new RoomServiceClient(host, config.livekitApiKey, config.livekitApiSecret);
+  const deadline = Date.now() + ROOM_PUBLICATION_TIMEOUT_MS;
+  let summary: RoomPublicationSummary[] = [];
+
+  const published = await pollUntil(
+    async () => {
+      const participants = await roomClient.listParticipants(roomCode);
+      summary = participants.map((participant) => ({
+        identity: participant.identity,
+        tracks: participant.tracks.map((track) => ({ mimeType: track.mimeType, sid: track.sid })),
+      }));
+      const hasVideo = summary.some((participant) =>
+        participant.tracks.some((track) => track.mimeType.startsWith('video/')),
+      );
+      return hasVideo ? summary : null;
+    },
+    ROOM_PUBLICATION_POLL_MS,
+    deadline,
+  );
+
+  if (published !== null) {
+    log('LIVEKIT', `Room publications: ${JSON.stringify(published)}`);
+    return;
   }
 
   throw new Error(`Presenter video publication did not appear in LiveKit: ${JSON.stringify(summary)}`);
-}
+};
 
 interface PresenterPhase {
   ok: boolean;
@@ -147,28 +221,53 @@ const PRESENTER_STOP_TIMEOUT_MS = 60_000;
 const STREAM_END_TIMEOUT_MS = 30_000;
 const STREAM_TIMEOUT_MS = 20_000;
 
-const FATAL_PATTERNS = [
-  /(?:FATAL|fatal)\s*error/i,
-  /uncaught\s*(?:exception|error)/i,
-  /cannot read propert(?:y|ies) of (?:undefined|null)/i,
-  /process\s*\.\s*exit/i,
-  /segmentation\s*fault/i,
-  /signal\s*:\s*SIG(?:SEGV|ABRT|ILL|FPE|BUS)/i,
-  /ERR_MODULE_NOT_FOUND/,
-  /Failed to load resource(?!.*favicon)/i,
-  /WebSocket is closed before the connection is established/,
-  /iceConnectionState.*failed/i,
-  /GPU process.*crash/i,
-  /Decoder stall confirmed/i,
-  /framesDecoded=0.*codec=/i,
-];
+const ROOM_PUBLICATION_TIMEOUT_MS = 10_000;
+const ROOM_PUBLICATION_POLL_MS = 250;
+const PRESENTER_PHASE_POLL_MS = 1000;
+const TELEMETRY_TIMEOUT_MS = 20_000;
+const TELEMETRY_POLL_MS = 500;
+const FILE_POLL_MS = 500;
+const FPS_SAMPLE_INTERVAL_MS = 2200;
+const FPS_SAMPLE_INDICES = [0, 1, 2];
 
-function log(prefix: string, msg: string): void {
-  const ts = new Date().toISOString().slice(11, 23);
-  process.stdout.write(`[${ts}] [${prefix}] ${msg}\n`);
+const HTTP_OK_MIN = 200;
+const HTTP_REDIRECT_MAX = 400;
+
+/** Sentinel returned by poll callbacks that must stop the poll without producing a value. */
+const PHASE_POLL_STOP = true;
+
+interface RoomPublicationTrack {
+  readonly sid: string;
+  readonly mimeType: string;
 }
 
-function killPort(port: number): void {
+interface RoomPublicationSummary {
+  readonly identity: string;
+  readonly tracks: readonly RoomPublicationTrack[];
+}
+
+const FATAL_PATTERNS = [
+  /(?:FATAL|fatal)\s*error/iu,
+  /uncaught\s*(?:exception|error)/iu,
+  /cannot read propert(?:y|ies) of (?:undefined|null)/iu,
+  /process\s*\.\s*exit/iu,
+  /segmentation\s*fault/iu,
+  /signal\s*:\s*SIG(?:SEGV|ABRT|ILL|FPE|BUS)/iu,
+  /ERR_MODULE_NOT_FOUND/u,
+  /Failed to load resource(?!.*favicon)/iu,
+  /WebSocket is closed before the connection is established/u,
+  /iceConnectionState.*failed/iu,
+  /GPU process.*crash/iu,
+  /Decoder stall confirmed/iu,
+  /framesDecoded=0.*codec=/iu,
+];
+
+const log = (prefix: string, msg: string): void => {
+  const ts = new Date().toISOString().slice(11, 23);
+  process.stdout.write(`[${ts}] [${prefix}] ${msg}\n`);
+};
+
+const killPort = (port: number): void => {
   try {
     if (process.platform === 'linux') {
       execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'pipe' });
@@ -178,9 +277,9 @@ function killPort(port: number): void {
   } catch {
     log('CLEANUP', `Port ${port} was free`);
   }
-}
+};
 
-function killStraySlopcast(): void {
+const killStraySlopcast = (): void => {
   try {
     if (process.platform === 'linux') {
       execSync(`pkill -f 'target/release/slopcast' 2>/dev/null || true`, { stdio: 'pipe' });
@@ -190,10 +289,10 @@ function killStraySlopcast(): void {
   } catch {
     log('CLEANUP', 'No stray app processes to kill');
   }
-}
+};
 
-function httpGet(url: string): Promise<number> {
-  return new Promise((resolve, reject) => {
+const httpGet = (url: string): Promise<number> =>
+  new Promise((resolve, reject) => {
     const parsed = new URL(url);
     if (parsed.hostname === 'localhost') {
       parsed.hostname = '127.0.0.1';
@@ -209,50 +308,56 @@ function httpGet(url: string): Promise<number> {
         reject(new Error(`HTTP GET ${url} timed out`));
       });
   });
-}
 
-async function pollHealth(url: string, timeoutMs: number, label: string): Promise<void> {
+const pollHealth = async (url: string, timeoutMs: number, label: string): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   log('HEALTH', `Polling ${label} at ${url} (timeout ${timeoutMs}ms)...`);
-  while (Date.now() < deadline) {
-    try {
-      const status = await httpGet(url);
-      if (status >= 200 && status < 400) {
-        log('HEALTH', `${label} responded HTTP ${status}`);
-        return;
+  const healthy = await pollUntil(
+    async () => {
+      try {
+        const status = await httpGet(url);
+        if (status >= HTTP_OK_MIN && status < HTTP_REDIRECT_MAX) {
+          return status;
+        }
+      } catch {
+        log('HEALTH', `${label} not ready yet`);
       }
-    } catch {
-      log('HEALTH', `${label} not ready yet`);
-    }
-    await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
+      return null;
+    },
+    HEALTH_POLL_MS,
+    deadline,
+  );
+  if (healthy !== null) {
+    log('HEALTH', `${label} responded HTTP ${healthy}`);
+    return;
   }
   throw new Error(`${label} did not become healthy within ${timeoutMs}ms`);
-}
+};
 
-function spawnLogging(
+const spawnLogging = (
   command: string,
   args: string[],
   label: LogEntry['source'],
   logEntries: LogEntry[],
-): ChildProcess {
+): ChildProcess => {
   const proc = spawn(command, args, {
     cwd: REPO_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: process.platform === 'win32',
     env: { ...process.env, FORCE_COLOR: '0' },
+    shell: process.platform === 'win32',
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  proc.stdout?.on('data', (data: Buffer) => {
+  proc.stdout.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
-      logEntries.push({ source: label, message: line, timestamp: Date.now() });
+      logEntries.push({ message: line, source: label, timestamp: Date.now() });
     }
   });
 
-  proc.stderr?.on('data', (data: Buffer) => {
+  proc.stderr.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
-      logEntries.push({ source: label, message: line, timestamp: Date.now() });
+      logEntries.push({ message: line, source: label, timestamp: Date.now() });
     }
   });
 
@@ -265,41 +370,51 @@ function spawnLogging(
   });
 
   return proc;
-}
+};
 
-function tcpCheck(host: string, port: number, timeoutMs = 2000): Promise<boolean> {
-  return new Promise((resolve) => {
+const tcpCheck = (host: string, port: number, timeoutMs = 2000): Promise<boolean> =>
+  new Promise((resolve) => {
     const socket = net.connect({ host, port });
     const done = (ok: boolean) => {
       socket.destroy();
       resolve(ok);
     };
-    socket.once('connect', () => done(true));
-    socket.once('error', () => done(false));
-    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => {
+      done(true);
+    });
+    socket.once('error', () => {
+      done(false);
+    });
+    socket.setTimeout(timeoutMs, () => {
+      done(false);
+    });
   });
-}
 
-function parseWsEndpoint(url: string): { host: string; port: number } | null {
-  const m = url.match(/^wss?:\/\/([^/:]+)(?::(\d+))?/);
-  if (!m) return null;
+const parseWsEndpoint = (url: string): { host: string; port: number } | null => {
+  const match = /^wss?:\/\/(?<host>[^/:]+)(?::(?<port>\d+))?/u.exec(url);
+  if (!match) {
+    return null;
+  }
 
-  const host = m[1];
-  if (!host) return null;
+  const host = match.groups?.host;
+  if (host === undefined || host.length === 0) {
+    return null;
+  }
 
-  return { host, port: m[2] ? Number.parseInt(m[2], 10) : 80 };
-}
+  const port = match.groups?.port;
+  return { host, port: port === undefined || port.length === 0 ? 80 : Number.parseInt(port, 10) };
+};
 
-function findOnPath(bin: string): boolean {
+const findOnPath = (bin: string): boolean => {
   try {
     execSync(process.platform === 'win32' ? `where ${bin}` : `which ${bin}`, { stdio: 'pipe' });
     return true;
   } catch {
     return false;
   }
-}
+};
 
-async function ensureLiveKit(url: string, logEntries: LogEntry[]): Promise<ChildProcess | null> {
+const ensureLiveKit = async (url: string, logEntries: LogEntry[]): Promise<ChildProcess | null> => {
   const endpoint = parseWsEndpoint(url);
   if (!endpoint) {
     log('LIVEKIT', `Could not parse LiveKit URL "${url}" — assuming external SFU`);
@@ -323,7 +438,9 @@ async function ensureLiveKit(url: string, logEntries: LogEntry[]): Promise<Child
   for (const port of [endpoint.port, 7881, 7882]) {
     killPort(port);
   }
-  await new Promise((r) => setTimeout(r, 500));
+  await new Promise((r) => {
+    setTimeout(r, 500);
+  });
   log('LIVEKIT', `Starting native livekit-server --dev on :${endpoint.port}...`);
   const proc = spawnLogging(
     'livekit-server',
@@ -332,18 +449,20 @@ async function ensureLiveKit(url: string, logEntries: LogEntry[]): Promise<Child
     logEntries,
   );
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (await tcpCheck(endpoint.host, endpoint.port)) {
-      log('LIVEKIT', 'livekit-server is up');
-      return proc;
-    }
-    await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
+  const up = await pollUntil(
+    async () => ((await tcpCheck(endpoint.host, endpoint.port)) ? true : null),
+    HEALTH_POLL_MS,
+    deadline,
+  );
+  if (up !== null) {
+    log('LIVEKIT', 'livekit-server is up');
+    return proc;
   }
   proc.kill('SIGTERM');
   throw new Error('livekit-server did not open its port within the startup timeout');
-}
+};
 
-function findSpotifyProcess(): boolean {
+const findSpotifyProcess = (): boolean => {
   try {
     if (process.platform === 'linux') {
       const out = execSync('pgrep -x spotify 2>/dev/null || true', { encoding: 'utf-8' }).trim();
@@ -354,12 +473,12 @@ function findSpotifyProcess(): boolean {
       return out.includes('Spotify.exe');
     }
   } catch (err) {
-    log('SPOTIFY', `Process detection failed: ${err}`);
+    log('SPOTIFY', `Process detection failed: ${String(err)}`);
   }
   return false;
-}
+};
 
-function launchSpotify(): boolean {
+const launchSpotify = (): boolean => {
   try {
     if (process.platform === 'linux') {
       execSync('nohup spotify >/dev/null 2>&1 &', { stdio: 'ignore', timeout: 3000 });
@@ -370,12 +489,12 @@ function launchSpotify(): boolean {
       return true;
     }
   } catch (err) {
-    log('SPOTIFY', `Failed to launch Spotify: ${err}`);
+    log('SPOTIFY', `Failed to launch Spotify: ${String(err)}`);
   }
   return false;
-}
+};
 
-function validateLogs(entries: LogEntry[], label: string): LogEntry[] {
+const validateLogs = (entries: LogEntry[], label: string): LogEntry[] => {
   const matched: LogEntry[] = [];
 
   for (const entry of entries) {
@@ -395,9 +514,9 @@ function validateLogs(entries: LogEntry[], label: string): LogEntry[] {
   }
 
   return matched;
-}
+};
 
-function validateGpuReport(report: GpuInfo | null): string[] {
+const validateGpuReport = (report: GpuInfo | null): string[] => {
   const issues: string[] = [];
 
   if (!report) {
@@ -405,7 +524,7 @@ function validateGpuReport(report: GpuInfo | null): string[] {
     return issues;
   }
 
-  if (!report.eglVendor) {
+  if (report.eglVendor === null || report.eglVendor.length === 0) {
     issues.push('GPU probe reported no EGL vendor');
   }
 
@@ -414,7 +533,7 @@ function validateGpuReport(report: GpuInfo | null): string[] {
   }
 
   return issues;
-}
+};
 
 interface ServerProcs {
   serverProc: ChildProcess | null;
@@ -422,8 +541,8 @@ interface ServerProcs {
   livekitProc: ChildProcess | null;
 }
 
-async function ensureServers(config: AppConfig, logEntries: LogEntry[]): Promise<ServerProcs> {
-  const procs: ServerProcs = { serverProc: null, webProc: null, livekitProc: null };
+const ensureServers = async (config: AppConfig, logEntries: LogEntry[]): Promise<ServerProcs> => {
+  const procs: ServerProcs = { livekitProc: null, serverProc: null, webProc: null };
 
   procs.livekitProc = await ensureLiveKit(config.livekitUrl, logEntries);
 
@@ -432,7 +551,9 @@ async function ensureServers(config: AppConfig, logEntries: LogEntry[]): Promise
     log('SPAWN', 'API server is already running and healthy');
   } catch {
     killPort(config.serverPort);
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => {
+      setTimeout(r, 500);
+    });
     log('SPAWN', 'Starting API server...');
     procs.serverProc = spawnLogging('pnpm', ['--filter', 'server', 'dev'], 'server', logEntries);
     await pollHealth(`${config.apiEndpoint}/health`, STARTUP_TIMEOUT_MS, 'API server');
@@ -443,7 +564,9 @@ async function ensureServers(config: AppConfig, logEntries: LogEntry[]): Promise
     log('SPAWN', 'Web dev server is already running and healthy');
   } catch {
     killPort(config.webPort);
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => {
+      setTimeout(r, 500);
+    });
     log('SPAWN', 'Starting Web dev server...');
     procs.webProc = spawnLogging('pnpm', ['--filter', 'web', 'dev'], 'web', logEntries);
     await pollHealth(config.websiteUrl, STARTUP_TIMEOUT_MS, 'Web server');
@@ -464,7 +587,7 @@ async function ensureServers(config: AppConfig, logEntries: LogEntry[]): Promise
   }
 
   return procs;
-}
+};
 
 interface PresenterPhaseResult {
   phase: PresenterPhase;
@@ -474,51 +597,71 @@ interface PresenterPhaseResult {
 const PRESENTER_TIMEOUT_MS = 240_000;
 const PRESENTER_TEARDOWN_MS = 30_000;
 
-function writePresenterRelease(): void {
+const writePresenterRelease = (): void => {
   writeFileSync(PRESENTER_RELEASE_FLAG, String(Date.now()));
-}
+};
 
-async function waitForProcessExit(proc: ChildProcess, timeoutMs: number): Promise<void> {
+const waitForProcessExit = async (proc: ChildProcess, timeoutMs: number): Promise<void> => {
   const outputClosed = [proc.stdout, proc.stderr].every(
-    (stream) => stream == null || stream.readableEnded || stream.destroyed,
+    (stream) => stream === null || stream.readableEnded || stream.destroyed,
   );
-  if ((proc.exitCode !== null || proc.signalCode !== null) && outputClosed) return;
+  if ((proc.exitCode !== null || proc.signalCode !== null) && outputClosed) {
+    return;
+  }
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(() => resolve(), timeoutMs);
+    const timer = setTimeout(() => {
+      resolve();
+    }, timeoutMs);
     proc.once('close', () => {
       clearTimeout(timer);
       resolve();
     });
   });
-}
+};
 
-async function waitForPresenterPhase(presenterProc: ChildProcess, timeoutMs: number): Promise<PresenterPhase | null> {
+const readPresentPhaseIfPresent = (): PresenterPhase | null => {
+  if (!existsSync(PRESENTER_PHASE_JSON)) {
+    return null;
+  }
+  return readPresenterPhaseFile(PRESENTER_PHASE_JSON);
+};
+
+const presenterPhaseIsTerminal = (phase: PresenterPhase): boolean => phase.handoffReady || phase.errors.length > 0;
+
+const waitForPresenterPhase = async (
+  presenterProc: ChildProcess,
+  timeoutMs: number,
+): Promise<PresenterPhase | null> => {
   const deadline = Date.now() + timeoutMs;
   let phase: PresenterPhase | null = null;
-  while (Date.now() < deadline) {
-    if (existsSync(PRESENTER_PHASE_JSON)) {
-      try {
-        // SAFETY: the presenter writes this file from the PresenterPhase object in its Playwright script.
-        phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
-        if (phase.handoffReady || phase.errors.length > 0) break;
-      } catch (error) {
-        console.debug('[e2e] presenter phase is not complete:', error);
+  await pollUntil(
+    () => {
+      const next = readPresentPhaseIfPresent();
+      if (next !== null) {
+        phase = next;
+        if (presenterPhaseIsTerminal(next)) {
+          return next;
+        }
       }
-    }
-    if (presenterProc.exitCode !== null || presenterProc.signalCode !== null) break;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+      if (presenterProc.exitCode !== null || presenterProc.signalCode !== null) {
+        return PHASE_POLL_STOP;
+      }
+      return null;
+    },
+    PRESENTER_PHASE_POLL_MS,
+    deadline,
+  );
   return phase;
-}
+};
 
-async function runPresenterPhase(
+const runPresenterPhase = async (
   config: AppConfig,
   logEntries: LogEntry[],
   result: TestResult,
   codec: string,
   captureMode: string,
   ownProcess: (process: ChildProcess) => void,
-): Promise<PresenterPhaseResult> {
+): Promise<PresenterPhaseResult> => {
   log('TEST', `=== Step 2: Presenter Automation (Playwright CDP + Tauri, codec=${codec}) ===`);
 
   const appBinary = process.env.E2E_APP_BINARY_PATH ?? path.join(REPO_ROOT, 'target', 'release', 'slopcast');
@@ -541,24 +684,24 @@ async function runPresenterPhase(
   const sharedEnv = {
     ...process.env,
     NODE_ENV: 'test',
-    XDG_CONFIG_HOME: path.join(REPO_ROOT, 'test-output', 'e2e-userdata'),
     SLOPCAST_E2E_CAPTURE: captureMode === 'portal' ? '' : 'synthetic',
+    XDG_CONFIG_HOME: path.join(REPO_ROOT, 'test-output', 'e2e-userdata'),
   };
   const appProc = spawn(appBinary, [], {
     cwd: path.dirname(appBinary),
-    stdio: ['ignore', 'pipe', 'pipe'],
     env: sharedEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   ownProcess(appProc);
   const attachOutput = (stream: NodeJS.ReadableStream): void => {
     stream.on('data', (data: Buffer) => {
       for (const line of data.toString().split('\n').filter(Boolean)) {
-        logEntries.push({ source: 'desktop-main', message: line, timestamp: Date.now() });
+        logEntries.push({ message: line, source: 'desktop-main', timestamp: Date.now() });
       }
     });
   };
-  if (appProc.stdout) attachOutput(appProc.stdout);
-  if (appProc.stderr) attachOutput(appProc.stderr);
+  attachOutput(appProc.stdout);
+  attachOutput(appProc.stderr);
   appProc.on('error', (err) => {
     log('PROCESS', `presenter binary spawn error: ${err.message}`);
   });
@@ -568,21 +711,21 @@ async function runPresenterPhase(
     ['--filter', 'desktop', 'exec', 'node', '../../tests/e2e/desktop/presenter.playwright.ts'],
     {
       cwd: REPO_ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...sharedEnv,
+        E2E_CAPTURE: captureMode,
+        E2E_CODEC: codec,
+        E2E_EXPECTED_BITRATE: String(passBitrateFor(codec)),
+        E2E_EXPECTED_FPS: String(passFps),
         E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
         E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
-        E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
-        E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
         E2E_SPECTATOR_READY_FLAG: PRESENTER_SPECTATOR_READY_FLAG,
+        E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
+        E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
         E2E_WEBSITE_URL: config.websiteUrl,
-        E2E_CODEC: codec,
-        E2E_EXPECTED_FPS: String(passFps),
-        E2E_EXPECTED_BITRATE: String(passBitrateFor(codec)),
-        E2E_CAPTURE: captureMode,
         FORCE_COLOR: '0',
       },
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
   ownProcess(presenterProc);
@@ -595,7 +738,7 @@ async function runPresenterPhase(
 
   const phase = await waitForPresenterPhase(presenterProc, PRESENTER_TIMEOUT_MS);
 
-  if (!phase?.ok) {
+  if (phase?.ok !== true) {
     writePresenterRelease();
     const reason = phase
       ? phase.errors.join('; ') || 'no errors recorded'
@@ -641,15 +784,15 @@ async function runPresenterPhase(
   );
 
   return { phase, presenterProc };
-}
+};
 
-async function waitForSpectatorConnection(page: Page, result: TestResult): Promise<void> {
+const waitForSpectatorConnection = async (page: Page, result: TestResult): Promise<void> => {
   try {
     await page.waitForFunction(
       () => {
         const badges = document.querySelectorAll('[role="status"]');
         for (const badge of badges) {
-          const text = badge.textContent?.toLowerCase() ?? '';
+          const text = badge.textContent.toLowerCase();
           if (text.includes('live') || text.includes('connecting') || text.includes('waiting')) {
             return true;
           }
@@ -662,17 +805,17 @@ async function waitForSpectatorConnection(page: Page, result: TestResult): Promi
     log('SPECTATOR', 'Connection status badge visible');
     result.spectatorConnected = true;
   } catch (err) {
-    log('SPECTATOR', `Connection status badge never appeared: ${err}`);
+    log('SPECTATOR', `Connection status badge never appeared: ${String(err)}`);
     result.errors.push('Spectator never reached connecting/live state');
   }
-}
+};
 
-async function waitForSpectatorVideo(
+const waitForSpectatorVideo = async (
   page: Page,
   result: TestResult,
   codec: string,
   captureMode: string,
-): Promise<void> {
+): Promise<void> => {
   try {
     await page.waitForSelector('video', { state: 'attached', timeout: STREAM_TIMEOUT_MS });
 
@@ -696,14 +839,14 @@ async function waitForSpectatorVideo(
         if (video.videoWidth > 0 && video.videoHeight > 0) {
           return {
             found: true,
-            width: video.videoWidth,
             height: video.videoHeight,
             playing: !video.paused,
             readyState: video.readyState,
+            width: video.videoWidth,
           };
         }
       }
-      return { found: false, width: 0, height: 0, playing: false, readyState: -1 };
+      return { found: false, height: 0, playing: false, readyState: -1, width: 0 };
     });
 
     if (videoState.found) {
@@ -715,7 +858,7 @@ async function waitForSpectatorVideo(
       result.spectatorVideoPlaying = videoState.playing;
       result.spectatorVideoWidth = videoState.width;
       result.spectatorVideoHeight = videoState.height;
-      const expectedDims = RESOLUTION_DIMENSIONS[passResolution] ?? RESOLUTION_DIMENSIONS['720p'];
+      const expectedDims = RESOLUTION_DIMENSIONS[passResolution];
       if (
         captureMode === 'synthetic' &&
         (videoState.width !== expectedDims.width || videoState.height !== expectedDims.height)
@@ -732,12 +875,12 @@ async function waitForSpectatorVideo(
     await checkSpectatorFrameFlow(page, result);
     await checkSpectatorDecodedFps(page, result, codec);
   } catch (err) {
-    log('SPECTATOR', `Video element never appeared: ${err}`);
+    log('SPECTATOR', `Video element never appeared: ${String(err)}`);
     result.errors.push('Spectator video element never appeared');
   }
-}
+};
 
-async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<void> {
+const checkSpectatorFrameFlow = async (page: Page, result: TestResult): Promise<void> => {
   try {
     const frameCheck = await page.evaluate(async () => {
       const video = [...document.querySelectorAll('video')].find((v) => v.videoWidth > 0);
@@ -745,12 +888,28 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
         throw new Error('no video element with frames');
       }
       await Promise.race([
-        new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve())),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('first video frame timed out')), 5000)),
+        new Promise<void>((resolve) => {
+          video.requestVideoFrameCallback(() => {
+            resolve();
+          });
+        }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('first video frame timed out'));
+          }, 5000);
+        }),
       ]);
       await Promise.race([
-        new Promise<void>((resolve) => video.requestVideoFrameCallback(() => resolve())),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('second video frame timed out')), 5000)),
+        new Promise<void>((resolve) => {
+          video.requestVideoFrameCallback(() => {
+            resolve();
+          });
+        }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('second video frame timed out'));
+          }, 5000);
+        }),
       ]);
 
       const canvas = document.createElement('canvas');
@@ -761,7 +920,7 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
         throw new Error('canvas 2d context unavailable');
       }
       ctx.drawImage(video, 0, 0, 64, 64);
-      const data = ctx.getImageData(0, 0, 64, 64).data;
+      const { data } = ctx.getImageData(0, 0, 64, 64);
       const pixels = data.length / 4;
       const [firstRed = 0, firstGreen = 0, firstBlue = 0] = data;
       let nonBlackCount = 0;
@@ -769,13 +928,17 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
       for (let i = 0; i < data.length; i += 4) {
         const [red = 0, green = 0, blue = 0] = data.subarray(i, i + 3);
         const luma = 0.299 * red + 0.587 * green + 0.114 * blue;
-        if (luma > 16) nonBlackCount += 1;
-        if (red !== firstRed || green !== firstGreen || blue !== firstBlue) variedCount += 1;
+        if (luma > 16) {
+          nonBlackCount += 1;
+        }
+        if (red !== firstRed || green !== firstGreen || blue !== firstBlue) {
+          variedCount += 1;
+        }
       }
       return {
+        currentTime: video.currentTime,
         nonBlack: nonBlackCount / pixels,
         varied: variedCount / pixels,
-        currentTime: video.currentTime,
       };
     });
 
@@ -789,12 +952,12 @@ async function checkSpectatorFrameFlow(page: Page, result: TestResult): Promise<
         `content=${hasContent}`,
     );
   } catch (err) {
-    log('SPECTATOR', `Frame flow check failed: ${err}`);
+    log('SPECTATOR', `Frame flow check failed: ${String(err)}`);
     result.errors.push(`Spectator frame flow check failed: ${String(err)}`);
   }
-}
+};
 
-async function enableSpectatorTelemetry(page: Page): Promise<void> {
+const enableSpectatorTelemetry = async (page: Page): Promise<void> => {
   await page.locator('video').first().hover();
   await page.getByRole('button', { name: 'Player settings' }).click();
   const telemetryToggle = page.getByRole('switch', { name: 'Show telemetry' });
@@ -802,9 +965,9 @@ async function enableSpectatorTelemetry(page: Page): Promise<void> {
     await telemetryToggle.click();
   }
   await page.keyboard.press('Escape');
-}
+};
 
-async function checkSpectatorDecodedFps(page: Page, result: TestResult, codec: string): Promise<void> {
+const checkSpectatorDecodedFps = async (page: Page, result: TestResult, codec: string): Promise<void> => {
   try {
     await enableSpectatorTelemetry(page);
 
@@ -812,28 +975,34 @@ async function checkSpectatorDecodedFps(page: Page, result: TestResult, codec: s
     await page.waitForFunction(
       () => {
         const text = document.querySelector('[data-testid="spectator-telemetry-fps"]')?.textContent;
-        return text != null && Number.parseFloat(text) > 0;
+        return text !== undefined && Number.parseFloat(text) > 0;
       },
       undefined,
       { timeout: 8000 },
     );
     const spectatorCodec = (await page.locator('[data-testid="spectator-telemetry-codec"]').textContent())?.trim();
     const expectedCodec = codecLabelForTest(codec);
-    result.spectatorCodec = spectatorCodec || null;
-    if (!spectatorCodec || spectatorCodec.toUpperCase() !== expectedCodec.toUpperCase()) {
+    let reportedCodec: string | null = null;
+    if (spectatorCodec !== undefined && spectatorCodec.length > 0) {
+      reportedCodec = spectatorCodec;
+    }
+    result.spectatorCodec = reportedCodec;
+    if (reportedCodec === null || reportedCodec.toUpperCase() !== expectedCodec.toUpperCase()) {
       result.errors.push(
-        `Spectator codec mismatch: requested ${expectedCodec}, receiver reported ${spectatorCodec || 'none'}`,
+        `Spectator codec mismatch: requested ${expectedCodec}, receiver reported ${reportedCodec ?? 'none'}`,
       );
     }
 
     const samples: number[] = [];
-    for (let sampleIndex = 0; sampleIndex < 3; sampleIndex++) {
+    await sequentially(FPS_SAMPLE_INDICES, async (sampleIndex) => {
       if (sampleIndex > 0) {
-        await new Promise((resolve) => setTimeout(resolve, 2200));
+        await delay(FPS_SAMPLE_INTERVAL_MS);
       }
       const fps = Number.parseFloat((await fpsValue.textContent()) ?? '');
-      if (Number.isFinite(fps) && fps > 0) samples.push(fps);
-    }
+      if (Number.isFinite(fps) && fps > 0) {
+        samples.push(fps);
+      }
+    });
     if (samples.length !== 3) {
       throw new Error(`received only ${samples.length} valid decoded-FPS telemetry sample(s)`);
     }
@@ -852,16 +1021,14 @@ async function checkSpectatorDecodedFps(page: Page, result: TestResult, codec: s
         `minimum=${minimumFps}`,
     );
   } catch (err) {
-    log('SPECTATOR', `Decoded FPS check failed: ${err}`);
+    log('SPECTATOR', `Decoded FPS check failed: ${String(err)}`);
     result.errors.push(`Spectator decoded FPS check failed: ${String(err)}`);
   }
-}
+};
 
-function codecLabelForTest(codec: string): string {
-  return codec.replace(/^H26[45]$/i, (m) => `H.${m.slice(1)}`);
-}
+const codecLabelForTest = (codec: string): string => codec.replace(/^H26[45]$/iu, (m) => `H.${m.slice(1)}`);
 
-async function checkDecoderStall(page: Page, result: TestResult): Promise<void> {
+const checkDecoderStall = async (page: Page, result: TestResult): Promise<void> => {
   try {
     const stallHint = await page.evaluate(() => {
       const stallEl = document.querySelector('[data-decoder-stalled]');
@@ -873,20 +1040,26 @@ async function checkDecoderStall(page: Page, result: TestResult): Promise<void> 
       result.errors.push('Spectator decoder stall detected (possible codec profile mismatch)');
     }
   } catch (err) {
-    log('SPECTATOR', `Decoder stall check failed: ${err}`);
+    log('SPECTATOR', `Decoder stall check failed: ${String(err)}`);
   }
-}
+};
 
 const waitForFile = async (filePath: string, timeoutMs: number): Promise<boolean> => {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(filePath)) return true;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  return false;
+  const found = await pollUntil(
+    () => {
+      if (existsSync(filePath)) {
+        return true;
+      }
+      return null;
+    },
+    FILE_POLL_MS,
+    deadline,
+  );
+  return found !== null;
 };
 
-async function runPresenterStopRoundTrip(page: Page, result: TestResult): Promise<void> {
+const runPresenterStopRoundTrip = async (page: Page, result: TestResult): Promise<void> => {
   log('TEST', '=== Presenter stop round-trip (spectator must be informed) ===');
   rmSync(PRESENTER_STOPPED_FLAG, { force: true });
   writeFileSync(PRESENTER_STOP_FLAG, 'stop');
@@ -901,7 +1074,7 @@ async function runPresenterStopRoundTrip(page: Page, result: TestResult): Promis
       () => {
         const badges = document.querySelectorAll('[role="status"]');
         for (const badge of badges) {
-          const text = badge.textContent?.toLowerCase() ?? '';
+          const text = badge.textContent.toLowerCase();
           if (text.includes('stream ended') || text.includes('presenter left')) {
             return true;
           }
@@ -914,17 +1087,17 @@ async function runPresenterStopRoundTrip(page: Page, result: TestResult): Promis
     result.spectatorNotifiedOfStop = true;
     log('SPECTATOR', 'Badge reports the stream ended — stop propagated to the spectator');
   } catch (err) {
-    log('SPECTATOR', `Badge never reported the stream ended: ${err}`);
+    log('SPECTATOR', `Badge never reported the stream ended: ${String(err)}`);
     result.errors.push('Spectator was not informed when the presenter stopped (badge never left Live)');
   }
-}
+};
 
-async function runSpectatorPhase(
+const runSpectatorPhase = async (
   logEntries: LogEntry[],
   result: TestResult,
   codec: string,
   captureMode: string,
-): Promise<Browser> {
+): Promise<Browser> => {
   log('TEST', '=== Step 3: Spectator Automation (Chromium) ===');
 
   const { chromium } = await import('playwright');
@@ -942,67 +1115,71 @@ async function runSpectatorPhase(
 
   try {
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
+      viewport: { height: 720, width: 1280 },
     });
     const spectatorPage = await context.newPage();
 
     spectatorPage.on('console', (msg) => {
       logEntries.push({
-        source: 'spectator',
         message: `[${msg.type()}] ${msg.text()}`,
+        source: 'spectator',
         timestamp: Date.now(),
       });
     });
 
     spectatorPage.on('pageerror', (err) => {
       logEntries.push({
-        source: 'spectator',
         message: `UNCAUGHT: ${err.message}`,
+        source: 'spectator',
         timestamp: Date.now(),
       });
     });
 
     log('SPECTATOR', `Navigating to ${result.shareUrl}`);
     await spectatorPage.goto(result.shareUrl, {
-      waitUntil: 'domcontentloaded',
       timeout: SPECTATOR_CONNECT_TIMEOUT_MS,
+      waitUntil: 'domcontentloaded',
     });
 
     await waitForSpectatorConnection(spectatorPage, result);
 
     if (codec === 'h265') {
       log('SPECTATOR', 'H.265 decode checks skipped — headless Chromium has no HEVC decoder');
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => {
+        setTimeout(r, 3000);
+      });
     } else {
       await waitForSpectatorVideo(spectatorPage, result, codec, captureMode);
 
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => {
+        setTimeout(r, 3000);
+      });
 
       await checkDecoderStall(spectatorPage, result);
     }
 
     writeFileSync(PRESENTER_SPECTATOR_READY_FLAG, 'ready');
-    const telemetryDeadline = Date.now() + 20_000;
-    while (Date.now() < telemetryDeadline) {
-      let phase: PresenterPhase;
-      try {
-        // SAFETY: the presenter writes this file from the PresenterPhase object in its Playwright script.
-        phase = JSON.parse(readFileSync(PRESENTER_PHASE_JSON, 'utf8')) as PresenterPhase;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        continue;
-      }
-      if (phase.errors.length > 0) {
-        result.errors.push(...phase.errors.map((error) => `Presenter post-subscription telemetry: ${error}`));
-        break;
-      }
-      if (phase.postSubscriptionTelemetryReady) {
-        result.presenterVideoBytesSent = phase.videoBytesSent;
-        result.presenterBitrateBps = phase.senderBitrateBps;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
+    const telemetryDeadline = Date.now() + TELEMETRY_TIMEOUT_MS;
+    await pollUntil(
+      () => {
+        const phase = readPresenterPhaseFile(PRESENTER_PHASE_JSON);
+        if (phase === null) {
+          return null;
+        }
+        if (phase.errors.length > 0) {
+          result.errors.push(...phase.errors.map((error) => `Presenter post-subscription telemetry: ${error}`));
+          return PHASE_POLL_STOP;
+        }
+        if (phase.postSubscriptionTelemetryReady) {
+          result.presenterVideoBytesSent = phase.videoBytesSent;
+          result.presenterBitrateBps = phase.senderBitrateBps;
+          return PHASE_POLL_STOP;
+        }
+        return null;
+      },
+      TELEMETRY_POLL_MS,
+      telemetryDeadline,
+    );
     if (result.presenterVideoBytesSent <= 0) {
       result.errors.push('Presenter telemetry reported no RTP bytes after the spectator subscribed');
     }
@@ -1013,12 +1190,14 @@ async function runSpectatorPhase(
     return browser;
   } finally {
     if (shouldCloseBrowser) {
-      await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
+      await browser.close().catch(() => {
+        log('CLEANUP', 'Spectator browser already closed');
+      });
     }
   }
-}
+};
 
-function validateDiagnostics(result: TestResult, passLogEntries: LogEntry[], codec: string): void {
+const validateDiagnostics = (result: TestResult, passLogEntries: LogEntry[], codec: string): void => {
   log('TEST', '=== Step 4: Diagnostic Validation ===');
 
   const desktopLogs = passLogEntries.filter((e) => e.source === 'desktop-main' || e.source === 'desktop-renderer');
@@ -1059,26 +1238,28 @@ function validateDiagnostics(result: TestResult, passLogEntries: LogEntry[], cod
   if (result.previewFramesSent <= 0) {
     result.errors.push('Presenter emitted no preview frames (previewFramesSent stayed at 0)');
   }
-}
+};
 
-function writeOutputArtifacts(logEntries: LogEntry[]): void {
+const writeOutputArtifacts = (logEntries: LogEntry[]): void => {
   const consoleOutput = logEntries
     .map((e) => `[${new Date(e.timestamp).toISOString()}] [${e.source}] ${e.message}`)
     .join('\n');
   writeFileSync(DESKTOP_CONSOLE_LOG, consoleOutput);
   const webLogEntries = logEntries.filter((e) => e.source === 'spectator');
   writeFileSync(WEB_CONSOLE_LOG, webLogEntries.map((e) => e.message).join('\n'));
-}
+};
 
-async function shutdownResources(
+const shutdownResources = async (
   browser: Browser | null,
   presenterProc: ChildProcess | null,
   procs: ServerProcs,
   config: AppConfig,
-): Promise<void> {
+): Promise<void> => {
   log('CLEANUP', 'Shutting down...');
   if (browser) {
-    await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
+    await browser.close().catch(() => {
+      log('CLEANUP', 'Spectator browser already closed');
+    });
   }
   if (presenterProc) {
     writePresenterRelease();
@@ -1093,47 +1274,47 @@ async function shutdownResources(
     try {
       proc?.kill('SIGTERM');
     } catch (err) {
-      log('CLEANUP', `Process kill failed: ${err}`);
+      log('CLEANUP', `Process kill failed: ${String(err)}`);
     }
   }
 
   killPort(config.serverPort);
   killPort(config.webPort);
-}
+};
 
-async function runTest(): Promise<TestResult> {
+const runTest = async (): Promise<TestResult> => {
   const startTime = Date.now();
   const result: TestResult = {
-    passed: false,
-    roomCode: '',
-    shareUrl: '',
-    gpuReport: null,
+    captureFramesPushed: 0,
+    codecResults: {},
+    codecsTested: [],
     consoleErrors: [],
-    spectatorConnected: false,
-    spectatorVideoReceived: false,
-    spectatorVideoPlaying: false,
-    spectatorVideoWidth: 0,
-    spectatorVideoHeight: 0,
-    spectatorCodec: null,
-    spectatorDecodedFps: 0,
-    spectatorFramesFlowing: false,
-    spectatorFrameHasContent: false,
-    spectatorNotifiedOfStop: false,
+    decoderStallDetected: false,
+    durationMs: 0,
+    encoderImplementation: null,
+    errors: [],
+    gpuReport: null,
+    passed: false,
+    presenterBitrateBps: 0,
+    presenterTelemetryFps: 0,
+    presenterVideoBytesSent: 0,
     presenterVideoFlowing: false,
     presenterVideoFramesEncoded: 0,
-    presenterVideoBytesSent: 0,
-    presenterTelemetryFps: 0,
-    presenterBitrateBps: 0,
-    captureFramesPushed: 0,
     previewFramesSent: 0,
-    videoCodecReported: null,
-    encoderImplementation: null,
-    decoderStallDetected: false,
-    codecsTested: [],
-    codecResults: {},
-    durationMs: 0,
     retries: 0,
-    errors: [],
+    roomCode: '',
+    shareUrl: '',
+    spectatorCodec: null,
+    spectatorConnected: false,
+    spectatorDecodedFps: 0,
+    spectatorFrameHasContent: false,
+    spectatorFramesFlowing: false,
+    spectatorNotifiedOfStop: false,
+    spectatorVideoHeight: 0,
+    spectatorVideoPlaying: false,
+    spectatorVideoReceived: false,
+    spectatorVideoWidth: 0,
+    videoCodecReported: null,
   };
 
   const logEntries: LogEntry[] = [];
@@ -1157,20 +1338,22 @@ async function runTest(): Promise<TestResult> {
 
   const streamSettingsPath = path.join(OUTPUT_DIR, 'e2e-userdata', 'slopcast', 'stream-settings.json');
   const writeStreamSettingsForPass = (codec: string): void => {
-    if (captureMode === 'portal') return;
+    if (captureMode === 'portal') {
+      return;
+    }
     const bitrateLimit = passBitrateFor(codec);
     mkdirSync(path.dirname(streamSettingsPath), { recursive: true });
     writeFileSync(
       streamSettingsPath,
       JSON.stringify(
         {
-          fps: passFps,
-          bitrateLimit,
-          videoCodec: codec,
-          resolution: passResolution,
           apiEndpoint: 'http://localhost:3001',
           autoBitrate: false,
+          bitrateLimit,
+          fps: passFps,
           motionMode: 'static',
+          resolution: passResolution,
+          videoCodec: codec,
         },
         null,
         2,
@@ -1184,7 +1367,7 @@ async function runTest(): Promise<TestResult> {
 
   let browser: Browser | null = null;
   let presenterProc: ChildProcess | null = null;
-  let procs: ServerProcs = { serverProc: null, webProc: null, livekitProc: null };
+  let procs: ServerProcs = { livekitProc: null, serverProc: null, webProc: null };
 
   const releasePresenterSession = async (): Promise<void> => {
     if (presenterProc) {
@@ -1198,7 +1381,9 @@ async function runTest(): Promise<TestResult> {
       presenterProc = null;
     }
     if (browser) {
-      await browser.close().catch(() => log('CLEANUP', 'Spectator browser already closed'));
+      await browser.close().catch(() => {
+        log('CLEANUP', 'Spectator browser already closed');
+      });
       browser = null;
     }
   };
@@ -1248,31 +1433,29 @@ async function runTest(): Promise<TestResult> {
       await releasePresenterSession();
     }
 
-    if (fatalError == null) {
+    if (fatalError === null) {
       validateDiagnostics(result, logEntries.slice(logsBefore), codec);
     }
     const passErrors = result.errors.slice(errorsBefore);
     result.codecResults[codec] = {
-      passed: passErrors.length === 0,
+      encoderImplementation: result.encoderImplementation,
       errors: passErrors,
-      encoderImplementation: result.encoderImplementation ?? null,
-      videoCodecReported: result.videoCodecReported ?? null,
+      passed: passErrors.length === 0,
       presenterBitrateBps: result.presenterBitrateBps,
       presenterTelemetryFps: result.presenterTelemetryFps,
-      spectatorDecodedFps: result.spectatorDecodedFps,
-      spectatorVideoWidth: result.spectatorVideoWidth,
-      spectatorVideoHeight: result.spectatorVideoHeight,
       spectatorCodec: result.spectatorCodec,
+      spectatorDecodedFps: result.spectatorDecodedFps,
+      spectatorVideoHeight: result.spectatorVideoHeight,
+      spectatorVideoWidth: result.spectatorVideoWidth,
+      videoCodecReported: result.videoCodecReported,
     };
-    log('TEST', `Pass codec=${codec}: ${fatalError == null && passErrors.length === 0 ? 'PASSED' : 'FAILED'}`);
+    log('TEST', `Pass codec=${codec}: ${fatalError === null && passErrors.length === 0 ? 'PASSED' : 'FAILED'}`);
   };
 
   try {
     procs = await ensureServers(config, logEntries);
 
-    for (const codec of codecs) {
-      await runCodecPass(codec);
-    }
+    await sequentially(codecs, runCodecPass);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log('TEST', `FATAL: ${message}`);
@@ -1289,14 +1472,18 @@ async function runTest(): Promise<TestResult> {
   log('TEST', `Result written to ${RESULT_PATH}`);
 
   return result;
-}
+};
 
 const RETRY_DELAY_MS = 3000;
 
 const waitBeforeRetry = (attempt: number, maxRetries: number): Promise<void> => {
-  if (attempt >= maxRetries) return Promise.resolve();
+  if (attempt >= maxRetries) {
+    return Promise.resolve();
+  }
   log('TEST', 'Retrying in 3 seconds...');
-  return new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+  return new Promise((r) => {
+    setTimeout(r, RETRY_DELAY_MS);
+  });
 };
 
 const reportFinalFailure = (lastResult: TestResult | null): void => {
@@ -1308,11 +1495,12 @@ const reportFinalFailure = (lastResult: TestResult | null): void => {
   }
 };
 
-async function main(): Promise<void> {
+const main = async (): Promise<void> => {
   const maxRetries = 2;
   let lastResult: TestResult | null = null;
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  const attempts = Array.from({ length: maxRetries }, (_unused, index) => index + 1);
+  await sequentially(attempts, async (attempt) => {
     log('TEST', `========================================`);
     log('TEST', `Attempt ${attempt} of ${maxRetries}`);
     log('TEST', `========================================`);
@@ -1337,13 +1525,13 @@ async function main(): Promise<void> {
       log('TEST', `FATAL: ${message}`);
       await waitBeforeRetry(attempt, maxRetries);
     }
-  }
+  });
 
   reportFinalFailure(lastResult);
   process.exit(1);
-}
+};
 
-function printSummary(result: TestResult): void {
+const printSummary = (result: TestResult): void => {
   log('SUMMARY', '============================================');
   log('SUMMARY', `Room Code:       ${result.roomCode || 'N/A'}`);
   log('SUMMARY', `Share URL:       ${result.shareUrl || 'N/A'}`);
@@ -1378,7 +1566,7 @@ function printSummary(result: TestResult): void {
   }
 
   log('SUMMARY', '============================================');
-}
+};
 
 main().catch((err) => {
   console.error('Unhandled error in e2e-test:', err);

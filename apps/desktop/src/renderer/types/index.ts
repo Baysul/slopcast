@@ -1,129 +1,129 @@
 import type { AudioApp } from '@slopcast/shared-types';
 
 export interface CaptureContext {
-  de: 'unknown' | 'kde' | 'gnome';
-  sourceType: 'monitor' | 'window' | 'region' | 'unknown';
-  mediaName: string | null;
-  videoNodeCount: number;
-  app: AudioApp | null;
-  screencastNodeId: number | null;
-  highestSerial: number | null;
-  portalProps: Record<string, string> | null;
-  windowPid: number | null;
-  windowCaption: string | null;
+  readonly de: 'unknown' | 'kde' | 'gnome';
+  readonly sourceType: 'monitor' | 'window' | 'region' | 'unknown';
+  readonly mediaName: string | null;
+  readonly videoNodeCount: number;
+  readonly app: AudioApp | null;
+  readonly screencastNodeId: number | null;
+  readonly highestSerial: number | null;
+  readonly portalProps: Record<string, string> | null;
+  readonly windowPid: number | null;
+  readonly windowCaption: string | null;
 }
 
 export interface AppConfig {
-  apiEndpoint: string;
-  livekitUrl: string;
+  readonly apiEndpoint: string;
+  readonly livekitUrl: string;
 }
 
 export interface PlatformInfo {
-  platform: string;
-  isWayland: boolean;
-  desktopEnvironment: string;
-  videoCaptureAvailable: boolean;
+  readonly platform: string;
+  readonly isWayland: boolean;
+  readonly desktopEnvironment: string;
+  readonly videoCaptureAvailable: boolean;
 }
 
 export interface WindowButtonIcons {
-  minimize: string | null;
-  maximize: string | null;
-  restore: string | null;
-  close: string | null;
+  readonly minimize: string | null;
+  readonly maximize: string | null;
+  readonly restore: string | null;
+  readonly close: string | null;
 }
 
 export type CaptureSourceKind = 'screen' | 'window';
 
 export interface CaptureSourceInfo {
-  id: number;
-  title: string;
-  displayId: number;
-  kind: CaptureSourceKind;
+  readonly id: number;
+  readonly title: string;
+  readonly displayId: number;
+  readonly kind: CaptureSourceKind;
 }
 
 export interface CaptureSourceSelection {
-  kind: CaptureSourceKind;
-  id: number;
+  readonly kind: CaptureSourceKind;
+  readonly id: number;
 }
 
 export type CaptureStage = 'idle' | 'previewing' | 'live';
 
 export interface CaptureStartResult {
-  ok: boolean;
-  nodeId: number | null;
-  videoEnabled: boolean;
-  error?: string | null;
+  readonly ok: boolean;
+  readonly nodeId: number | null;
+  readonly videoEnabled: boolean;
+  readonly error?: string | null;
 }
 
 export interface DesktopCaptureConfig {
-  fps: number;
-  width: number;
-  height: number;
-  videoCodec?: string;
-  maxBitrate?: number;
-  autoBitrate?: boolean;
+  readonly fps: number;
+  readonly width: number;
+  readonly height: number;
+  readonly videoCodec?: string;
+  readonly maxBitrate?: number;
+  readonly autoBitrate?: boolean;
 }
 
 export interface PreviewFrame {
-  data: Uint8Array;
-  ptsUs: number;
-  width: number;
-  height: number;
+  readonly data: Uint8Array;
+  readonly ptsUs: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 export interface NativeCodecInfo {
-  codec: string;
-  label: string;
-  hardware: boolean;
+  readonly codec: string;
+  readonly label: string;
+  readonly hardware: boolean;
 }
 
 export interface NativeTelemetry {
-  videoCodec: string | null;
-  encoderImplementation: string | null;
-  videoBytesSent: number | null;
-  videoPacketsSent: number | null;
-  videoPacketsLost: number | null;
-  videoFramesEncoded: number | null;
-  videoFramesSubmitted: number | null;
-  videoWidth: number | null;
-  videoHeight: number | null;
-  videoAppsrcInput: number | null;
-  videoAppsrcOutput: number | null;
-  videoAppsrcDropped: number | null;
-  videoAppsrcLevelBuffers: number | null;
-  videoAppsrcLevelBytes: number | null;
-  videoAppsrcLevelTime: number | null;
-  audioCodec: string | null;
-  audioBytesSent: number | null;
-  audioPacketsSent: number | null;
-  audioPacketsLost: number | null;
-  rttMs: number | null;
-  timestampMs: number | null;
+  readonly videoCodec: string | null;
+  readonly encoderImplementation: string | null;
+  readonly videoBytesSent: number | null;
+  readonly videoPacketsSent: number | null;
+  readonly videoPacketsLost: number | null;
+  readonly videoFramesEncoded: number | null;
+  readonly videoFramesSubmitted: number | null;
+  readonly videoWidth: number | null;
+  readonly videoHeight: number | null;
+  readonly videoAppsrcInput: number | null;
+  readonly videoAppsrcOutput: number | null;
+  readonly videoAppsrcDropped: number | null;
+  readonly videoAppsrcLevelBuffers: number | null;
+  readonly videoAppsrcLevelBytes: number | null;
+  readonly videoAppsrcLevelTime: number | null;
+  readonly audioCodec: string | null;
+  readonly audioBytesSent: number | null;
+  readonly audioPacketsSent: number | null;
+  readonly audioPacketsLost: number | null;
+  readonly rttMs: number | null;
+  readonly timestampMs: number | null;
 }
 
 export interface DesktopCaptureStats {
-  framesDequeued: number;
-  framesPushed: number;
-  framesDropped: number;
-  captureErrors: number;
-  previewFramesSent: number;
-  keepaliveAttempted: number;
-  keepalivePushed: number;
-  keepaliveDropped: number;
-  lastWidth: number;
-  lastHeight: number;
-  pacerPushes: number;
-  pacerPops: number;
-  pacerDrops: number;
-  pacerDepth: number;
-  pacerMaxDepth: number;
-  cursorFrames: number;
-  cursorMissing: boolean;
+  readonly framesDequeued: number;
+  readonly framesPushed: number;
+  readonly framesDropped: number;
+  readonly captureErrors: number;
+  readonly previewFramesSent: number;
+  readonly keepaliveAttempted: number;
+  readonly keepalivePushed: number;
+  readonly keepaliveDropped: number;
+  readonly lastWidth: number;
+  readonly lastHeight: number;
+  readonly pacerPushes: number;
+  readonly pacerPops: number;
+  readonly pacerDrops: number;
+  readonly pacerDepth: number;
+  readonly pacerMaxDepth: number;
+  readonly cursorFrames: number;
+  readonly cursorMissing: boolean;
 }
 
 export interface GpuInfo {
-  eglVendor: string | null;
-  glRenderer: string | null;
-  glVersion: string | null;
-  softwareRasterizer: boolean;
+  readonly eglVendor: string | null;
+  readonly glRenderer: string | null;
+  readonly glVersion: string | null;
+  readonly softwareRasterizer: boolean;
 }

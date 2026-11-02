@@ -21,17 +21,27 @@ export interface StoredReplayChunk {
 
 const transactionDone = (transaction: IDBTransaction): Promise<void> =>
   new Promise((resolve, reject) => {
-    transaction.addEventListener('complete', () => resolve(), { once: true });
+    transaction.addEventListener(
+      'complete',
+      () => {
+        resolve();
+      },
+      { once: true },
+    );
     transaction.addEventListener(
       'abort',
-      () => reject(transaction.error ?? new Error('IndexedDB transaction aborted')),
+      () => {
+        reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
+      },
       {
         once: true,
       },
     );
     transaction.addEventListener(
       'error',
-      () => reject(transaction.error ?? new Error('IndexedDB transaction failed')),
+      () => {
+        reject(transaction.error ?? new Error('IndexedDB transaction failed'));
+      },
       {
         once: true,
       },
@@ -51,9 +61,15 @@ const deleteSessionRecords = (store: IDBObjectStore, sessionId: string): Promise
       store.delete(cursor.primaryKey);
       cursor.continue();
     });
-    request.addEventListener('error', () => reject(request.error ?? new Error('Failed to clear replay records')), {
-      once: true,
-    });
+    request.addEventListener(
+      'error',
+      () => {
+        reject(request.error ?? new Error('Failed to clear replay records'));
+      },
+      {
+        once: true,
+      },
+    );
   });
 
 const openReplayDatabase = (): Promise<IDBDatabase> =>
@@ -75,11 +91,29 @@ const openReplayDatabase = (): Promise<IDBDatabase> =>
         thumbnails.createIndex(THUMBNAIL_TIME_INDEX, ['sessionId', 'mediaTime']);
       }
     });
-    request.addEventListener('success', () => resolve(request.result), { once: true });
-    request.addEventListener('error', () => reject(request.error ?? new Error('Failed to open replay storage')), {
-      once: true,
-    });
-    request.addEventListener('blocked', () => reject(new Error('Replay storage upgrade was blocked')), { once: true });
+    request.addEventListener(
+      'success',
+      () => {
+        resolve(request.result);
+      },
+      { once: true },
+    );
+    request.addEventListener(
+      'error',
+      () => {
+        reject(request.error ?? new Error('Failed to open replay storage'));
+      },
+      {
+        once: true,
+      },
+    );
+    request.addEventListener(
+      'blocked',
+      () => {
+        reject(new Error('Replay storage upgrade was blocked'));
+      },
+      { once: true },
+    );
   });
 
 const clearSession = async (database: IDBDatabase, sessionId: string): Promise<void> => {
@@ -104,7 +138,9 @@ const initializeSession = async (database: IDBDatabase, sessionId: string): Prom
 };
 
 const deleteBefore = (store: IDBObjectStore, indexName: string, sessionId: string, cutoff: number): Promise<void> => {
-  if (cutoff <= 0) return Promise.resolve();
+  if (cutoff <= 0) {
+    return Promise.resolve();
+  }
 
   return new Promise((resolve, reject) => {
     const range = IDBKeyRange.bound([sessionId, 0], [sessionId, cutoff], false, true);
@@ -119,17 +155,26 @@ const deleteBefore = (store: IDBObjectStore, indexName: string, sessionId: strin
       store.delete(cursor.primaryKey);
       cursor.continue();
     });
-    request.addEventListener('error', () => reject(request.error ?? new Error('Failed to prune replay storage')), {
-      once: true,
-    });
+    request.addEventListener(
+      'error',
+      () => {
+        reject(request.error ?? new Error('Failed to prune replay storage'));
+      },
+      {
+        once: true,
+      },
+    );
   });
 };
 
 export class ReplayStore {
-  private constructor(
-    private readonly database: IDBDatabase,
-    private readonly sessionId: string,
-  ) {}
+  private readonly database: IDBDatabase;
+  private readonly sessionId: string;
+
+  private constructor(database: IDBDatabase, sessionId: string) {
+    this.database = database;
+    this.sessionId = sessionId;
+  }
 
   static async create(sessionId: string): Promise<ReplayStore> {
     const database = await openReplayDatabase();

@@ -1,39 +1,56 @@
 import { Monitor, X } from 'lucide-react';
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+
 import { markSpectatorCapabilityNoticeSeen, shouldShowSpectatorCapabilityNotice } from './spectator-capability-notice';
 
 interface SpectatorBannerProps {
-  compact?: boolean;
-  autoFade?: boolean;
-  fadeDelayMs?: number;
+  readonly compact?: boolean;
+  readonly autoFade?: boolean;
+  readonly fadeDelayMs?: number;
 }
 
-export const SpectatorBanner: React.FC<SpectatorBannerProps> = ({ compact, autoFade = true, fadeDelayMs = 10000 }) => {
-  const [shouldRender] = useState(() => shouldShowSpectatorCapabilityNotice(window.localStorage));
+const DEFAULT_FADE_DELAY_MS = 10_000;
+
+export const SpectatorBanner: React.FC<SpectatorBannerProps> = ({
+  compact,
+  autoFade = true,
+  fadeDelayMs = DEFAULT_FADE_DELAY_MS,
+}) => {
+  const shouldRender = useMemo(() => shouldShowSpectatorCapabilityNotice(window.localStorage), []);
   const [isVisible, setIsVisible] = useState(shouldRender);
 
   useEffect(() => {
-    if (shouldRender) markSpectatorCapabilityNoticeSeen(window.localStorage);
+    if (shouldRender) {
+      markSpectatorCapabilityNoticeSeen(window.localStorage);
+    }
   }, [shouldRender]);
 
   useEffect(() => {
-    if (!shouldRender || !autoFade) return;
+    if (!shouldRender || !autoFade) {
+      return undefined;
+    }
 
     const timer = setTimeout(() => {
       setIsVisible(false);
     }, fadeDelayMs);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+    };
   }, [autoFade, fadeDelayMs, shouldRender]);
 
-  const fadeClasses = `transition-opacity duration-1000 ease-out ${
-    isVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-  }`;
+  let visibilityClasses = 'opacity-0 pointer-events-none';
+  if (isVisible) {
+    visibilityClasses = 'opacity-100';
+  }
+  const fadeClasses = `transition-opacity duration-1000 ease-out ${visibilityClasses}`;
 
-  if (!shouldRender) return null;
+  if (!shouldRender) {
+    return null;
+  }
 
-  if (compact) {
+  if (compact === true) {
     return (
       <div
         className={`flex items-start justify-between gap-2 text-[11px] leading-snug text-white/40 bg-black/50 border border-white/10 rounded-lg pl-2.5 pr-1.5 py-1.5 backdrop-blur-md max-w-[280px] pointer-events-auto ${fadeClasses}`}
@@ -43,7 +60,9 @@ export const SpectatorBanner: React.FC<SpectatorBannerProps> = ({ compact, autoF
         </p>
         <button
           type="button"
-          onClick={() => setIsVisible(false)}
+          onClick={() => {
+            setIsVisible(false);
+          }}
           aria-label="Dismiss banner"
           title="Dismiss banner"
           className="p-0.5 text-white/40 hover:text-white transition-colors shrink-0 rounded focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/50"
@@ -66,7 +85,9 @@ export const SpectatorBanner: React.FC<SpectatorBannerProps> = ({ compact, autoF
       </div>
       <button
         type="button"
-        onClick={() => setIsVisible(false)}
+        onClick={() => {
+          setIsVisible(false);
+        }}
         aria-label="Dismiss banner"
         title="Dismiss banner"
         className="p-1 text-muted-foreground hover:text-foreground transition-colors shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

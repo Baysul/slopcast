@@ -1,4 +1,6 @@
+import { isJsonObject } from '@slopcast/shared-types';
 import { useEffect, useRef } from 'react';
+
 import type { PreviewFrame } from '../../../types';
 
 const PREVIEW_VERT = `#version 300 es
@@ -24,7 +26,7 @@ interface GpuFit {
   scaleY: number;
 }
 
-function fitScale(texW: number, texH: number, canvasW: number, canvasH: number): GpuFit {
+const fitScale = (texW: number, texH: number, canvasW: number, canvasH: number): GpuFit => {
   if (texW === 0 || texH === 0 || canvasW === 0 || canvasH === 0) {
     return { scaleX: 1, scaleY: 1 };
   }
@@ -34,15 +36,17 @@ function fitScale(texW: number, texH: number, canvasW: number, canvasH: number):
     return { scaleX: 1, scaleY: canvasAspect / texAspect };
   }
   return { scaleX: texAspect / canvasAspect, scaleY: 1 };
-}
+};
 
-function compileProgram(gl: WebGL2RenderingContext): WebGLProgram | null {
+const compileProgram = (gl: WebGL2RenderingContext): WebGLProgram | null => {
   const compile = (type: number, source: string): WebGLShader | null => {
     const shader = gl.createShader(type);
-    if (!shader) return null;
+    if (!shader) {
+      return null;
+    }
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    if (gl.getShaderParameter(shader, gl.COMPILE_STATUS) !== true) {
       console.warn('[PreviewCanvas] shader compile failed:', gl.getShaderInfoLog(shader));
       gl.deleteShader(shader);
       return null;
@@ -51,21 +55,27 @@ function compileProgram(gl: WebGL2RenderingContext): WebGLProgram | null {
   };
   const vertex = compile(gl.VERTEX_SHADER, PREVIEW_VERT);
   const fragment = compile(gl.FRAGMENT_SHADER, PREVIEW_FRAG);
-  if (!vertex || !fragment) return null;
-  const program = gl.createProgram();
-  if (!program) return null;
+  if (!vertex || !fragment) {
+    return null;
+  }
+  // DOM typings mark this non-null, but WebGL may return null if creation fails.
+  const createProgram = (): WebGLProgram | null => gl.createProgram();
+  const program = createProgram();
+  if (program === null) {
+    return null;
+  }
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  if (gl.getProgramParameter(program, gl.LINK_STATUS) !== true) {
     console.warn('[PreviewCanvas] program link failed:', gl.getProgramInfoLog(program));
     gl.deleteProgram(program);
     return null;
   }
   return program;
-}
+};
 
 const GPU_TEXTURE_USAGE_TEXTURE_BINDING = 0x04;
 const GPU_TEXTURE_USAGE_COPY_DST = 0x02;
@@ -106,11 +116,15 @@ class WebGl2Preview {
   }
 
   upload(frame: PreviewFrame): void {
-    const gl = this.gl;
-    if (!this.program) return;
+    const { gl } = this;
+    if (!this.program) {
+      return;
+    }
     const { width, height, data } = frame;
     if (width !== this.texW || height !== this.texH) {
-      if (this.texture) gl.deleteTexture(this.texture);
+      if (this.texture) {
+        gl.deleteTexture(this.texture);
+      }
       this.texture = gl.createTexture();
       this.texW = width;
       this.texH = height;
@@ -127,13 +141,17 @@ class WebGl2Preview {
   }
 
   draw(canvasW: number, canvasH: number): void {
-    const gl = this.gl;
-    if (!this.program || !this.texture || !this.vao || !this.buffer) return;
+    const { gl } = this;
+    if (!this.program || !this.texture || !this.vao || !this.buffer) {
+      return;
+    }
     const { scaleX, scaleY } = fitScale(this.texW, this.texH, canvasW, canvasH);
     gl.viewport(0, 0, canvasW, canvasH);
-    // biome-ignore lint/correctness/useHookAtTopLevel: WebGL call, not a React hook — Biome's use* heuristic false-positives on gl.useProgram.
+    // Biome-ignore lint/correctness/useHookAtTopLevel: WebGL call, not a React hook — Biome's use* heuristic false-positives on gl.useProgram.
     gl.useProgram(this.program);
-    if (this.uScale) gl.uniform2f(this.uScale, scaleX, scaleY);
+    if (this.uScale) {
+      gl.uniform2f(this.uScale, scaleX, scaleY);
+    }
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.bindVertexArray(this.vao);
@@ -141,6 +159,14 @@ class WebGl2Preview {
     gl.bindVertexArray(null);
   }
 }
+
+const isGpuCanvasContext = (value: unknown): value is GPUCanvasContext =>
+  isJsonObject(value) && 'configure' in value && 'getCurrentTexture' in value;
+
+const getGpuCanvasContext = (canvas: HTMLCanvasElement): GPUCanvasContext | null => {
+  const context: unknown = canvas.getContext('webgpu');
+  return isGpuCanvasContext(context) ? context : null;
+};
 
 class WebGpuPreview {
   private readonly device: GPUDevice;
@@ -156,27 +182,30 @@ class WebGpuPreview {
   constructor(device: GPUDevice, canvas: HTMLCanvasElement) {
     this.device = device;
     this.format = navigator.gpu.getPreferredCanvasFormat();
-    const context = canvas.getContext('webgpu');
-    if (!context) throw new Error('WebGPU canvas context unavailable');
-    // SAFETY: the webgpu context identifier returns GPUCanvasContext in WebGPU-enabled renderers.
-    this.context = context as GPUCanvasContext;
-    this.context.configure({ device, format: this.format, alphaMode: 'opaque' });
+    const context = getGpuCanvasContext(canvas);
+    if (!context) {
+      throw new Error('WebGPU canvas context unavailable');
+    }
+    this.context = context;
+    this.context.configure({ alphaMode: 'opaque', device, format: this.format });
   }
 
   upload(frame: PreviewFrame): void {
-    const device = this.device;
+    const { device } = this;
     if (frame.width !== this.texW || frame.height !== this.texH) {
       this.texture?.destroy();
       this.texture = device.createTexture({
-        size: [frame.width, frame.height],
         format: 'bgra8unorm',
+        size: [frame.width, frame.height],
         usage: GPU_TEXTURE_USAGE_TEXTURE_BINDING | GPU_TEXTURE_USAGE_COPY_DST,
       });
       this.texW = frame.width;
       this.texH = frame.height;
       this.rebuildPipeline();
     }
-    if (!this.texture) return;
+    if (!this.texture) {
+      return;
+    }
     device.queue.writeTexture({ texture: this.texture }, frame.data, { bytesPerRow: frame.width * 4 }, [
       frame.width,
       frame.height,
@@ -184,18 +213,20 @@ class WebGpuPreview {
   }
 
   draw(canvasW: number, canvasH: number): void {
-    if (!this.pipeline || !this.bindGroup || !this.uniform) return;
-    const device = this.device;
+    if (!this.pipeline || !this.bindGroup || !this.uniform) {
+      return;
+    }
+    const { device } = this;
     const { scaleX, scaleY } = fitScale(this.texW, this.texH, canvasW, canvasH);
     device.queue.writeBuffer(this.uniform, 0, new Float32Array([scaleX, scaleY]));
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.context.getCurrentTexture().createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          clearValue: { a: 1, b: 0, g: 0, r: 0 },
           loadOp: 'clear',
           storeOp: 'store',
+          view: this.context.getCurrentTexture().createView(),
         },
       ],
     });
@@ -207,8 +238,8 @@ class WebGpuPreview {
   }
 
   private rebuildPipeline(): void {
-    const device = this.device;
-    const format = this.format;
+    const { device } = this;
+    const { format } = this;
     const shader = device.createShaderModule({
       code: `
         struct Uniforms { scale: vec2<f32>, pad: vec2<f32> };
@@ -229,16 +260,18 @@ class WebGpuPreview {
       `,
     });
     this.pipeline = device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: shader, entryPoint: 'vs' },
       fragment: {
-        module: shader,
         entryPoint: 'fs',
+        module: shader,
         targets: [{ format }],
       },
+      layout: 'auto',
       primitive: { topology: 'triangle-list' },
+      vertex: { entryPoint: 'vs', module: shader },
     });
-    if (!this.texture) return;
+    if (!this.texture) {
+      return;
+    }
     this.uniform?.destroy();
     this.uniform = device.createBuffer({
       size: 16,
@@ -249,17 +282,17 @@ class WebGpuPreview {
       minFilter: 'linear',
     });
     this.bindGroup = device.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniform } },
         { binding: 1, resource: this.texture.createView() },
         { binding: 2, resource: sampler },
       ],
+      layout: this.pipeline.getBindGroupLayout(0),
     });
   }
 }
 
-function drawCanvas2d(ctx: CanvasRenderingContext2D, frame: PreviewFrame): void {
+const drawCanvas2d = (ctx: CanvasRenderingContext2D, frame: PreviewFrame): void => {
   const { width, height, data } = frame;
   const image = ctx.createImageData(width, height);
   const pixels = data;
@@ -272,77 +305,87 @@ function drawCanvas2d(ctx: CanvasRenderingContext2D, frame: PreviewFrame): void 
     out[i + 3] = alpha;
   }
   ctx.putImageData(image, 0, 0);
-}
-
-type PreviewRenderer = {
-  upload: (frame: PreviewFrame) => void;
-  draw: (width: number, height: number) => void;
 };
 
-async function tryWebGpu(canvas: HTMLCanvasElement): Promise<PreviewRenderer | null> {
-  if (!navigator.gpu) return null;
+interface PreviewRenderer {
+  upload: (frame: PreviewFrame) => void;
+  draw: (width: number, height: number) => void;
+}
+
+const tryWebGpu = async (canvas: HTMLCanvasElement): Promise<PreviewRenderer | null> => {
+  if (Object.is(navigator.gpu, null) || Object.is(navigator.gpu, undefined)) {
+    return null;
+  }
   try {
     const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) return null;
+    if (!adapter) {
+      return null;
+    }
     const device = await adapter.requestDevice();
     return new WebGpuPreview(device, canvas);
   } catch (err) {
     console.warn('[PreviewCanvas] WebGPU init failed, falling back to WebGL2:', err);
     return null;
   }
-}
+};
 
-function tryWebGl2(canvas: HTMLCanvasElement): PreviewRenderer | null {
+const tryWebGl2 = (canvas: HTMLCanvasElement): PreviewRenderer | null => {
   const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
   return gl ? new WebGl2Preview(gl) : null;
-}
+};
 
-function tryCanvas2d(canvas: HTMLCanvasElement): PreviewRenderer | null {
+const tryCanvas2d = (canvas: HTMLCanvasElement): PreviewRenderer | null => {
   const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
+  if (!ctx) {
+    return null;
+  }
   let latest: PreviewFrame | null = null;
   return {
+    draw: () => {
+      if (latest) {
+        drawCanvas2d(ctx, latest);
+      }
+    },
     upload: (frame: PreviewFrame) => {
       latest = frame;
     },
-    draw: () => {
-      if (latest) drawCanvas2d(ctx, latest);
-    },
   };
-}
+};
 
 export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rendererRef = useRef<PreviewRenderer | null>(null);
-  const canvasSizeRef = useRef({ width: 0, height: 0 });
+  const canvasSizeRef = useRef({ height: 0, width: 0 });
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      return undefined;
+    }
 
     const setup = async (): Promise<void> => {
       const gpu = await tryWebGpu(canvas);
       if (gpu) {
         rendererRef.current = gpu;
-        window.__PREVIEW_RENDERER__ = 'webgpu';
+        window.previewRenderer = 'webgpu';
         console.info('[PreviewCanvas] preview renderer: WebGPU');
-        return;
+        return undefined;
       }
       const gl = tryWebGl2(canvas);
       if (gl) {
         rendererRef.current = gl;
-        window.__PREVIEW_RENDERER__ = 'webgl2';
+        window.previewRenderer = 'webgl2';
         console.info('[PreviewCanvas] preview renderer: WebGL2');
-        return;
+        return undefined;
       }
       const canvas2d = tryCanvas2d(canvas);
       if (canvas2d) {
         rendererRef.current = canvas2d;
-        window.__PREVIEW_RENDERER__ = 'canvas2d';
+        window.previewRenderer = 'canvas2d';
         console.info('[PreviewCanvas] preview renderer: Canvas2D');
-        return;
+        return undefined;
       }
-      window.__PREVIEW_RENDERER__ = 'none';
+      window.previewRenderer = 'none';
     };
     void setup();
 
@@ -354,7 +397,7 @@ export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
         canvas.width = width;
         canvas.height = height;
       }
-      canvasSizeRef.current = { width, height };
+      canvasSizeRef.current = { height, width };
     };
     resize();
     const observer = new ResizeObserver(resize);
@@ -368,12 +411,16 @@ export const PreviewCanvas: React.FC<{ frame: PreviewFrame }> = ({ frame }) => {
 
   useEffect(() => {
     const renderer = rendererRef.current;
-    if (!renderer) return;
+    if (!renderer) {
+      return;
+    }
     renderer.upload(frame);
     const { width, height } = canvasSizeRef.current;
-    if (width > 0 && height > 0) renderer.draw(width, height);
-    if (window.__PREVIEW_BENCH__) {
-      window.__PREVIEW_BENCH_DATA__?.push([frame.ptsUs, performance.now(), performance.now()]);
+    if (width > 0 && height > 0) {
+      renderer.draw(width, height);
+    }
+    if (window.previewBench === true) {
+      window.previewBenchData?.push([frame.ptsUs, performance.now(), performance.now()]);
     }
   }, [frame]);
 

@@ -43,7 +43,7 @@ export class ReplayOwnership {
   constructor(requestLock: ReplayLockRequest | null, onChange: (state: ReplayOwnershipState) => void) {
     this.requestLock = requestLock;
     this.onChange = onChange;
-    this.state = requestLock ? { status: 'idle' } : { status: 'unsupported', reason: UNSUPPORTED_REASON };
+    this.state = requestLock ? { status: 'idle' } : { reason: UNSUPPORTED_REASON, status: 'unsupported' };
   }
 
   getState(): ReplayOwnershipState {
@@ -51,14 +51,18 @@ export class ReplayOwnership {
   }
 
   claim(): void {
-    if (this.states.has('destroyed')) return;
+    if (this.states.has('destroyed')) {
+      return;
+    }
 
     this.states.add('should-own');
     if (!this.requestLock) {
-      this.setState({ status: 'unsupported', reason: UNSUPPORTED_REASON });
+      this.setState({ reason: UNSUPPORTED_REASON, status: 'unsupported' });
       return;
     }
-    if (this.requestController || this.state.status === 'owned') return;
+    if (this.requestController || this.state.status === 'owned') {
+      return;
+    }
 
     this.beginRequest(this.requestLock);
   }
@@ -70,7 +74,9 @@ export class ReplayOwnership {
   }
 
   destroy(): void {
-    if (this.states.has('destroyed')) return;
+    if (this.states.has('destroyed')) {
+      return;
+    }
 
     this.states.add('destroyed');
     this.release();
@@ -82,7 +88,9 @@ export class ReplayOwnership {
     this.setState({ status: 'waiting' });
 
     requestLock(REPLAY_OWNER_LOCK, { mode: 'exclusive', signal: controller.signal }, async () => {
-      if (controller.signal.aborted || !this.states.has('should-own')) return;
+      if (controller.signal.aborted || !this.states.has('should-own')) {
+        return;
+      }
 
       const releaseSignal = createReleaseSignal();
       this.releaseOwner = releaseSignal.release;
@@ -93,17 +101,25 @@ export class ReplayOwnership {
         this.releaseOwner = null;
       }
     }).then(
-      () => this.finishRequest(controller),
-      (error: Error) => this.failRequest(controller, error),
+      () => {
+        this.finishRequest(controller);
+      },
+      (error: Error) => {
+        this.failRequest(controller, error);
+      },
     );
   }
 
   private finishRequest(controller: AbortController): void {
-    if (this.requestController !== controller) return;
+    if (this.requestController !== controller) {
+      return;
+    }
 
     this.requestController = null;
     this.releaseOwner = null;
-    if (this.states.has('destroyed')) return;
+    if (this.states.has('destroyed')) {
+      return;
+    }
 
     this.setState({ status: 'idle' });
     if (this.states.has('should-own') && this.requestLock) {
@@ -112,11 +128,15 @@ export class ReplayOwnership {
   }
 
   private failRequest(controller: AbortController, error: Error): void {
-    if (this.requestController !== controller) return;
+    if (this.requestController !== controller) {
+      return;
+    }
 
     this.requestController = null;
     this.releaseOwner = null;
-    if (this.states.has('destroyed')) return;
+    if (this.states.has('destroyed')) {
+      return;
+    }
     if (isAbortError(error)) {
       this.setState({ status: 'idle' });
       if (this.states.has('should-own') && this.requestLock) {
@@ -126,7 +146,7 @@ export class ReplayOwnership {
     }
 
     this.states.delete('should-own');
-    this.setState({ status: 'failed', reason: error.message });
+    this.setState({ reason: error.message, status: 'failed' });
   }
 
   private setState(state: ReplayOwnershipState): void {
@@ -142,7 +162,9 @@ export const createBrowserReplayOwnership = (onChange: (state: ReplayOwnershipSt
 
   const requestLock: ReplayLockRequest = (name, options, callback) =>
     navigator.locks.request(name, options, async (lock) => {
-      if (!lock) return;
+      if (!lock) {
+        return;
+      }
 
       await callback();
     });

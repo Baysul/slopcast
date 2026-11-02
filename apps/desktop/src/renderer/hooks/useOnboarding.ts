@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
+
 import { desktopApi } from '../api/desktop';
 
-export function useOnboarding() {
+export const useOnboarding = () => {
   const [completed, setCompleted] = useState(false);
   const [initialised, setInitialised] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    desktopApi.getOnboardingCompleted().then((v) => {
+    void desktopApi.getOnboardingCompleted().then((isCompleted) => {
       if (!cancelled) {
-        setCompleted(v);
+        setCompleted(isCompleted);
         setInitialised(true);
       }
     });
@@ -20,8 +21,10 @@ export function useOnboarding() {
 
   const dismiss = useCallback(async () => {
     const ok = await desktopApi.setOnboardingCompleted();
-    if (ok) setCompleted(true);
+    if (ok) {
+      setCompleted(true);
+    }
   }, []);
 
   return { completed: !initialised || completed, dismiss };
-}
+};

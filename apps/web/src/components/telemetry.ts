@@ -89,21 +89,35 @@ interface StatsPrev {
   init: boolean;
 }
 
-function computeQuality(
+const computeQuality = (
   br: number | null,
   fps: number | null,
   loss: number | null,
   freeze: number,
-): 'excellent' | 'degraded' | 'poor' {
-  if (br != null && br < 500_000) return 'poor';
-  if (fps != null && fps < 10) return 'poor';
-  if (loss != null && loss > 3) return 'poor';
-  if (freeze > 0) return 'poor';
-  if (br != null && br < 2_000_000) return 'degraded';
-  if (fps != null && fps < 20) return 'degraded';
-  if (loss != null && loss > 0.5) return 'degraded';
+): 'excellent' | 'degraded' | 'poor' => {
+  if (br !== null && br < 500_000) {
+    return 'poor';
+  }
+  if (fps !== null && fps < 10) {
+    return 'poor';
+  }
+  if (loss !== null && loss > 3) {
+    return 'poor';
+  }
+  if (freeze > 0) {
+    return 'poor';
+  }
+  if (br !== null && br < 2_000_000) {
+    return 'degraded';
+  }
+  if (fps !== null && fps < 20) {
+    return 'degraded';
+  }
+  if (loss !== null && loss > 0.5) {
+    return 'degraded';
+  }
   return 'excellent';
-}
+};
 
 interface VideoStats {
   videoCodec: string | null;
@@ -131,14 +145,29 @@ interface VideoStats {
   retransmittedPacketsReceived: number;
 }
 
+// RTCStats entries carry the standardized stats fields at runtime; spreading copies them without asserting a shape.
+const toStatLike = (value: unknown): RTCStatLike | undefined => {
+  if (typeof value !== 'object' || value === null || !('type' in value) || typeof value.type !== 'string') {
+    return undefined;
+  }
+  const { type } = value;
+  return { ...value, type };
+};
+
 const applyVideoDelta = (acc: VideoStats, report: RTCStatLike, prev: StatsPrev): void => {
   const ts = report.timestamp ?? 0;
-  if (!prev.init || ts <= prev.ts) return;
+  if (!prev.init || ts <= prev.ts) {
+    return;
+  }
   const dt = (ts - prev.ts) / 1000;
   const db = (report.bytesReceived ?? 0) - prev.bytesReceived;
-  if (db >= 0) acc.videoBitrate = (db * 8) / dt;
+  if (db >= 0) {
+    acc.videoBitrate = (db * 8) / dt;
+  }
   const df = (report.framesDecoded ?? 0) - prev.framesDecoded;
-  if (df >= 0) acc.frameRate = df / dt;
+  if (df >= 0) {
+    acc.frameRate = df / dt;
+  }
   const dl = Math.max(0, (report.packetsLost ?? 0) - prev.packetsLost);
   const dr = Math.max(0, (report.packetsReceived ?? 0) - prev.packetsReceived);
   const total = dl + dr;
@@ -161,20 +190,23 @@ const applyVideoDelta = (acc: VideoStats, report: RTCStatLike, prev: StatsPrev):
   );
 };
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: RTC stats folding is intentionally comprehensive.
-function foldInboundVideo(acc: VideoStats, report: RTCStatLike, stats: RTCStatsReport, prev: StatsPrev | null): void {
+const foldInboundVideo = (
+  acc: VideoStats,
+  report: RTCStatLike,
+  stats: RTCStatsReport,
+  prev: StatsPrev | null,
+): void => {
   const ts = report.timestamp ?? 0;
 
-  if (report.codecId) {
-    // SAFETY: codecId references a codec stats entry in the same RTCStatsReport.
-    const codec = stats.get(report.codecId) as RTCStatLike | undefined;
+  if (report.codecId !== undefined && report.codecId !== '') {
+    const codec = toStatLike(stats.get(report.codecId));
     acc.videoCodec = codecLabel(codec?.mimeType);
   }
 
   acc.width = report.frameWidth ?? acc.width;
   acc.height = report.frameHeight ?? acc.height;
 
-  if (prev?.init && ts > prev.ts) {
+  if (prev?.init === true && ts > prev.ts) {
     applyVideoDelta(acc, report, prev);
   } else {
     const totalReceived = (report.packetsReceived ?? 0) + (report.packetsLost ?? 0);
@@ -190,51 +222,61 @@ function foldInboundVideo(acc: VideoStats, report: RTCStatLike, stats: RTCStatsR
   acc.framesRendered = report.framesRendered ?? acc.framesRendered;
   acc.framesDropped = report.framesDropped ?? acc.framesDropped;
   acc.packetsDiscarded = report.packetsDiscarded ?? acc.packetsDiscarded;
-  acc.jitterMs = report.jitter == null ? acc.jitterMs : report.jitter * 1000;
-  if (report.jitterBufferEmittedCount && report.jitterBufferEmittedCount > 0) {
+  acc.jitterMs = report.jitter === undefined ? acc.jitterMs : report.jitter * 1000;
+  if (report.jitterBufferEmittedCount !== undefined && report.jitterBufferEmittedCount > 0) {
     acc.jitterBufferDelayMs = ((report.jitterBufferDelay ?? 0) / report.jitterBufferEmittedCount) * 1000;
     acc.jitterBufferTargetDelayMs = ((report.jitterBufferTargetDelay ?? 0) / report.jitterBufferEmittedCount) * 1000;
   }
-}
+};
 
 const emptyVideoStats = (): VideoStats => ({
-  videoCodec: null,
-  width: null,
-  height: null,
+  decodeTimeMs: null,
+  firCount: 0,
   frameRate: null,
-  videoBitrate: null,
-  packetLossPct: null,
-  freezeCount: 0,
-  hasVideo: false,
   framesDecoded: 0,
-  packetsReceived: 0,
+  framesDropped: 0,
   framesReceived: 0,
   framesRendered: 0,
-  framesDropped: 0,
-  packetsDiscarded: 0,
-  jitterMs: null,
+  freezeCount: 0,
+  hasVideo: false,
+  height: null,
   jitterBufferDelayMs: null,
   jitterBufferTargetDelayMs: null,
-  decodeTimeMs: null,
-  processingTimeMs: null,
+  jitterMs: null,
   nackCount: 0,
+  packetLossPct: null,
+  packetsDiscarded: 0,
+  packetsReceived: 0,
   pliCount: 0,
-  firCount: 0,
+  processingTimeMs: null,
   retransmittedPacketsReceived: 0,
+  videoBitrate: null,
+  videoCodec: null,
+  width: null,
 });
 
-export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, hasAudio: boolean): SpectatorTelemetry {
+export const computeTelemetry = (
+  stats: RTCStatsReport,
+  prev: StatsPrev | null,
+  hasAudio: boolean,
+): SpectatorTelemetry => {
   const video = emptyVideoStats();
   let decoderImplementation: string | null = null;
 
+  const reports: RTCStatLike[] = [];
   for (const reportRaw of stats.values()) {
-    // SAFETY: browser RTCStatsReport entries use the standardized RTC stats fields we read.
-    const report = reportRaw as RTCStatLike;
+    const report = toStatLike(reportRaw);
+    if (report !== undefined) {
+      reports.push(report);
+    }
+  }
+
+  for (const report of reports) {
     if (report.type === 'inbound-rtp' && report.kind === 'video') {
       video.hasVideo = true;
       foldInboundVideo(video, report, stats, prev);
-      if (report.decoderImplementation) {
-        decoderImplementation = report.decoderImplementation;
+      if (report.decoderImplementation !== undefined && report.decoderImplementation !== '') {
+        ({ decoderImplementation } = report);
       }
     }
   }
@@ -242,65 +284,64 @@ export function computeTelemetry(stats: RTCStatsReport, prev: StatsPrev | null, 
   const quality = computeQuality(video.videoBitrate, video.frameRate, video.packetLossPct, video.freezeCount);
 
   return {
-    videoCodec: video.videoCodec,
-    width: video.width,
-    height: video.height,
+    decodeTimeMs: video.decodeTimeMs,
+    decoderImplementation,
+    firCount: video.firCount,
     frameRate: video.frameRate,
-    videoBitrate: video.videoBitrate,
-    packetLossPct: video.packetLossPct,
-    freezeCount: video.freezeCount,
-    hasVideo: video.hasVideo,
-    hasAudio,
-    quality,
     framesDecoded: video.framesDecoded,
-    packetsReceived: video.packetsReceived,
+    framesDropped: video.framesDropped,
     framesReceived: video.framesReceived,
     framesRendered: video.framesRendered,
-    framesDropped: video.framesDropped,
-    packetsDiscarded: video.packetsDiscarded,
-    jitterMs: video.jitterMs,
+    freezeCount: video.freezeCount,
+    hasAudio,
+    hasVideo: video.hasVideo,
+    height: video.height,
     jitterBufferDelayMs: video.jitterBufferDelayMs,
     jitterBufferTargetDelayMs: video.jitterBufferTargetDelayMs,
-    decodeTimeMs: video.decodeTimeMs,
-    processingTimeMs: video.processingTimeMs,
+    jitterMs: video.jitterMs,
     nackCount: video.nackCount,
+    packetLossPct: video.packetLossPct,
+    packetsDiscarded: video.packetsDiscarded,
+    packetsReceived: video.packetsReceived,
     pliCount: video.pliCount,
-    firCount: video.firCount,
+    processingTimeMs: video.processingTimeMs,
+    quality,
     retransmittedPacketsReceived: video.retransmittedPacketsReceived,
-    decoderImplementation,
+    videoBitrate: video.videoBitrate,
+    videoCodec: video.videoCodec,
+    width: video.width,
   };
-}
+};
 
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: snapshot extraction mirrors the stats schema.
-export function createStatsPrev(stats: RTCStatsReport): StatsPrev | null {
+// Snapshot extraction mirrors the stats schema.
+export const createStatsPrev = (stats: RTCStatsReport): StatsPrev | null => {
   for (const reportRaw of stats.values()) {
-    // SAFETY: browser RTCStatsReport entries use the standardized RTC stats fields we read.
-    const report = reportRaw as RTCStatLike;
-    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+    const report = toStatLike(reportRaw);
+    if (report?.type === 'inbound-rtp' && report.kind === 'video') {
       return {
         bytesReceived: report.bytesReceived ?? 0,
-        packetsReceived: report.packetsReceived ?? 0,
-        packetsLost: report.packetsLost ?? 0,
-        framesReceived: report.framesReceived ?? 0,
+        firCount: report.firCount ?? 0,
         framesDecoded: report.framesDecoded ?? 0,
-        framesRendered: report.framesRendered ?? 0,
         framesDropped: report.framesDropped ?? 0,
-        packetsDiscarded: report.packetsDiscarded ?? 0,
+        framesReceived: report.framesReceived ?? 0,
+        framesRendered: report.framesRendered ?? 0,
+        init: true,
         jitterBufferDelay: report.jitterBufferDelay ?? 0,
-        jitterBufferTargetDelay: report.jitterBufferTargetDelay ?? 0,
         jitterBufferEmittedCount: report.jitterBufferEmittedCount ?? 0,
+        jitterBufferTargetDelay: report.jitterBufferTargetDelay ?? 0,
+        nackCount: report.nackCount ?? 0,
+        packetsDiscarded: report.packetsDiscarded ?? 0,
+        packetsLost: report.packetsLost ?? 0,
+        packetsReceived: report.packetsReceived ?? 0,
+        pliCount: report.pliCount ?? 0,
+        retransmittedPacketsReceived: report.retransmittedPacketsReceived ?? 0,
+        rid: report.rid ?? '',
+        ssrc: report.ssrc ?? 0,
         totalDecodeTime: report.totalDecodeTime ?? 0,
         totalProcessingDelay: report.totalProcessingDelay ?? 0,
-        nackCount: report.nackCount ?? 0,
-        pliCount: report.pliCount ?? 0,
-        firCount: report.firCount ?? 0,
-        retransmittedPacketsReceived: report.retransmittedPacketsReceived ?? 0,
-        ssrc: report.ssrc ?? 0,
-        rid: report.rid ?? '',
         ts: report.timestamp ?? 0,
-        init: true,
       };
     }
   }
   return null;
-}
+};

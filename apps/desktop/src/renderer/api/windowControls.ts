@@ -1,5 +1,6 @@
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+
 import { desktopApi } from '@/api/desktop';
 
 export type ResizeDirection =
@@ -15,7 +16,9 @@ export type ResizeDirection =
 const unavailableOps = new Set<string>();
 
 const warnUnavailable = (op: string, cause: unknown): void => {
-  if (unavailableOps.has(op)) return;
+  if (unavailableOps.has(op)) {
+    return;
+  }
   unavailableOps.add(op);
   console.warn(`[window] "${op}" unavailable, using fallback:`, cause);
 };
@@ -30,12 +33,14 @@ const currentWindow = (): ReturnType<typeof getCurrentWindow> | null => {
 };
 
 // The window manager must run interactive moves and resizes on Linux so snapping and edge tiling
-// work. Chromium's pointer grab keeps the toolkit from seeing the press, so Rust asks for it.
+// Work. Chromium's pointer grab keeps the toolkit from seeing the press, so Rust asks for it.
 const usesWindowManagerDrag = navigator.userAgent.includes('Linux');
 
 const nativeDragWindow = async (): Promise<boolean> => {
   const win = currentWindow();
-  if (!win) return false;
+  if (!win) {
+    return false;
+  }
   try {
     await win.startDragging();
     return true;
@@ -47,7 +52,9 @@ const nativeDragWindow = async (): Promise<boolean> => {
 
 const nativeResizeWindow = async (direction: ResizeDirection): Promise<boolean> => {
   const win = currentWindow();
-  if (!win) return false;
+  if (!win) {
+    return false;
+  }
   try {
     await win.startResizeDragging(direction);
     return true;
@@ -58,9 +65,36 @@ const nativeResizeWindow = async (direction: ResizeDirection): Promise<boolean> 
 };
 
 export const windowControls = {
+  close: async (): Promise<boolean> => {
+    const win = currentWindow();
+    if (!win) {
+      return false;
+    }
+    try {
+      await win.close();
+      return true;
+    } catch (err) {
+      warnUnavailable('close', err);
+      return false;
+    }
+  },
+  isMaximized: async (): Promise<boolean> => {
+    const win = currentWindow();
+    if (!win) {
+      return false;
+    }
+    try {
+      return await win.isMaximized();
+    } catch (err) {
+      warnUnavailable('isMaximized', err);
+      return false;
+    }
+  },
   minimize: async (): Promise<boolean> => {
     const win = currentWindow();
-    if (!win) return false;
+    if (!win) {
+      return false;
+    }
     try {
       await win.minimize();
       return true;
@@ -69,26 +103,16 @@ export const windowControls = {
       return false;
     }
   },
-  toggleMaximize: async (): Promise<boolean> => {
+  onResized: async (callback: () => void): Promise<UnlistenFn> => {
     const win = currentWindow();
-    if (!win) return false;
-    try {
-      await win.toggleMaximize();
-      return true;
-    } catch (err) {
-      warnUnavailable('toggleMaximize', err);
-      return false;
+    if (!win) {
+      return () => undefined;
     }
-  },
-  close: async (): Promise<boolean> => {
-    const win = currentWindow();
-    if (!win) return false;
     try {
-      await win.close();
-      return true;
+      return await win.onResized(callback);
     } catch (err) {
-      warnUnavailable('close', err);
-      return false;
+      warnUnavailable('onResized', err);
+      return () => undefined;
     }
   },
   startMove: (): void => {
@@ -105,24 +129,17 @@ export const windowControls = {
     }
     void nativeResizeWindow(direction);
   },
-  isMaximized: async (): Promise<boolean> => {
+  toggleMaximize: async (): Promise<boolean> => {
     const win = currentWindow();
-    if (!win) return false;
-    try {
-      return await win.isMaximized();
-    } catch (err) {
-      warnUnavailable('isMaximized', err);
+    if (!win) {
       return false;
     }
-  },
-  onResized: async (callback: () => void): Promise<UnlistenFn> => {
-    const win = currentWindow();
-    if (!win) return () => undefined;
     try {
-      return await win.onResized(callback);
+      await win.toggleMaximize();
+      return true;
     } catch (err) {
-      warnUnavailable('onResized', err);
-      return () => undefined;
+      warnUnavailable('toggleMaximize', err);
+      return false;
     }
   },
 };

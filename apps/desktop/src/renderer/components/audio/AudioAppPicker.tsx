@@ -1,9 +1,12 @@
 import type { AudioApp } from '@slopcast/shared-types';
 import { AudioLines, Check, Volume2, VolumeX } from 'lucide-react';
 import React from 'react';
+
 import { Button } from '@/components/ui/button';
-import { type AudioAppGroup, groupAudioApps } from '../../utils/audio-grouping';
-import { isGroupSelected, NO_AUDIO_APP } from '../../utils/audio-targets';
+
+import { groupAudioApps } from '../../utils/audio-grouping';
+import type { AudioAppGroup } from '../../utils/audio-grouping';
+import { NO_AUDIO_APP, isGroupSelected } from '../../utils/audio-targets';
 import { AudioLevelMeter } from './AudioLevelMeter';
 
 export interface AudioAppPickerProps {
@@ -20,16 +23,16 @@ export interface AudioAppPickerProps {
 }
 
 const DESKTOP_AUDIO_APP: AudioApp = {
+  clientId: null,
   id: -1,
+  mediaTitle: null,
   name: 'Desktop Audio (All System Sound)',
   processId: 0,
-  clientId: null,
-  mediaTitle: null,
 };
 
 const DESKTOP_AUDIO_GROUP: AudioAppGroup = {
-  representative: DESKTOP_AUDIO_APP,
   members: [DESKTOP_AUDIO_APP],
+  representative: DESKTOP_AUDIO_APP,
 };
 
 export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
@@ -48,29 +51,37 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
     const groups = audioAppGroups ?? groupAudioApps(audioApps);
     const MuteIcon = isMuted ? VolumeX : Volume2;
     let selectionHint = 'Automatic audio selection is off. No Audio is selected until you choose an app.';
-    if (autoSelectAudio)
+    if (autoSelectAudio) {
       selectionHint = 'Audio is matched to your shared application when possible. Unmatched sources stay video-only.';
+    }
 
     const displayName = (app: AudioApp): string => app.name;
 
     const firstMemberTitle = (members: AudioApp[], key: 'mediaTitle' | 'windowTitle'): string | undefined => {
       for (const m of members) {
-        if (m[key]) {
-          return m[key];
+        const title = m[key];
+        if (title !== null && title !== undefined && title !== '') {
+          return title;
         }
       }
       return undefined;
     };
 
     const groupSubLabel = (group: AudioAppGroup, isDesktopAudio: boolean): string | null => {
-      if (isDesktopAudio) return 'All system audio';
+      if (isDesktopAudio) {
+        return 'All system audio';
+      }
       const { members } = group;
       const label = firstMemberTitle(members, 'mediaTitle') ?? firstMemberTitle(members, 'windowTitle');
-      if (label) {
-        if (members.length > 1) return `${label} \u00B7 ${members.length} streams`;
+      if (label !== undefined && label !== '') {
+        if (members.length > 1) {
+          return `${label} \u00B7 ${members.length} streams`;
+        }
         return label;
       }
-      if (members.length > 1) return `${members.length} audio streams`;
+      if (members.length > 1) {
+        return `${members.length} audio streams`;
+      }
       return null;
     };
 
@@ -115,7 +126,9 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
             </div>
             {(() => {
               const label = groupSubLabel(group, isDesktopAudio);
-              if (!label) return null;
+              if (label === null || label === '') {
+                return null;
+              }
               return (
                 <div className="flex items-center gap-2 mt-0.5">
                   <span className="text-xs opacity-60">{label}</span>
@@ -174,7 +187,7 @@ export const AudioAppPicker: React.FC<AudioAppPickerProps> = React.memo(
           Mute silences the shared audio without changing your selected source.
         </p>
         <div className="space-y-1.5">
-          {renderBtn({ representative: NO_AUDIO_APP, members: [NO_AUDIO_APP] })}
+          {renderBtn({ members: [NO_AUDIO_APP], representative: NO_AUDIO_APP })}
           {renderBtn(DESKTOP_AUDIO_GROUP)}
           {groups.length > 0 && <div className="border-t border-border my-1.5" />}
           {groups.map((group) => renderBtn(group))}

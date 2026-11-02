@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+
+import { test } from 'vite-plus/test';
 
 import {
-  codecLabel,
   DEFAULT_STREAM_SETTINGS,
+  codecLabel,
   fmtBitrate,
   fmtLoss,
   normalizeLivekitUrl,
@@ -24,15 +25,15 @@ test('the returned defaults are a fresh copy, not the shared constant', () => {
 
 test('valid fields pass through unchanged', () => {
   const raw = {
-    fps: 30,
-    bitrateLimit: 5_000_000,
-    videoCodec: 'h264',
-    resolution: '720p',
     apiEndpoint: 'https://srv.example.com',
     apiEndpointIsCustom: true,
-    pendingApiEndpoint: 'https://pending.example.com',
     autoBitrate: false,
+    bitrateLimit: 5_000_000,
+    fps: 30,
     motionMode: 'dynamic',
+    pendingApiEndpoint: 'https://pending.example.com',
+    resolution: '720p',
+    videoCodec: 'h264',
   };
   assert.deepEqual(sanitizeStreamSettings(raw), raw);
 });

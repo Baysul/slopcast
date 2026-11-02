@@ -1,6 +1,7 @@
-import type { MotionMode, ResolutionPreset, VideoCodec } from '@slopcast/shared-types';
+import { isMotionMode, isResolutionPreset, isVideoCodec } from '@slopcast/shared-types';
 import type React from 'react';
 import { memo, useCallback, useEffect, useState } from 'react';
+
 import { desktopApi } from '@/api/desktop';
 import { Input } from '@/components/ui/input';
 import {
@@ -19,11 +20,12 @@ import { notify } from '@/lib/toast';
 import type { ControlState } from '@/types/preferences';
 import { manualBitrateOptions, recommendBitrateCap, recommendedBitrateRange } from '@/utils/bitrate';
 import { codecOptionSuffix, groupCodecsByHardware } from '@/utils/codecs';
+
 import { ApiEndpointField } from './ApiEndpointField';
 
 const BITS_PER_MEGABIT = 1_000_000;
 
-const formatMegabits = (bitrate: number): string => (bitrate / BITS_PER_MEGABIT).toFixed(1).replace(/\.0$/, '');
+const formatMegabits = (bitrate: number): string => (bitrate / BITS_PER_MEGABIT).toFixed(1).replace(/\.0$/u, '');
 
 interface BitrateGuidanceInput {
   autoBitrate: boolean;
@@ -94,14 +96,14 @@ export const StreamSettingsPanel: React.FC = memo(() => {
   const [controls, setControls] = useState<ControlState | null>(null);
   const [contextError, setContextError] = useState('');
   const onApiEndpointValidated = useCallback((endpoint: string) => {
-    void desktopApi
-      .editApiEndpoint({ kind: 'validate', endpoint })
-      .catch((cause: unknown) => notify('error', 'API endpoint could not update', String(cause)));
+    void desktopApi.editApiEndpoint({ endpoint, kind: 'validate' }).catch((cause: unknown) => {
+      notify('error', 'API endpoint could not update', String(cause));
+    });
   }, []);
   const onApiEndpointReset = useCallback(() => {
-    void desktopApi
-      .editApiEndpoint({ kind: 'reset' })
-      .catch((cause: unknown) => notify('error', 'API endpoint could not reset', String(cause)));
+    void desktopApi.editApiEndpoint({ kind: 'reset' }).catch((cause: unknown) => {
+      notify('error', 'API endpoint could not reset', String(cause));
+    });
   }, []);
 
   useEffect(() => {
@@ -109,34 +111,40 @@ export const StreamSettingsPanel: React.FC = memo(() => {
     let received = false;
     const unlisten = desktopApi.onControlStateChanged((state) => {
       received = true;
-      if (disposed) return;
+      if (disposed) {
+        return;
+      }
       setControls(state);
       setContextError('');
     });
     void unlisten
       .then(async () => {
         const state = await desktopApi.getControlState();
-        if (!disposed && !received) setControls(state);
+        if (!disposed && !received) {
+          setControls(state);
+        }
       })
       .catch((cause: unknown) => {
-        if (!disposed) setContextError(String(cause));
+        if (!disposed) {
+          setContextError(String(cause));
+        }
       });
     return () => {
       disposed = true;
-      void unlisten.then((stop) => stop());
+      void unlisten.then((stop) => {
+        stop();
+      });
     };
   }, []);
 
-  if (!settingsHydrated)
-    return (
-      <p className="text-sm text-muted-foreground" role="status">
-        Loading stream settings…
-      </p>
-    );
+  if (!settingsHydrated) {
+    return <output className="block text-sm text-muted-foreground">Loading stream settings…</output>;
+  }
 
   let effectiveBitrate = bitrateLimit;
-  if (autoBitrate)
-    effectiveBitrate = recommendBitrateCap({ codec: videoCodec, resolution, fps: streamFps, motionTier: 'static' });
+  if (autoBitrate) {
+    effectiveBitrate = recommendBitrateCap({ codec: videoCodec, fps: streamFps, motionTier: 'static', resolution });
+  }
   const roomEndpoint = controls?.roomEndpoint ?? null;
   const endpointValidationRevision = controls?.endpointValidationRevision ?? 0;
   const endpointControlsDisabled = !controls || controls.endpointControlsDisabled;
@@ -145,16 +153,16 @@ export const StreamSettingsPanel: React.FC = memo(() => {
   const bitrateMaximum = Math.max(...bitrateOptions);
   const [recommendedMinimum, recommendedMaximum] = recommendedBitrateRange({
     codec: videoCodec,
-    resolution,
     fps: streamFps,
     motionTier: 'static',
+    resolution,
   });
   const recommendedRangeLabel = `${formatMegabits(recommendedMinimum)}–${formatMegabits(recommendedMaximum)} Mbps`;
   const bitrateGuidance = getBitrateGuidance({
     autoBitrate,
     bitrateLimit,
-    recommendedMinimum,
     recommendedMaximum,
+    recommendedMinimum,
     recommendedRangeLabel,
     streamProfile: `${resolution}${streamFps}`,
   });
@@ -177,8 +185,9 @@ export const StreamSettingsPanel: React.FC = memo(() => {
             <Select
               value={videoCodec}
               onValueChange={(value) => {
-                // SAFETY: every item value comes from a CodecInfo codec.
-                setVideoCodec(value as VideoCodec);
+                if (isVideoCodec(value)) {
+                  setVideoCodec(value);
+                }
               }}
             >
               <SelectTrigger id="select-video-codec">
@@ -221,8 +230,9 @@ export const StreamSettingsPanel: React.FC = memo(() => {
             <Select
               value={resolution}
               onValueChange={(value) => {
-                // SAFETY: the items below exhaust the ResolutionPreset values.
-                setResolution(value as ResolutionPreset);
+                if (isResolutionPreset(value)) {
+                  setResolution(value);
+                }
               }}
             >
               <SelectTrigger id="select-resolution">
@@ -247,7 +257,12 @@ export const StreamSettingsPanel: React.FC = memo(() => {
             >
               Frame Rate
             </label>
-            <Select value={String(streamFps)} onValueChange={(v) => setStreamFps(Number(v))}>
+            <Select
+              value={String(streamFps)}
+              onValueChange={(v) => {
+                setStreamFps(Number(v));
+              }}
+            >
               <SelectTrigger id="select-fps">
                 <SelectValue />
               </SelectTrigger>
@@ -277,7 +292,9 @@ export const StreamSettingsPanel: React.FC = memo(() => {
                 value={formatMegabits(autoBitrate ? effectiveBitrate : bitrateLimit)}
                 onChange={(event) => {
                   const megabits = Number(event.currentTarget.value);
-                  if (!Number.isFinite(megabits)) return;
+                  if (!Number.isFinite(megabits)) {
+                    return;
+                  }
 
                   const boundedMegabits = Math.min(
                     bitrateMaximum / BITS_PER_MEGABIT,
@@ -297,22 +314,23 @@ export const StreamSettingsPanel: React.FC = memo(() => {
                 step={500_000}
                 value={[autoBitrate ? effectiveBitrate : bitrateLimit]}
                 onValueChange={(values) => {
-                  const nextBitrate = values[0];
-                  if (nextBitrate == null) return;
+                  const [nextBitrate] = values;
+                  if (nextBitrate === undefined) {
+                    return;
+                  }
 
                   setBitrateLimit(nextBitrate);
                 }}
                 disabled={autoBitrate}
               />
             </div>
-            <p
+            <output
               id="bitrate-guidance"
-              role="status"
               aria-live="polite"
-              className={`text-xs leading-relaxed ${bitrateGuidance.needsAttention ? 'text-safelight' : 'text-muted-foreground'}`}
+              className={`block text-xs leading-relaxed ${bitrateGuidance.needsAttention ? 'text-safelight' : 'text-muted-foreground'}`}
             >
               {bitrateGuidance.message}
-            </p>
+            </output>
           </div>
         </div>
 
@@ -342,8 +360,9 @@ export const StreamSettingsPanel: React.FC = memo(() => {
             <Select
               value={motionMode}
               onValueChange={(value) => {
-                // SAFETY: the items below exhaust the MotionMode values.
-                setMotionMode(value as MotionMode);
+                if (isMotionMode(value)) {
+                  setMotionMode(value);
+                }
               }}
               disabled={!autoBitrate}
             >
@@ -378,3 +397,5 @@ export const StreamSettingsPanel: React.FC = memo(() => {
     </div>
   );
 });
+
+StreamSettingsPanel.displayName = 'StreamSettingsPanel';

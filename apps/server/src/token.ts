@@ -1,14 +1,14 @@
 import { AccessToken } from 'livekit-server-sdk';
 
-export function presenterToken(apiKey: string, apiSecret: string, room: string, identity: string): Promise<string> {
+export const presenterToken = (apiKey: string, apiSecret: string, room: string, identity: string): Promise<string> => {
   const at = new AccessToken(apiKey, apiSecret, { identity, ttl: '6h' });
-  at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: false, canPublishData: false });
+  at.addGrant({ canPublish: true, canPublishData: false, canSubscribe: false, room, roomJoin: true });
   return at.toJwt();
-}
+};
 
 // Spectator tokens are intentionally unauthenticated; LiveKit grants deny publishing.
-export function spectatorToken(apiKey: string, apiSecret: string, room: string, identity: string): Promise<string> {
+export const spectatorToken = (apiKey: string, apiSecret: string, room: string, identity: string): Promise<string> => {
   const at = new AccessToken(apiKey, apiSecret, { identity, ttl: '6h' });
-  at.addGrant({ roomJoin: true, room, canPublish: false, canSubscribe: true, canPublishData: false });
+  at.addGrant({ canPublish: false, canPublishData: false, canSubscribe: true, room, roomJoin: true });
   return at.toJwt();
-}
+};

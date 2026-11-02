@@ -1,4 +1,5 @@
-import { type AudioLevelSubscription, AudioVisualizer as SharedAudioVisualizer } from '@slopcast/ui';
+import { AudioVisualizer as SharedAudioVisualizer } from '@slopcast/ui';
+import type { AudioLevelSubscription } from '@slopcast/ui';
 import type React from 'react';
 import { useMemo, useRef, useState } from 'react';
 
@@ -56,7 +57,9 @@ const isRelativePosition = (position: RelativePosition): boolean =>
 const readSavedPosition = (): RelativePosition | null => {
   try {
     const storedPosition = window.localStorage.getItem(POSITION_STORAGE_KEY);
-    if (!storedPosition) return null;
+    if (storedPosition === null || storedPosition === '') {
+      return null;
+    }
 
     const [xValue, yValue] = storedPosition.split(',');
     const position = { x: Number(xValue), y: Number(yValue) };
@@ -86,7 +89,9 @@ const clearSavedPosition = (): void => {
 const clamp = (value: number, maximum: number): number => Math.min(maximum, Math.max(0, value));
 
 const getPositionStyle = (position: RelativePosition | null): React.CSSProperties | undefined => {
-  if (!position) return undefined;
+  if (!position) {
+    return undefined;
+  }
   return {
     left: `${position.x * 100}%`,
     top: `${position.y * 100}%`,
@@ -94,17 +99,26 @@ const getPositionStyle = (position: RelativePosition | null): React.CSSPropertie
   };
 };
 
+const createAudioContext = (Constructor: typeof AudioContext): AudioContext | null => {
+  try {
+    return new Constructor();
+  } catch (error) {
+    console.error('[AudioVisualizer] Failed to initialize AudioContext:', error);
+    return null;
+  }
+};
+
 const createMediaStreamSubscription =
   (mediaStream: MediaStream): AudioLevelSubscription =>
   (listener) => {
-    const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
-    if (!AudioContextConstructor || mediaStream.getAudioTracks().length === 0) return () => undefined;
+    const AudioContextConstructor =
+      (window as { AudioContext?: typeof AudioContext }).AudioContext ?? window.webkitAudioContext;
+    if (AudioContextConstructor === undefined || mediaStream.getAudioTracks().length === 0) {
+      return () => undefined;
+    }
 
-    let audioContext: AudioContext;
-    try {
-      audioContext = new AudioContextConstructor();
-    } catch (error) {
-      console.error('[AudioVisualizer] Failed to initialize AudioContext:', error);
+    const audioContext = createAudioContext(AudioContextConstructor);
+    if (!audioContext) {
       return () => undefined;
     }
 
@@ -117,14 +131,18 @@ const createMediaStreamSubscription =
     source.connect(analyser);
 
     const resumeAudio = (): void => {
-      if (audioContext.state !== 'suspended') return;
+      if (audioContext.state !== 'suspended') {
+        return;
+      }
       audioContext.resume().catch((error) => {
         console.warn('[AudioVisualizer] AudioContext resume failed:', error);
       });
     };
     const sample = (now: number): void => {
       animationFrame = requestAnimationFrame(sample);
-      if (document.hidden || now - lastSampleAt < SAMPLE_INTERVAL_MS) return;
+      if (document.hidden || now - lastSampleAt < SAMPLE_INTERVAL_MS) {
+        return;
+      }
 
       lastSampleAt = now;
       analyser.getFloatTimeDomainData(levels);
@@ -139,7 +157,9 @@ const createMediaStreamSubscription =
       cancelAnimationFrame(animationFrame);
       source.disconnect();
       analyser.disconnect();
-      if (audioContext.state === 'closed') return;
+      if (audioContext.state === 'closed') {
+        return;
+      }
       audioContext.close().catch((error) => {
         console.warn('[AudioVisualizer] AudioContext close failed:', error);
       });
@@ -153,7 +173,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
   showStatus,
   onInteraction,
 }) => {
-  const visualizerRef = useRef<HTMLDivElement | null>(null);
+  const visualizerRef = useRef<HTMLButtonElement | null>(null);
   const dragSessionRef = useRef<DragSession | null>(null);
   const lastTapTimeRef = useRef(0);
   const [position, setPosition] = useState<RelativePosition | null>(readSavedPosition);
@@ -166,26 +186,30 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     clearSavedPosition();
   };
 
-  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
-    if (event.button !== 0) return;
+  const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    if (event.button !== 0) {
+      return;
+    }
 
     const player = playerRef.current;
     const visualizer = visualizerRef.current;
-    if (!player || !visualizer) return;
+    if (!player || !visualizer) {
+      return;
+    }
 
     const playerBounds = player.getBoundingClientRect();
     const visualizerBounds = visualizer.getBoundingClientRect();
     dragSessionRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      playerLeft: playerBounds.left,
-      playerTop: playerBounds.top,
-      maximumLeft: Math.max(0, playerBounds.width - visualizerBounds.width),
-      maximumTop: Math.max(0, playerBounds.height - visualizerBounds.height),
       grabOffsetX: event.clientX - visualizerBounds.left,
       grabOffsetY: event.clientY - visualizerBounds.top,
       hasMoved: false,
+      maximumLeft: Math.max(0, playerBounds.width - visualizerBounds.width),
+      maximumTop: Math.max(0, playerBounds.height - visualizerBounds.height),
+      playerLeft: playerBounds.left,
+      playerTop: playerBounds.top,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
     };
     onInteraction?.();
     event.preventDefault();
@@ -193,13 +217,17 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+  const handlePointerMove = (event: React.PointerEvent<HTMLButtonElement>): void => {
     const dragSession = dragSessionRef.current;
-    if (!dragSession || dragSession.pointerId !== event.pointerId) return;
+    if (!dragSession || dragSession.pointerId !== event.pointerId) {
+      return;
+    }
 
     const horizontalMovement = Math.abs(event.clientX - dragSession.startX);
     const verticalMovement = Math.abs(event.clientY - dragSession.startY);
-    if (!dragSession.hasMoved && horizontalMovement <= DRAG_THRESHOLD && verticalMovement <= DRAG_THRESHOLD) return;
+    if (!dragSession.hasMoved && horizontalMovement <= DRAG_THRESHOLD && verticalMovement <= DRAG_THRESHOLD) {
+      return;
+    }
 
     const left = clamp(event.clientX - dragSession.playerLeft - dragSession.grabOffsetX, dragSession.maximumLeft);
     const top = clamp(event.clientY - dragSession.playerTop - dragSession.grabOffsetY, dragSession.maximumTop);
@@ -215,9 +243,11 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     event.stopPropagation();
   };
 
-  const finishDrag = (event: React.PointerEvent<HTMLDivElement>, shouldDetectTap: boolean): void => {
+  const finishDrag = (event: React.PointerEvent<HTMLButtonElement>, shouldDetectTap: boolean): void => {
     const dragSession = dragSessionRef.current;
-    if (!dragSession || dragSession.pointerId !== event.pointerId) return;
+    if (!dragSession || dragSession.pointerId !== event.pointerId) {
+      return;
+    }
 
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -227,10 +257,14 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
 
     if (dragSession.hasMoved) {
       lastTapTimeRef.current = 0;
-      if (positionRef.current) savePosition(positionRef.current);
+      if (positionRef.current) {
+        savePosition(positionRef.current);
+      }
       return;
     }
-    if (!shouldDetectTap || event.pointerType === 'mouse') return;
+    if (!shouldDetectTap || event.pointerType === 'mouse') {
+      return;
+    }
 
     const tapTime = performance.now();
     if (tapTime - lastTapTimeRef.current <= DOUBLE_TAP_DELAY_MS) {
@@ -241,29 +275,86 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     lastTapTimeRef.current = tapTime;
   };
 
-  const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>): void => {
+  const handleDoubleClick = (event: React.MouseEvent<HTMLButtonElement>): void => {
     event.preventDefault();
     event.stopPropagation();
     resetPosition();
   };
 
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>): void => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      resetPosition();
+      onInteraction?.();
+      return;
+    }
+
+    const player = playerRef.current;
+    const visualizer = visualizerRef.current;
+    if (!player || !visualizer) {
+      return;
+    }
+
+    const playerBounds = player.getBoundingClientRect();
+    const visualizerBounds = visualizer.getBoundingClientRect();
+    const maximumLeft = Math.max(0, playerBounds.width - visualizerBounds.width);
+    const maximumTop = Math.max(0, playerBounds.height - visualizerBounds.height);
+    const savedPosition = positionRef.current;
+    const left = savedPosition ? savedPosition.x * maximumLeft : visualizerBounds.left - playerBounds.left;
+    const top = savedPosition ? savedPosition.y * maximumTop : visualizerBounds.top - playerBounds.top;
+    const step = event.shiftKey ? 32 : 8;
+    let nextLeft = left;
+    let nextTop = top;
+    switch (event.key) {
+      case 'ArrowLeft':
+        nextLeft = left - step;
+        break;
+      case 'ArrowRight':
+        nextLeft = left + step;
+        break;
+      case 'ArrowUp':
+        nextTop = top - step;
+        break;
+      case 'ArrowDown':
+        nextTop = top + step;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    const nextPosition = {
+      x: maximumLeft === 0 ? 0 : clamp(nextLeft, maximumLeft) / maximumLeft,
+      y: maximumTop === 0 ? 0 : clamp(nextTop, maximumTop) / maximumTop,
+    };
+    positionRef.current = nextPosition;
+    setPosition(nextPosition);
+    savePosition(nextPosition);
+    onInteraction?.();
+  };
+
   const placementClass = position ? '' : 'top-4 right-16';
   return (
-    <div
+    <button
       ref={visualizerRef}
+      type="button"
       data-audio-visualizer
-      role="img"
-      aria-label="Audio activity visualizer. Drag to move. Double-click or double-tap to reset."
+      aria-label="Audio activity visualizer. Drag to move, arrow keys to reposition, Enter to reset."
       title="Drag to move. Double-click or double-tap to reset."
-      className={`${className ?? ''} ${placementClass} flex touch-none cursor-grab active:cursor-grabbing items-center gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-1.5 backdrop-blur-sm`}
+      className={`${className ?? ''} ${placementClass} flex touch-none cursor-grab active:cursor-grabbing items-center gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-1.5 text-left backdrop-blur-sm`}
       style={getPositionStyle(position)}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
-      onPointerUp={(event) => finishDrag(event, true)}
-      onPointerCancel={(event) => finishDrag(event, false)}
+      onPointerUp={(event) => {
+        finishDrag(event, true);
+      }}
+      onPointerCancel={(event) => {
+        finishDrag(event, false);
+      }}
       onDoubleClick={handleDoubleClick}
+      onKeyDown={handleKeyDown}
     >
-      {showStatus && (
+      {showStatus === true && (
         <span aria-hidden="true" className="relative w-1.5 h-1.5">
           <span className="absolute inset-0 rounded-full bg-safelight animate-ping opacity-75" />
           <span className="absolute inset-0 rounded-full bg-safelight" />
@@ -271,6 +362,6 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
       )}
       <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Audio</span>
       <SharedAudioVisualizer subscribe={subscribe} />
-    </div>
+    </button>
   );
 };

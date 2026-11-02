@@ -1,5 +1,6 @@
 import { ArrowRight, ScreenShare, Users, X } from 'lucide-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+
 import { useOnboarding } from '@/hooks/useOnboarding';
 
 export const WelcomeBanner: React.FC = React.memo(() => {
@@ -10,17 +11,24 @@ export const WelcomeBanner: React.FC = React.memo(() => {
 
   useEffect(() => {
     if (!completed) {
-      const timer = setTimeout(() => setVisible(true), 400);
-      return () => clearTimeout(timer);
+      const timer = setTimeout(() => {
+        setVisible(true);
+      }, 400);
+      return () => {
+        clearTimeout(timer);
+      };
     }
     return undefined;
   }, [completed]);
 
-  useEffect(() => {
-    return () => {
-      if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
-    };
-  }, []);
+  useEffect(
+    () => () => {
+      if (dismissTimerRef.current !== undefined) {
+        clearTimeout(dismissTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const handleDismiss = useCallback(() => {
     setExiting(true);
@@ -30,14 +38,18 @@ export const WelcomeBanner: React.FC = React.memo(() => {
   const handleTransitionEnd = useCallback(
     (e: React.TransitionEvent) => {
       if (e.propertyName === 'max-height' && exiting) {
-        if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
-        dismiss();
+        if (dismissTimerRef.current !== undefined) {
+          clearTimeout(dismissTimerRef.current);
+        }
+        void dismiss();
       }
     },
     [exiting, dismiss],
   );
 
-  if (completed && !exiting) return null;
+  if (completed && !exiting) {
+    return null;
+  }
 
   return (
     <div

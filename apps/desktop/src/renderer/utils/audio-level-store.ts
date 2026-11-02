@@ -6,25 +6,23 @@ export const WAVE_COLUMN_COUNT = 96;
 
 const ACTIVE_AMP = 0.002;
 
-export function silentWave(): number[] {
-  return new Array(WAVE_COLUMN_COUNT * 2).fill(0);
-}
+export const silentWave = (): number[] => new Array<number>(WAVE_COLUMN_COUNT * 2).fill(0);
 
-export function waveIsActive(columns: number[]): boolean {
-  return columns.some((v) => Math.abs(v) > ACTIVE_AMP);
-}
+export const waveIsActive = (columns: readonly number[]): boolean => columns.some((v) => Math.abs(v) > ACTIVE_AMP);
 
-function waveChanged(prev: number[], next: number[]): boolean {
-  if (prev.length !== next.length) return true;
+const waveChanged = (prev: readonly number[], next: readonly number[]): boolean => {
+  if (prev.length !== next.length) {
+    return true;
+  }
   for (let i = 0; i < next.length; i++) {
     if (Math.abs((prev[i] ?? 0) - (next[i] ?? 0)) > WAVE_EPSILON) {
       return true;
     }
   }
   return false;
-}
+};
 
-function accumulateMax(target: number[], columns: number[]): void {
+const accumulateMax = (target: number[], columns: readonly number[]): void => {
   const pairs = Math.min(Math.floor(columns.length / 2), WAVE_COLUMN_COUNT);
   for (let i = 0; i < pairs; i++) {
     const minIndex = i * 2;
@@ -40,13 +38,13 @@ function accumulateMax(target: number[], columns: number[]): void {
       target[maxIndex] = max;
     }
   }
-}
+};
 
 class AudioWaveStore {
-  private waves = new Map<number, number[]>();
-  private listeners = new Map<number, Set<WaveCallback>>();
+  private readonly waves = new Map<number, number[]>();
+  private readonly listeners = new Map<number, Set<WaveCallback>>();
 
-  public updateWave(apps: Array<{ id: number; columns: number[] }>): void {
+  public updateWave(apps: { id: number; columns: number[] }[]): void {
     const seen = new Set<number>();
     const maxPerColumn = silentWave();
 

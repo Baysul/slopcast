@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+
 import { desktopApi } from '../api/desktop';
 import type { DesktopCaptureStats } from '../types';
 import type { MotionMode, MotionTier } from '../utils/bitrate';
@@ -10,74 +11,93 @@ const HYSTERESIS = 0.1;
 
 export const classifyMotionTier = (motionRatio: number, previous: MotionTier): MotionTier => {
   if (previous === 'dynamic') {
-    if (motionRatio >= DYNAMIC_THRESHOLD - HYSTERESIS) return 'dynamic';
-    if (motionRatio < STATIC_THRESHOLD) return 'static';
+    if (motionRatio >= DYNAMIC_THRESHOLD - HYSTERESIS) {
+      return 'dynamic';
+    }
+    if (motionRatio < STATIC_THRESHOLD) {
+      return 'static';
+    }
     return 'mixed';
   }
   if (previous === 'static') {
-    if (motionRatio <= STATIC_THRESHOLD + HYSTERESIS) return 'static';
-    if (motionRatio > DYNAMIC_THRESHOLD) return 'dynamic';
+    if (motionRatio <= STATIC_THRESHOLD + HYSTERESIS) {
+      return 'static';
+    }
+    if (motionRatio > DYNAMIC_THRESHOLD) {
+      return 'dynamic';
+    }
     return 'mixed';
   }
-  if (motionRatio < STATIC_THRESHOLD) return 'static';
-  if (motionRatio > DYNAMIC_THRESHOLD) return 'dynamic';
+  if (motionRatio < STATIC_THRESHOLD) {
+    return 'static';
+  }
+  if (motionRatio > DYNAMIC_THRESHOLD) {
+    return 'dynamic';
+  }
   return 'mixed';
 };
 
 interface MotionDetection {
-  motionTier: MotionTier;
-  detected: boolean;
+  readonly motionTier: MotionTier;
+  readonly detected: boolean;
 }
 
 interface MotionSnapshot {
-  real: number;
-  keepalive: number;
+  readonly real: number;
+  readonly keepalive: number;
 }
 
 interface MotionSample {
-  tier: MotionTier | null;
-  prev: MotionSnapshot;
+  readonly tier: MotionTier | null;
+  readonly prev: MotionSnapshot;
 }
 
+const NO_FRAMES = 0;
+
 const snapshot = (stats: DesktopCaptureStats): MotionSnapshot => ({
-  real: stats.framesPushed,
   keepalive: stats.keepalivePushed,
+  real: stats.framesPushed,
 });
 
-async function sampleMotion(prev: MotionSnapshot | null, currentTier: MotionTier): Promise<MotionSample> {
+const sampleMotion = async (prev: MotionSnapshot | null, currentTier: MotionTier): Promise<MotionSample> => {
   const stats = await desktopApi.getVideoCaptureStats();
   const current = snapshot(stats);
   if (!prev) {
-    return { tier: null, prev: current };
+    return { prev: current, tier: null };
   }
   const realDelta = current.real - prev.real;
   const keepaliveDelta = current.keepalive - prev.keepalive;
   const total = realDelta + keepaliveDelta;
-  if (total <= 0) {
-    return { tier: null, prev: current };
+  if (total <= NO_FRAMES) {
+    return { prev: current, tier: null };
   }
   const ratio = realDelta / total;
   const next = classifyMotionTier(ratio, currentTier);
-  const changed = next !== currentTier ? next : null;
-  return { tier: changed, prev: current };
-}
+  let changed: MotionTier | null = next;
+  if (next === currentTier) {
+    changed = null;
+  }
+  return { prev: current, tier: changed };
+};
 
-export function useMotionDetection(mode: MotionMode, active: boolean): MotionDetection {
+export const useMotionDetection = (mode: MotionMode, active: boolean): MotionDetection => {
   const [detectedTier, setDetectedTier] = useState<MotionTier>('mixed');
-  const prevRef = useRef<{ real: number; keepalive: number } | null>(null);
+  const prevRef = useRef<MotionSnapshot | null>(null);
   const tierRef = useRef<MotionTier>('mixed');
 
   useEffect(() => {
     if (!active || mode !== 'auto') {
       prevRef.current = null;
-      return;
+      return undefined;
     }
 
     let disposed = false;
     const poll = async (): Promise<void> => {
       try {
         const result = await sampleMotion(prevRef.current, tierRef.current);
-        if (disposed) return;
+        if (disposed) {
+          return undefined;
+        }
         prevRef.current = result.prev;
         if (result.tier) {
           tierRef.current = result.tier;
@@ -86,7 +106,9 @@ export function useMotionDetection(mode: MotionMode, active: boolean): MotionDet
       } catch (error) {
         console.debug('[motion] sample failed:', error);
       }
-      if (!disposed) setTimeout(poll, POLL_INTERVAL_MS);
+      if (!disposed) {
+        setTimeout(poll, POLL_INTERVAL_MS);
+      }
     };
     void poll();
 
@@ -96,7 +118,7 @@ export function useMotionDetection(mode: MotionMode, active: boolean): MotionDet
   }, [mode, active]);
 
   if (mode !== 'auto') {
-    return { motionTier: mode, detected: false };
+    return { detected: false, motionTier: mode };
   }
-  return { motionTier: detectedTier, detected: true };
-}
+  return { detected: true, motionTier: detectedTier };
+};

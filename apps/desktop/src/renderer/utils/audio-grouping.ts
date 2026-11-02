@@ -6,31 +6,37 @@ export interface AudioAppGroup {
 }
 
 const identityKeyFor = (app: AudioApp): string => {
-  if (app.bundleId && app.bundleId.trim().length > 0) {
+  if (app.bundleId !== null && app.bundleId !== undefined && app.bundleId.trim().length > 0) {
     return `b:${app.bundleId.trim().toLowerCase()}`;
   }
-  if (app.name && app.name.trim().length > 0) {
+  if (app.name.trim().length > 0) {
     return `n:${app.name.trim().toLowerCase()}`;
   }
   if (app.processId > 0) {
     return `p:${app.processId}`;
   }
-  if (app.clientId != null && app.clientId > 0) {
+  if (app.clientId !== null && app.clientId !== undefined && app.clientId > 0) {
     return `c:${app.clientId}`;
   }
   return `i:${app.id}`;
 };
 
+const hasTitle = (title: string | null | undefined): boolean => title !== null && title !== undefined && title !== '';
+
 const mergeIntoGroup = (group: AudioAppGroup, app: AudioApp): void => {
   group.members.push(app);
-  if (!group.representative.mediaTitle && app.mediaTitle) {
+  if (!hasTitle(group.representative.mediaTitle) && hasTitle(app.mediaTitle)) {
     group.representative = app;
-  } else if (!group.representative.mediaTitle && !group.representative.windowTitle && app.windowTitle) {
+  } else if (
+    !hasTitle(group.representative.mediaTitle) &&
+    !hasTitle(group.representative.windowTitle) &&
+    hasTitle(app.windowTitle)
+  ) {
     group.representative = app;
   }
 };
 
-export function groupAudioApps(apps: AudioApp[]): AudioAppGroup[] {
+export const groupAudioApps = (apps: AudioApp[]): AudioAppGroup[] => {
   const groups: AudioAppGroup[] = [];
   const identityMap = new Map<string, AudioAppGroup>();
   for (const app of apps) {
@@ -38,27 +44,30 @@ export function groupAudioApps(apps: AudioApp[]): AudioAppGroup[] {
     const existing = identityMap.get(key);
     if (existing) {
       mergeIntoGroup(existing, app);
-      continue;
+    } else {
+      const group: AudioAppGroup = { members: [app], representative: app };
+      groups.push(group);
+      identityMap.set(key, group);
     }
-    const group: AudioAppGroup = { representative: app, members: [app] };
-    groups.push(group);
-    identityMap.set(key, group);
   }
   return groups;
-}
+};
 
-export function audioAppsEqual(a: readonly AudioApp[], b: readonly AudioApp[]): boolean {
-  if (a.length !== b.length) return false;
+export const audioAppsEqual = (a: readonly AudioApp[], b: readonly AudioApp[]): boolean => {
+  if (a.length !== b.length) {
+    return false;
+  }
   return a.every((app, i) => {
     const other = b[i];
     return (
-      app.id === other?.id &&
-      app.processId === other?.processId &&
-      (app.clientId ?? null) === (other?.clientId ?? null) &&
-      (app.bundleId ?? null) === (other?.bundleId ?? null) &&
-      app.name === other?.name &&
-      (app.mediaTitle ?? null) === (other?.mediaTitle ?? null) &&
-      (app.windowTitle ?? null) === (other?.windowTitle ?? null)
+      other !== undefined &&
+      app.id === other.id &&
+      app.processId === other.processId &&
+      (app.clientId ?? null) === (other.clientId ?? null) &&
+      (app.bundleId ?? null) === (other.bundleId ?? null) &&
+      app.name === other.name &&
+      (app.mediaTitle ?? null) === (other.mediaTitle ?? null) &&
+      (app.windowTitle ?? null) === (other.windowTitle ?? null)
     );
   });
-}
+};

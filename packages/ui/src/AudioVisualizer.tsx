@@ -32,7 +32,9 @@ const tick = (now: number): void => {
   if (now - lastTickTime >= FRAME_INTERVAL_MS) {
     lastTickTime = now;
     for (const draw of activeVisualizers) {
-      if (!draw(now)) activeVisualizers.delete(draw);
+      if (!draw(now)) {
+        activeVisualizers.delete(draw);
+      }
     }
   }
   tickerFrame = activeVisualizers.size > 0 ? requestAnimationFrame(tick) : null;
@@ -40,7 +42,9 @@ const tick = (now: number): void => {
 
 const wakeVisualizer = (draw: VisualizerDraw): void => {
   activeVisualizers.add(draw);
-  if (tickerFrame !== null) return;
+  if (tickerFrame !== null) {
+    return;
+  }
 
   lastTickTime = 0;
   tickerFrame = requestAnimationFrame(tick);
@@ -48,7 +52,9 @@ const wakeVisualizer = (draw: VisualizerDraw): void => {
 
 const sleepVisualizer = (draw: VisualizerDraw): void => {
   activeVisualizers.delete(draw);
-  if (activeVisualizers.size > 0 || tickerFrame === null) return;
+  if (activeVisualizers.size > 0 || tickerFrame === null) {
+    return;
+  }
 
   cancelAnimationFrame(tickerFrame);
   tickerFrame = null;
@@ -71,11 +77,17 @@ const prepareCanvas = (
 };
 
 const peakToHeight = (peak: number): number => {
-  if (peak <= 0.000_01) return 0;
+  if (peak <= 0.000_01) {
+    return 0;
+  }
 
   const decibels = 20 * Math.log10(peak);
-  if (decibels <= -PEAK_FLOOR_DB) return 0;
-  if (decibels >= 0) return 1;
+  if (decibels <= -PEAK_FLOOR_DB) {
+    return 0;
+  }
+  if (decibels >= 0) {
+    return 1;
+  }
   return (decibels + PEAK_FLOOR_DB) / PEAK_FLOOR_DB;
 };
 
@@ -99,11 +111,10 @@ const advanceEnvelope = (peaks: readonly number[], envelope: number[], elapsedSe
     const current = envelope[barIndex] ?? 0;
     if (target > current) {
       envelope[barIndex] = target;
-      continue;
+    } else {
+      const released = current * Math.exp(-BAR_RELEASE_RATE * elapsedSeconds);
+      envelope[barIndex] = released < 0.001 ? 0 : released;
     }
-
-    const released = current * Math.exp(-BAR_RELEASE_RATE * elapsedSeconds);
-    envelope[barIndex] = released < 0.001 ? 0 : released;
   }
 };
 
@@ -116,42 +127,45 @@ const paintBars = (context: CanvasRenderingContext2D, envelope: readonly number[
   context.fillStyle = 'rgba(255, 255, 255, 0.08)';
   context.fillRect(0, center - 0.5, width, 1);
   context.fillStyle = getComputedStyle(context.canvas).color;
-  for (let barIndex = 0; barIndex < envelope.length; barIndex += 1) {
-    const level = envelope[barIndex] ?? 0;
-    if (level <= 0.001) continue;
-
-    const halfHeight = Math.max(1, level * maximumHalfHeight);
-    context.globalAlpha = 0.5 + Math.min(1, level * 2) * 0.35;
-    context.beginPath();
-    context.roundRect(barIndex * (barWidth + BAR_GAP), center - halfHeight, barWidth, halfHeight * 2, radius);
-    context.fill();
+  for (const [barIndex, level] of envelope.entries()) {
+    if (level > 0.001) {
+      const halfHeight = Math.max(1, level * maximumHalfHeight);
+      context.globalAlpha = 0.5 + Math.min(1, level * 2) * 0.35;
+      context.beginPath();
+      context.roundRect(barIndex * (barWidth + BAR_GAP), center - halfHeight, barWidth, halfHeight * 2, radius);
+      context.fill();
+    }
   }
   context.globalAlpha = 1;
 };
 
 const levelsAreActive = (levels: ArrayLike<number>): boolean => {
-  for (let index = 0; index < levels.length; index += 1) {
-    if (Math.abs(levels[index] ?? 0) > ACTIVE_AMPLITUDE) return true;
+  for (const level of Array.from(levels)) {
+    if (Math.abs(level) > ACTIVE_AMPLITUDE) {
+      return true;
+    }
   }
   return false;
 };
 
 const useStableDraw = (draw: VisualizerDraw): (() => void) => {
   const drawRef = useRef(draw);
-  drawRef.current = draw;
-  const stableDrawRef = useRef<VisualizerDraw | null>(null);
-  if (stableDrawRef.current === null) stableDrawRef.current = (now) => drawRef.current(now);
-
   useEffect(() => {
-    const stableDraw = stableDrawRef.current;
-    return () => {
-      if (stableDraw) sleepVisualizer(stableDraw);
-    };
-  }, []);
+    drawRef.current = draw;
+  }, [draw]);
+  // One stable identity for the animation loop; it always draws the latest `draw` through the ref.
+  const stableDraw = useCallback((now: number): boolean => drawRef.current(now), []);
+
+  useEffect(
+    () => () => {
+      sleepVisualizer(stableDraw);
+    },
+    [stableDraw],
+  );
 
   return useCallback(() => {
-    if (stableDrawRef.current) wakeVisualizer(stableDrawRef.current);
-  }, []);
+    wakeVisualizer(stableDraw);
+  }, [stableDraw]);
 };
 
 export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
@@ -164,8 +178,8 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const contextRef = useRef<CanvasRenderingContext2D | null>(null);
   const targetLevelsRef = useRef<ArrayLike<number>>([]);
-  const peaksRef = useRef<number[]>(new Array(DISPLAY_BARS).fill(0));
-  const envelopeRef = useRef<number[]>(new Array(DISPLAY_BARS).fill(0));
+  const peaksRef = useRef<number[]>(new Array<number>(DISPLAY_BARS).fill(0));
+  const envelopeRef = useRef<number[]>(new Array<number>(DISPLAY_BARS).fill(0));
   const lastActiveAtRef = useRef(0);
   const lastDrawAtRef = useRef<number | null>(null);
   const isSilentRef = useRef<boolean>(true);
@@ -174,15 +188,21 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
 
   const signalActivity = useCallback((isActive: boolean): void => {
     if (isActive) {
-      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+      if (hideTimerRef.current !== null) {
+        clearTimeout(hideTimerRef.current);
+      }
       hideTimerRef.current = null;
-      if (!isSilentRef.current) return;
+      if (!isSilentRef.current) {
+        return;
+      }
 
       isSilentRef.current = false;
       setIsSilent(false);
       return;
     }
-    if (isSilentRef.current || hideTimerRef.current) return;
+    if (isSilentRef.current || hideTimerRef.current !== null) {
+      return;
+    }
 
     hideTimerRef.current = setTimeout(() => {
       hideTimerRef.current = null;
@@ -193,12 +213,16 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
 
   const draw = (now: number): boolean => {
     const canvas = canvasRef.current;
-    if (!canvas) return false;
+    if (!canvas) {
+      return false;
+    }
 
     let context = contextRef.current;
     if (!context) {
       context = canvas.getContext('2d');
-      if (!context) return false;
+      if (!context) {
+        return false;
+      }
       contextRef.current = context;
     }
 
@@ -210,7 +234,9 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     prepareCanvas(canvas, context, width, height);
     advanceEnvelope(peaksRef.current, envelopeRef.current, elapsedSeconds);
     paintBars(context, envelopeRef.current, width, height);
-    if (isActive) lastActiveAtRef.current = now;
+    if (isActive) {
+      lastActiveAtRef.current = now;
+    }
     return isActive || now - lastActiveAtRef.current < SLEEP_COOLDOWN_MS;
   };
   const wake = useStableDraw(draw);
@@ -219,18 +245,21 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     targetLevelsRef.current = [];
     envelopeRef.current.fill(0);
     lastDrawAtRef.current = null;
-    isSilentRef.current = true;
-    setIsSilent(true);
+    // `isSilent`/`isSilentRef` start silent, and `signalActivity` maintains them afterwards.
     const unsubscribe = subscribe((levels) => {
       const isActive = levelsAreActive(levels);
       targetLevelsRef.current = levels;
       signalActivity(isActive);
-      if (isActive) wake();
+      if (isActive) {
+        wake();
+      }
     });
     wake();
     return () => {
       unsubscribe();
-      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+      if (hideTimerRef.current !== null) {
+        clearTimeout(hideTimerRef.current);
+      }
       hideTimerRef.current = null;
     };
   }, [signalActivity, subscribe, wake]);
@@ -241,7 +270,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
       ref={canvasRef}
       width={width}
       height={height}
-      style={{ width, height }}
+      style={{ height, width }}
       className={`${visibilityClass} text-safelight ${className}`}
     />
   );

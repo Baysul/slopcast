@@ -1,29 +1,36 @@
+import { isJsonObject, readString } from '@slopcast/shared-types';
+
 export type ApiEndpointErrorKind = 'invalid' | 'timeout' | 'unreachable' | 'unexpected' | 'unhealthy';
 
 export interface ApiEndpointCheckSuccess {
-  ok: true;
-  endpoint: string;
+  readonly ok: true;
+  readonly endpoint: string;
 }
 
 export interface ApiEndpointCheckFailure {
-  ok: false;
-  kind: ApiEndpointErrorKind;
-  message: string;
+  readonly ok: false;
+  readonly kind: ApiEndpointErrorKind;
+  readonly message: string;
 }
 
 export type ApiEndpointCheckResult = ApiEndpointCheckSuccess | ApiEndpointCheckFailure;
 
+const HTTP_OK = 200;
+const HTTP_SERVICE_UNAVAILABLE = 503;
+
 const failure = (kind: ApiEndpointErrorKind, message: string): ApiEndpointCheckFailure => ({
-  ok: false,
   kind,
   message,
+  ok: false,
 });
 
-export function normalizeApiEndpoint(input: string): ApiEndpointCheckResult {
+export const normalizeApiEndpoint = (input: string): ApiEndpointCheckResult => {
   const trimmed = input.trim();
-  if (!trimmed) return failure('invalid', 'Enter an API endpoint.');
+  if (!trimmed) {
+    return failure('invalid', 'Enter an API endpoint.');
+  }
 
-  let parsed: URL;
+  let parsed: URL | undefined = undefined;
   try {
     parsed = new URL(trimmed);
   } catch {
@@ -36,39 +43,44 @@ export function normalizeApiEndpoint(input: string): ApiEndpointCheckResult {
     return failure('invalid', 'Use a base URL without credentials, a query, or a fragment.');
   }
 
-  parsed.pathname = parsed.pathname.replace(/\/+$/, '');
-  return { ok: true, endpoint: parsed.toString().replace(/\/$/, '') };
-}
+  parsed.pathname = parsed.pathname.replace(/\/+$/u, '');
+  return { endpoint: parsed.toString().replace(/\/$/u, ''), ok: true };
+};
 
-export async function checkApiEndpoint(
+export const checkApiEndpoint = async (
   input: string,
   signal: AbortSignal,
   fetcher: typeof fetch = fetch,
-): Promise<ApiEndpointCheckResult> {
+): Promise<ApiEndpointCheckResult> => {
   const normalized = normalizeApiEndpoint(input);
-  if (!normalized.ok) return normalized;
+  if (!normalized.ok) {
+    return normalized;
+  }
 
-  let response: Response;
+  let response: Response | undefined = undefined;
   try {
     response = await fetcher(`${normalized.endpoint}/api/health`, { signal });
   } catch {
-    if (signal.aborted) return failure('timeout', 'The endpoint did not respond within 5 seconds.');
+    if (signal.aborted) {
+      return failure('timeout', 'The endpoint did not respond within 5 seconds.');
+    }
     return failure('unreachable', 'The server could not be reached. Check the URL and your network.');
   }
-  if (response.status === 503) {
+  if (response.status === HTTP_SERVICE_UNAVAILABLE) {
     return failure('unhealthy', 'The API is online, but its LiveKit service is unavailable.');
   }
-  if (response.status !== 200) {
+  if (response.status !== HTTP_OK) {
     return failure('unexpected', `The endpoint returned HTTP ${response.status} instead of a healthy response.`);
   }
 
   try {
-    // SAFETY: the Slopcast health endpoint uses this JSON contract.
-    const body = (await response.json()) as { status?: string };
-    if (body.status === 'ok') return normalized;
+    const body: unknown = await response.json();
+    if (isJsonObject(body) && readString(body, 'status') === 'ok') {
+      return normalized;
+    }
   } catch {
     return failure('unexpected', 'The endpoint returned an unreadable health response.');
   }
 
   return failure('unexpected', 'The endpoint did not identify itself as a healthy Slopcast API.');
-}
+};

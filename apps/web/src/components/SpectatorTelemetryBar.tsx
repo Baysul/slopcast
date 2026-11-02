@@ -1,5 +1,6 @@
 import { fmtBitrate, fmtLoss } from '@slopcast/shared-types';
 import type React from 'react';
+
 import type { SpectatorTelemetry } from './telemetry.js';
 
 export { computeTelemetry, createStatsPrev } from './telemetry.js';
@@ -14,7 +15,7 @@ const TelemetryCell: React.FC<{
   <div className="flex flex-col gap-0.5 min-w-0 shrink-0">
     <span
       className={`text-xs font-semibold uppercase tracking-wider leading-none ${
-        degrade ? 'text-destructive/75' : 'text-muted-foreground'
+        degrade === true ? 'text-destructive/75' : 'text-muted-foreground'
       }`}
     >
       {label}
@@ -22,18 +23,20 @@ const TelemetryCell: React.FC<{
     <span className="flex items-baseline gap-1.5 leading-none">
       <span
         className={`text-sm font-mono font-semibold tabular-nums leading-none ${
-          degrade ? 'text-destructive' : 'text-foreground'
+          degrade === true ? 'text-destructive' : 'text-foreground'
         }`}
       >
         {value}
       </span>
-      {sub != null && <span className="text-xs font-mono tabular-nums leading-none text-caption-text">{sub}</span>}
+      {sub !== null && sub !== undefined && (
+        <span className="text-xs font-mono tabular-nums leading-none text-caption-text">{sub}</span>
+      )}
     </span>
   </div>
 );
 
 export const SpectatorTelemetryBar: React.FC<{ telemetry: SpectatorTelemetry }> = ({ telemetry }) => {
-  const lossDegrade = telemetry.packetLossPct != null && telemetry.packetLossPct > 1;
+  const lossDegrade = telemetry.packetLossPct !== null && telemetry.packetLossPct > 1;
 
   return (
     <div className="flex items-end gap-x-5 gap-y-3 flex-wrap">
@@ -42,7 +45,11 @@ export const SpectatorTelemetryBar: React.FC<{ telemetry: SpectatorTelemetry }> 
       <div className="hidden sm:block">
         <TelemetryCell
           label="Resolution"
-          value={telemetry.width && telemetry.height ? `${telemetry.width}\u00d7${telemetry.height}` : '\u2014'}
+          value={
+            Boolean(telemetry.width) && Boolean(telemetry.height)
+              ? `${telemetry.width}\u00d7${telemetry.height}`
+              : '\u2014'
+          }
         />
       </div>
 
@@ -50,11 +57,13 @@ export const SpectatorTelemetryBar: React.FC<{ telemetry: SpectatorTelemetry }> 
         label="FPS"
         value={
           <span data-testid="spectator-telemetry-fps">
-            {telemetry.frameRate != null ? `${Math.round(telemetry.frameRate)}` : '\u2014'}
+            {telemetry.frameRate === null ? '\u2014' : `${Math.round(telemetry.frameRate)}`}
           </span>
         }
         sub={
-          telemetry.videoCodec ? <span data-testid="spectator-telemetry-codec">{telemetry.videoCodec}</span> : undefined
+          telemetry.videoCodec !== null && telemetry.videoCodec !== '' ? (
+            <span data-testid="spectator-telemetry-codec">{telemetry.videoCodec}</span>
+          ) : undefined
         }
         degrade={telemetry.quality === 'poor'}
       />
@@ -62,11 +71,11 @@ export const SpectatorTelemetryBar: React.FC<{ telemetry: SpectatorTelemetry }> 
       <div className="hidden md:block">
         <TelemetryCell
           label="Jitter"
-          value={telemetry.jitterMs != null ? `${telemetry.jitterMs.toFixed(1)} ms` : '\u2014'}
+          value={telemetry.jitterMs === null ? '\u2014' : `${telemetry.jitterMs.toFixed(1)} ms`}
           sub={
-            telemetry.jitterBufferDelayMs != null ? `buffer ${telemetry.jitterBufferDelayMs.toFixed(0)} ms` : undefined
+            telemetry.jitterBufferDelayMs === null ? undefined : `buffer ${telemetry.jitterBufferDelayMs.toFixed(0)} ms`
           }
-          degrade={telemetry.jitterMs != null && telemetry.jitterMs > 30}
+          degrade={telemetry.jitterMs !== null && telemetry.jitterMs > 30}
         />
       </div>
 

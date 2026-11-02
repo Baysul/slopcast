@@ -1,5 +1,9 @@
 import { existsSync, writeFileSync } from 'node:fs';
-import { type Browser, chromium, type Page } from 'playwright';
+
+import { chromium } from 'playwright';
+import type { Browser, Page } from 'playwright';
+
+import { pollUntil } from '../async-helpers.ts';
 
 declare global {
   interface Window {
@@ -74,148 +78,180 @@ const codec = process.env.E2E_CODEC ?? 'h264';
 const expectedFps = Number(process.env.E2E_EXPECTED_FPS ?? 60);
 const expectedBitrate = Number(process.env.E2E_EXPECTED_BITRATE ?? 20_000_000);
 const cdpUrl = process.env.E2E_CDP_URL ?? 'http://127.0.0.1:9222';
-if (!phaseJsonPath || !releaseFlagPath || !websiteUrl) {
+if (
+  phaseJsonPath === undefined ||
+  phaseJsonPath.length === 0 ||
+  releaseFlagPath === undefined ||
+  releaseFlagPath.length === 0 ||
+  websiteUrl === undefined ||
+  websiteUrl.length === 0
+) {
   throw new Error('E2E_PHASE_JSON, E2E_RELEASE_FLAG and E2E_WEBSITE_URL must be set');
 }
+
+const phaseOutputPath = phaseJsonPath;
 
 const ROOM_CREATE_TIMEOUT_MS = 30_000;
 const PREVIEW_TIMEOUT_MS = captureMode === 'portal' ? 60_000 : 20_000;
 const TELEMETRY_SAMPLE_GAP_MS = 2000;
 const HOLD_TIMEOUT_MS = 180_000;
 const CDP_UP_TIMEOUT_MS = 60_000;
+const CDP_POLL_MS = 1000;
+const HOLD_POLL_MS = 2000;
+const TELEMETRY_BAR_POLL_MS = 1000;
+const TELEMETRY_BAR_TIMEOUT_MS = 12_000;
 
 const phase: PhaseResult = {
-  ok: false,
-  handoffReady: false,
-  roomCode: '',
-  shareUrl: '',
-  isWayland: false,
+  captureFramesPushed: 0,
   captureMode,
   codec,
-  gpuReport: null,
-  previewFramesSent: 0,
-  videoFramesEncoded: 0,
-  videoBytesSent: 0,
-  videoCodecReported: null,
-  encoderImplementation: null,
-  captureFramesPushed: 0,
-  telemetryFlowing: false,
-  telemetryFps: 0,
-  senderBitrateBps: 0,
-  senderBitrateSampleMs: 0,
   cursorFrames: 0,
   cursorMissing: false,
-  postSubscriptionTelemetryReady: false,
+  encoderImplementation: null,
   errors: [],
+  gpuReport: null,
+  handoffReady: false,
+  isWayland: false,
+  ok: false,
+  postSubscriptionTelemetryReady: false,
+  previewFramesSent: 0,
+  roomCode: '',
+  senderBitrateBps: 0,
+  senderBitrateSampleMs: 0,
+  shareUrl: '',
+  telemetryFlowing: false,
+  telemetryFps: 0,
+  videoBytesSent: 0,
+  videoCodecReported: null,
+  videoFramesEncoded: 0,
 };
 
-function writePhase(): void {
+const writePhase = (): void => {
   phase.ok = phase.errors.length === 0;
-  if (phaseJsonPath) writeFileSync(phaseJsonPath, JSON.stringify(phase, null, 2));
-}
+  writeFileSync(phaseOutputPath, JSON.stringify(phase, null, 2));
+};
 
-function recordError(message: string): void {
+const recordError = (message: string): void => {
   phase.errors.push(message);
   console.error(`[e2e] ${message}`);
   writePhase();
-}
+};
 
-function assert(condition: boolean, message: string): void {
+const assert = (condition: boolean, message: string): void => {
   if (!condition) {
     recordError(message);
     throw new Error(message);
   }
-}
+};
 
-async function connectToApp(): Promise<{ browser: Browser; page: Page }> {
+const connectToApp = async (): Promise<{ browser: Browser; page: Page }> => {
   const deadline = Date.now() + CDP_UP_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`${cdpUrl}/json/version`);
-      if (response.ok) break;
-    } catch (error) {
-      console.debug('[e2e] CDP endpoint not ready:', error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+  await pollUntil(
+    async () => {
+      try {
+        const response = await fetch(`${cdpUrl}/json/version`);
+        if (response.ok) {
+          return true;
+        }
+      } catch (error) {
+        console.debug('[e2e] CDP endpoint not ready:', error);
+      }
+      return null;
+    },
+    CDP_POLL_MS,
+    deadline,
+  );
   const browser = await chromium.connectOverCDP(cdpUrl);
-  const context = browser.contexts()[0];
+  const [context] = browser.contexts();
   const page =
-    context.pages().find((candidate) => /tauri\.localhost|localhost:5173/.test(candidate.url())) ?? context.pages()[0];
-  if (!page) throw new Error('CEF exposed no page target over CDP');
+    context.pages().find((candidate) => /tauri\.localhost|localhost:5173/u.test(candidate.url())) ??
+    context.pages().at(0);
+  if (page === undefined) {
+    throw new Error('CEF exposed no page target over CDP');
+  }
   return { browser, page };
-}
+};
 
-function locatorFor(page: Page, selector: string) {
-  const buttonText = /^button=(.+)$/.exec(selector);
-  if (buttonText) return page.getByRole('button', { name: buttonText[1], exact: true });
+const locatorFor = (page: Page, selector: string) => {
+  const buttonText = /^button=(?<label>.+)$/u.exec(selector);
+  if (buttonText) {
+    return page.getByRole('button', { exact: true, name: buttonText[1] });
+  }
   return page.locator(selector);
-}
+};
 
-async function waitForDisplayed(page: Page, selector: string, timeout: number): Promise<void> {
+const waitForDisplayed = async (page: Page, selector: string, timeout: number): Promise<void> => {
   await locatorFor(page, selector).waitFor({ state: 'visible', timeout });
-}
+};
 
-async function waitForExist(page: Page, selector: string, timeout: number): Promise<void> {
+const waitForExist = async (page: Page, selector: string, timeout: number): Promise<void> => {
   await locatorFor(page, selector).waitFor({ state: 'attached', timeout });
-}
+};
 
-async function isExisting(page: Page, selector: string): Promise<boolean> {
-  return (await locatorFor(page, selector).count()) > 0;
-}
+const isExisting = async (page: Page, selector: string): Promise<boolean> =>
+  (await locatorFor(page, selector).count()) > 0;
 
-async function getText(page: Page, selector: string): Promise<string> {
-  return (await locatorFor(page, selector).innerText()).trim();
-}
+const getText = async (page: Page, selector: string): Promise<string> =>
+  (await locatorFor(page, selector).innerText()).trim();
 
-async function clickElement(page: Page, selector: string): Promise<void> {
+const clickElement = async (page: Page, selector: string): Promise<void> => {
   await locatorFor(page, selector).click();
-}
+};
 
-function tauriInvoke<T>(page: Page, command: string): Promise<T> {
-  return page.evaluate(
+const tauriInvoke = <T>(page: Page, command: string): Promise<T> =>
+  page.evaluate(
     ({ cmd }) => {
-      if (!window.__TAURI__?.core?.invoke) throw new Error('window.__TAURI__.core.invoke unavailable');
-      return window.__TAURI__.core.invoke<T>(cmd);
+      const tauri = window.__TAURI__;
+      if (!tauri?.core?.invoke) {
+        throw new Error('window.__TAURI__.core.invoke unavailable');
+      }
+      return tauri.core.invoke<T>(cmd);
     },
     { cmd: command },
   );
-}
 
-function assertCodecTelemetry(phaseResult: PhaseResult): void {
+const assertCodecTelemetry = (phaseResult: PhaseResult): void => {
   const expectedMime = `video/${codec.toUpperCase()}`;
   assert(
     (phaseResult.videoCodecReported ?? '').toUpperCase() === expectedMime.toUpperCase(),
     `Outbound codec mismatch: requested ${expectedMime}, reported ${phaseResult.videoCodecReported ?? 'null'}`,
   );
-  if (codec !== 'h264' && codec !== 'h265') return;
+  if (codec !== 'h264' && codec !== 'h265') {
+    return;
+  }
   const impl = phaseResult.encoderImplementation ?? '';
   console.log(`[e2e] ${codec} encoder implementation: ${impl || '(not yet reported)'}`);
   assert(
-    /VAAPI|vah264enc|vah265enc|x265enc|NVENC|Media\s*Foundation|VideoToolbox/i.test(impl),
+    /VAAPI|vah264enc|vah265enc|x265enc|NVENC|Media\s*Foundation|VideoToolbox/iu.test(impl),
     `${codec} was not hardware-encoded (encoderImplementation=${impl || 'empty'})`,
   );
-}
+};
 
-async function samplePreviewCanvas(
+const samplePreviewCanvas = (
   page: Page,
-): Promise<{ hasContent: boolean; barsCorrect: boolean; upright: boolean; horizontal: boolean; barChannels: string }> {
-  return page.evaluate(async () => {
+): Promise<{ hasContent: boolean; barsCorrect: boolean; upright: boolean; horizontal: boolean; barChannels: string }> =>
+  page.evaluate(async () => {
     const empty = {
-      hasContent: false,
-      barsCorrect: false,
-      upright: false,
-      horizontal: false,
       barChannels: '',
+      barsCorrect: false,
+      hasContent: false,
+      horizontal: false,
+      upright: false,
     };
     const canvas = document.querySelector<HTMLCanvasElement>('canvas[aria-label="Live screenshare preview"]');
-    if (!canvas) return empty;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (!canvas) {
+      return empty;
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 500);
+    });
     const copy = document.createElement('canvas');
     copy.width = canvas.width;
     copy.height = canvas.height;
     const ctx = copy.getContext('2d');
-    if (!ctx) return empty;
+    if (!ctx) {
+      return empty;
+    }
     ctx.drawImage(canvas, 0, 0);
     const { data, width, height } = ctx.getImageData(0, 0, copy.width, copy.height);
     const dumpBars = (): string => {
@@ -229,7 +265,9 @@ async function samplePreviewCanvas(
       }
       return bars.join(' ');
     };
-    if (width < 160 || height < 90) return empty;
+    if (width < 160 || height < 90) {
+      return empty;
+    }
 
     const pixel = (x: number, y: number): [number, number, number] => {
       const i = (y * width + x) * 4;
@@ -240,7 +278,9 @@ async function samplePreviewCanvas(
     let total = 0;
     for (let i = 0; i < data.length; i += 16) {
       total += 1;
-      if (Math.max(data[i], data[i + 1], data[i + 2]) > 16) nonBlack += 1;
+      if (Math.max(data[i], data[i + 1], data[i + 2]) > 16) {
+        nonBlack += 1;
+      }
     }
 
     const y = Math.floor(height * 0.75);
@@ -262,7 +302,9 @@ async function samplePreviewCanvas(
       for (let yy = y0; yy < y1; yy += 2) {
         for (let xx = 0; xx < width; xx += 2) {
           const [r, g, b] = pixel(xx, yy);
-          if (r > 200 && g > 200 && b > 200) count += 1;
+          if (r > 200 && g > 200 && b > 200) {
+            count += 1;
+          }
         }
       }
       return count;
@@ -274,50 +316,59 @@ async function samplePreviewCanvas(
     const horizontal = bar(0, [true, true, true]) && bar(7, [false, false, false]);
 
     return {
-      hasContent: total > 0 && nonBlack / total > 0.1,
-      barsCorrect,
-      upright,
-      horizontal,
       barChannels: dumpBars(),
+      barsCorrect,
+      hasContent: total > 0 && nonBlack / total > 0.1,
+      horizontal,
+      upright,
     };
   });
-}
 
-async function snapshotPresenterTelemetry(page: Page): Promise<{
+const snapshotPresenterTelemetry = async (
+  page: Page,
+): Promise<{
   telemetry: NativeTelemetry;
   stats: CaptureStats;
-}> {
+}> => {
   const telemetry = await tauriInvoke<NativeTelemetry>(page, 'get_native_telemetry');
   const stats = await tauriInvoke<CaptureStats>(page, 'get_video_capture_stats');
-  return { telemetry, stats };
-}
+  return { stats, telemetry };
+};
 
-async function readTelemetryBarFps(page: Page): Promise<string> {
+const readTelemetryBarFps = async (page: Page): Promise<string> => {
   let uiFps = '—';
-  for (let i = 0; i < 12; i++) {
-    const selector = '[data-testid="telemetry-fps"]';
-    if (await isExisting(page, selector)) {
-      uiFps = await getText(page, selector);
-      const parsed = Number.parseFloat(uiFps);
-      if (Number.isFinite(parsed) && parsed > 0) break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+  await pollUntil(
+    async () => {
+      const selector = '[data-testid="telemetry-fps"]';
+      if (await isExisting(page, selector)) {
+        uiFps = await getText(page, selector);
+        const parsed = Number.parseFloat(uiFps);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          return true;
+        }
+      }
+      return null;
+    },
+    TELEMETRY_BAR_POLL_MS,
+    Date.now() + TELEMETRY_BAR_TIMEOUT_MS,
+  );
   return uiFps;
-}
+};
 
-async function stopShareForSpectatorCheck(page: Page): Promise<void> {
+const stopShareForSpectatorCheck = async (page: Page): Promise<void> => {
   await waitForDisplayed(page, 'button=Stop Screenshare', 30_000);
   await clickElement(page, 'button=Stop Screenshare');
   await waitForDisplayed(page, 'button=Stop', 10_000);
   await clickElement(page, 'button=Stop');
   await waitForDisplayed(page, 'button=Start Screenshare', 30_000);
   console.log('[e2e] stop completed — presenter back to the idle stage');
-}
+};
 
-async function verifyPostSubscriptionTelemetry(page: Page): Promise<void> {
+const verifyPostSubscriptionTelemetry = async (page: Page): Promise<void> => {
   const start = await snapshotPresenterTelemetry(page);
-  await new Promise((resolve) => setTimeout(resolve, 5000));
+  await new Promise((resolve) => {
+    setTimeout(resolve, 5000);
+  });
   const end = await snapshotPresenterTelemetry(page);
   const startBytes = start.telemetry.videoBytesSent ?? 0;
   const endBytes = end.telemetry.videoBytesSent ?? 0;
@@ -344,15 +395,21 @@ async function verifyPostSubscriptionTelemetry(page: Page): Promise<void> {
   );
 
   let uiBitrate = '—';
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const selector = '[data-testid="telemetry-bitrate"]';
-    if (await isExisting(page, selector)) {
-      uiBitrate = await getText(page, selector);
-      const parsed = Number.parseFloat(uiBitrate);
-      if (Number.isFinite(parsed) && parsed > 0) break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+  await pollUntil(
+    async () => {
+      const selector = '[data-testid="telemetry-bitrate"]';
+      if (await isExisting(page, selector)) {
+        uiBitrate = await getText(page, selector);
+        const parsed = Number.parseFloat(uiBitrate);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          return true;
+        }
+      }
+      return null;
+    },
+    TELEMETRY_BAR_POLL_MS,
+    Date.now() + TELEMETRY_BAR_TIMEOUT_MS,
+  );
   assert(
     Number.parseFloat(uiBitrate) > 0,
     `Telemetry bar never showed live video bitrate after subscription (stuck at "${uiBitrate}")`,
@@ -363,9 +420,9 @@ async function verifyPostSubscriptionTelemetry(page: Page): Promise<void> {
     `[e2e] post-subscription telemetry: bytesSent=${phase.videoBytesSent}, ` +
       `measuredBitrate=${(phase.senderBitrateBps / 1_000_000).toFixed(2)}Mbps, uiBitrate="${uiBitrate}"`,
   );
-}
+};
 
-async function runStep(name: string, step: () => Promise<void>): Promise<void> {
+const runStep = async (name: string, step: () => Promise<void>): Promise<void> => {
   console.log(`[e2e] step: ${name}`);
   try {
     await step();
@@ -375,9 +432,9 @@ async function runStep(name: string, step: () => Promise<void>): Promise<void> {
       recordError(message);
     }
   }
-}
+};
 
-async function main(): Promise<void> {
+const main = async (): Promise<void> => {
   const { browser, page } = await connectToApp();
 
   try {
@@ -438,7 +495,9 @@ async function main(): Promise<void> {
       }
 
       const t0 = await snapshotPresenterTelemetry(page);
-      await new Promise((resolve) => setTimeout(resolve, TELEMETRY_SAMPLE_GAP_MS));
+      await new Promise((resolve) => {
+        setTimeout(resolve, TELEMETRY_SAMPLE_GAP_MS);
+      });
       const t1 = await snapshotPresenterTelemetry(page);
 
       phase.videoFramesEncoded = t1.telemetry.videoFramesEncoded ?? 0;
@@ -493,29 +552,48 @@ async function main(): Promise<void> {
       phase.handoffReady = true;
       writePhase();
 
-      assert(gpu.eglVendor != null && gpu.eglVendor.length > 0, 'GPU probe reported no EGL vendor');
-      assert(gpu.softwareRasterizer === false, 'GPU is software-rendered (llvmpipe/softpipe)');
+      assert(gpu.eglVendor !== null && gpu.eglVendor.length > 0, 'GPU probe reported no EGL vendor');
+      assert(!gpu.softwareRasterizer, 'GPU is software-rendered (llvmpipe/softpipe)');
       console.log(`[e2e] gpu: vendor=${gpu.eglVendor} renderer=${gpu.glRenderer} version=${gpu.glVersion}`);
     });
 
     await runStep('keeps the app alive until the spectator phase releases it', async () => {
       const deadline = Date.now() + HOLD_TIMEOUT_MS;
       let spectatorTelemetryVerified = false;
-      while (Date.now() < deadline) {
-        if (releaseFlagPath && existsSync(releaseFlagPath)) {
-          console.log('[e2e] release flag seen — ending presenter session');
-          return;
-        }
-        if (stopFlagPath && stoppedFlagPath && !existsSync(stoppedFlagPath) && existsSync(stopFlagPath)) {
-          await stopShareForSpectatorCheck(page);
-          writeFileSync(stoppedFlagPath, 'stopped');
-          console.log('[e2e] share stopped — waiting for the spectator check to complete');
-        }
-        if (spectatorReadyFlagPath && !spectatorTelemetryVerified && existsSync(spectatorReadyFlagPath)) {
-          await verifyPostSubscriptionTelemetry(page);
-          spectatorTelemetryVerified = true;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+      const released = await pollUntil(
+        async () => {
+          if (releaseFlagPath.length > 0 && existsSync(releaseFlagPath)) {
+            return true;
+          }
+          if (
+            stopFlagPath !== undefined &&
+            stopFlagPath.length > 0 &&
+            stoppedFlagPath !== undefined &&
+            stoppedFlagPath.length > 0 &&
+            !existsSync(stoppedFlagPath) &&
+            existsSync(stopFlagPath)
+          ) {
+            await stopShareForSpectatorCheck(page);
+            writeFileSync(stoppedFlagPath, 'stopped');
+            console.log('[e2e] share stopped — waiting for the spectator check to complete');
+          }
+          if (
+            spectatorReadyFlagPath !== undefined &&
+            spectatorReadyFlagPath.length > 0 &&
+            !spectatorTelemetryVerified &&
+            existsSync(spectatorReadyFlagPath)
+          ) {
+            await verifyPostSubscriptionTelemetry(page);
+            spectatorTelemetryVerified = true;
+          }
+          return null;
+        },
+        HOLD_POLL_MS,
+        deadline,
+      );
+      if (released !== null) {
+        console.log('[e2e] release flag seen — ending presenter session');
+        return;
       }
       recordError('Presenter hold timed out before the spectator phase released it');
     });
@@ -523,7 +601,7 @@ async function main(): Promise<void> {
     writePhase();
     await browser.close().catch(() => undefined);
   }
-}
+};
 
 main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);

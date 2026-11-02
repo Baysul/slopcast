@@ -1,5 +1,7 @@
-import { type BufferedRange, ReplayMediaBuffer } from './replay-media-buffer';
-import { createBrowserReplayOwnership, type ReplayOwnership, type ReplayOwnershipState } from './replay-ownership';
+import { ReplayMediaBuffer } from './replay-media-buffer';
+import type { BufferedRange } from './replay-media-buffer';
+import { createBrowserReplayOwnership } from './replay-ownership';
+import type { ReplayOwnership, ReplayOwnershipState } from './replay-ownership';
 import { ReplayStore } from './replay-store';
 
 export const REPLAY_DEFAULT_SECONDS = 120;
@@ -38,7 +40,9 @@ export interface ViewerReplaySnapshot {
 }
 
 const sanitizeWindowSeconds = (value: number): number => {
-  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
   const stepped = Math.round(value / REPLAY_STEP_SECONDS) * REPLAY_STEP_SECONDS;
   return Math.min(REPLAY_MAX_SECONDS, Math.max(REPLAY_STEP_SECONDS, stepped));
 };
@@ -46,7 +50,9 @@ const sanitizeWindowSeconds = (value: number): number => {
 export const readReplayWindowSeconds = (): number => {
   try {
     const stored = window.localStorage.getItem(REPLAY_PREFERENCE_KEY);
-    if (stored == null) return REPLAY_DEFAULT_SECONDS;
+    if (stored === null) {
+      return REPLAY_DEFAULT_SECONDS;
+    }
 
     const windowSeconds = sanitizeWindowSeconds(Number(stored));
     return windowSeconds > 0 ? windowSeconds : REPLAY_DEFAULT_SECONDS;
@@ -57,7 +63,9 @@ export const readReplayWindowSeconds = (): number => {
 };
 
 const saveReplayWindowSeconds = (value: number): void => {
-  if (value <= 0) return;
+  if (value <= 0) {
+    return;
+  }
 
   try {
     window.localStorage.setItem(REPLAY_PREFERENCE_KEY, String(value));
@@ -86,17 +94,30 @@ const findReplayMimeType = (stream: MediaStream): string | null => {
 };
 
 const replaySupportFailure = (stream: MediaStream): string | null => {
-  if (!('MediaRecorder' in window)) return 'MediaRecorder is unavailable';
-  if (!('MediaSource' in window)) return 'MediaSource is unavailable';
-  if (!('indexedDB' in window)) return 'IndexedDB is unavailable';
-  if (!findReplayMimeType(stream)) return 'No recording format is supported by both MediaRecorder and MediaSource';
+  if (!('MediaRecorder' in window)) {
+    return 'MediaRecorder is unavailable';
+  }
+  if (!('MediaSource' in window)) {
+    return 'MediaSource is unavailable';
+  }
+  if (!('indexedDB' in window)) {
+    return 'IndexedDB is unavailable';
+  }
+  const mimeType = findReplayMimeType(stream);
+  if (mimeType === null || mimeType === '') {
+    return 'No recording format is supported by both MediaRecorder and MediaSource';
+  }
 
   return null;
 };
 
 const parseStorageWriteFailure = (cause: unknown): 'quota' | Error => {
-  if (cause instanceof DOMException && cause.name === 'QuotaExceededError') return 'quota';
-  if (cause instanceof Error) return cause;
+  if (cause instanceof DOMException && cause.name === 'QuotaExceededError') {
+    return 'quota';
+  }
+  if (cause instanceof Error) {
+    return cause;
+  }
 
   return new Error('Browser storage rejected a replay chunk');
 };
@@ -115,7 +136,9 @@ const createThumbnailBlob = async (video: HTMLVideoElement): Promise<Blob> => {
   if ('OffscreenCanvas' in window) {
     const canvas = new OffscreenCanvas(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
     const context = canvas.getContext('2d', { alpha: false });
-    if (!context) throw new Error('The browser could not create a thumbnail canvas');
+    if (!context) {
+      throw new Error('The browser could not create a thumbnail canvas');
+    }
 
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = 'high';
@@ -123,14 +146,17 @@ const createThumbnailBlob = async (video: HTMLVideoElement): Promise<Blob> => {
     context.fillRect(0, 0, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
     context.drawImage(video, x, y, width, height);
 
-    return canvas.convertToBlob({ type: 'image/jpeg', quality: THUMBNAIL_QUALITY });
+    const blob = await canvas.convertToBlob({ quality: THUMBNAIL_QUALITY, type: 'image/jpeg' });
+    return blob;
   }
 
   const canvas = document.createElement('canvas');
   canvas.width = THUMBNAIL_WIDTH;
   canvas.height = THUMBNAIL_HEIGHT;
   const context = canvas.getContext('2d', { alpha: false });
-  if (!context) throw new Error('The browser could not create a thumbnail canvas');
+  if (!context) {
+    throw new Error('The browser could not create a thumbnail canvas');
+  }
 
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
@@ -138,11 +164,11 @@ const createThumbnailBlob = async (video: HTMLVideoElement): Promise<Blob> => {
   context.fillRect(0, 0, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
   context.drawImage(video, x, y, width, height);
 
-  return new Promise((resolve, reject) => {
+  const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
-      (blob) => {
-        if (blob) {
-          resolve(blob);
+      (encodedBlob) => {
+        if (encodedBlob) {
+          resolve(encodedBlob);
           return;
         }
         reject(new Error('The browser could not encode a replay thumbnail'));
@@ -151,20 +177,21 @@ const createThumbnailBlob = async (video: HTMLVideoElement): Promise<Blob> => {
       THUMBNAIL_QUALITY,
     );
   });
+  return blob;
 };
 
 const createInitialSnapshot = (windowSeconds: number): ViewerReplaySnapshot => ({
+  announcement: null,
   availability: 'checking',
-  unavailableReason: null,
-  mode: 'live',
-  windowSeconds,
   effectiveWindowSeconds: windowSeconds,
-  range: null,
-  position: 0,
   isShareEnded: false,
   limitationReason: null,
-  announcement: null,
+  mode: 'live',
+  position: 0,
   preview: null,
+  range: null,
+  unavailableReason: null,
+  windowSeconds,
 });
 
 export class ViewerReplay {
@@ -184,13 +211,19 @@ export class ViewerReplay {
   private generation = 0;
   private readonly states = new Set<'destroyed' | 'ending'>();
   private readonly ownership: ReplayOwnership;
+  private readonly replayVideo: HTMLVideoElement;
+  private readonly thumbnailVideo: HTMLVideoElement;
+  private readonly onChange: (snapshot: ViewerReplaySnapshot) => void;
 
   constructor(
-    private readonly replayVideo: HTMLVideoElement,
-    private readonly thumbnailVideo: HTMLVideoElement,
+    replayVideo: HTMLVideoElement,
+    thumbnailVideo: HTMLVideoElement,
     windowSeconds: number,
-    private readonly onChange: (snapshot: ViewerReplaySnapshot) => void,
+    onChange: (snapshot: ViewerReplaySnapshot) => void,
   ) {
+    this.replayVideo = replayVideo;
+    this.thumbnailVideo = thumbnailVideo;
+    this.onChange = onChange;
     this.snapshot = createInitialSnapshot(sanitizeWindowSeconds(windowSeconds));
     this.ownership = createBrowserReplayOwnership(this.handleOwnershipChange);
     this.replayVideo.addEventListener('timeupdate', this.handleReplayTimeUpdate);
@@ -206,24 +239,26 @@ export class ViewerReplay {
     this.stream = stream;
     this.states.delete('ending');
     this.update({
+      announcement: null,
       availability: 'checking',
-      unavailableReason: null,
-      mode: 'live',
       effectiveWindowSeconds: this.snapshot.windowSeconds,
-      range: null,
-      position: 0,
       isShareEnded: false,
       limitationReason: null,
-      announcement: null,
+      mode: 'live',
+      position: 0,
       preview: null,
+      range: null,
+      unavailableReason: null,
     });
 
     await this.clearSession();
-    if (this.states.has('destroyed') || generation !== this.generation) return;
+    if (this.states.has('destroyed') || generation !== this.generation) {
+      return;
+    }
     this.stream = stream;
 
     const failure = replaySupportFailure(stream);
-    if (failure) {
+    if (failure !== null && failure !== '') {
       this.markUnavailable(failure);
       return;
     }
@@ -247,7 +282,9 @@ export class ViewerReplay {
   }
 
   endShare(): void {
-    if (this.states.has('ending') || this.snapshot.isShareEnded) return;
+    if (this.states.has('ending') || this.snapshot.isShareEnded) {
+      return;
+    }
 
     this.states.add('ending');
     this.stream = null;
@@ -264,9 +301,9 @@ export class ViewerReplay {
     const windowSeconds = sanitizeWindowSeconds(value);
     saveReplayWindowSeconds(windowSeconds);
     this.update({
-      windowSeconds,
       effectiveWindowSeconds: windowSeconds,
       limitationReason: null,
+      windowSeconds,
     });
 
     if (windowSeconds === 0) {
@@ -279,11 +316,11 @@ export class ViewerReplay {
       this.ownership.release();
       this.update({
         availability: 'available',
-        unavailableReason: null,
         mode: 'live',
-        range: null,
         position: 0,
         preview: null,
+        range: null,
+        unavailableReason: null,
       });
       return;
     }
@@ -293,7 +330,7 @@ export class ViewerReplay {
     if (this.stream && !this.recorder) {
       const ownershipState = this.ownership.getState();
       if (ownershipState.status === 'owned') {
-        const generation = this.generation;
+        const { generation } = this;
         this.beginRecording(generation).catch((error) => {
           this.markUnavailable(error instanceof Error ? error.message : 'Replay recording failed');
         });
@@ -304,12 +341,14 @@ export class ViewerReplay {
   }
 
   seek(mediaTime: number, shouldPlay: boolean): void {
-    const range = this.snapshot.range;
-    if (!range) return;
+    const { range } = this.snapshot;
+    if (!range) {
+      return;
+    }
 
     const clampedTime = Math.min(range.end, Math.max(range.start, mediaTime));
     this.replayVideo.currentTime = clampedTime;
-    this.update({ mode: 'replay', position: clampedTime, announcement: null });
+    this.update({ announcement: null, mode: 'replay', position: clampedTime });
     if (shouldPlay) {
       this.playReplay();
       return;
@@ -318,27 +357,29 @@ export class ViewerReplay {
   }
 
   goLive(): void {
-    const range = this.snapshot.range;
+    const { range } = this.snapshot;
     const position = range ? range.end : 0;
 
     this.replayVideo.pause();
     this.update({
+      announcement: null,
       mode: 'live',
       position,
-      announcement: null,
       preview: null,
     });
   }
 
   playReplay(): void {
-    const range = this.snapshot.range;
-    if (!range) return;
+    const { range } = this.snapshot;
+    if (!range) {
+      return;
+    }
 
     if (this.replayVideo.currentTime < range.start) {
       this.replayVideo.currentTime = range.start;
       this.update({
-        position: range.start,
         announcement: 'Replay window advanced to the oldest available moment',
+        position: range.start,
       });
     }
     this.replayVideo.play().catch((error) => {
@@ -351,30 +392,36 @@ export class ViewerReplay {
   }
 
   preview(mediaTime: number | null): void {
-    if (mediaTime == null || this.thumbnails.length === 0) {
-      if (this.snapshot.preview) this.update({ preview: null });
+    if (mediaTime === null || this.thumbnails.length === 0) {
+      if (this.snapshot.preview) {
+        this.update({ preview: null });
+      }
       return;
     }
 
-    let nearest = this.thumbnails[0];
+    let [nearest] = this.thumbnails;
     for (const thumbnail of this.thumbnails) {
       if (!nearest || Math.abs(thumbnail.mediaTime - mediaTime) < Math.abs(nearest.mediaTime - mediaTime)) {
         nearest = thumbnail;
       }
     }
-    if (this.snapshot.preview === nearest) return;
+    if (this.snapshot.preview === nearest) {
+      return;
+    }
 
     this.update({ preview: nearest ?? null });
   }
 
   clearAnnouncement(): void {
-    if (this.snapshot.announcement) {
+    if (this.snapshot.announcement !== null && this.snapshot.announcement !== '') {
       this.update({ announcement: null });
     }
   }
 
   destroy(): void {
-    if (this.states.has('destroyed')) return;
+    if (this.states.has('destroyed')) {
+      return;
+    }
 
     this.states.add('destroyed');
     this.generation += 1;
@@ -390,7 +437,7 @@ export class ViewerReplay {
   }
 
   private async beginRecording(generation: number): Promise<void> {
-    const stream = this.stream;
+    const { stream } = this;
     if (
       !stream ||
       this.states.has('destroyed') ||
@@ -401,13 +448,13 @@ export class ViewerReplay {
     }
 
     const mimeType = findReplayMimeType(stream);
-    if (!mimeType) {
+    if (mimeType === null || mimeType === '') {
       this.markUnavailable('No recording format is supported by both MediaRecorder and MediaSource');
       return;
     }
 
     const sessionId = crypto.randomUUID();
-    let store: ReplayStore;
+    let store: ReplayStore | undefined = undefined;
     try {
       store = await ReplayStore.create(sessionId);
     } catch (error) {
@@ -424,14 +471,14 @@ export class ViewerReplay {
 
     this.store = store;
     this.resetThumbnailCapture();
-    this.mediaBuffer = new ReplayMediaBuffer(
-      this.replayVideo,
+    this.mediaBuffer = new ReplayMediaBuffer({
       mimeType,
-      this.snapshot.effectiveWindowSeconds,
-      this.handleRangeChange,
-      this.reduceEffectiveWindow,
-      this.handleMediaBufferFailure,
-    );
+      onFailure: this.handleMediaBufferFailure,
+      onRangeChange: this.handleRangeChange,
+      onStoragePressure: this.reduceEffectiveWindow,
+      video: this.replayVideo,
+      windowSeconds: this.snapshot.effectiveWindowSeconds,
+    });
 
     try {
       this.recorder = new MediaRecorder(stream, { mimeType });
@@ -448,18 +495,24 @@ export class ViewerReplay {
   }
 
   private readonly handleRecordedData = (event: BlobEvent): void => {
-    if (event.data.size === 0 || this.states.has('destroyed')) return;
+    if (event.data.size === 0 || this.states.has('destroyed')) {
+      return;
+    }
 
     const blob = event.data;
     const sequence = this.sequence++;
-    const generation = this.generation;
+    const { generation } = this;
     this.writeQueue = this.writeQueue
       .then(async () => {
-        if (generation !== this.generation) return;
+        if (generation !== this.generation) {
+          return;
+        }
         await this.appendAndStoreChunk(blob, sequence);
       })
       .catch((error) => {
-        if (generation !== this.generation) return;
+        if (generation !== this.generation) {
+          return;
+        }
         this.markUnavailable(error instanceof Error ? error.message : 'Replay chunk processing failed');
       });
   };
@@ -493,20 +546,24 @@ export class ViewerReplay {
   };
 
   private async appendAndStoreChunk(blob: Blob, sequence: number): Promise<void> {
-    const mediaBuffer = this.mediaBuffer;
-    const store = this.store;
-    if (!mediaBuffer || !store) return;
+    const { mediaBuffer } = this;
+    const { store } = this;
+    if (!mediaBuffer || !store) {
+      return;
+    }
 
     await mediaBuffer.append(blob);
     const range = mediaBuffer.getRange();
-    if (!range) return;
+    if (!range) {
+      return;
+    }
 
     const startedAt = Math.max(range.start, this.previousChunkEnd);
     const endedAt = range.end;
     this.previousChunkEnd = endedAt;
 
     this.captureThumbnail(endedAt, range.start);
-    await this.storeChunkWithFallback(store, { sequence, startedAt, endedAt, blob });
+    await this.storeChunkWithFallback(store, { blob, endedAt, sequence, startedAt });
     await store.prune(Math.max(0, endedAt - this.snapshot.effectiveWindowSeconds));
     this.pruneThumbnails(range.start);
   }
@@ -520,27 +577,33 @@ export class ViewerReplay {
       return;
     } catch (error) {
       const failure = parseStorageWriteFailure(error);
-      if (failure !== 'quota') throw failure;
+      if (failure !== 'quota') {
+        throw failure;
+      }
     }
 
-    let nextWindow = this.reduceEffectiveWindow();
-    while (nextWindow != null) {
-      await store.prune(Math.max(0, chunk.endedAt - nextWindow));
+    const retryWithReducedWindow = async (window: number | null): Promise<void> => {
+      if (window === null) {
+        throw new Error('Browser storage cannot retain a replay chunk');
+      }
+      await store.prune(Math.max(0, chunk.endedAt - window));
       try {
         await store.putChunk(chunk);
         return;
       } catch (error) {
         const failure = parseStorageWriteFailure(error);
-        if (failure !== 'quota') throw failure;
-        nextWindow = this.reduceEffectiveWindow();
+        if (failure !== 'quota') {
+          throw failure;
+        }
       }
-    }
+      await retryWithReducedWindow(this.reduceEffectiveWindow());
+    };
 
-    throw new Error('Browser storage cannot retain a replay chunk');
+    await retryWithReducedWindow(this.reduceEffectiveWindow());
   }
 
   private readonly handleRangeChange = (range: BufferedRange | null): void => {
-    let position = this.snapshot.position;
+    let { position } = this.snapshot;
     if (this.snapshot.mode === 'live') {
       position = range ? range.end : 0;
     }
@@ -552,18 +615,20 @@ export class ViewerReplay {
     ) {
       this.replayVideo.currentTime = range.start;
       this.update({
-        range,
-        position: range.start,
         announcement: 'Replay window advanced to the oldest available moment',
+        position: range.start,
+        range,
       });
       return;
     }
-    this.update({ range, position });
+    this.update({ position, range });
   };
 
   private readonly reduceEffectiveWindow = (): number | null => {
     const current = this.snapshot.effectiveWindowSeconds;
-    if (current <= RECORDING_CHUNK_SECONDS) return null;
+    if (current <= RECORDING_CHUNK_SECONDS) {
+      return null;
+    }
 
     const next = Math.max(RECORDING_CHUNK_SECONDS, current - REPLAY_STEP_SECONDS);
     this.update({
@@ -580,7 +645,9 @@ export class ViewerReplay {
   };
 
   private readonly handleReplayTimeUpdate = (): void => {
-    if (this.snapshot.mode !== 'replay') return;
+    if (this.snapshot.mode !== 'replay') {
+      return;
+    }
     this.update({ position: this.replayVideo.currentTime });
   };
 
@@ -601,9 +668,13 @@ export class ViewerReplay {
 
   private captureThumbnail(mediaTime: number, cutoff: number): void {
     const video = this.thumbnailVideo;
-    const thumbnailEpoch = this.thumbnailEpoch;
-    if (this.thumbnailCaptureEpoch === thumbnailEpoch || this.thumbnailCaptureFailed) return;
-    if (this.lastThumbnailAt > 0 && mediaTime - this.lastThumbnailAt < THUMBNAIL_INTERVAL_SECONDS) return;
+    const { thumbnailEpoch } = this;
+    if (this.thumbnailCaptureEpoch === thumbnailEpoch || this.thumbnailCaptureFailed) {
+      return;
+    }
+    if (this.lastThumbnailAt > 0 && mediaTime - this.lastThumbnailAt < THUMBNAIL_INTERVAL_SECONDS) {
+      return;
+    }
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.videoWidth === 0 || video.videoHeight === 0) {
       return;
     }
@@ -612,26 +683,34 @@ export class ViewerReplay {
     this.lastThumbnailAt = mediaTime;
     createThumbnailBlob(video)
       .then((blob) => {
-        if (this.states.has('destroyed') || thumbnailEpoch !== this.thumbnailEpoch) return;
+        if (this.states.has('destroyed') || thumbnailEpoch !== this.thumbnailEpoch) {
+          return;
+        }
 
         this.thumbnails.push({ mediaTime, url: URL.createObjectURL(blob) });
         this.pruneThumbnails(cutoff);
       })
       .catch((error) => {
-        if (this.states.has('destroyed') || thumbnailEpoch !== this.thumbnailEpoch) return;
+        if (this.states.has('destroyed') || thumbnailEpoch !== this.thumbnailEpoch) {
+          return;
+        }
 
         this.thumbnailCaptureFailed = true;
         console.info('[Replay] Thumbnail generation unavailable; using timestamp previews:', error);
       })
       .finally(() => {
-        if (this.thumbnailCaptureEpoch === thumbnailEpoch) this.thumbnailCaptureEpoch = null;
+        if (this.thumbnailCaptureEpoch === thumbnailEpoch) {
+          this.thumbnailCaptureEpoch = null;
+        }
       });
   }
 
   private pruneToWindow(): void {
-    const range = this.snapshot.range;
-    const store = this.store;
-    if (!range || !store || this.snapshot.effectiveWindowSeconds <= 0) return;
+    const { range } = this.snapshot;
+    const { store } = this;
+    if (!range || !store || this.snapshot.effectiveWindowSeconds <= 0) {
+      return;
+    }
 
     const cutoff = Math.max(0, range.end - this.snapshot.effectiveWindowSeconds);
     store.prune(cutoff).catch((error) => {
@@ -652,12 +731,14 @@ export class ViewerReplay {
       }
     }
     this.thumbnails = retained;
-    if (shouldClearPreview) this.update({ preview: null });
+    if (shouldClearPreview) {
+      this.update({ preview: null });
+    }
   }
 
   private finishShare(): void {
     this.states.delete('ending');
-    const range = this.snapshot.range;
+    const { range } = this.snapshot;
     if (!range) {
       this.ownership.release();
       this.update({ availability: 'available', isShareEnded: true, mode: 'live' });
@@ -668,17 +749,19 @@ export class ViewerReplay {
     this.replayVideo.currentTime = finalPosition;
     this.replayVideo.pause();
     this.update({
+      announcement: 'Stream ended. Replay remains available.',
+      isShareEnded: true,
       mode: 'replay',
       position: finalPosition,
-      isShareEnded: true,
-      announcement: 'Stream ended. Replay remains available.',
     });
   }
 
   private stopRecording(): void {
-    const recorder = this.recorder;
+    const { recorder } = this;
     this.recorder = null;
-    if (!recorder) return;
+    if (!recorder) {
+      return;
+    }
 
     recorder.removeEventListener('dataavailable', this.handleRecordedData);
     recorder.removeEventListener('error', this.handleRecorderError);
@@ -689,7 +772,9 @@ export class ViewerReplay {
   }
 
   private markUnavailable(reason: string): void {
-    if (this.snapshot.availability === 'unavailable' && this.snapshot.unavailableReason === reason) return;
+    if (this.snapshot.availability === 'unavailable' && this.snapshot.unavailableReason === reason) {
+      return;
+    }
 
     console.info(`[Replay] Unavailable: ${reason}`);
     this.stopRecording();
@@ -701,12 +786,12 @@ export class ViewerReplay {
     this.ownership.release();
     this.update({
       availability: 'unavailable',
-      unavailableReason: reason,
-      mode: 'live',
-      range: null,
-      position: 0,
       limitationReason: null,
+      mode: 'live',
+      position: 0,
       preview: null,
+      range: null,
+      unavailableReason: reason,
     });
   }
 
@@ -718,27 +803,37 @@ export class ViewerReplay {
   }
 
   private clearStoredMedia(): void {
-    const store = this.store;
+    const { store } = this;
     this.store = null;
-    if (!store) return;
+    if (!store) {
+      return;
+    }
 
     store
       .clear()
-      .catch((error) => console.warn('[Replay] Failed to clear temporary replay media:', error))
-      .finally(() => store.close());
+      .catch((error) => {
+        console.warn('[Replay] Failed to clear temporary replay media:', error);
+      })
+      .finally(() => {
+        store.close();
+      });
   }
 
   private readonly handleOwnershipChange = (state: ReplayOwnershipState): void => {
-    if (this.states.has('destroyed')) return;
+    if (this.states.has('destroyed')) {
+      return;
+    }
     if (state.status === 'waiting') {
       this.update({ availability: 'blocked', unavailableReason: null });
       return;
     }
     if (state.status === 'owned') {
       this.update({ availability: 'available', unavailableReason: null });
-      if (!this.stream || this.snapshot.windowSeconds === 0 || this.recorder) return;
+      if (!this.stream || this.snapshot.windowSeconds === 0 || this.recorder) {
+        return;
+      }
 
-      const generation = this.generation;
+      const { generation } = this;
       this.beginRecording(generation).catch((error) => {
         this.markUnavailable(error instanceof Error ? error.message : 'Replay recording failed');
       });
@@ -757,7 +852,7 @@ export class ViewerReplay {
     this.resetThumbnailCapture();
     this.releaseThumbnails();
 
-    const store = this.store;
+    const { store } = this;
     this.store = null;
     if (store) {
       try {

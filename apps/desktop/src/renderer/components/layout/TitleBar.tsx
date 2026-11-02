@@ -1,6 +1,8 @@
 import { AnimatePresence, motion } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
+
 import { windowControls } from '@/api/windowControls';
+
 import appIcon from '../../../../src-tauri/icons/128x128.png';
 import { WindowButtons } from './WindowButtons';
 
@@ -14,8 +16,10 @@ export interface TitleBarProps {
   onSettings?: () => void;
 }
 
-function getCenterSignal(isPreviewing: boolean, title?: string): React.ReactNode {
-  if (title) return <h1 className="text-sm font-semibold tracking-tight text-foreground/90">{title}</h1>;
+const getCenterSignal = (isPreviewing: boolean, title?: string): React.ReactNode => {
+  if (title !== undefined && title !== '') {
+    return <h1 className="text-sm font-semibold tracking-tight text-foreground/90">{title}</h1>;
+  }
   if (isPreviewing) {
     return (
       <span className="inline-flex items-center gap-2">
@@ -27,20 +31,24 @@ function getCenterSignal(isPreviewing: boolean, title?: string): React.ReactNode
     );
   }
   return null;
-}
+};
 
 export const TitleBar: React.FC<TitleBarProps> = React.memo(
   ({ isLive = false, isPreviewing = false, title, onSettings }) => {
     const [maximized, setMaximized] = useState(false);
-    const centerLayout = title ? 'absolute inset-0' : 'flex-1';
+    const centerLayout = title !== undefined && title !== '' ? 'absolute inset-0' : 'flex-1';
 
     const pressRef = useRef<{ x: number; y: number; time: number; isArmed: boolean } | null>(null);
 
     // Starting the move on press would hand the release to the window manager, so a double-click
-    // would never arrive. The move starts once the pointer actually travels.
+    // Would never arrive. The move starts once the pointer actually travels.
     const handlePointerDown = (event: React.PointerEvent<HTMLElement>): void => {
-      if (event.button !== 0) return;
-      if (event.target instanceof Element && event.target.closest('button')) return;
+      if (event.button !== 0) {
+        return;
+      }
+      if (event.target instanceof Element && event.target.closest('button')) {
+        return;
+      }
 
       const previous = pressRef.current;
       const isDoubleClick =
@@ -53,20 +61,26 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(
         return;
       }
 
-      pressRef.current = { x: event.clientX, y: event.clientY, time: event.timeStamp, isArmed: true };
+      pressRef.current = { isArmed: true, time: event.timeStamp, x: event.clientX, y: event.clientY };
     };
 
     const handlePointerMove = (event: React.PointerEvent<HTMLElement>): void => {
       const press = pressRef.current;
-      if (press === null || !press.isArmed) return;
-      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < DRAG_THRESHOLD_PX) return;
+      if (press === null || !press.isArmed) {
+        return;
+      }
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < DRAG_THRESHOLD_PX) {
+        return;
+      }
 
       press.isArmed = false;
       windowControls.startMove();
     };
 
     const handlePointerEnd = (): void => {
-      if (pressRef.current) pressRef.current.isArmed = false;
+      if (pressRef.current) {
+        pressRef.current.isArmed = false;
+      }
     };
 
     useEffect(() => {
@@ -74,14 +88,18 @@ export const TitleBar: React.FC<TitleBarProps> = React.memo(
       let unlisten: (() => void) | null = null;
       const refresh = async (): Promise<void> => {
         const value = await windowControls.isMaximized();
-        if (!disposed) setMaximized(value);
+        if (!disposed) {
+          setMaximized(value);
+        }
       };
       void refresh();
       void windowControls
         .onResized(() => void refresh())
         .then((fn) => {
           unlisten = fn;
-          if (disposed) void fn();
+          if (disposed) {
+            fn();
+          }
         });
       return () => {
         disposed = true;

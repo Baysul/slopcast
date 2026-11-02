@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
 
-import {
-  REPLAY_BLOCKED_MESSAGE,
-  type ReplayLockRequest,
-  ReplayOwnership,
-  type ReplayOwnershipState,
+import { test } from 'vite-plus/test';
+
+import { REPLAY_BLOCKED_MESSAGE, ReplayOwnership } from '../../../apps/web/src/components/replay/replay-ownership.ts';
+import type {
+  ReplayLockRequest,
+  ReplayOwnershipState,
 } from '../../../apps/web/src/components/replay/replay-ownership.ts';
 
 interface PendingLockRequest {
@@ -24,13 +24,15 @@ class LockQueue {
     new Promise<void>((resolve, reject) => {
       const pendingRequest: PendingLockRequest = {
         callback,
-        signal: options.signal,
-        resolve,
-        reject,
         isStarted: false,
+        reject,
+        resolve,
+        signal: options.signal,
       };
       const handleAbort = (): void => {
-        if (pendingRequest.isStarted) return;
+        if (pendingRequest.isStarted) {
+          return;
+        }
 
         const requestIndex = this.pending.indexOf(pendingRequest);
         if (requestIndex >= 0) {
@@ -44,10 +46,14 @@ class LockQueue {
     });
 
   private grantNext(): void {
-    if (this.states.has('held')) return;
+    if (this.states.has('held')) {
+      return;
+    }
 
     const pendingRequest = this.pending.shift();
-    if (!pendingRequest) return;
+    if (!pendingRequest) {
+      return;
+    }
     if (pendingRequest.signal.aborted) {
       this.grantNext();
       return;
@@ -70,10 +76,15 @@ class LockQueue {
   }
 }
 
-const flushTasks = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+const flushTasks = (): Promise<void> =>
+  new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 
 const createOwnership = (lockQueue: LockQueue, states: ReplayOwnershipState[]): ReplayOwnership =>
-  new ReplayOwnership(lockQueue.request, (state) => states.push(state));
+  new ReplayOwnership(lockQueue.request, (state) => {
+    states.push(state);
+  });
 
 test('only the oldest eligible tab owns replay', async () => {
   const lockQueue = new LockQueue();
@@ -149,7 +160,9 @@ test('destroying the owner hands replay to the oldest waiter', async () => {
 test('lock failures stop retrying and explain why replay failed', async () => {
   const states: ReplayOwnershipState[] = [];
   const failedRequest: ReplayLockRequest = () => Promise.reject(new Error('Lock service failed'));
-  const ownership = new ReplayOwnership(failedRequest, (state) => states.push(state));
+  const ownership = new ReplayOwnership(failedRequest, (state) => {
+    states.push(state);
+  });
 
   ownership.claim();
   await flushTasks();
@@ -158,7 +171,7 @@ test('lock failures stop retrying and explain why replay failed', async () => {
     states.map((state) => state.status),
     ['waiting', 'failed'],
   );
-  assert.deepEqual(ownership.getState(), { status: 'failed', reason: 'Lock service failed' });
+  assert.deepEqual(ownership.getState(), { reason: 'Lock service failed', status: 'failed' });
 });
 
 test('missing Web Locks fails closed', () => {
@@ -167,8 +180,8 @@ test('missing Web Locks fails closed', () => {
   ownership.claim();
 
   assert.deepEqual(ownership.getState(), {
-    status: 'unsupported',
     reason: 'Cross-tab replay ownership requires Web Locks in a secure context',
+    status: 'unsupported',
   });
 });
 

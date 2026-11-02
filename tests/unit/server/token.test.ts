@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+
+import { isJsonObject, readBoolean, readFiniteNumber, readString } from '@slopcast/shared-types';
+import type { JsonObject } from '@slopcast/shared-types';
 import { AccessToken, TokenVerifier } from 'livekit-server-sdk';
+import { test } from 'vite-plus/test';
 
 import { presenterToken, spectatorToken } from '../../../apps/server/src/token.js';
 
@@ -22,11 +25,38 @@ interface ClaimGrants {
   nbf?: number;
 }
 
-async function verifyToken(token: string): Promise<ClaimGrants> {
+const readVideoGrant = (value: JsonObject): VideoGrant => ({
+  canPublish: readBoolean(value, 'canPublish') ?? false,
+  canPublishData: readBoolean(value, 'canPublishData') ?? false,
+  canSubscribe: readBoolean(value, 'canSubscribe') ?? false,
+  room: readString(value, 'room') ?? '',
+  roomJoin: readBoolean(value, 'roomJoin') ?? false,
+});
+
+const verifyToken = async (token: string): Promise<ClaimGrants> => {
   const verifier = new TokenVerifier(API_KEY, API_SECRET);
-  // SAFETY: TokenVerifier validated the JWT before exposing its typed claims.
-  return (await verifier.verify(token)) as ClaimGrants;
-}
+  const claims: unknown = await verifier.verify(token);
+  if (!isJsonObject(claims)) {
+    throw new Error('Token claims are not a JSON object');
+  }
+  const video: unknown = claims.video;
+  if (!isJsonObject(video)) {
+    throw new Error('Token claims have no video grant');
+  }
+  const grants: ClaimGrants = {
+    sub: readString(claims, 'sub') ?? '',
+    video: readVideoGrant(video),
+  };
+  const exp = readFiniteNumber(claims, 'exp');
+  const nbf = readFiniteNumber(claims, 'nbf');
+  if (exp !== undefined) {
+    grants.exp = exp;
+  }
+  if (nbf !== undefined) {
+    grants.nbf = nbf;
+  }
+  return grants;
+};
 
 test('presenter token is publisher-only', async () => {
   const token = await presenterToken(API_KEY, API_SECRET, 'abc-123-xyz', 'presenter-abc-123-xyz-1');
@@ -66,7 +96,10 @@ test('token identities are embedded verbatim', async () => {
 test('tokens are signed so a tampered grant fails verification', async () => {
   const token = await spectatorToken(API_KEY, API_SECRET, 'abc-123-xyz', 'spectator-tamper');
   const verifier = new TokenVerifier(API_KEY, API_SECRET);
-  const [header, payload, signature] = token.split('.');
+  const parts = token.split('.');
+  const header = parts.at(0);
+  const payload = parts.at(1);
+  const signature = parts.at(2);
   if (header === undefined || payload === undefined || signature === undefined) {
     throw new Error('Unexpected JWT format');
   }
@@ -74,7 +107,7 @@ test('tokens are signed so a tampered grant fails verification', async () => {
   const tamperedPayload = Buffer.from(
     JSON.stringify({ ...JSON.parse(Buffer.from(payload, 'base64url').toString()), video: { canPublish: true } }),
   ).toString('base64url');
-  await assert.rejects(verifier.verify(`${header}.${tamperedPayload}.${signature}`), /signature|invalid/i);
+  await assert.rejects(verifier.verify(`${header}.${tamperedPayload}.${signature}`), /signature|invalid/iu);
 });
 
 test('an unverifiable key pair is rejected', async () => {
@@ -85,7 +118,7 @@ test('an unverifiable key pair is rejected', async () => {
 
 test('AccessToken can still be constructed like production code', async () => {
   const at = new AccessToken(API_KEY, API_SECRET, { identity: 'probe', ttl: '6h' });
-  at.addGrant({ roomJoin: true, room: 'abc-123-xyz', canPublish: true });
+  at.addGrant({ canPublish: true, room: 'abc-123-xyz', roomJoin: true });
   assert.equal(at.toJwt instanceof Function, true);
   assert.equal((await at.toJwt()).split('.').length, 3);
 });

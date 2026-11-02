@@ -1,32 +1,43 @@
 import { ScreenShare } from 'lucide-react';
 import React, { useEffect, useRef } from 'react';
+
 import { Card, CardContent } from '@/components/ui/card';
+
 import { desktopApi } from '../../../api/desktop';
 import type { CaptureStage, PreviewFrame } from '../../../types';
-import { type StreamTelemetry, StreamTelemetryBar } from '../../telemetry/StreamTelemetryBar';
+import { StreamTelemetryBar } from '../../telemetry/StreamTelemetryBar';
+import type { StreamTelemetry } from '../../telemetry/StreamTelemetryBar';
 import { PreviewCanvas } from './PreviewCanvas';
 
 export interface ScreensharePreviewProps {
-  captureStage: CaptureStage;
-  roomCode: string;
-  copied: 'link' | 'code' | null;
-  previewFrame: PreviewFrame | null;
-  telemetry: StreamTelemetry;
-  showTelemetry: boolean;
-  onCopyLink: () => void;
+  readonly captureStage: CaptureStage;
+  readonly roomCode: string;
+  readonly copied: 'link' | 'code' | null;
+  readonly previewFrame: PreviewFrame | null;
+  readonly telemetry: StreamTelemetry;
+  readonly showTelemetry: boolean;
+  readonly onCopyLink: () => void;
 }
 
 const VIEWPORT_REPORT_DEBOUNCE_MS = 150;
 
 export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
-  ({ captureStage, roomCode, copied, previewFrame, telemetry, showTelemetry, onCopyLink }) => {
+  ({ captureStage, roomCode, copied, previewFrame, telemetry, showTelemetry, onCopyLink }: ScreensharePreviewProps) => {
     const live = captureStage === 'live';
     const showPreview = previewFrame !== null && captureStage !== 'idle';
     const viewportRef = useRef<HTMLDivElement | null>(null);
+    let linkLabel = 'Copy invite link';
+    let linkAriaLabel = 'Copy invite link';
+    if (copied === 'link') {
+      linkLabel = 'Link copied';
+      linkAriaLabel = 'Invite link copied';
+    }
 
     useEffect(() => {
       const container = viewportRef.current;
-      if (!container) return;
+      if (!container) {
+        return undefined;
+      }
       let disposed = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
       const report = (): void => {
@@ -36,17 +47,23 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
         void desktopApi.setPreviewViewport(width, height);
       };
       const observer = new ResizeObserver(() => {
-        if (timer) clearTimeout(timer);
+        if (timer !== null) {
+          clearTimeout(timer);
+        }
         timer = setTimeout(() => {
           timer = null;
-          if (!disposed) report();
+          if (!disposed) {
+            report();
+          }
         }, VIEWPORT_REPORT_DEBOUNCE_MS);
       });
       observer.observe(container);
       report();
       return () => {
         disposed = true;
-        if (timer) clearTimeout(timer);
+        if (timer !== null) {
+          clearTimeout(timer);
+        }
         observer.disconnect();
         void desktopApi.clearPreviewViewport();
       };
@@ -69,17 +86,7 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
 
             {captureStage === 'idle' && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-6">
-                {!roomCode ? (
-                  <>
-                    <span className="p-3 rounded-full bg-safelight/10 mb-1">
-                      <ScreenShare className="size-7 text-safelight" aria-hidden="true" />
-                    </span>
-                    <p className="text-sm text-foreground font-semibold">No room yet</p>
-                    <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
-                      Create a live room to get your invite link, then pick a source to preview before you go live.
-                    </p>
-                  </>
-                ) : (
+                {roomCode && (
                   <>
                     <span className="p-3 rounded-full bg-secondary mb-1">
                       <ScreenShare className="size-7 text-muted-foreground" aria-hidden="true" />
@@ -91,11 +98,22 @@ export const ScreensharePreview: React.FC<ScreensharePreviewProps> = React.memo(
                     <button
                       type="button"
                       onClick={onCopyLink}
-                      aria-label={copied === 'link' ? 'Invite link copied' : 'Copy invite link'}
+                      aria-label={linkAriaLabel}
                       className="mt-1 inline-flex items-center gap-1.5 text-xs font-medium text-safelight hover:text-safelight-hover transition-colors focus:outline-none focus-visible:underline"
                     >
-                      {copied === 'link' ? 'Link copied' : 'Copy invite link'}
+                      {linkLabel}
                     </button>
+                  </>
+                )}
+                {!roomCode && (
+                  <>
+                    <span className="p-3 rounded-full bg-safelight/10 mb-1">
+                      <ScreenShare className="size-7 text-safelight" aria-hidden="true" />
+                    </span>
+                    <p className="text-sm text-foreground font-semibold">No room yet</p>
+                    <p className="text-sm text-muted-foreground max-w-xs leading-relaxed">
+                      Create a live room to get your invite link, then pick a source to preview before you go live.
+                    </p>
                   </>
                 )}
               </div>

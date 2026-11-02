@@ -1,11 +1,11 @@
 import { Check, LoaderCircle, TriangleAlert } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
+
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { type ApiEndpointCheckFailure, checkApiEndpoint } from '@/utils/apiEndpoint';
+import { EndpointValidator } from '@/utils/endpoint-validator';
 
 const ENDPOINT_DEBOUNCE_MS = 1_500;
-const ENDPOINT_TIMEOUT_MS = 5_000;
 
 export type ApiEndpointAvailability = 'checking' | 'error' | 'healthy' | 'typing';
 
@@ -19,7 +19,7 @@ interface ApiEndpointFieldProps {
   onReset: () => void;
 }
 
-export function ApiEndpointField({
+export const ApiEndpointField = ({
   activeEndpoint,
   pendingEndpoint,
   roomEndpoint,
@@ -27,80 +27,49 @@ export function ApiEndpointField({
   disabled,
   onValidated,
   onReset,
-}: ApiEndpointFieldProps): React.ReactNode {
+}: ApiEndpointFieldProps): React.ReactNode => {
   const sourceEndpoint = pendingEndpoint ?? activeEndpoint;
-  const [draft, setDraft] = useState(sourceEndpoint);
-  const [availability, setAvailability] = useState<ApiEndpointAvailability>('checking');
-  const [failure, setFailure] = useState<ApiEndpointCheckFailure | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const requestRef = useRef(0);
-
-  const clearPendingWork = useCallback((): void => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = null;
-    abortRef.current?.abort();
-    abortRef.current = null;
-    requestRef.current += 1;
-  }, []);
-
-  const validate = useCallback(
-    async (endpoint: string): Promise<void> => {
-      clearPendingWork();
-      const request = requestRef.current + 1;
-      const controller = new AbortController();
-      requestRef.current = request;
-      abortRef.current = controller;
-      setFailure(null);
-      setAvailability('checking');
-
-      const timeout = setTimeout(() => controller.abort(), ENDPOINT_TIMEOUT_MS);
-      const result = await checkApiEndpoint(endpoint, controller.signal);
-      clearTimeout(timeout);
-      if (requestRef.current !== request) return;
-      abortRef.current = null;
-
-      if (!result.ok) {
-        setFailure(result);
-        setAvailability('error');
-        return;
-      }
-
-      setDraft(result.endpoint);
-      setAvailability('healthy');
-      onValidated(result.endpoint);
-    },
-    [clearPendingWork, onValidated],
-  );
+  const validator = useMemo(() => new EndpointValidator(sourceEndpoint), [sourceEndpoint]);
+  const { availability, draft, failure } = useSyncExternalStore(validator.subscribe, validator.getSnapshot);
+  const value = draft ?? sourceEndpoint;
 
   useEffect(() => {
-    void validationRevision;
-    setDraft(sourceEndpoint);
-    void validate(sourceEndpoint);
-    return clearPendingWork;
-  }, [sourceEndpoint, validationRevision, validate, clearPendingWork]);
+    validator.setOnValidated(onValidated);
+  }, [onValidated, validator]);
 
-  const handleChange = (value: string): void => {
-    clearPendingWork();
-    setDraft(value);
-    setFailure(null);
-    setAvailability('typing');
-    debounceRef.current = setTimeout(() => void validate(value), ENDPOINT_DEBOUNCE_MS);
+  useEffect(() => {
+    // A revision bump re-checks the endpoint even when the endpoint text is unchanged.
+    validator.setRevision(validationRevision);
+    void validator.validate(sourceEndpoint);
+    return () => {
+      validator.cancelPending();
+    };
+  }, [sourceEndpoint, validationRevision, validator]);
+
+  const handleChange = (next: string): void => {
+    validator.scheduleValidation(next, ENDPOINT_DEBOUNCE_MS);
   };
 
   const handleReset = (): void => {
     onReset();
-    setDraft(activeEndpoint);
-    void validate(activeEndpoint);
+    void validator.validate(activeEndpoint);
   };
 
-  const isPending = pendingEndpoint !== null && draft === pendingEndpoint;
-  const canReset = failure !== null || isPending || draft !== activeEndpoint;
+  const isPending = pendingEndpoint !== null && value === pendingEndpoint;
+  const canReset = failure !== null || isPending || value !== activeEndpoint;
   let statusMessage = 'Enter the base URL for your Slopcast API.';
-  if (availability === 'checking') statusMessage = 'Checking endpoint…';
-  if (availability === 'healthy') statusMessage = 'Connected';
-  if (isPending) statusMessage = 'Validated. Applies when this room closes.';
-  if (failure) statusMessage = failure.message;
+  if (availability === 'checking') {
+    statusMessage = 'Checking endpoint…';
+  }
+  if (availability === 'healthy') {
+    statusMessage = 'Connected';
+  }
+  if (isPending) {
+    statusMessage = 'Validated. Applies when this room closes.';
+  }
+  if (failure) {
+    statusMessage = failure.message;
+  }
 
   return (
     <div className="space-y-1.5">
@@ -114,13 +83,17 @@ export function ApiEndpointField({
         <Input
           id="api-endpoint"
           type="url"
-          value={draft}
-          onChange={(event) => handleChange(event.target.value)}
-          onBlur={() => void validate(draft)}
+          value={value}
+          onChange={(event) => {
+            handleChange(event.target.value);
+          }}
+          onBlur={() => void validator.validate(value)}
           onKeyDown={(event) => {
-            if (event.key !== 'Enter') return;
+            if (event.key !== 'Enter') {
+              return;
+            }
             event.preventDefault();
-            void validate(draft);
+            void validator.validate(value);
           }}
           disabled={disabled}
           aria-invalid={failure !== null}
@@ -135,14 +108,16 @@ export function ApiEndpointField({
         </span>
       </div>
       <div className="flex min-h-5 items-start justify-between gap-3">
-        <div id="api-endpoint-status" role="status" aria-live="polite" className="min-w-0 space-y-0.5">
-          <p className={`text-xs leading-relaxed ${failure ? 'text-destructive' : 'text-muted-foreground'}`}>
+        <output id="api-endpoint-status" aria-live="polite" className="block min-w-0 space-y-0.5">
+          <span className={`block text-xs leading-relaxed ${failure ? 'text-destructive' : 'text-muted-foreground'}`}>
             {statusMessage}
-          </p>
-          {isPending && roomEndpoint && (
-            <p className="break-all text-xs leading-relaxed text-caption-text">Current room: {roomEndpoint}</p>
+          </span>
+          {isPending && roomEndpoint !== null && roomEndpoint !== '' && (
+            <span className="block break-all text-xs leading-relaxed text-caption-text">
+              Current room: {roomEndpoint}
+            </span>
           )}
-        </div>
+        </output>
         {canReset && (
           <Button
             type="button"
@@ -158,4 +133,4 @@ export function ApiEndpointField({
       </div>
     </div>
   );
-}
+};

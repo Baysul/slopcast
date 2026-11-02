@@ -1,8 +1,9 @@
+import { RESOLUTION_DIMENSIONS, codecLabel } from '@slopcast/shared-types';
 import type { VideoCodec } from '@slopcast/shared-types';
-import { codecLabel, RESOLUTION_DIMENSIONS } from '@slopcast/shared-types';
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
+
 import {
   AlertDialog,
   AlertDialogAction,
@@ -14,43 +15,49 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Toaster } from '@/components/ui/sonner';
+
 import { desktopApi } from './api/desktop';
 import { AudioAppPicker } from './components/audio/AudioAppPicker';
 import { PlatformNotice } from './components/gate/PlatformNotice';
 import { TitleBar } from './components/layout/TitleBar';
 import { ScreensharePreview } from './components/onboarding/preview/ScreensharePreview';
 import { WelcomeBanner } from './components/onboarding/WelcomeBanner';
-import type { ApiEndpointAvailability } from './components/settings/ApiEndpointField';
 import { DesktopSettings } from './components/settings/DesktopSettings';
 import { SourcePicker } from './components/sources/SourcePicker';
 import { idleTelemetry } from './components/telemetry/StreamTelemetryBar';
 import { useAudioCapture } from './hooks/useAudioCapture';
 import { useDesktopPreferences } from './hooks/useDesktopPreferences';
-import type { PreparedRoom } from './hooks/useNativeRoom';
 import { useNativeRoom } from './hooks/useNativeRoom';
+import type { PreparedRoom } from './hooks/useNativeRoom';
 import { useStreamSettings } from './hooks/useStreamSettings';
 import { useStreamTelemetry } from './hooks/useStreamTelemetry';
 import { notify, primeAudioContext } from './lib/toast';
 import type { CaptureSourceSelection, CaptureStage, DesktopCaptureConfig, PlatformInfo, PreviewFrame } from './types';
 import type { DesktopAction } from './types/preferences';
+import { apiEndpointHealthStore } from './utils/api-endpoint-health-store';
 import { checkApiEndpoint } from './utils/apiEndpoint';
 import { toAudioTargetId } from './utils/audio-targets';
 import { recommendBitrateCap } from './utils/bitrate';
 import { copyText } from './utils/clipboard';
+
 import './index.css';
 
 const ROOM_RETRY_MS = 45_000;
 
-function revealMainWindow(): void {
-  void desktopApi.showMainWindow().catch((cause: unknown) => console.error('Cannot show Slopcast:', cause));
-}
+const revealMainWindow = (): void => {
+  void desktopApi.showMainWindow().catch((cause: unknown) => {
+    console.error('Cannot show Slopcast:', cause);
+  });
+};
 
-function matchesTelemetryShortcut(event: KeyboardEvent, chord: string): boolean {
-  if (!chord) return false;
+const matchesTelemetryShortcut = (event: KeyboardEvent, chord: string): boolean => {
+  if (!chord) {
+    return false;
+  }
 
   const parts = chord.split('+');
   const key = parts.pop();
-  const shortCode = event.code.replace(/^(Key|Digit)/, '');
+  const shortCode = event.code.replace(/^(?:Key|Digit)/u, '');
 
   return (
     (key === event.code || key === shortCode) &&
@@ -59,11 +66,11 @@ function matchesTelemetryShortcut(event: KeyboardEvent, chord: string): boolean 
     event.shiftKey === parts.includes('Shift') &&
     event.altKey === parts.includes('Alt')
   );
-}
+};
 
 type ConfirmationAction = 'close-room' | 'quit' | 'quit-anyway';
 
-function DesktopActionConfirmation({
+const DesktopActionConfirmation = ({
   action,
   isBusy,
   onCancel,
@@ -73,33 +80,43 @@ function DesktopActionConfirmation({
   isBusy: boolean;
   onCancel: () => void;
   onConfirm: () => Promise<void>;
-}) {
+}) => {
   const previousFocusRef = useRef<HTMLElement | null>(null);
-  if (!action) return null;
+  if (!action) {
+    return null;
+  }
 
   const title = action === 'close-room' ? 'Close this room?' : 'Quit Slopcast?';
   const label = action === 'close-room' ? 'Close room' : 'Quit';
   let description = 'Sharing will stop and spectators will disconnect. Closing the room makes its link unusable.';
-  if (action === 'quit-anyway')
+  if (action === 'quit-anyway') {
     description =
       'The server could not close your room. Capture will stop, but the link may remain until the server expires it. Quit anyway?';
+  }
 
   return (
     <AlertDialog
       open
       onOpenChange={(open) => {
-        if (!open) onCancel();
+        if (!open) {
+          onCancel();
+        }
       }}
     >
       <AlertDialogContent
         onOpenAutoFocus={() => {
           const focused = document.activeElement;
-          if (focused instanceof HTMLElement) previousFocusRef.current = focused;
+          if (focused instanceof HTMLElement) {
+            previousFocusRef.current = focused;
+          }
         }}
         onCloseAutoFocus={(event) => {
           event.preventDefault();
-          if (previousFocusRef.current?.isConnected) previousFocusRef.current.focus();
-          else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
+          if (previousFocusRef.current?.isConnected === true) {
+            previousFocusRef.current.focus();
+          } else {
+            document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
+          }
         }}
       >
         <AlertDialogHeader>
@@ -111,7 +128,11 @@ function DesktopActionConfirmation({
           <AlertDialogAction
             disabled={isBusy}
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            onClick={() => void onConfirm().catch((cause: unknown) => notify('error', 'Action failed', String(cause)))}
+            onClick={() =>
+              void onConfirm().catch((cause: unknown) => {
+                notify('error', 'Action failed', String(cause));
+              })
+            }
           >
             {label}
           </AlertDialogAction>
@@ -119,11 +140,15 @@ function DesktopActionConfirmation({
       </AlertDialogContent>
     </AlertDialog>
   );
-}
+};
 
-function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
-  if (!(payload instanceof ArrayBuffer)) return null;
-  if (payload.byteLength < 16) return null;
+const parsePreviewPayload = (payload: ArrayBuffer): PreviewFrame | null => {
+  if (!(payload instanceof ArrayBuffer)) {
+    return null;
+  }
+  if (payload.byteLength < 16) {
+    return null;
+  }
   const view = new DataView(payload);
   let ptsUs = 0;
   let width = 0;
@@ -135,41 +160,49 @@ function parsePreviewPayload(payload: ArrayBuffer): PreviewFrame | null {
   } catch {
     return null;
   }
-  if (width === 0 || height === 0) return null;
-  return { ptsUs, width, height, data: new Uint8Array(payload, 16) };
-}
+  if (width === 0 || height === 0) {
+    return null;
+  }
+  return { data: new Uint8Array(payload, 16), height, ptsUs, width };
+};
 
-async function fetchAndRender(
+const fetchAndRender = async (
   lastPts: number,
   onNewFrame: (pts: number) => void,
   renderFrame: (frame: PreviewFrame) => void,
-): Promise<void> {
+): Promise<void> => {
   try {
     const resp = await fetch(`http://frame.localhost/frame.bin?t=${Date.now()}`);
-    if (!resp.ok) return;
+    if (!resp.ok) {
+      return;
+    }
     const buf = await resp.arrayBuffer();
-    if (buf.byteLength <= 16) return;
+    if (buf.byteLength <= 16) {
+      return;
+    }
     const frame = parsePreviewPayload(buf);
-    if (!frame || frame.ptsUs === lastPts) return;
+    if (!frame || frame.ptsUs === lastPts) {
+      return;
+    }
     onNewFrame(frame.ptsUs);
     renderFrame(frame);
   } catch (err) {
     console.debug('[preview] frame fetch failed:', err);
   }
-}
+};
 
-async function logLiveAudioSources(): Promise<void> {
+const logLiveAudioSources = async (): Promise<void> => {
   const sources = await desktopApi.dumpAudioSources();
   console.log(`[Presenter] live audio sources: ${sources.length}`);
   for (const source of sources) {
     console.log('[Presenter] audio source props:', JSON.stringify(source, null, 2));
   }
-}
+};
 
-async function logSelectedApplication(label: string | null): Promise<void> {
+const logSelectedApplication = async (label: string | null): Promise<void> => {
   const context = await desktopApi.inspectCaptureContext();
   console.log(`[Presenter] selected application (trackLabel="${label}"):`, JSON.stringify(context, null, 2));
-}
+};
 
 export const PresenterApp: React.FC = () => {
   const [platformInfo, setPlatformInfo] = useState<PlatformInfo | null>(null);
@@ -189,12 +222,15 @@ export const PresenterApp: React.FC = () => {
   const { snapshot: preferencesSnapshot, error: preferencesError, colorMode } = useDesktopPreferences();
   const autoSelectAudio = preferencesSnapshot?.preferences.autoSelectAudio ?? false;
   const telemetryShortcutRef = useRef('');
-  telemetryShortcutRef.current = preferencesSnapshot?.preferences.telemetryShortcut ?? '';
+  useLayoutEffect(() => {
+    telemetryShortcutRef.current = preferencesSnapshot?.preferences.telemetryShortcut ?? '';
+  }, [preferencesSnapshot]);
   const roomCodeRef = useRef<string>('');
   const healthyEndpointRef = useRef<boolean>(false);
   const trayShareRef = useRef<boolean>(false);
-  const [endpointAvailability, setEndpointAvailability] = useState<ApiEndpointAvailability>('checking');
-  const [hasHealthyApiEndpoint, setHasHealthyApiEndpoint] = useState(false);
+  const endpointHealth = useSyncExternalStore(apiEndpointHealthStore.subscribe, apiEndpointHealthStore.getSnapshot);
+  const endpointAvailability = endpointHealth.availability;
+  const hasHealthyApiEndpoint = endpointHealth.healthy;
   const [endpointSwitchCandidate, setEndpointSwitchCandidate] = useState<string | null>(null);
   const [endpointValidationRevision, setEndpointValidationRevision] = useState(0);
   const [isRoomTransitioning, setIsRoomTransitioning] = useState(false);
@@ -237,6 +273,7 @@ export const PresenterApp: React.FC = () => {
 
   const {
     roomCode,
+    connectionState: roomConnectionState,
     shareUrl,
     spectatorCount,
     isCreatingRoom,
@@ -253,11 +290,18 @@ export const PresenterApp: React.FC = () => {
     livekitUrl,
     onDisconnect: handleRoomDisconnect,
   });
-  roomCodeRef.current = roomCode;
-  healthyEndpointRef.current = hasHealthyApiEndpoint;
+  useLayoutEffect(() => {
+    roomCodeRef.current = roomCode;
+  }, [roomCode]);
+
+  useLayoutEffect(() => {
+    healthyEndpointRef.current = hasHealthyApiEndpoint;
+  }, [hasHealthyApiEndpoint]);
 
   useEffect(() => {
-    if (!retryableReplacement) return;
+    if (!retryableReplacement) {
+      return undefined;
+    }
     const remainingMs = Math.max(0, retryableReplacement.expiresAt - Date.now());
     const timer = setTimeout(() => {
       void discardPreparedRoom(retryableReplacement.room);
@@ -265,7 +309,9 @@ export const PresenterApp: React.FC = () => {
       setEndpointValidationRevision((revision) => revision + 1);
       notify('info', 'Replacement room expired', 'Create a fresh room when you are ready to try again.');
     }, remainingMs);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+    };
   }, [discardPreparedRoom, retryableReplacement]);
 
   const {
@@ -288,9 +334,14 @@ export const PresenterApp: React.FC = () => {
     attemptAutoResolve,
     handleSelectApp,
   } = useAudioCapture(captureStage === 'live', platformInfo?.platform === 'linux', autoSelectAudio);
-  stopAudioCaptureRef.current = stopAudioCapture;
-  const audioChoiceRef = useRef({ autoSelectAudio, audioAppExplicitlySet, selectedAudioAppId });
-  audioChoiceRef.current = { autoSelectAudio, audioAppExplicitlySet, selectedAudioAppId };
+  useLayoutEffect(() => {
+    stopAudioCaptureRef.current = stopAudioCapture;
+  }, [stopAudioCapture]);
+
+  const audioChoiceRef = useRef({ audioAppExplicitlySet, autoSelectAudio, selectedAudioAppId });
+  useLayoutEffect(() => {
+    audioChoiceRef.current = { audioAppExplicitlySet, autoSelectAudio, selectedAudioAppId };
+  }, [audioAppExplicitlySet, autoSelectAudio, selectedAudioAppId]);
 
   const { telemetry, setTelemetry, startTelemetryPolling, stopTelemetryPolling, resetStatsPrev } =
     useStreamTelemetry(spectatorCount);
@@ -303,56 +354,56 @@ export const PresenterApp: React.FC = () => {
       autoBitrate
         ? recommendBitrateCap({
             codec: videoCodec,
-            resolution,
             fps: streamFps,
             motionTier: 'static',
+            resolution,
           })
         : bitrateLimit,
     [autoBitrate, videoCodec, resolution, streamFps, bitrateLimit],
   );
   const effectiveBitrateRef = useRef(effectiveBitrate);
-  useEffect(() => {
+  useLayoutEffect(() => {
     effectiveBitrateRef.current = effectiveBitrate;
   }, [effectiveBitrate]);
 
   const videoConfigKey = useCallback((): string => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
     return JSON.stringify({
-      fps: streamFpsRef.current,
-      bitrate: effectiveBitrateRef.current,
       auto: autoBitrateRef.current,
+      bitrate: effectiveBitrateRef.current,
       codec: videoCodec,
-      width: dims.width,
+      fps: streamFpsRef.current,
       height: dims.height,
+      width: dims.width,
     });
   }, [videoCodec, resolutionRef, streamFpsRef, autoBitrateRef]);
 
   const buildCaptureConfig = useCallback((): DesktopCaptureConfig => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
     return {
-      fps: streamFpsRef.current,
-      width: dims.width,
-      height: dims.height,
-      videoCodec,
-      maxBitrate: effectiveBitrateRef.current,
       autoBitrate: autoBitrateRef.current,
+      fps: streamFpsRef.current,
+      height: dims.height,
+      maxBitrate: effectiveBitrateRef.current,
+      videoCodec,
+      width: dims.width,
     };
   }, [resolutionRef, streamFpsRef, videoCodec, autoBitrateRef]);
 
   useEffect(() => {
-    (async () => {
+    void (async () => {
       const info = await desktopApi.getPlatformInfo();
       setPlatformInfo(info);
     })();
 
     let disposed = false;
-    if (window.__PREVIEW_BENCH__) {
-      window.__PREVIEW_BENCH_DATA__ = [];
+    if (window.previewBench === true) {
+      window.previewBenchData = [];
     }
     const pollFrame = (): void => {
       let lastPts = 0;
       const poll = async (): Promise<void> => {
-        if (!disposed)
+        if (!disposed) {
           await fetchAndRender(
             lastPts,
             (pts) => {
@@ -360,9 +411,16 @@ export const PresenterApp: React.FC = () => {
             },
             setPreviewFrame,
           );
-        if (!disposed) requestAnimationFrame(poll);
+        }
+        if (!disposed) {
+          requestAnimationFrame(() => {
+            void poll();
+          });
+        }
       };
-      requestAnimationFrame(poll);
+      requestAnimationFrame(() => {
+        void poll();
+      });
     };
     pollFrame();
 
@@ -375,34 +433,38 @@ export const PresenterApp: React.FC = () => {
   useEffect(() => {
     if (captureStage !== 'live') {
       lastVideoConfigKeyRef.current = null;
-      return;
+      return undefined;
     }
 
     const dims = RESOLUTION_DIMENSIONS[resolution];
     const key = JSON.stringify({
-      fps: streamFps,
-      bitrate: effectiveBitrate,
       auto: autoBitrate,
+      bitrate: effectiveBitrate,
       codec: videoCodec,
-      width: dims.width,
+      fps: streamFps,
       height: dims.height,
+      width: dims.width,
     });
-    if (lastVideoConfigKeyRef.current === key) return;
+    if (lastVideoConfigKeyRef.current === key) {
+      return undefined;
+    }
 
     const prevCodec = activeVideoCodecRef.current;
     const session = captureSessionRef.current;
     const timeout = setTimeout(() => {
       void desktopApi
         .updateNativeVideo({
-          fps: streamFps,
-          width: dims.width,
-          height: dims.height,
-          videoCodec,
-          maxBitrate: effectiveBitrate,
           autoBitrate,
+          fps: streamFps,
+          height: dims.height,
+          maxBitrate: effectiveBitrate,
+          videoCodec,
+          width: dims.width,
         })
         .then((ok) => {
-          if (!ok || captureSessionRef.current !== session) return;
+          if (!ok || captureSessionRef.current !== session) {
+            return;
+          }
           lastVideoConfigKeyRef.current = key;
           resetStatsPrev();
           activeVideoCodecRef.current = videoCodec;
@@ -418,7 +480,9 @@ export const PresenterApp: React.FC = () => {
           }
         });
     }, 300);
-    return () => clearTimeout(timeout);
+    return () => {
+      clearTimeout(timeout);
+    };
   }, [streamFps, effectiveBitrate, videoCodec, resolution, autoBitrate, captureStage, resetStatsPrev]);
 
   const handleCreateRoom = useCallback(async () => {
@@ -444,7 +508,9 @@ export const PresenterApp: React.FC = () => {
     stopTelemetryPolling();
     audioAppIdRef.current = null;
     setPreviewFrame(null);
-    if (!audioAppExplicitlySet) setSelectedAudioAppId(autoSelectAudio ? null : 0);
+    if (!audioAppExplicitlySet) {
+      setSelectedAudioAppId(autoSelectAudio ? null : 0);
+    }
     setAudioAppExplicitlySet(false);
     setAutoDetectedApp(null);
     setAutoDetectFailed(false);
@@ -469,7 +535,9 @@ export const PresenterApp: React.FC = () => {
   }, [resetCaptureState, stopAudioCapture]);
 
   const handleStopShare = useCallback(async () => {
-    if (stopBusyRef.current) return;
+    if (stopBusyRef.current) {
+      return;
+    }
     stopBusyRef.current = true;
     captureSessionRef.current += 1;
     setPickerOpen(false);
@@ -477,7 +545,9 @@ export const PresenterApp: React.FC = () => {
     try {
       const stopped = await desktopApi.stopNativeCapture();
       await stopAudioCapture();
-      if (!stopped) throw new Error('Capture could not be stopped cleanly. The room remains open.');
+      if (!stopped) {
+        throw new Error('Capture could not be stopped cleanly. The room remains open.');
+      }
       resetCaptureState();
     } catch (cause) {
       notify('error', 'Screenshare stop failed', String(cause));
@@ -492,21 +562,33 @@ export const PresenterApp: React.FC = () => {
       void handleStopShare();
     });
     return () => {
-      void unlistenPromise.then((unlisten) => unlisten());
+      void unlistenPromise.then((unlisten) => {
+        unlisten();
+      });
     };
   }, [handleStopShare]);
 
   const resolveAudioTarget = useCallback(async (): Promise<number> => {
     const choice = audioChoiceRef.current;
-    if (choice.audioAppExplicitlySet) return choice.selectedAudioAppId ?? 0;
-    if (!choice.autoSelectAudio) return 0;
+    if (choice.audioAppExplicitlySet) {
+      return choice.selectedAudioAppId ?? 0;
+    }
+    if (!choice.autoSelectAudio) {
+      return 0;
+    }
 
     await loadAudioApps();
     const resolved = await attemptAutoResolve();
-    const current = audioChoiceRef.current;
-    if (current.audioAppExplicitlySet) return current.selectedAudioAppId ?? 0;
-    if (!current.autoSelectAudio) return 0;
-    if (resolved) return toAudioTargetId(resolved, platformInfo?.platform === 'linux');
+    const { current } = audioChoiceRef;
+    if (current.audioAppExplicitlySet) {
+      return current.selectedAudioAppId ?? 0;
+    }
+    if (!current.autoSelectAudio) {
+      return 0;
+    }
+    if (resolved) {
+      return toAudioTargetId(resolved, platformInfo?.platform === 'linux');
+    }
     setCaptureContext(await desktopApi.getCaptureContext());
     setAutoDetectFailed(true);
     notify('info', 'No audio detected', 'Sharing video only. Choose an audio app to include its sound.');
@@ -516,13 +598,20 @@ export const PresenterApp: React.FC = () => {
 
   const captureAudioForTarget = useCallback(
     async (requestedTargetAudioId: number | null): Promise<void> => {
-      if (requestedTargetAudioId === null) return;
+      if (requestedTargetAudioId === null) {
+        return;
+      }
       const choice = audioChoiceRef.current;
       let targetAudioId = requestedTargetAudioId;
-      if (choice.audioAppExplicitlySet) targetAudioId = choice.selectedAudioAppId ?? 0;
-      else if (!choice.autoSelectAudio) targetAudioId = 0;
+      if (choice.audioAppExplicitlySet) {
+        targetAudioId = choice.selectedAudioAppId ?? 0;
+      } else if (!choice.autoSelectAudio) {
+        targetAudioId = 0;
+      }
       try {
-        if (audioAppIdRef.current !== targetAudioId) await startAudioCapture(targetAudioId);
+        if (audioAppIdRef.current !== targetAudioId) {
+          await startAudioCapture(targetAudioId);
+        }
       } catch (err) {
         console.error('Audio capture failed (continuing video-only):', err);
         notify('info', 'Audio unavailable', 'Sharing video only — the selected audio source could not be captured.');
@@ -533,7 +622,9 @@ export const PresenterApp: React.FC = () => {
 
   const cleanupFailedShare = useCallback(async (): Promise<void> => {
     const stopped = await desktopApi.stopNativeCapture();
-    if (!stopped) notify('error', 'Capture cleanup failed', 'Try Stop Screenshare before sharing again.');
+    if (!stopped) {
+      notify('error', 'Capture cleanup failed', 'Try Stop Screenshare before sharing again.');
+    }
     await stopAudioCapture();
     if (!audioAppExplicitlySet) {
       setSelectedAudioAppId(autoSelectAudio ? null : 0);
@@ -544,20 +635,26 @@ export const PresenterApp: React.FC = () => {
   const getTelemetryInputs = useCallback(() => {
     const dims = RESOLUTION_DIMENSIONS[resolutionRef.current];
     return {
-      width: dims.width,
+      hasAudio: audioAppIdRef.current !== null && audioAppIdRef.current !== 0,
       height: dims.height,
       targetFrameRate: streamFpsRef.current,
-      hasAudio: audioAppIdRef.current != null && audioAppIdRef.current !== 0,
+      width: dims.width,
     };
   }, [resolutionRef, streamFpsRef, audioAppIdRef]);
 
   const activateLive = useCallback(
     async (session: number): Promise<void> => {
-      if (captureSessionRef.current !== session) return;
+      if (captureSessionRef.current !== session) {
+        return;
+      }
       const targetAudioId = await resolveAudioTarget();
-      if (captureSessionRef.current !== session) return;
+      if (captureSessionRef.current !== session) {
+        return;
+      }
       await captureAudioForTarget(targetAudioId);
-      if (captureSessionRef.current !== session) return;
+      if (captureSessionRef.current !== session) {
+        return;
+      }
       activeVideoCodecRef.current = videoCodec;
       lastVideoConfigKeyRef.current = videoConfigKey();
       setCaptureStage('live');
@@ -599,7 +696,9 @@ export const PresenterApp: React.FC = () => {
 
   const runCaptureAction = useCallback(
     async (operation: () => Promise<void>) => {
-      if (captureBusyRef.current || stopBusyRef.current || roomActionRef.current || isRoomTransitioning) return;
+      if (captureBusyRef.current || stopBusyRef.current || roomActionRef.current || isRoomTransitioning) {
+        return;
+      }
       captureBusyRef.current = true;
       setIsCaptureBusy(true);
       try {
@@ -619,11 +718,14 @@ export const PresenterApp: React.FC = () => {
     primeAudioContext();
     const started = await desktopApi.startCapturePreview(source);
     if (captureSessionRef.current !== session) {
-      if (started && !(await desktopApi.stopVideoCapture()))
+      if (started && !(await desktopApi.stopVideoCapture())) {
         notify('error', 'Capture cleanup failed', 'A cancelled source did not stop cleanly.');
+      }
       return session;
     }
-    if (!started) throw new Error('No capture source was selected. The room remains open.');
+    if (!started) {
+      throw new Error('No capture source was selected. The room remains open.');
+    }
     selectedCaptureSourceRef.current = source ?? null;
     setPreviewFrame(null);
     setCaptureStage('previewing');
@@ -637,9 +739,13 @@ export const PresenterApp: React.FC = () => {
 
   const publishCapture = useCallback(
     async (session: number) => {
-      if (captureSessionRef.current !== session) return;
+      if (captureSessionRef.current !== session) {
+        return;
+      }
       const published = await desktopApi.goLive(buildCaptureConfig(), selectedCaptureSourceRef.current ?? undefined);
-      if (!published) throw new Error('The selected source could not be published. Try Go Live again.');
+      if (!published) {
+        throw new Error('The selected source could not be published. Try Go Live again.');
+      }
       if (captureSessionRef.current !== session) {
         await cleanupFailedShare();
         return;
@@ -655,21 +761,29 @@ export const PresenterApp: React.FC = () => {
       const previousSession = captureSessionRef.current + 1;
       captureSessionRef.current = previousSession;
       if (captureStage !== 'idle') {
-        if (!(await desktopApi.stopVideoCapture())) throw new Error('The current video source could not stop.');
-        if (captureSessionRef.current !== previousSession) return;
+        if (!(await desktopApi.stopVideoCapture())) {
+          throw new Error('The current video source could not stop.');
+        }
+        if (captureSessionRef.current !== previousSession) {
+          return;
+        }
         stopTelemetryPolling();
         lastVideoConfigKeyRef.current = null;
         setCaptureStage('idle');
         setPreviewFrame(null);
       }
       const session = await startPreviewCapture(source);
-      if (wasLive) await publishCapture(session);
+      if (wasLive) {
+        await publishCapture(session);
+      }
     },
     [captureStage, stopTelemetryPolling, startPreviewCapture, publishCapture],
   );
 
   const handleStartShare = useCallback(async () => {
-    if (!roomCode || captureStage !== 'idle' || pickerOpen || !preferencesSnapshot) return;
+    if (!roomCode || captureStage !== 'idle' || pickerOpen || !preferencesSnapshot) {
+      return;
+    }
     if (platformInfo?.platform === 'windows') {
       setPickerOpen(true);
       return;
@@ -679,38 +793,53 @@ export const PresenterApp: React.FC = () => {
     });
   }, [roomCode, captureStage, pickerOpen, preferencesSnapshot, platformInfo, runCaptureAction, startPreviewCapture]);
 
-  const ensureTrayRoom = useCallback(async (): Promise<boolean> => {
-    if (roomCodeRef.current) return true;
+  const ensureTrayRoom = useCallback((): Promise<boolean> => {
+    if (roomCodeRef.current) {
+      return Promise.resolve(true);
+    }
     if (!healthyEndpointRef.current) {
       notify('error', 'API endpoint unavailable', 'Fix the API endpoint in Settings → Stream before sharing.');
-      return false;
+      return Promise.resolve(false);
     }
     return createNativeRoom();
   }, [createNativeRoom]);
 
   const startShareFromTray = useCallback(async () => {
-    if (captureBusyRef.current || roomActionRef.current) return;
-    if (!(await ensureTrayRoom())) return;
+    if (captureBusyRef.current || roomActionRef.current) {
+      return;
+    }
+    if (!(await ensureTrayRoom())) {
+      return;
+    }
     if (platformInfo?.platform === 'windows') {
       setPickerOpen(true);
       revealMainWindow();
       return;
     }
-    trayShareRef.current = true;
-    try {
-      await runCaptureAction(async () => {
-        await startPreviewCapture();
-      });
-    } finally {
+    const finishTrayShare = (): void => {
       if (trayShareRef.current) {
         trayShareRef.current = false;
         revealMainWindow();
       }
+    };
+    trayShareRef.current = true;
+    const startTrayPreview = async (): Promise<void> => {
+      await startPreviewCapture();
+    };
+    const outcome = await runCaptureAction(startTrayPreview).then(
+      () => ({ kind: 'ok' }) as const,
+      (cause: unknown) => ({ cause, kind: 'failed' }) as const,
+    );
+    finishTrayShare();
+    if (outcome.kind === 'failed') {
+      throw outcome.cause;
     }
   }, [ensureTrayRoom, platformInfo, runCaptureAction, startPreviewCapture]);
 
   const handleSwitchSource = useCallback(async () => {
-    if (!roomCode || captureStage === 'idle' || pickerOpen || captureBusyRef.current || roomActionRef.current) return;
+    if (!roomCode || captureStage === 'idle' || pickerOpen || captureBusyRef.current || roomActionRef.current) {
+      return;
+    }
     if (platformInfo?.platform === 'windows') {
       setPickerOpen(true);
       return;
@@ -727,13 +856,17 @@ export const PresenterApp: React.FC = () => {
   );
 
   const handleGoLive = useCallback(async () => {
-    if (captureStage !== 'previewing' || !previewFrame) return;
+    if (captureStage !== 'previewing' || !previewFrame) {
+      return;
+    }
     await runCaptureAction(() => publishCapture(captureSessionRef.current));
   }, [captureStage, previewFrame, runCaptureAction, publishCapture]);
 
   const resumeSharingAfterReplacement = useCallback(
     async (shouldResumeSharing: boolean): Promise<void> => {
-      if (!shouldResumeSharing) return;
+      if (!shouldResumeSharing) {
+        return;
+      }
       try {
         const source = selectedCaptureSourceRef.current ?? undefined;
         await startCombinedShare(source);
@@ -751,21 +884,25 @@ export const PresenterApp: React.FC = () => {
   const handleApiEndpointValidated = useCallback(
     (endpoint: string): void => {
       if (endpoint === apiEndpoint) {
-        setHasHealthyApiEndpoint(true);
-        if (!roomCode) setPendingApiEndpoint(null);
+        apiEndpointHealthStore.markHealthy(endpoint);
+        if (!roomCode) {
+          setPendingApiEndpoint(null);
+        }
         return;
       }
-      if (endpoint === pendingApiEndpoint && (roomCode || retryableReplacement)) return;
+      if (endpoint === pendingApiEndpoint && (roomCode || retryableReplacement)) {
+        return;
+      }
       if (!roomCode && !retryableReplacement) {
         activateApiEndpoint(endpoint);
-        setHasHealthyApiEndpoint(true);
+        apiEndpointHealthStore.markHealthy(endpoint);
         return;
       }
 
       setEndpointSwitchCandidate(endpoint);
-      void desktopApi
-        .showMainWindow()
-        .catch((cause: unknown) => notify('error', 'Room confirmation unavailable', String(cause)));
+      void desktopApi.showMainWindow().catch((cause: unknown) => {
+        notify('error', 'Room confirmation unavailable', String(cause));
+      });
     },
     [activateApiEndpoint, apiEndpoint, pendingApiEndpoint, retryableReplacement, roomCode, setPendingApiEndpoint],
   );
@@ -777,33 +914,41 @@ export const PresenterApp: React.FC = () => {
 
   useEffect(() => {
     const subscription = desktopApi.onApiEndpointEdit((edit) => {
-      if (edit.kind === 'reset') handleApiEndpointReset();
-      else handleApiEndpointValidated(edit.endpoint);
+      if (edit.kind === 'reset') {
+        handleApiEndpointReset();
+      } else {
+        handleApiEndpointValidated(edit.endpoint);
+      }
     });
     return () => {
-      void subscription.then((stop) => stop());
+      void subscription.then((stop) => {
+        stop();
+      });
     };
   }, [handleApiEndpointReset, handleApiEndpointValidated]);
 
   useEffect(() => {
-    if (!settingsHydrated) return;
+    if (!settingsHydrated) {
+      return undefined;
+    }
 
+    const target = pendingApiEndpoint ?? apiEndpoint;
+    const revision = endpointValidationRevision;
     let disposed = false;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 5_000);
 
-    void endpointValidationRevision;
-    setEndpointAvailability('checking');
-    setHasHealthyApiEndpoint(false);
-    void checkApiEndpoint(pendingApiEndpoint ?? apiEndpoint, controller.signal).then((result) => {
+    apiEndpointHealthStore.markChecking(target, revision);
+    void checkApiEndpoint(target, controller.signal).then((result) => {
       clearTimeout(timeout);
-      if (disposed) return;
-      setHasHealthyApiEndpoint(result.ok);
+      if (disposed) {
+        return;
+      }
+      apiEndpointHealthStore.markResult(target, revision, result.ok);
       if (result.ok) {
-        setEndpointAvailability('healthy');
         handleApiEndpointValidated(result.endpoint);
-      } else {
-        setEndpointAvailability('error');
       }
     });
     return () => {
@@ -814,14 +959,18 @@ export const PresenterApp: React.FC = () => {
   }, [apiEndpoint, pendingApiEndpoint, endpointValidationRevision, settingsHydrated, handleApiEndpointValidated]);
 
   const deferEndpointSwitch = useCallback((): void => {
-    if (!endpointSwitchCandidate) return;
+    if (endpointSwitchCandidate === null || endpointSwitchCandidate === '') {
+      return;
+    }
     setPendingApiEndpoint(endpointSwitchCandidate);
     setEndpointSwitchCandidate(null);
   }, [endpointSwitchCandidate, setPendingApiEndpoint]);
 
   const handleEndpointDialogOpenChange = useCallback(
     (open: boolean): void => {
-      if (open || isConfirmingEndpointSwitchRef.current) return;
+      if (open || isConfirmingEndpointSwitchRef.current) {
+        return;
+      }
       deferEndpointSwitch();
     },
     [deferEndpointSwitch],
@@ -829,7 +978,9 @@ export const PresenterApp: React.FC = () => {
 
   const handleReplaceRoom = useCallback(async (): Promise<void> => {
     const candidate = endpointSwitchCandidate;
-    if (!candidate || isRoomTransitioning) return;
+    if (candidate === null || candidate === '' || isRoomTransitioning) {
+      return;
+    }
     isConfirmingEndpointSwitchRef.current = true;
     setIsRoomTransitioning(true);
 
@@ -891,7 +1042,9 @@ export const PresenterApp: React.FC = () => {
 
   const handleRetryRoomConnection = useCallback(async (): Promise<void> => {
     const replacement = retryableReplacement;
-    if (!replacement || isRoomTransitioning) return;
+    if (!replacement || isRoomTransitioning) {
+      return;
+    }
     if (Date.now() >= replacement.expiresAt) {
       await discardPreparedRoom(replacement.room);
       setRetryableReplacement(null);
@@ -923,27 +1076,39 @@ export const PresenterApp: React.FC = () => {
     retryableReplacement,
   ]);
 
-  const handleCloseRoom = useCallback(async (): Promise<boolean> => {
-    if (isRoomTransitioning || roomActionRef.current) return false;
+  const withRoomTransition = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
     roomActionRef.current = true;
     setIsRoomTransitioning(true);
     try {
+      return await action();
+    } finally {
+      roomActionRef.current = false;
+      setIsRoomTransitioning(false);
+    }
+  }, []);
+
+  const handleCloseRoom = useCallback((): Promise<boolean> => {
+    if (isRoomTransitioning || roomActionRef.current) {
+      return Promise.resolve(false);
+    }
+    return withRoomTransition(async () => {
       const result = await closeRoom();
       if (!result.ok) {
         notify('error', 'Room closure failed', result.error ?? 'The room remains open. Try again.');
         return false;
       }
       await stopCaptureAfterRoomClosure();
-      if (pendingApiEndpoint) setEndpointValidationRevision((revision) => revision + 1);
+      if (pendingApiEndpoint !== null && pendingApiEndpoint !== '') {
+        setEndpointValidationRevision((revision) => revision + 1);
+      }
       return true;
-    } finally {
-      roomActionRef.current = false;
-      setIsRoomTransitioning(false);
-    }
-  }, [closeRoom, isRoomTransitioning, pendingApiEndpoint, stopCaptureAfterRoomClosure]);
+    });
+  }, [closeRoom, isRoomTransitioning, pendingApiEndpoint, stopCaptureAfterRoomClosure, withRoomTransition]);
 
   const handleToggleMute = useCallback(async () => {
-    if (muteBusyRef.current) return;
+    if (muteBusyRef.current) {
+      return;
+    }
     muteBusyRef.current = true;
     try {
       setIsMuted(await desktopApi.toggleAudioMute());
@@ -953,6 +1118,14 @@ export const PresenterApp: React.FC = () => {
       muteBusyRef.current = false;
     }
   }, []);
+
+  const refreshAudioApps = useCallback((): void => {
+    void loadAudioApps();
+  }, [loadAudioApps]);
+
+  const toggleAudioMute = useCallback((): void => {
+    void handleToggleMute();
+  }, [handleToggleMute]);
 
   const handleOpenSettings = useCallback(async () => {
     try {
@@ -969,7 +1142,9 @@ export const PresenterApp: React.FC = () => {
       await handleCloseRoom();
       return;
     }
-    if (action !== 'quit' && action !== 'quit-anyway') return;
+    if (action !== 'quit' && action !== 'quit-anyway') {
+      return;
+    }
     await handleStopShare();
     if (action === 'quit' && roomCode && !(await handleCloseRoom())) {
       setConfirmation('quit-anyway');
@@ -983,7 +1158,9 @@ export const PresenterApp: React.FC = () => {
       void handleGoLive();
       return;
     }
-    if (captureStage === 'idle') void startShareFromTray();
+    if (captureStage === 'idle') {
+      void startShareFromTray();
+    }
   }, [captureStage, handleGoLive, startShareFromTray]);
 
   const dispatchAction = useCallback(
@@ -1002,47 +1179,71 @@ export const PresenterApp: React.FC = () => {
           void handleToggleMute();
           return;
         case 'close-room':
-          if (roomCode) setConfirmation('close-room');
+          if (roomCode) {
+            setConfirmation('close-room');
+          }
           return;
         case 'quit':
-          if (roomCode || captureStage !== 'idle' || captureBusyRef.current) setConfirmation('quit');
-          else void desktopApi.quitApp().catch((cause: unknown) => notify('error', 'Quit failed', String(cause)));
+          if (roomCode || captureStage !== 'idle' || captureBusyRef.current) {
+            setConfirmation('quit');
+          } else {
+            void desktopApi.quitApp().catch((cause: unknown) => {
+              notify('error', 'Quit failed', String(cause));
+            });
+          }
       }
     },
     [roomCode, captureStage, handleStopShare, handleSwitchSource, handleToggleMute, startShareOrGoLive],
   );
   const dispatchActionRef = useRef(dispatchAction);
-  dispatchActionRef.current = dispatchAction;
+  useLayoutEffect(() => {
+    dispatchActionRef.current = dispatchAction;
+  }, [dispatchAction]);
 
   useEffect(() => {
-    const subscription = desktopApi.onDesktopAction((action) => dispatchActionRef.current(action));
+    const subscription = desktopApi.onDesktopAction((action) => {
+      dispatchActionRef.current(action);
+    });
     void desktopApi
       .getAudioMuted()
       .then(setIsMuted)
-      .catch((cause: unknown) => notify('error', 'Mute status unavailable', String(cause)));
+      .catch((cause: unknown) => {
+        notify('error', 'Mute status unavailable', String(cause));
+      });
     const openSettings = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.repeat || event.isComposing) return;
+      if (event.defaultPrevented || event.repeat || event.isComposing) {
+        return;
+      }
       if ((event.ctrlKey || event.metaKey) && event.key === ',' && !event.altKey && !event.shiftKey) {
         event.preventDefault();
         void handleOpenSettings();
       }
     };
     const toggleTelemetry = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.repeat || event.isComposing) return;
-      if (!document.hasFocus()) return;
+      if (event.defaultPrevented || event.repeat || event.isComposing) {
+        return;
+      }
+      if (!document.hasFocus()) {
+        return;
+      }
       if (
         event.target instanceof Element &&
         event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')
-      )
+      ) {
         return;
-      if (!matchesTelemetryShortcut(event, telemetryShortcutRef.current)) return;
+      }
+      if (!matchesTelemetryShortcut(event, telemetryShortcutRef.current)) {
+        return;
+      }
       event.preventDefault();
       setShowTelemetry((visible) => !visible);
     };
     window.addEventListener('keydown', openSettings);
     window.addEventListener('keydown', toggleTelemetry);
     return () => {
-      void subscription.then((stop) => stop());
+      void subscription.then((stop) => {
+        stop();
+      });
       window.removeEventListener('keydown', openSettings);
       window.removeEventListener('keydown', toggleTelemetry);
     };
@@ -1051,15 +1252,17 @@ export const PresenterApp: React.FC = () => {
   useEffect(() => {
     void desktopApi
       .updateControlState({
-        roomOpen: !!roomCode,
         captureStage,
-        isMuted,
-        isBusy: isCaptureBusy || isRoomTransitioning,
-        roomEndpoint,
         endpointControlsDisabled: isRoomTransitioning || retryableReplacement !== null,
         endpointValidationRevision,
+        isBusy: isCaptureBusy || isRoomTransitioning,
+        isMuted,
+        roomEndpoint,
+        roomOpen: Boolean(roomCode),
       })
-      .catch((cause: unknown) => notify('error', 'Tray status could not update', String(cause)));
+      .catch((cause: unknown) => {
+        notify('error', 'Tray status could not update', String(cause));
+      });
   }, [
     roomCode,
     captureStage,
@@ -1072,17 +1275,23 @@ export const PresenterApp: React.FC = () => {
   ]);
 
   useEffect(() => {
-    if (preferencesError) notify('error', 'Preferences unavailable', preferencesError);
+    if (preferencesError !== null && preferencesError !== '') {
+      notify('error', 'Preferences unavailable', preferencesError);
+    }
   }, [preferencesError]);
 
   const flashCopied = useCallback((kind: 'link' | 'code') => {
     setCopied(kind);
-    setTimeout(() => setCopied(null), 2000);
+    setTimeout(() => {
+      setCopied(null);
+    }, 2000);
   }, []);
 
   const handleCopyLink = useCallback(async () => {
     const url = shareUrl;
-    if (!url) return;
+    if (!url) {
+      return;
+    }
     const ok = await copyText(url);
     if (ok) {
       flashCopied('link');
@@ -1092,7 +1301,9 @@ export const PresenterApp: React.FC = () => {
   }, [shareUrl, flashCopied]);
 
   const handleCopyCode = useCallback(async () => {
-    if (!roomCode) return;
+    if (!roomCode) {
+      return;
+    }
     const ok = await copyText(roomCode);
     if (ok) {
       flashCopied('code');
@@ -1101,18 +1312,25 @@ export const PresenterApp: React.FC = () => {
     }
   }, [roomCode, flashCopied]);
 
-  const isEndpointCheckPending = endpointAvailability === 'checking' || endpointAvailability === 'typing';
+  const isEndpointCheckPending = endpointAvailability === 'checking';
   const canCreateRoom = settingsHydrated && hasHealthyApiEndpoint && !isEndpointCheckPending && !isRoomTransitioning;
   const roomCreateDisabledReason = (): string | null => {
-    if (!settingsHydrated) return 'Loading saved API endpoint settings.';
-    if (endpointAvailability === 'checking') return 'Checking the API endpoint before room creation.';
-    if (endpointAvailability === 'typing') return 'Finish editing the API endpoint before creating a room.';
-    if (hasHealthyApiEndpoint) return null;
-    if (endpointAvailability === 'error') return 'Fix the API endpoint in Settings → Stream before creating a room.';
+    if (!settingsHydrated) {
+      return 'Loading saved API endpoint settings.';
+    }
+    if (endpointAvailability === 'checking') {
+      return 'Checking the API endpoint before room creation.';
+    }
+    if (hasHealthyApiEndpoint) {
+      return null;
+    }
+    if (endpointAvailability === 'error') {
+      return 'Fix the API endpoint in Settings → Stream before creating a room.';
+    }
     return null;
   };
   const canStartShare =
-    !!roomCode &&
+    Boolean(roomCode) &&
     captureStage === 'idle' &&
     !isRoomTransitioning &&
     !isCaptureBusy &&
@@ -1120,8 +1338,12 @@ export const PresenterApp: React.FC = () => {
     preferencesSnapshot !== null;
   const canGoLive = captureStage === 'previewing' && previewFrame !== null && !isRoomTransitioning && !isCaptureBusy;
   const startDisabledReason = (): string | null => {
-    if (captureStage !== 'idle' || canStartShare) return null;
-    if (!roomCode) return 'Create a live room to start sharing.';
+    if (captureStage !== 'idle' || canStartShare) {
+      return null;
+    }
+    if (!roomCode) {
+      return 'Create a live room to start sharing.';
+    }
     return null;
   };
   const disabledReason = startDisabledReason();
@@ -1147,7 +1369,7 @@ export const PresenterApp: React.FC = () => {
               previewFrame={previewFrame}
               telemetry={telemetry}
               showTelemetry={showTelemetry}
-              onCopyLink={handleCopyLink}
+              onCopyLink={() => void handleCopyLink()}
             />
           </div>
         </main>
@@ -1155,6 +1377,7 @@ export const PresenterApp: React.FC = () => {
         <aside className="w-[22rem] shrink-0 overflow-y-auto border-l border-border bg-card/60 backdrop-blur-md divide-y divide-border">
           <SourcePicker
             roomCode={roomCode}
+            roomConnectionState={roomConnectionState}
             isCreatingRoom={isCreatingRoom}
             isClosingRoom={isClosingRoom}
             isRoomTransitioning={isRoomTransitioning}
@@ -1162,11 +1385,13 @@ export const PresenterApp: React.FC = () => {
             roomCreateDisabledReason={roomCreateDisabledReason()}
             hasRetryableRoom={retryableReplacement !== null}
             copied={copied}
-            onCreateRoom={handleCreateRoom}
+            onCreateRoom={() => void handleCreateRoom()}
             onRetryRoomConnection={() => void handleRetryRoomConnection()}
-            onCloseRoom={() => setConfirmation('close-room')}
-            onCopyCode={handleCopyCode}
-            onCopyLink={handleCopyLink}
+            onCloseRoom={() => {
+              setConfirmation('close-room');
+            }}
+            onCopyCode={() => void handleCopyCode()}
+            onCopyLink={() => void handleCopyLink()}
             captureContext={captureContext}
             autoDetectFailed={autoDetectFailed}
             captureStage={captureStage}
@@ -1179,10 +1404,10 @@ export const PresenterApp: React.FC = () => {
             pickerOpen={pickerOpen}
             setPickerOpen={setPickerOpen}
             onSourceSelected={handleSourceSelected}
-            onStartShare={handleStartShare}
-            onGoLive={handleGoLive}
-            onStopShare={handleStopShare}
-            onSwitchSource={handleSwitchSource}
+            onStartShare={() => void handleStartShare()}
+            onGoLive={() => void handleGoLive()}
+            onStopShare={() => void handleStopShare()}
+            onSwitchSource={() => void handleSwitchSource()}
             canSwitchSource={!isCaptureBusy && !isRoomTransitioning && !pickerOpen}
           />
 
@@ -1192,10 +1417,10 @@ export const PresenterApp: React.FC = () => {
             selectedAudioAppId={selectedAudioAppId}
             autoDetectedApp={autoDetectedApp}
             onSelectApp={handleSelectApp}
-            onRefresh={loadAudioApps}
+            onRefresh={refreshAudioApps}
             autoSelectAudio={autoSelectAudio}
             isMuted={isMuted}
-            onToggleMute={handleToggleMute}
+            onToggleMute={toggleAudioMute}
           />
         </aside>
       </div>
@@ -1207,13 +1432,15 @@ export const PresenterApp: React.FC = () => {
       <TitleBar
         isLive={captureStage === 'live'}
         isPreviewing={captureStage === 'previewing'}
-        onSettings={handleOpenSettings}
+        onSettings={() => void handleOpenSettings()}
       />
       {content}
       <DesktopActionConfirmation
         action={confirmation}
         isBusy={isRoomTransitioning}
-        onCancel={() => setConfirmation(null)}
+        onCancel={() => {
+          setConfirmation(null);
+        }}
         onConfirm={confirmAction}
       />
       <AlertDialog open={endpointSwitchCandidate !== null} onOpenChange={handleEndpointDialogOpenChange}>
@@ -1247,7 +1474,12 @@ export const PresenterApp: React.FC = () => {
 };
 
 const rootEl = document.getElementById('root');
-if (!rootEl) throw new Error('Missing #root element');
+if (!rootEl) {
+  throw new Error('Missing #root element');
+}
 const root = createRoot(rootEl);
-if (new URLSearchParams(window.location.search).has('settings')) root.render(<DesktopSettings />);
-else root.render(<PresenterApp />);
+if (new URLSearchParams(window.location.search).has('settings')) {
+  root.render(<DesktopSettings />);
+} else {
+  root.render(<PresenterApp />);
+}
