@@ -400,6 +400,34 @@ mod tests {
     use super::{append_idle_clients, is_generic_title, is_skip_client};
     use crate::AudioApp;
     use std::collections::HashMap;
+    use std::process::{Child, Command};
+
+    struct ClientProcess(Child);
+
+    impl ClientProcess {
+        fn new() -> Self {
+            Self(
+                Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap_or_else(|e| panic!("start client process: {e}")),
+            )
+        }
+
+        fn pid(&self) -> i32 {
+            self.0
+                .id()
+                .try_into()
+                .unwrap_or_else(|e| panic!("client pid fits i32: {e}"))
+        }
+    }
+
+    impl Drop for ClientProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
 
     fn app(process_id: i32) -> AudioApp {
         AudioApp {
@@ -454,8 +482,10 @@ mod tests {
 
     #[test]
     fn idle_clients_become_negative_pid_targets() {
-        let mut apps = vec![app(42)];
-        let clients = HashMap::from([(1, (43u32, "Spotify".to_string()))]);
+        let client = ClientProcess::new();
+        let pid = client.pid();
+        let mut apps = vec![app(std::process::id().cast_signed())];
+        let clients = HashMap::from([(1, (pid.cast_unsigned(), "Spotify".to_string()))]);
         append_idle_clients(&mut apps, clients);
         let idle = apps
             .iter()
@@ -463,14 +493,16 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!("idle Spotify must be listed");
             });
-        assert_eq!(idle.id, -43);
-        assert_eq!(idle.process_id, 43);
+        assert_eq!(idle.id, -pid);
+        assert_eq!(idle.process_id, pid);
     }
 
     #[test]
     fn idle_clients_skip_pids_with_active_streams() {
-        let mut apps = vec![app(42)];
-        let clients = HashMap::from([(1, (42u32, "Spotify".to_string()))]);
+        let client = ClientProcess::new();
+        let pid = client.pid();
+        let mut apps = vec![app(pid)];
+        let clients = HashMap::from([(1, (pid.cast_unsigned(), "Spotify".to_string()))]);
         append_idle_clients(&mut apps, clients);
         assert_eq!(apps.len(), 1, "a stream-owning pid must not be duplicated");
     }
@@ -504,15 +536,20 @@ mod tests {
 
     #[test]
     fn idle_clients_prefer_the_shortest_name_per_pid() {
+        let client = ClientProcess::new();
+        let pid = client.pid();
         let mut apps = Vec::new();
         let clients = HashMap::from([
-            (1, (50u32, "Chromium input".to_string())),
-            (2, (50u32, "Chromium".to_string())),
+            (1, (pid.cast_unsigned(), "Chromium input".to_string())),
+            (2, (pid.cast_unsigned(), "Chromium".to_string())),
         ]);
         append_idle_clients(&mut apps, clients);
-        let idle = apps.iter().find(|a| a.process_id == 50).unwrap_or_else(|| {
-            panic!("pid 50 must be listed");
-        });
+        let idle = apps
+            .iter()
+            .find(|a| a.process_id == pid)
+            .unwrap_or_else(|| {
+                panic!("pid {pid} must be listed");
+            });
         assert_eq!(idle.name, "Chromium");
     }
 }
