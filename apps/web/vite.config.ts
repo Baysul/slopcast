@@ -1,32 +1,33 @@
 import path from 'node:path';
+
 import { loadConfig } from '@slopcast/shared-types/config';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig, lazyPlugins } from 'vite-plus';
 
 process.env.ALLOW_DEV_KEYS = 'true';
 const config = loadConfig();
 
 export default defineConfig({
-  plugins: [tailwindcss(), react()],
-  resolve: {
-    alias: {
-      '@': path.resolve(import.meta.dirname, './src'),
-    },
-  },
   build: {
-    sourcemap: false,
-    minify: 'oxc',
     cssMinify: true,
+    minify: 'oxc',
     reportCompressedSize: false,
-    target: 'esnext',
     rolldownOptions: {
       output: {
         minify: {
-          compress: { dropDebugger: true },
           codegen: { legalComments: 'none' },
+          compress: { dropDebugger: true },
         },
       },
+    },
+    sourcemap: false,
+    target: 'esnext',
+  },
+  plugins: lazyPlugins(() => [tailwindcss(), react()]),
+  resolve: {
+    alias: {
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   server: {
@@ -34,12 +35,12 @@ export default defineConfig({
     port: config.webPort,
     proxy: {
       '/api': {
-        target: config.apiEndpoint,
         changeOrigin: true,
+        target: config.apiEndpoint,
       },
       '/health': {
-        target: config.apiEndpoint,
         changeOrigin: true,
+        target: config.apiEndpoint,
       },
     },
   },

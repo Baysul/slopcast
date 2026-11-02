@@ -1,19 +1,15 @@
 {
   "name": "slopcast-monorepo",
-  "author": "Basil <parsley@duck.com>",
-  "homepage": "https://github.com/Baysul/slopcast",
-  "private": true,
   "version": "0.1.0",
-  "packageManager": "pnpm@12.10.1",
-  "engines": {
-    "node": ">=24.0.0"
-  },
+  "private": true,
+  "homepage": "https://github.com/Baysul/slopcast",
+  "author": "Basil <parsley@duck.com>",
   "scripts": {
-    "check": "biome ci && pnpm --recursive check",
-    "check:fix": "biome check --write",
-    "lint": "biome lint",
-    "lint:fix": "biome lint --write",
-    "format": "biome format --write && pnpm --filter @slopcast/native-rust rust:fmt",
+    "check": "vp check && pnpm --recursive check",
+    "check:fix": "vp check --fix",
+    "lint": "vp lint",
+    "lint:fix": "vp lint --fix",
+    "format": "vp fmt --write && pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:fmt": "pnpm --filter @slopcast/native-rust rust:fmt",
     "rust:check": "pnpm --filter @slopcast/native-rust rust:check",
     "dev": "pnpm --parallel --recursive dev",
@@ -32,10 +28,15 @@
     "dist:desktop:linux:deb": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles deb",
     "dist:desktop:linux:tar": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles deb && cd target/release/bundle/deb && tar -czf ../Slopcast-$npm_package_version-linux-amd64.tar.gz slopcast_$npm_package_version_amd64",
     "dist:desktop:win": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles nsis",
-    "test:unit": "pnpm --filter server test && pnpm --filter @slopcast/shared-types test && pnpm --filter desktop test && pnpm --filter web test"
+    "test": "vp test",
+    "test:unit": "vp test"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.15",
-    "playwright": "^1.64.0"
-  }
+    "playwright": "^1.64.0",
+    "vite-plus": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "pnpm@12.10.1"
 }

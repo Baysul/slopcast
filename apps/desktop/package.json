@@ -1,18 +1,18 @@
 {
   "name": "desktop",
-  "author": "Basil <parsley@duck.com>",
-  "homepage": "https://github.com/Baysul/slopcast",
   "version": "0.1.0",
   "private": true,
+  "homepage": "https://github.com/Baysul/slopcast",
+  "author": "Basil <parsley@duck.com>",
   "type": "module",
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit && cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings",
     "dev": "tauri dev",
-    "dev:renderer": "vite",
-    "build": "pnpm --filter @slopcast/shared-types build && vite build",
-    "build:renderer": "vite build",
+    "dev:renderer": "vp dev",
+    "build": "pnpm --filter @slopcast/shared-types build && vp build",
+    "build:renderer": "vp build",
     "tauri": "tauri",
-    "test": "node --test \"../../tests/unit/desktop/*.test.ts\""
+    "test": "vp -C ../.. test tests/unit/desktop"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.24",
@@ -44,6 +44,7 @@
     "playwright": "^1.64.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.4"
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
   }
 }

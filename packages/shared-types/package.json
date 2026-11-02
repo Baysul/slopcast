@@ -18,11 +18,10 @@
   "scripts": {
     "check": "tsc",
     "build": "tsc",
-    "test": "tsx --test \"../../tests/unit/shared-types/*.test.ts\""
+    "test": "vp -C ../.. test tests/unit/shared-types"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }
