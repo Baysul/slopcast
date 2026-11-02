@@ -46,7 +46,7 @@ Click **Create Live Room** in the desktop app and copy the link. Anyone who open
 
 ## Background
 
-Slopcast is a vibe-coded personal project. I plan to maintain it until *an actually good app* for sharing a screen on Linux and Wayland appears.
+Slopcast is a vibe-coded personal project. I plan to maintain it until _an actually good app_ for sharing a screen on Linux and Wayland appears.
 
 ### Why not use other apps?
 

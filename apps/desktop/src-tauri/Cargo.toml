@@ -24,23 +24,14 @@ name = "slopcast_lib"
 crate-type = ["lib"]
 
 [build-dependencies]
-tauri-build = {
-  git = "https://github.com/tauri-apps/tauri",
-  rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1",
-  features = []
-}
+tauri-build = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1", features = [
+] }
 
 [dependencies]
-tauri = {
-  git = "https://github.com/tauri-apps/tauri",
-  rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1",
-  default-features = false,
-  features = ["tray-icon"]
-}
-tauri-runtime-cef = {
-  git = "https://github.com/tauri-apps/tauri",
-  rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1"
-}
+tauri = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1", default-features = false, features = [
+  "tray-icon",
+] }
+tauri-runtime-cef = { git = "https://github.com/tauri-apps/tauri", rev = "9d1a5b176e337c8395362a4e7c99bac99b36a1d1" }
 log = "0.4"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-log = "2"
