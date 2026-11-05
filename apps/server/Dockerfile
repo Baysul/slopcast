@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-slim AS builder
+# The build output is plain JavaScript and the production dependencies have no
+# native code, so the builder runs once on the build machine's own platform and
+# every target platform copies from it (no QEMU for pnpm install and tsc).
+FROM --platform=$BUILDPLATFORM node:24-slim AS builder
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable

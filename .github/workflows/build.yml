@@ -5,13 +5,40 @@ on:
     branches:
       - main
       - refactor
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build only this target
+        type: choice
+        default: all
+        options:
+          - all
+          - docker
+          - linux
+          - linux-appimage
+          - linux-deb
+          - linux-tar
+          - win
+      linux_arch:
+        description: Architecture for a Linux-only target (all builds both)
+        type: choice
+        default: both
+        options:
+          - both
+          - arm64
+          - amd64
 
 jobs:
   build-docker:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'docker'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    env:
+      # Forgejo's container registry. The automatic token cannot push packages,
+      # so REGISTRY_TOKEN is an access token with the write:package scope.
+      REGISTRY: forge.cunny.cat
     strategy:
       fail-fast: false
       matrix:
@@ -26,12 +53,17 @@ jobs:
           echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker || true
 
+      # Rootless Forgejo workers use host-provisioned binfmt handlers.
       - name: Set up QEMU
+        if: vars.BINFMT_PRESENT != '1'
         uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
+          # buildkitd shares the Docker daemon's network and hosts file, so it
+          # reaches the registry the way the daemon does.
+          driver-opts: network=host
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -40,17 +72,17 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}/${{ matrix.target }}
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.target }}
           tags: |
             type=sha,prefix=
             type=ref,event=branch
 
-      - name: Login to GitHub Container Registry
+      - name: Login to Forgejo Container Registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -65,29 +97,36 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-desktop:
-    runs-on: ${{ matrix.os }}
+    if: github.event_name != 'workflow_dispatch' || inputs.target != 'docker'
+    # Linux builds run in matching-architecture containers. Windows still
+    # cross-compiles on ARM64 with clang-cl + lld-link and the MSVC CRT/SDK.
+    runs-on: ${{ matrix.name == 'win' && 'ubuntu-24.04-arm64' || format('ubuntu-24.04-{0}', matrix.arch) }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            name: linux-appimage
-            asset-path: target/release/bundle/appimage/*.AppImage
-          - os: ubuntu-24.04
-            name: linux-deb
-            asset-path: target/release/bundle/deb/*.deb
-          - os: ubuntu-24.04
-            name: linux-tar
-            asset-path: target/release/bundle/*.tar.gz
-          - os: windows-latest
-            name: win
-            asset-path: target/release/bundle/nsis/*.exe
+        # A manual run builds only the bundle picked in `target`, for both arches.
+        name: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all') && '["linux", "win"]' || format('["{0}"]', inputs.target)) }}
+        arch: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'win' || inputs.linux_arch == 'both') && '["arm64", "amd64"]' || format('["{0}"]', inputs.linux_arch)) }}
+        exclude:
+          - name: win
+            arch: arm64
+    env:
+      ASSET_PATHS: >-
+        {"linux": "target/release/bundle/appimage/*.AppImage\ntarget/release/bundle/deb/*.deb\ntarget/release/bundle/*.tar.gz",
+        "linux-appimage": "target/release/bundle/appimage/*.AppImage",
+        "linux-deb": "target/release/bundle/deb/*.deb",
+        "linux-tar": "target/release/bundle/*.tar.gz",
+        "win": "target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe"}
 
     steps:
       - uses: actions/checkout@v6
 
+      - name: Verify Linux build architecture
+        if: matrix.name != 'win'
+        run: test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
+
       - name: Add the LLVM apt repo for clang 23
-        if: runner.os == 'Linux'
+        if: matrix.name != 'win'
         run: |
           # libwebrtc bundles Chromium's hermetic libc++, whose floor is clang 21+
           # (vendor/webrtc-sys/build.rs enforces it); noble's clang is 18.
@@ -99,7 +138,7 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/llvm-23.list > /dev/null
 
       - name: Install Linux system deps
-        if: runner.os == 'Linux'
+        if: matrix.name != 'win'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -144,6 +183,11 @@ jobs:
           toolchain: ${{ steps.rust.outputs.toolchain }}
           components: rustfmt, clippy
 
+      - name: Provision Windows SDK and MSVC CRT (xwin)
+        if: matrix.name == 'win'
+        shell: bash
+        run: bash scripts/setup-windows-cross.sh
+
       - uses: pnpm/action-setup@v6
         with:
           version: 12.10.1
@@ -157,27 +201,43 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Cache CEF (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.name != 'win'
         uses: actions/cache@v4
         with:
           path: ~/.cache/tauri-cef
-          key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cef-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cef-${{ runner.os }}-
+            cef-linux-${{ matrix.arch }}-
 
       - name: Cache CEF (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.name == 'win'
         uses: actions/cache@v4
         with:
-          path: ~/AppData/Local/tauri-cef
-          key: cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.cache/tauri-cef-win
+          key: cef-windows-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cef-${{ runner.os }}-
+            cef-windows-
+
+      - name: Cache Windows cross toolchain
+        if: matrix.name == 'win'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/cargo-xwin
+            ~/.cargo/bin/xwin
+          key: xwin-${{ runner.arch }}-v1
+
+      - name: Cache GStreamer build
+        if: matrix.name != 'win'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/slopcast/gstreamer-runtime
+          key: gstreamer-linux-${{ matrix.arch }}-${{ hashFiles('scripts/prepare-gstreamer-runtime.sh') }}
 
       - name: Install Tauri CEF CLI
         shell: bash
         run: |
-          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked --force
+          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked
           cargo tauri --version
 
       - name: Verify Tauri CEF runtime
@@ -201,32 +261,36 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
+          if [ "${{ matrix.name }}" = "win" ]; then
+            source scripts/windows-cross-env.sh
+            export CEF_PATH="$HOME/.cache/tauri-cef-win"
+            cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check
+            bash scripts/tauri-bundle.sh --target x86_64-pc-windows-msvc --bundles nsis --verbose
+          else
             export CEF_PATH="$HOME/.cache/tauri-cef"
             export CUDA_HOME=/usr
             export CXX="clang++-23"
             pnpm check
             pnpm desktop:prepare-gstreamer
             case "${{ matrix.name }}" in
+              linux)
+                bash scripts/tauri-bundle.sh --bundles deb,appimage --verbose
+                bash scripts/package-linux-tar.sh
+                ;;
               linux-appimage) bash scripts/tauri-bundle.sh --bundles appimage --verbose ;;
               linux-deb) bash scripts/tauri-bundle.sh --bundles deb --verbose ;;
               linux-tar)
                 bash scripts/tauri-bundle.sh --bundles deb --verbose
-                ver=$(node -p "require('./package.json').version")
-                cd target/release/bundle/deb && tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_*_amd64.deb 2>/dev/null || tar -czf ../Slopcast-"$ver"-linux-amd64.tar.gz slopcast_"$ver"_amd64 2>/dev/null || tar -czf ../Slopcast-0.1.0-linux-amd64.tar.gz slopcast_*_amd64*
+                bash scripts/package-linux-tar.sh
                 ;;
             esac
-          else
-            export CEF_PATH="$LOCALAPPDATA/tauri-cef"
-            pnpm check
-            pnpm desktop:prepare-gstreamer
-            bash scripts/tauri-bundle.sh --bundles nsis --verbose
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        # v4+ needs GitHub's artifact service; Forgejo implements the v3 protocol.
+        uses: actions/upload-artifact@v3
         with:
-          name: desktop-${{ matrix.name }}
-          path: ${{ matrix.asset-path }}
+          name: desktop-${{ matrix.name }}-${{ matrix.arch }}
+          path: ${{ fromJSON(env.ASSET_PATHS)[matrix.name] }}
           retention-days: 7
           if-no-files-found: error

@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-slim AS builder
+# The site is static files, so the builder runs once on the build machine's own
+# platform and every target platform copies from it (no QEMU for pnpm install,
+# tsc and vite).
+FROM --platform=$BUILDPLATFORM node:24-slim AS builder
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
@@ -16,10 +19,15 @@ COPY apps/web/ apps/web/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter @slopcast/shared-types build
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm --filter web build
 
+# serve is pure JavaScript too: install it natively and copy it into place.
+FROM --platform=$BUILDPLATFORM node:24-slim AS serve
+RUN npm install -g --prefix /opt/serve serve
+
 FROM node:24-slim
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable && npm install -g serve
+RUN corepack enable
+COPY --from=serve /opt/serve/ /usr/local/
 COPY --from=builder /app/apps/web/dist /app
 COPY apps/web/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh

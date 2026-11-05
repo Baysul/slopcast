@@ -26,7 +26,7 @@
     "dist:desktop:linux": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles deb,appimage",
     "dist:desktop:linux:appimage": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles appimage",
     "dist:desktop:linux:deb": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles deb",
-    "dist:desktop:linux:tar": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles deb && cd target/release/bundle/deb && tar -czf ../Slopcast-$npm_package_version-linux-amd64.tar.gz slopcast_$npm_package_version_amd64",
+    "dist:desktop:linux:tar": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles deb && bash scripts/package-linux-tar.sh",
     "dist:desktop:win": "pnpm check && pnpm desktop:prepare-gstreamer && bash scripts/tauri-bundle.sh --bundles nsis",
     "test": "vp test",
     "test:unit": "vp test"
