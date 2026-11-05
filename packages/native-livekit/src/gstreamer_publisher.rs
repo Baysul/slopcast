@@ -762,17 +762,19 @@ fn configure_signaller(
             ROOM_CONNECTED.store(connected, Ordering::Relaxed);
         }
     });
-    let pipeline_for_error = pipeline.clone();
+    let pipeline_for_error = pipeline.downgrade();
     signaller.connect("error", false, move |values| {
         let message = values[1]
             .get::<String>()
             .unwrap_or_else(|_| "LiveKit signaller error".into());
         if WORKER_GENERATION.load(Ordering::Relaxed) == generation {
             log::warn!("GStreamer LiveKit signaller error: {message}");
-            let _ = pipeline_for_error.post_message(gst::message::Error::new(
-                gst::LibraryError::Failed,
-                &format!("LiveKit signaller: {message}"),
-            ));
+            if let Some(pipeline) = pipeline_for_error.upgrade() {
+                let _ = pipeline.post_message(gst::message::Error::new(
+                    gst::LibraryError::Failed,
+                    &format!("LiveKit signaller: {message}"),
+                ));
+            }
         }
         None
     });
@@ -1282,6 +1284,42 @@ mod tests {
             max_bitrate: Some(bitrate),
             auto_bitrate: true,
         }
+    }
+
+    #[test]
+    #[ignore = "requires the bundled runtime from pnpm desktop:prepare-gstreamer"]
+    fn signaller_error_callback_does_not_retain_the_pipeline() {
+        init_gst();
+        if gst::ElementFactory::find("livekitwebrtcsink").is_none() {
+            let plugins = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins");
+            load_plugins(&plugins)
+                .unwrap_or_else(|error| panic!("bundled GStreamer plugins required: {error}"));
+        }
+        let pipeline = gst::Pipeline::new();
+        let sink = make_element("livekitwebrtcsink")
+            .unwrap_or_else(|error| panic!("LiveKit sink required: {error}"));
+        pipeline
+            .add(&sink)
+            .unwrap_or_else(|error| panic!("failed to add sink: {error}"));
+        let signaller = sink.property::<gst::glib::Object>("signaller");
+        configure_signaller(
+            &sink,
+            &pipeline,
+            &ConnectionConfig {
+                url: "ws://127.0.0.1:7880".into(),
+                token: "test-token".into(),
+                room_name: "test-room".into(),
+                identity: "presenter-test".into(),
+            },
+            0,
+        );
+        let weak_pipeline = pipeline.downgrade();
+        drop(sink);
+        drop(pipeline);
+        assert!(weak_pipeline.upgrade().is_none());
+        // A late signal must be harmless even if another owner retained the signaller.
+        signaller.emit_by_name::<()>("error", &[&"late error"]);
     }
 
     #[test]

@@ -118,3 +118,25 @@ test('silent streams do not contribute to the desktop-audio max', () => {
 test('getWave returns silence for unknown ids', () => {
   assert.deepEqual(audioWaveStore.getWave(9999), silentWave());
 });
+
+test('removed streams emit silence once and can return with the same id', () => {
+  const seen: number[][] = [];
+  const unsubscribe = audioWaveStore.subscribe(1001, (columns) => {
+    seen.push(columns);
+  });
+  try {
+    audioWaveStore.updateWave([{ id: 1001, columns: [0.5, -0.5] }]);
+    audioWaveStore.updateWave([]);
+    const countAfterRemoval = seen.length;
+    assert.deepEqual(seen.at(-1), silentWave());
+    assert.deepEqual(audioWaveStore.getWave(1001), silentWave());
+
+    audioWaveStore.updateWave([]);
+    assert.equal(seen.length, countAfterRemoval);
+    audioWaveStore.updateWave([{ id: 1001, columns: [0.5, -0.5] }]);
+    assert.deepEqual(seen.at(-1), [0.5, -0.5]);
+    assert.equal(seen.length, countAfterRemoval + 1);
+  } finally {
+    unsubscribe();
+  }
+});

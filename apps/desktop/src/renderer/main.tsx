@@ -39,6 +39,7 @@ import { checkApiEndpoint } from './utils/apiEndpoint';
 import { toAudioTargetId } from './utils/audio-targets';
 import { recommendBitrateCap } from './utils/bitrate';
 import { copyText } from './utils/clipboard';
+import { startPreviewPolling } from './utils/preview-frames';
 
 import './index.css';
 
@@ -140,55 +141,6 @@ const DesktopActionConfirmation = ({
       </AlertDialogContent>
     </AlertDialog>
   );
-};
-
-const parsePreviewPayload = (payload: ArrayBuffer): PreviewFrame | null => {
-  if (!(payload instanceof ArrayBuffer)) {
-    return null;
-  }
-  if (payload.byteLength < 16) {
-    return null;
-  }
-  const view = new DataView(payload);
-  let ptsUs = 0;
-  let width = 0;
-  let height = 0;
-  try {
-    ptsUs = Number(view.getBigUint64(0, true));
-    width = view.getUint32(8, true);
-    height = view.getUint32(12, true);
-  } catch {
-    return null;
-  }
-  if (width === 0 || height === 0) {
-    return null;
-  }
-  return { data: new Uint8Array(payload, 16), height, ptsUs, width };
-};
-
-const fetchAndRender = async (
-  lastPts: number,
-  onNewFrame: (pts: number) => void,
-  renderFrame: (frame: PreviewFrame) => void,
-): Promise<void> => {
-  try {
-    const resp = await fetch(`http://frame.localhost/frame.bin?t=${Date.now()}`);
-    if (!resp.ok) {
-      return;
-    }
-    const buf = await resp.arrayBuffer();
-    if (buf.byteLength <= 16) {
-      return;
-    }
-    const frame = parsePreviewPayload(buf);
-    if (!frame || frame.ptsUs === lastPts) {
-      return;
-    }
-    onNewFrame(frame.ptsUs);
-    renderFrame(frame);
-  } catch (err) {
-    console.debug('[preview] frame fetch failed:', err);
-  }
 };
 
 const logLiveAudioSources = async (): Promise<void> => {
@@ -396,39 +348,21 @@ export const PresenterApp: React.FC = () => {
       setPlatformInfo(info);
     })();
 
-    let disposed = false;
     if (window.previewBench === true) {
       window.previewBenchData = [];
     }
-    const pollFrame = (): void => {
-      let lastPts = 0;
-      const poll = async (): Promise<void> => {
-        if (!disposed) {
-          await fetchAndRender(
-            lastPts,
-            (pts) => {
-              lastPts = pts;
-            },
-            setPreviewFrame,
-          );
-        }
-        if (!disposed) {
-          requestAnimationFrame(() => {
-            void poll();
-          });
-        }
-      };
-      requestAnimationFrame(() => {
-        void poll();
-      });
-    };
-    pollFrame();
-
     return () => {
-      disposed = true;
       closeRoomBestEffort();
     };
   }, [closeRoomBestEffort]);
+
+  const isPreviewActive = captureStage !== 'idle';
+  useEffect(() => {
+    if (!isPreviewActive) {
+      return undefined;
+    }
+    return startPreviewPolling(setPreviewFrame);
+  }, [isPreviewActive]);
 
   useEffect(() => {
     if (captureStage !== 'live') {

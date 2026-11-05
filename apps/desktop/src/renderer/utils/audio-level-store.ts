@@ -69,9 +69,9 @@ class AudioWaveStore {
 
     for (const [id, prev] of this.waves.entries()) {
       if (id !== -1 && !seen.has(id)) {
+        this.waves.delete(id);
         const silence = silentWave();
         if (waveChanged(prev, silence)) {
-          this.waves.set(id, silence);
           this.notify(id, silence);
         }
       }

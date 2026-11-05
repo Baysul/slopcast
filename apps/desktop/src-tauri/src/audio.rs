@@ -12,6 +12,63 @@ use crate::dto::{AudioAppDto, AudioAppWaveDto, CaptureContextDto};
 const WAVE_EPSILON: f64 = 0.002;
 static AUDIO_MUTED: AtomicBool = AtomicBool::new(false);
 
+#[derive(Default)]
+struct WaveDeduplicator {
+    last: HashMap<i32, CachedWave>,
+}
+
+struct CachedWave {
+    columns: Vec<f64>,
+    seen: bool,
+}
+
+impl WaveDeduplicator {
+    fn update(&mut self, waves: &[native_rust::AudioAppWave]) -> bool {
+        let mut changed = false;
+        for wave in waves {
+            if let Some(previous) = self.last.get_mut(&wave.id) {
+                previous.seen = true;
+                if previous.columns.len() != wave.columns.len()
+                    || previous
+                        .columns
+                        .iter()
+                        .zip(&wave.columns)
+                        .any(|(a, b)| (a - b).abs() > WAVE_EPSILON)
+                {
+                    changed = true;
+                }
+            } else {
+                self.last.insert(
+                    wave.id,
+                    CachedWave {
+                        columns: Vec::new(),
+                        seen: true,
+                    },
+                );
+                changed = true;
+            }
+        }
+
+        let previous_len = self.last.len();
+        self.last.retain(|_, wave| {
+            let seen = wave.seen;
+            wave.seen = false;
+            seen
+        });
+        changed |= self.last.len() != previous_len;
+        if changed {
+            // The emitted payload contains every current stream. Keep the deduplication
+            // baseline in sync with that payload while reusing the cached allocations.
+            for wave in waves {
+                if let Some(previous) = self.last.get_mut(&wave.id) {
+                    previous.columns.clone_from(&wave.columns);
+                }
+            }
+        }
+        changed
+    }
+}
+
 #[tauri::command]
 pub(crate) fn get_audio_muted() -> bool {
     AUDIO_MUTED.load(Ordering::Relaxed)
@@ -30,27 +87,15 @@ pub fn register_audio_callbacks(app: &AppHandle) {
         let _ = native_livekit::feed_pcm(pcm);
     }));
 
-    let dedup = Mutex::new(HashMap::<i32, Vec<f64>>::new());
+    let dedup = Mutex::new(WaveDeduplicator::default());
     let wave_handle = app.clone();
     native_rust::set_wave_callback(Box::new(move |waves| {
         {
             let Ok(mut last) = dedup.lock() else {
                 return;
             };
-            let any_changed = waves.iter().any(|wave| {
-                last.get(&wave.id).is_none_or(|prev| {
-                    prev.len() != wave.columns.len()
-                        || prev
-                            .iter()
-                            .zip(&wave.columns)
-                            .any(|(a, b)| (a - b).abs() > WAVE_EPSILON)
-                })
-            });
-            if !any_changed {
+            if !last.update(&waves) {
                 return;
-            }
-            for wave in &waves {
-                last.insert(wave.id, wave.columns.clone());
             }
         }
         let payload: Vec<AudioAppWaveDto> = waves.into_iter().map(AudioAppWaveDto::from).collect();
@@ -176,4 +221,56 @@ pub async fn resolve_audio_source(
     })
     .await
     .map_err(|e| format!("resolve audio source task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wave(id: i32, level: f64) -> native_rust::AudioAppWave {
+        native_rust::AudioAppWave {
+            id,
+            columns: vec![level; 192],
+        }
+    }
+
+    #[test]
+    fn stream_removal_emits_an_update_even_when_remaining_waves_are_unchanged() {
+        let mut dedup = WaveDeduplicator::default();
+        assert!(dedup.update(&[wave(1, 0.5), wave(2, 0.25)]));
+        assert!(!dedup.update(&[wave(1, 0.5), wave(2, 0.25)]));
+        assert!(dedup.update(&[wave(2, 0.25)]));
+        assert!(!dedup.last.contains_key(&1));
+        assert!(!dedup.update(&[wave(2, 0.25)]));
+        assert!(dedup.update(&[]));
+        assert!(dedup.last.is_empty());
+        assert!(!dedup.update(&[]));
+    }
+
+    #[test]
+    fn stream_churn_does_not_accumulate_cached_waves() {
+        let mut dedup = WaveDeduplicator::default();
+        for id in 0..1000 {
+            assert!(dedup.update(&[wave(id, 0.5)]));
+            assert_eq!(dedup.last.len(), 1);
+        }
+        assert!(dedup.update(&[]));
+        assert!(dedup.last.is_empty());
+    }
+
+    #[test]
+    fn small_changes_accumulate_against_the_last_emitted_wave() {
+        let mut dedup = WaveDeduplicator::default();
+        assert!(dedup.update(&[wave(1, 0.5)]));
+        assert!(!dedup.update(&[wave(1, 0.501)]));
+        assert!(dedup.update(&[wave(1, 0.503)]));
+    }
+
+    #[test]
+    fn another_streams_update_also_refreshes_the_emitted_baseline() {
+        let mut dedup = WaveDeduplicator::default();
+        assert!(dedup.update(&[wave(1, 0.5), wave(2, 0.25)]));
+        assert!(dedup.update(&[wave(1, 0.501), wave(2, 0.5)]));
+        assert!(!dedup.update(&[wave(1, 0.5025), wave(2, 0.5)]));
+    }
 }

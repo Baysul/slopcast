@@ -375,15 +375,19 @@ pub(crate) fn stop() -> bool {
     if let Some(join) = session.source_join.take() {
         let _ = join.join();
     }
-    let stats = match session.delivery.stop() {
-        Ok(stats) => stats,
-        Err(error) => {
-            log::error!("[desktop-capture] {error}");
-            return false;
-        }
-    };
+    let result = session.delivery.stop();
     if let Ok(mut coordinator) = CAPTURE.lock() {
-        coordinator.frozen_stats = stats;
+        #[cfg(target_os = "linux")]
+        if coordinator.session.is_none() {
+            crate::frame_delivery::clear_i420_freelist();
+        }
+        if let Ok(stats) = &result {
+            coordinator.frozen_stats = *stats;
+        }
+    }
+    if let Err(error) = result {
+        log::error!("[desktop-capture] {error}");
+        return false;
     }
     true
 }

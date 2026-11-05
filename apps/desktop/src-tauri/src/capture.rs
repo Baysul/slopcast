@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use native_livekit::{CaptureConfig, DesktopCaptureStats};
 use tauri::Emitter;
+use tauri::http;
 
 use crate::AppHandle;
 use crate::platform::video_capture_available;
@@ -93,7 +94,46 @@ fn start_real_capture(
     native_livekit::start_desktop_capture()
 }
 
-pub static LATEST_FRAME: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+struct PreviewFrame {
+    bytes: Vec<u8>,
+    pts_us: i64,
+}
+
+static LATEST_FRAME: Mutex<Option<PreviewFrame>> = Mutex::new(None);
+
+pub(crate) fn preview_response(request: &http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+    let after = request.uri().query().and_then(|query| {
+        query
+            .split('&')
+            .find_map(|part| part.strip_prefix("after=")?.parse::<i64>().ok())
+    });
+    let frame = LATEST_FRAME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    preview_response_for(frame.as_ref(), after)
+}
+
+fn preview_response_for(
+    frame: Option<&PreviewFrame>,
+    after: Option<i64>,
+) -> http::Response<Vec<u8>> {
+    // Check the timestamp before cloning the pixels or handing them across IPC.
+    let body = frame
+        .filter(|frame| Some(frame.pts_us) != after)
+        .map(|frame| frame.bytes.clone());
+    let status = if body.is_some() {
+        http::StatusCode::OK
+    } else {
+        http::StatusCode::NO_CONTENT
+    };
+    http::Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .body(body.unwrap_or_default())
+        .unwrap_or_else(|_| unreachable!("valid preview response headers and body"))
+}
 
 fn clear_latest_frame() -> Result<(), String> {
     let mut frame = LATEST_FRAME
@@ -106,9 +146,9 @@ fn clear_latest_frame() -> Result<(), String> {
 }
 
 pub fn register_preview_frame_callback() {
-    native_livekit::set_preview_callback(Box::new(move |bytes, _pts_us| {
+    native_livekit::set_preview_callback(Box::new(move |bytes, pts_us| {
         if let Ok(mut slot) = LATEST_FRAME.lock() {
-            *slot = Some(bytes);
+            *slot = Some(PreviewFrame { bytes, pts_us });
         }
     }));
 }
@@ -377,5 +417,34 @@ pub async fn get_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     #[cfg(not(target_os = "windows"))]
     {
         Err("get_capture_sources is only supported on Windows".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_only_transfers_pixels_when_the_frame_changes() {
+        let frame = PreviewFrame {
+            bytes: vec![1, 2, 3, 4],
+            pts_us: 0,
+        };
+        for after in [None, Some(-1)] {
+            let response = preview_response_for(Some(&frame), after);
+            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(response.body(), &frame.bytes);
+            assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
+            assert_eq!(
+                response.headers()[http::header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                "*"
+            );
+        }
+        let unchanged = preview_response_for(Some(&frame), Some(0));
+        assert_eq!(unchanged.status(), http::StatusCode::NO_CONTENT);
+        assert_eq!(unchanged.body().len(), 0);
+        let absent = preview_response_for(None, None);
+        assert_eq!(absent.status(), http::StatusCode::NO_CONTENT);
+        assert_eq!(absent.body().len(), 0);
     }
 }

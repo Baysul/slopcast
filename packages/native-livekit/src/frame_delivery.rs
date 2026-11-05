@@ -21,8 +21,40 @@ static FRAME_TRACE_ENABLED: LazyLock<bool> =
 const I420_FREELIST_CAP: usize = 24;
 
 #[cfg(target_os = "linux")]
-static I420_FREELIST: LazyLock<Mutex<Vec<Vec<u8>>>> =
-    LazyLock::new(|| Mutex::new(Vec::with_capacity(I420_FREELIST_CAP)));
+static I420_FREELIST: LazyLock<Mutex<I420Freelist>> =
+    LazyLock::new(|| Mutex::new(I420Freelist::new()));
+
+#[cfg(target_os = "linux")]
+struct I420Freelist {
+    buffers: Vec<Vec<u8>>,
+    generation: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl I420Freelist {
+    fn new() -> Self {
+        Self {
+            buffers: Vec::with_capacity(I420_FREELIST_CAP),
+            generation: 0,
+        }
+    }
+
+    fn take(&mut self) -> (Vec<u8>, u64) {
+        (self.buffers.pop().unwrap_or_default(), self.generation)
+    }
+
+    fn recycle(&mut self, planes: Vec<u8>, generation: u64) {
+        if generation == self.generation && self.buffers.len() < I420_FREELIST_CAP {
+            self.buffers.push(planes);
+        }
+    }
+
+    fn clear(&mut self) {
+        // Buffers still held by GStreamer must not repopulate a cleared pool later.
+        self.generation = self.generation.wrapping_add(1);
+        self.buffers.clear();
+    }
+}
 
 #[cfg(target_os = "linux")]
 pub(crate) fn clear_i420_freelist() {
@@ -45,6 +77,7 @@ pub(crate) struct OwnedI420 {
     height: u32,
     layout: I420Layout,
     planes: Vec<u8>,
+    pool_generation: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -70,11 +103,11 @@ impl OwnedI420 {
         let layout = Self::layout(width, height).unwrap_or_else(|error| {
             unreachable!("I420 VideoInfo for {width}x{height} cannot fail to build: {error}")
         });
-        let mut planes = if let Ok(mut freelist) = I420_FREELIST.lock() {
-            freelist.pop().unwrap_or_default()
+        let (mut planes, pool_generation) = if let Ok(mut freelist) = I420_FREELIST.lock() {
+            freelist.take()
         } else {
             log::warn!("I420 freelist lock poisoned; allocating a fresh plane buffer");
-            Vec::new()
+            (Vec::new(), 0)
         };
         planes.resize(layout.size, 0);
         Self {
@@ -82,6 +115,7 @@ impl OwnedI420 {
             height,
             layout,
             planes,
+            pool_generation,
         }
     }
 
@@ -182,22 +216,13 @@ impl AsMut<[u8]> for OwnedI420 {
 }
 
 #[cfg(target_os = "linux")]
-impl OwnedI420 {
-    fn into_planes(mut self) -> Vec<u8> {
-        std::mem::take(&mut self.planes)
-    }
-}
-
-#[cfg(target_os = "linux")]
 impl Drop for OwnedI420 {
     fn drop(&mut self) {
         if self.planes.is_empty() {
             return;
         }
-        if let Ok(mut freelist) = I420_FREELIST.lock()
-            && freelist.len() < I420_FREELIST_CAP
-        {
-            freelist.push(std::mem::take(&mut self.planes));
+        if let Ok(mut freelist) = I420_FREELIST.lock() {
+            freelist.recycle(std::mem::take(&mut self.planes), self.pool_generation);
         }
     }
 }
@@ -250,7 +275,6 @@ pub(crate) type PreviewOutput = Arc<dyn Fn(Vec<u8>, i64) + Send + Sync>;
 const PREVIEW_FALLBACK_FPS: u32 = 30;
 const PREVIEW_MAX_FPS: u32 = 60;
 const PACER_CAPACITY: usize = 4;
-const HISTORY_CAPACITY: usize = 2;
 #[cfg(not(target_os = "linux"))]
 const PUBLICATION_RETENTION_CAPACITY: usize = 16;
 
@@ -519,31 +543,23 @@ struct HistoryFrame {
 }
 
 struct History {
-    frames: Vec<HistoryFrame>,
-    next: usize,
-    count: u64,
+    frame: Option<HistoryFrame>,
 }
 
 impl History {
     fn new() -> Self {
-        Self {
-            frames: (0..HISTORY_CAPACITY)
-                .map(|_| HistoryFrame {
-                    width: 0,
-                    height: 0,
-                    pts_us: 0,
-                    planes: Vec::new(),
-                })
-                .collect(),
-            next: 0,
-            count: 0,
-        }
+        Self { frame: None }
     }
 
     fn push(&mut self, sample: &VideoSample) {
         let strides = sample.buffer.strides();
         let (y, u, v) = sample.buffer.data();
-        let frame = &mut self.frames[self.next];
+        let frame = self.frame.get_or_insert_with(|| HistoryFrame {
+            width: 0,
+            height: 0,
+            pts_us: 0,
+            planes: Vec::new(),
+        });
         frame.width = sample.width;
         frame.height = sample.height;
         frame.pts_us = sample.pts_us;
@@ -553,15 +569,10 @@ impl History {
         let chroma_height = sample.height.div_ceil(2);
         append_active_rows(&mut frame.planes, u, strides.1, chroma_width, chroma_height);
         append_active_rows(&mut frame.planes, v, strides.2, chroma_width, chroma_height);
-        self.next = (self.next + 1) % HISTORY_CAPACITY;
-        self.count += 1;
     }
 
     fn newest(&self) -> Option<&HistoryFrame> {
-        if self.count == 0 {
-            return None;
-        }
-        Some(&self.frames[(self.next + HISTORY_CAPACITY - 1) % HISTORY_CAPACITY])
+        self.frame.as_ref()
     }
 }
 
@@ -1311,18 +1322,8 @@ fn warm_freelist(width: u32, height: u32) {
     if width == 0 || height == 0 {
         return;
     }
-    let warmed = [
-        OwnedI420::new(width, height).into_planes(),
-        OwnedI420::new(width, height).into_planes(),
-    ];
-    if let Ok(mut freelist) = I420_FREELIST.lock() {
-        for planes in warmed {
-            if freelist.len() >= I420_FREELIST_CAP {
-                break;
-            }
-            freelist.push(planes);
-        }
-    }
+    let warmed = [OwnedI420::new(width, height), OwnedI420::new(width, height)];
+    drop(warmed);
 }
 
 pub(crate) fn monotonic_us() -> i64 {
@@ -1501,6 +1502,24 @@ mod tests {
         if let Err(error) = gst::init() {
             panic!("GStreamer init failed: {error}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleared_freelist_rejects_buffers_released_by_an_old_pipeline() {
+        let mut freelist = I420Freelist::new();
+        let (_, generation) = freelist.take();
+        freelist.recycle(vec![1; 96], generation);
+        let (in_flight, generation) = freelist.take();
+        freelist.recycle(vec![2; 96], generation);
+
+        freelist.clear();
+        freelist.recycle(in_flight, generation);
+        assert_eq!(freelist.buffers.len(), 0);
+
+        let (_, current_generation) = freelist.take();
+        freelist.recycle(vec![3; 96], current_generation);
+        assert_eq!(freelist.take().0, vec![3; 96]);
     }
 
     fn submit_color_frame(ingress: &FrameIngress, pts_us: i64) {

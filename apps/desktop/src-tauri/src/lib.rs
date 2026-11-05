@@ -26,7 +26,6 @@ pub type App = tauri::App<CefRuntime>;
 mod e2e;
 
 use tauri::Manager;
-use tauri::http;
 use tauri_runtime_cef::{Cef, CefRuntime};
 
 const _FRONTEND_STAMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/slopcast-frontend-stamp"));
@@ -172,22 +171,8 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<(), tauri::Error> {
                 .build(),
         )
     };
-    let builder = builder.register_uri_scheme_protocol("frame", |_app, _request| {
-        // The renderer fetches this custom scheme cross-origin, so CORS is required.
-        let body = crate::capture::LATEST_FRAME
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_default();
-        // SAFETY: a valid header name/value + Vec<u8> body always succeeds.
-        match http::Response::builder()
-            .header(http::header::CONTENT_TYPE, "application/octet-stream")
-            .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(body)
-        {
-            Ok(r) => r,
-            Err(_) => unreachable!("valid header and body"),
-        }
+    let builder = builder.register_uri_scheme_protocol("frame", |_app, request| {
+        crate::capture::preview_response(&request)
     });
 
     let app = builder
