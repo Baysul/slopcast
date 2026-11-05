@@ -453,6 +453,11 @@ impl<E: LifecycleEffects> SessionMachine<E> {
 
     fn tick_connected(&mut self, now: Duration) {
         if let Some(error) = self.effects.poll_fault() {
+            log::warn!(
+                "Publisher session lost: {}: {}; reconnecting",
+                error.operation,
+                error.message
+            );
             self.last_error = Some(SessionError::effect(error));
             self.effects.install_dormant_binding();
             self.effects.teardown();

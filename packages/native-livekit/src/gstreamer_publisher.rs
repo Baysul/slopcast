@@ -140,6 +140,13 @@ pub(crate) fn load_plugins(plugin_dir: &Path) -> Result<(), String> {
         ));
     }
 
+    // When the scanner helper is unavailable (e.g. in an AppImage), scan_path
+    // loads plugins in-process. rswebrtc caches available payloaders while its
+    // types are registered, so register both RTP plugins before scanning it.
+    for name in ["libgstrtp.so", "libgstrsrtp.so"] {
+        gst::Plugin::load_file(plugin_dir.join(name))
+            .map_err(|error| format!("Failed to load bundled GStreamer plugin {name}: {error}"))?;
+    }
     gst::Registry::get().scan_path(plugin_dir);
 
     verify_required_elements()

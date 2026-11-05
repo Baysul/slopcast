@@ -1076,6 +1076,106 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires the bundled runtime from pnpm desktop:prepare-gstreamer"]
+    fn bundled_h264_discovery_survives_missing_plugin_scanner() -> Result<(), String> {
+        const CHILD: &str = "SLOPCAST_TEST_H264_DISCOVERY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Codec discovery is cached process-wide, so this must run before any other
+            // test initializes GStreamer or loads plugins from the host installation.
+            let registry = std::env::temp_dir()
+                .join(format!("slopcast-h264-registry-{}.bin", std::process::id()));
+            let output = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            )
+            .args([
+                "--ignored",
+                "--exact",
+                "gstreamer_encoder::tests::bundled_h264_discovery_survives_missing_plugin_scanner",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("GST_PLUGIN_SYSTEM_PATH_1_0", "")
+            .env("GST_PLUGIN_PATH_1_0", "")
+            .env("GST_REGISTRY_1_0", &registry)
+            .env(
+                "GST_PLUGIN_SCANNER_1_0",
+                registry.with_extension("missing-scanner"),
+            )
+            .output()
+            .map_err(|error| error.to_string())?;
+            let _ = std::fs::remove_file(registry);
+            assert!(
+                output.status.success(),
+                "isolated H.264 discovery failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(());
+        }
+
+        let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins");
+        crate::gstreamer_publisher::load_plugins(&plugin_dir)?;
+        let sink = gst::ElementFactory::make("livekitwebrtcsink")
+            .property("video-caps", gst::Caps::builder("video/x-h264").build())
+            .build()
+            .map_err(|error| error.to_string())?;
+        let signaller = sink.property::<gst::glib::Object>("signaller");
+        let (discovered, receiver) = std::sync::mpsc::channel();
+        signaller.connect("start", false, move |values| {
+            if let Ok(signaller) = values[0].get::<gst::glib::Object>() {
+                signaller.stop_signal_emission_by_name("start");
+            }
+            let _ = discovered.send(());
+            Some(true.to_value())
+        });
+        let pipeline = gst::Pipeline::new();
+        pipeline.add(&sink).map_err(|error| error.to_string())?;
+        let config = CaptureConfig {
+            width: 320,
+            height: 240,
+            fps: 30,
+            video_codec: Some("h264".into()),
+            max_bitrate: Some(500_000.0),
+            auto_bitrate: false,
+        };
+        let encoder = GstreamerEncoder::attach(&pipeline, &sink, &config)?;
+        let result = (|| {
+            pipeline
+                .set_state(gst::State::Playing)
+                .map_err(|error| error.to_string())?;
+            let bus = pipeline.bus().ok_or("test pipeline has no bus")?;
+            let info = gst_video::VideoInfo::builder(gst_video::VideoFormat::I420, 320, 240)
+                .build()
+                .map_err(|error| error.to_string())?;
+            for frame in 0..150_u64 {
+                let mut buffer = gst::Buffer::from_mut_slice(vec![0_u8; info.size()]);
+                if let Some(buffer) = buffer.get_mut() {
+                    buffer.set_pts(frame_duration(30) * frame);
+                    buffer.set_duration(frame_duration(30));
+                }
+                encoder
+                    .input
+                    .appsrc
+                    .push_buffer(buffer)
+                    .map_err(|error| error.to_string())?;
+                if let Some(message) = bus.pop_filtered(&[gst::MessageType::Error])
+                    && let gst::MessageView::Error(error) = message.view()
+                {
+                    return Err(format!("{}: {:?}", error.error(), error.debug()));
+                }
+                if receiver.try_recv().is_ok() {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(33));
+            }
+            Err("H.264 codec discovery never started the signaller".into())
+        })();
+        let _ = pipeline.set_state(gst::State::Null);
+        result
+    }
+
+    #[test]
     fn bitrate_conversion_uses_kilobits_per_second() {
         assert_eq!(bitrate_bps_to_kbps(20_000_000.0), 20_000);
         assert_eq!(bitrate_bps_to_kbps(8_000_499.0), 8_000);
