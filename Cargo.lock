@@ -5468,6 +5468,7 @@ name = "slopcast"
 version = "0.1.0"
 dependencies = [
  "ashpd",
+ "dirs",
  "futures-util",
  "libc",
  "log",

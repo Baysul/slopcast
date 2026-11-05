@@ -2,6 +2,10 @@ pub mod audio;
 pub mod capture;
 pub mod config;
 pub mod context;
+#[cfg(target_os = "linux")]
+mod diagnostics;
+#[cfg(target_os = "linux")]
+pub use diagnostics::configure_native_output;
 mod controls;
 pub mod dto;
 pub mod platform;
@@ -107,7 +111,9 @@ fn serve_frontend(host: &str, port: u16, handle: &AppHandle) -> std::io::Result<
     clippy::too_many_lines,
     reason = "app bootstrap is inherently sequential"
 )]
-pub fn run() {
+/// # Errors
+/// Returns an error if the desktop runtime or application setup fails.
+pub fn run(context: tauri::Context<CefRuntime>) -> Result<(), tauri::Error> {
     let cef = Cef::default().component_updates(false).command_line_args([
         ("--no-default-browser-check", None),
         ("--disable-default-apps", None),
@@ -133,6 +139,25 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
+                .level_for("zbus", log::LevelFilter::Warn)
+                .level_for("tracing::span", log::LevelFilter::Warn)
+                .max_file_size(5_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout).filter(
+                        |metadata| {
+                            let application = ["slopcast", "native_livekit", "native_rust"]
+                                .iter()
+                                .any(|prefix| metadata.target().starts_with(prefix));
+                            cfg!(debug_assertions)
+                                || metadata.level() == log::Level::Error
+                                || (application && metadata.level() == log::Level::Warn)
+                        },
+                    ),
+                ])
                 .build(),
         );
 
@@ -257,13 +282,7 @@ pub fn run() {
             capture::set_preview_viewport,
             capture::clear_preview_viewport,
         ])
-        .build(tauri::generate_context!())
-        .map_err(|e| eprintln!("failed to build tauri application: {e}"))
-        .ok();
-
-    let Some(app) = app else {
-        return;
-    };
+        .build(context)?;
 
     app.run(|app_handle, event| {
         if let tauri::RunEvent::WindowEvent {
@@ -314,4 +333,5 @@ pub fn run() {
             let _ = native_livekit::stop_desktop_capture();
         }
     });
+    Ok(())
 }

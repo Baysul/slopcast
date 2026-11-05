@@ -1079,42 +1079,12 @@ mod tests {
     #[ignore = "requires the bundled runtime from pnpm desktop:prepare-gstreamer"]
     fn bundled_h264_discovery_survives_missing_plugin_scanner() -> Result<(), String> {
         const CHILD: &str = "SLOPCAST_TEST_H264_DISCOVERY_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            // Codec discovery is cached process-wide, so this must run before any other
-            // test initializes GStreamer or loads plugins from the host installation.
-            let registry = std::env::temp_dir()
-                .join(format!("slopcast-h264-registry-{}.bin", std::process::id()));
-            let output = std::process::Command::new(
-                std::env::current_exe().map_err(|error| error.to_string())?,
-            )
-            .args([
-                "--ignored",
-                "--exact",
-                "gstreamer_encoder::tests::bundled_h264_discovery_survives_missing_plugin_scanner",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("GST_PLUGIN_SYSTEM_PATH_1_0", "")
-            .env("GST_PLUGIN_PATH_1_0", "")
-            .env("GST_REGISTRY_1_0", &registry)
-            .env(
-                "GST_PLUGIN_SCANNER_1_0",
-                registry.with_extension("missing-scanner"),
-            )
-            .output()
-            .map_err(|error| error.to_string())?;
-            let _ = std::fs::remove_file(registry);
-            assert!(
-                output.status.success(),
-                "isolated H.264 discovery failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return Ok(());
-        }
-
         let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins");
+        if std::env::var_os(CHILD).is_none() {
+            return isolated_h264_discovery(&plugin_dir, false);
+        }
+
         crate::gstreamer_publisher::load_plugins(&plugin_dir)?;
         let sink = gst::ElementFactory::make("livekitwebrtcsink")
             .property("video-caps", gst::Caps::builder("video/x-h264").build())
@@ -1173,6 +1143,62 @@ mod tests {
         })();
         let _ = pipeline.set_state(gst::State::Null);
         result
+    }
+
+    #[test]
+    #[ignore = "requires the bundled runtime from pnpm desktop:prepare-gstreamer"]
+    fn bundled_h264_discovery_during_gstreamer_init() -> Result<(), String> {
+        let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins");
+        isolated_h264_discovery(&plugin_dir, true)
+    }
+
+    fn isolated_h264_discovery(
+        plugin_dir: &std::path::Path,
+        initial_scan: bool,
+    ) -> Result<(), String> {
+        // Codec discovery is cached process-wide. Exercise both a scan during gst_init
+        // and the scanner-less fallback without host plugins or an existing registry.
+        let registry = std::env::temp_dir().join(format!(
+            "slopcast-h264-registry-{}-{initial_scan}.bin",
+            std::process::id()
+        ));
+        let scanner = if initial_scan {
+            plugin_dir.join("gst-plugin-scanner")
+        } else {
+            registry.with_extension("missing-scanner")
+        };
+        let output = std::process::Command::new(
+            std::env::current_exe().map_err(|error| error.to_string())?,
+        )
+        .args([
+            "--ignored",
+            "--exact",
+            "gstreamer_encoder::tests::bundled_h264_discovery_survives_missing_plugin_scanner",
+            "--nocapture",
+        ])
+        .env("SLOPCAST_TEST_H264_DISCOVERY_CHILD", "1")
+        .env("GST_PLUGIN_SYSTEM_PATH_1_0", "")
+        .env(
+            "GST_PLUGIN_PATH_1_0",
+            if initial_scan {
+                plugin_dir
+            } else {
+                std::path::Path::new("")
+            },
+        )
+        .env("GST_REGISTRY_1_0", &registry)
+        .env("GST_PLUGIN_SCANNER_1_0", scanner)
+        .output()
+        .map_err(|error| error.to_string())?;
+        let _ = std::fs::remove_file(registry);
+        assert!(
+            output.status.success(),
+            "isolated H.264 discovery failed (initial_scan={initial_scan}):\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
     }
 
     #[test]
