@@ -8,18 +8,18 @@ Assumed scope: Linux Wayland remains the primary target; preserve Linux amd64/ar
 
 ## What the repository already provides
 
-| Area | Current implementation | Migration treatment |
-| --- | --- | --- |
-| Video capture, encoding, publication | `packages/native-livekit`; Linux GStreamer/PipeWire, Windows capture and LiveKit paths | Retain, including `publisher_session.rs`, `frame_delivery.rs`, and the `vendor/webrtc-sys` patch. |
-| Application audio and metering | `packages/native-rust`; Linux PipeWire and Windows audio code | Retain. Preserve PCM delivery, mute, source resolution, waveform deduplication and application grouping. |
-| Native command layer | `apps/desktop/src-tauri/src/{audio,capture,room,context,settings,preferences,config}.rs` | Extract application services and models from Tauri handles, state injection, events and async helpers. |
-| Presenter behavior | Renderer `main.tsx`, `hooks/useNativeRoom.ts`, `useAudioCapture.ts`, `useStreamSettings.ts`, telemetry hooks and utilities | Port behavior into Rust services and GPUI views. This includes substantial application logic, not only layout. |
-| Preview transport | `capture.rs` callback/cache → `frame.localhost` → `utils/preview-frames.ts` → `PreviewCanvas.tsx` | Replace HTTP/IPC polling and browser canvases with an in-process frame handoff and GPUI image rendering. |
-| Desktop integration | `controls.rs`, `shortcuts.rs`, `tray_pulse.rs`, `window_drag.rs`, `window_icons.rs`, `diagnostics.rs` | Port lifecycle behavior; replace Tauri-specific implementations. Keep useful portal/notification code. |
-| Settings | JSON persistence through `SettingsStorage`, including selectable settings directory | Reuse schema, validation and atomic writes; preserve existing locations. |
-| Tests | Rust media tests, TypeScript logic tests, desktop Playwright/CDP harness | Retain media tests; port desktop logic tests; replace desktop browser driving with GPUI tests/native integration. |
-| Distribution | Tauri manifests, bundle scripts, CEF caches and build/release workflows | Replace desktop packaging while retaining GStreamer preparation and required native libraries. |
-| Spectators/API | `apps/web`, `apps/server`, shared TypeScript packages | Keep working throughout. React and pnpm remain needed for these applications. |
+| Area                                 | Current implementation                                                                                                     | Migration treatment                                                                                               |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Video capture, encoding, publication | `packages/native-livekit`; Linux GStreamer/PipeWire, Windows capture and LiveKit paths                                     | Retain, including `publisher_session.rs`, `frame_delivery.rs`, and the `vendor/webrtc-sys` patch.                 |
+| Application audio and metering       | `packages/native-rust`; Linux PipeWire and Windows audio code                                                              | Retain. Preserve PCM delivery, mute, source resolution, waveform deduplication and application grouping.          |
+| Native command layer                 | `apps/desktop/src-tauri/src/{audio,capture,room,context,settings,preferences,config}.rs`                                   | Extract application services and models from Tauri handles, state injection, events and async helpers.            |
+| Presenter behavior                   | Renderer `main.tsx`, `hooks/useNativeRoom.ts`, `useAudioCapture.ts`, `useStreamSettings.ts`, telemetry hooks and utilities | Port behavior into Rust services and GPUI views. This includes substantial application logic, not only layout.    |
+| Preview transport                    | `capture.rs` callback/cache → `frame.localhost` → `utils/preview-frames.ts` → `PreviewCanvas.tsx`                          | Replace HTTP/IPC polling and browser canvases with an in-process frame handoff and GPUI image rendering.          |
+| Desktop integration                  | `controls.rs`, `shortcuts.rs`, `tray_pulse.rs`, `window_drag.rs`, `window_icons.rs`, `diagnostics.rs`                      | Port lifecycle behavior; replace Tauri-specific implementations. Keep useful portal/notification code.            |
+| Settings                             | JSON persistence through `SettingsStorage`, including selectable settings directory                                        | Reuse schema, validation and atomic writes; preserve existing locations.                                          |
+| Tests                                | Rust media tests, TypeScript logic tests, desktop Playwright/CDP harness                                                   | Retain media tests; port desktop logic tests; replace desktop browser driving with GPUI tests/native integration. |
+| Distribution                         | Tauri manifests, bundle scripts, CEF caches and build/release workflows                                                    | Replace desktop packaging while retaining GStreamer preparation and required native libraries.                    |
+| Spectators/API                       | `apps/web`, `apps/server`, shared TypeScript packages                                                                      | Keep working throughout. React and pnpm remain needed for these applications.                                     |
 
 The existing media crates have no Tauri dependency in their manifests. This is the main reason to migrate the shell and application coordination without rewriting capture/publication.
 
@@ -150,13 +150,13 @@ Updated 2026-11-06. `packages/desktop-core` and `apps/desktop-gpui` are workspac
 
 ### What exists
 
-| Piece | State |
-| --- | --- |
+| Piece                   | State                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/desktop-core` | Application core: typed room API client, config discovery, settings/preferences storage with the existing files and atomic writes, audio listing/selection/grouping, codec ranking, bitrate recommendation, telemetry smoothing, shortcut parsing, capture adapter over the two native crates, presenter state machine. No Tauri, CEF or GPUI dependency. |
-| Presenter | Owns an owned Tokio runtime, publishes `Snapshot`s over a watch channel and `Event`s over a bounded channel. Commands are typed; async completions are tagged with capture/room/endpoint generations so late results cannot revive a stopped session, and resources such requests created are released. |
-| `apps/desktop-gpui` | Single main window: room creation, share link/copy, spectators, preview, share/go-live/switch/stop, mute, audio source choice, telemetry, notices and confirmation/source-picker overlays. Reads snapshots; dispatches commands; owns no session state. |
-| Preview transport | Native callback → `MediaHub` latest-frame slot → GPUI `RenderImage` → `img(..).object_fit(Contain)`. No HTTP, no JSON, no image encoding. The preview area registers its size in physical pixels and clears the viewport when capture stops. |
-| Shutdown | Quit confirmation runs in the core; `QuitNow` closes the window, and an app-quit hook runs bounded room deletion plus native teardown on a background thread. |
+| Presenter               | Owns an owned Tokio runtime, publishes `Snapshot`s over a watch channel and `Event`s over a bounded channel. Commands are typed; async completions are tagged with capture/room/endpoint generations so late results cannot revive a stopped session, and resources such requests created are released.                                                   |
+| `apps/desktop-gpui`     | Single main window: room creation, share link/copy, spectators, preview, share/go-live/switch/stop, mute, audio source choice, telemetry, notices and confirmation/source-picker overlays. Reads snapshots; dispatches commands; owns no session state.                                                                                                   |
+| Preview transport       | Native callback → `MediaHub` latest-frame slot → GPUI `RenderImage` → `img(..).object_fit(Contain)`. No HTTP, no JSON, no image encoding. The preview area registers its size in physical pixels and clears the viewport when capture stops.                                                                                                              |
+| Shutdown                | Quit confirmation runs in the core; `QuitNow` closes the window, and an app-quit hook runs bounded room deletion plus native teardown on a background thread.                                                                                                                                                                                             |
 
 ### Verified
 
