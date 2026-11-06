@@ -1080,7 +1080,7 @@ mod tests {
     fn bundled_h264_discovery_survives_missing_plugin_scanner() -> Result<(), String> {
         const CHILD: &str = "SLOPCAST_TEST_H264_DISCOVERY_CHILD";
         let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins");
+            .join("../../apps/desktop/resources/gstreamer-plugins");
         if std::env::var_os(CHILD).is_none() {
             return isolated_h264_discovery(&plugin_dir, false);
         }
@@ -1149,7 +1149,7 @@ mod tests {
     #[ignore = "requires the bundled runtime from pnpm desktop:prepare-gstreamer"]
     fn bundled_h264_discovery_during_gstreamer_init() -> Result<(), String> {
         let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins");
+            .join("../../apps/desktop/resources/gstreamer-plugins");
         isolated_h264_discovery(&plugin_dir, true)
     }
 

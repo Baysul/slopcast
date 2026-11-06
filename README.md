@@ -16,9 +16,9 @@
 
 You need:
 
-- Node.js 24 or newer and pnpm 9 or newer.
-- The [Rust toolchain](https://rustup.rs) and a C++20 compiler (gcc 10+, clang 10+, or Build Tools for Visual Studio 2022).
-- On Linux: PipeWire (`libpipewire-0.3-dev`), X11 (`libx11-dev`), GStreamer development packages, the `gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-ugly` and `gstreamer1.0-vaapi` plugins, `xdg-desktop-portal`, `pkg-config`, and `clang`.
+- Node.js 24 or newer and the pnpm version pinned in `package.json`.
+- The [Rust toolchain](https://rustup.rs) pinned in `rust-toolchain.toml`, plus clang 21 or newer on Linux or Build Tools for Visual Studio 2022 on Windows.
+- On Linux: PipeWire (`libpipewire-0.3-dev`), X11 (`libx11-dev`), a Vulkan-capable graphics driver, fontconfig/FreeType and xkbcommon development libraries, GStreamer development packages, the `gstreamer1.0-plugins-bad`, `gstreamer1.0-plugins-ugly` and `gstreamer1.0-vaapi` plugins, `xdg-desktop-portal`, `pkg-config`, and `clang`.
 
 From the repository root, install dependencies and build the desktop app once:
 
@@ -42,7 +42,9 @@ pnpm dev:web
 pnpm dev:desktop
 ```
 
-Click **Create Live Room** in the desktop app and copy the link. Anyone who opens it watches in a browser.
+The desktop is a native Rust application built with GPUI Kit. `pnpm build:desktop` produces `target/release/slopcast`; run it directly or use `pnpm dev:desktop` for a debug build. See [native desktop development and packaging](docs/native-desktop.md).
+
+Click **Create room** in the desktop app and copy the link. Anyone who opens it watches in a browser.
 
 ## Background
 

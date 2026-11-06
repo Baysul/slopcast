@@ -36,9 +36,10 @@ const passResolution = parseResolution(process.env.E2E_RESOLUTION ?? '1080p');
 const passBitrateFor = (codec: string): number => (codec === 'av1' ? 8_000_000 : passBitrate);
 
 interface GpuInfo {
-  eglVendor: string | null;
-  glRenderer: string | null;
-  glVersion: string | null;
+  backend: string | null;
+  deviceName: string | null;
+  driverName: string | null;
+  driverInfo: string | null;
   softwareRasterizer: boolean;
 }
 
@@ -48,9 +49,10 @@ const isStringArray = (value: unknown): value is string[] =>
 const isTrue = (value: unknown): boolean => value === true;
 
 const readGpuInfo = (value: JsonObject): GpuInfo => ({
-  eglVendor: readString(value, 'eglVendor') ?? null,
-  glRenderer: readString(value, 'glRenderer') ?? null,
-  glVersion: readString(value, 'glVersion') ?? null,
+  backend: readString(value, 'backend') ?? null,
+  deviceName: readString(value, 'deviceName') ?? null,
+  driverName: readString(value, 'driverName') ?? null,
+  driverInfo: readString(value, 'driverInfo') ?? null,
   softwareRasterizer: isTrue(value.softwareRasterizer),
 });
 
@@ -150,7 +152,7 @@ interface PresenterPhase {
 }
 
 interface LogEntry {
-  source: 'server' | 'web' | 'desktop-main' | 'desktop-renderer' | 'spectator' | 'livekit';
+  source: 'server' | 'web' | 'desktop-main' | 'spectator' | 'livekit';
   message: string;
   timestamp: number;
 }
@@ -265,30 +267,6 @@ const FATAL_PATTERNS = [
 const log = (prefix: string, msg: string): void => {
   const ts = new Date().toISOString().slice(11, 23);
   process.stdout.write(`[${ts}] [${prefix}] ${msg}\n`);
-};
-
-const killPort = (port: number): void => {
-  try {
-    if (process.platform === 'linux') {
-      execSync(`fuser -k ${port}/tcp 2>/dev/null || true`, { stdio: 'pipe' });
-    } else if (process.platform === 'win32') {
-      execSync(`netstat -ano | findstr :${port}`, { stdio: 'pipe' });
-    }
-  } catch {
-    log('CLEANUP', `Port ${port} was free`);
-  }
-};
-
-const killStraySlopcast = (): void => {
-  try {
-    if (process.platform === 'linux') {
-      execSync(`pkill -f 'target/release/slopcast' 2>/dev/null || true`, { stdio: 'pipe' });
-    } else if (process.platform === 'win32') {
-      execSync('taskkill /IM slopcast.exe /F >nul 2>&1 || exit /b 0', { stdio: 'pipe' });
-    }
-  } catch {
-    log('CLEANUP', 'No stray app processes to kill');
-  }
 };
 
 const httpGet = (url: string): Promise<number> =>
@@ -429,14 +407,15 @@ const ensureLiveKit = async (url: string, logEntries: LogEntry[]): Promise<Child
       `LiveKit SFU unreachable at ${url}. Check network/credentials (slopcast.config.json or LIVEKIT_URL).`,
     );
   }
+  if (await tcpCheck(endpoint.host, endpoint.port)) {
+    log('LIVEKIT', 'Using the reachable local LiveKit server');
+    return null;
+  }
   if (!findOnPath('livekit-server')) {
     throw new Error(
       `LiveKit SFU unreachable at ${url} and no livekit-server binary on PATH. ` +
         'Start one manually (livekit-server --dev) or point LIVEKIT_URL at a reachable instance.',
     );
-  }
-  for (const port of [endpoint.port, 7881, 7882]) {
-    killPort(port);
   }
   await new Promise((r) => {
     setTimeout(r, 500);
@@ -444,7 +423,7 @@ const ensureLiveKit = async (url: string, logEntries: LogEntry[]): Promise<Child
   log('LIVEKIT', `Starting native livekit-server --dev on :${endpoint.port}...`);
   const proc = spawnLogging(
     'livekit-server',
-    ['--dev', '--bind', '0.0.0.0', '--port', String(endpoint.port)],
+    ['--dev', '--bind', '127.0.0.1', '--port', String(endpoint.port)],
     'livekit',
     logEntries,
   );
@@ -460,38 +439,6 @@ const ensureLiveKit = async (url: string, logEntries: LogEntry[]): Promise<Child
   }
   proc.kill('SIGTERM');
   throw new Error('livekit-server did not open its port within the startup timeout');
-};
-
-const findSpotifyProcess = (): boolean => {
-  try {
-    if (process.platform === 'linux') {
-      const out = execSync('pgrep -x spotify 2>/dev/null || true', { encoding: 'utf-8' }).trim();
-      return out.length > 0;
-    }
-    if (process.platform === 'win32') {
-      const out = execSync('tasklist /FI "IMAGENAME eq Spotify.exe" 2>nul', { encoding: 'utf-8' });
-      return out.includes('Spotify.exe');
-    }
-  } catch (err) {
-    log('SPOTIFY', `Process detection failed: ${String(err)}`);
-  }
-  return false;
-};
-
-const launchSpotify = (): boolean => {
-  try {
-    if (process.platform === 'linux') {
-      execSync('nohup spotify >/dev/null 2>&1 &', { stdio: 'ignore', timeout: 3000 });
-      return true;
-    }
-    if (process.platform === 'win32') {
-      execSync('start "" "spotify:"', { stdio: 'ignore', timeout: 3000 });
-      return true;
-    }
-  } catch (err) {
-    log('SPOTIFY', `Failed to launch Spotify: ${String(err)}`);
-  }
-  return false;
 };
 
 const validateLogs = (entries: LogEntry[], label: string): LogEntry[] => {
@@ -520,15 +467,15 @@ const validateGpuReport = (report: GpuInfo | null): string[] => {
   const issues: string[] = [];
 
   if (!report) {
-    issues.push('GPU report is null — probe_gpu_info returned nothing');
+    issues.push('GPU report is null — native renderer returned no GPU specifications');
     return issues;
   }
 
-  if (report.eglVendor === null || report.eglVendor.length === 0) {
-    issues.push('GPU probe reported no EGL vendor');
+  if (report.driverName === null || report.driverName.length === 0) {
+    issues.push('Native renderer reported no driver');
   }
 
-  if (report.softwareRasterizer) {
+  if (report.softwareRasterizer && process.env.E2E_ALLOW_SOFTWARE !== '1') {
     issues.push('GPU is software-rendered (llvmpipe/softpipe/SwiftShader)');
   }
 
@@ -550,7 +497,6 @@ const ensureServers = async (config: AppConfig, logEntries: LogEntry[]): Promise
     await pollHealth(`${config.apiEndpoint}/health`, 1000, 'API server');
     log('SPAWN', 'API server is already running and healthy');
   } catch {
-    killPort(config.serverPort);
     await new Promise((r) => {
       setTimeout(r, 500);
     });
@@ -563,27 +509,12 @@ const ensureServers = async (config: AppConfig, logEntries: LogEntry[]): Promise
     await pollHealth(config.websiteUrl, 1000, 'Web server');
     log('SPAWN', 'Web dev server is already running and healthy');
   } catch {
-    killPort(config.webPort);
     await new Promise((r) => {
       setTimeout(r, 500);
     });
     log('SPAWN', 'Starting Web dev server...');
     procs.webProc = spawnLogging('pnpm', ['--filter', 'web', 'dev'], 'web', logEntries);
     await pollHealth(config.websiteUrl, STARTUP_TIMEOUT_MS, 'Web server');
-  }
-
-  log('SPOTIFY', 'Checking Spotify process...');
-  const spotifyRunning = findSpotifyProcess();
-  if (spotifyRunning) {
-    log('SPOTIFY', 'Spotify is already running');
-  } else {
-    log('SPOTIFY', 'Spotify not running — attempting to launch...');
-    const launched = launchSpotify();
-    if (launched) {
-      log('SPOTIFY', 'Spotify launched successfully');
-    } else {
-      log('SPOTIFY', 'Could not launch Spotify (may not be installed)');
-    }
   }
 
   return procs;
@@ -662,24 +593,22 @@ const runPresenterPhase = async (
   captureMode: string,
   ownProcess: (process: ChildProcess) => void,
 ): Promise<PresenterPhaseResult> => {
-  log('TEST', `=== Step 2: Presenter Automation (Playwright CDP + Tauri, codec=${codec}) ===`);
+  log('TEST', `=== Step 2: Presenter Automation (native core, codec=${codec}) ===`);
 
   const appBinary = process.env.E2E_APP_BINARY_PATH ?? path.join(REPO_ROOT, 'target', 'release', 'slopcast');
   if (!existsSync(appBinary)) {
     throw new Error(
-      `Tauri e2e binary not found at ${appBinary}. ` +
-        'Build it with: VITE_E2E=1 pnpm --filter desktop tauri build --features e2e ' +
-        '(add --no-bundle when AppImage bundling is unavailable in the environment)',
+      `Native e2e binary not found at ${appBinary}. ` +
+        'Build it with: pnpm desktop:prepare-gstreamer && cargo build --release -p slopcast --features e2e',
     );
   }
-  log('TAURI', `Launching Tauri app from ${appBinary}`);
+  log('NATIVE', `Launching native app from ${appBinary}`);
 
   rmSync(PRESENTER_RELEASE_FLAG, { force: true });
   rmSync(PRESENTER_PHASE_JSON, { force: true });
   rmSync(PRESENTER_STOP_FLAG, { force: true });
   rmSync(PRESENTER_STOPPED_FLAG, { force: true });
   rmSync(PRESENTER_SPECTATOR_READY_FLAG, { force: true });
-  killStraySlopcast();
 
   const sharedEnv = {
     ...process.env,
@@ -687,12 +616,26 @@ const runPresenterPhase = async (
     SLOPCAST_E2E_CAPTURE: captureMode === 'portal' ? '' : 'synthetic',
     XDG_CONFIG_HOME: path.join(REPO_ROOT, 'test-output', 'e2e-userdata'),
   };
-  const appProc = spawn(appBinary, [], {
-    cwd: path.dirname(appBinary),
-    env: sharedEnv,
+  const presenterProc = spawn(appBinary, [], {
+    cwd: REPO_ROOT,
+    env: {
+      ...sharedEnv,
+      SLOPCAST_SETTINGS_DIR: path.join(OUTPUT_DIR, 'native-settings'),
+      API_ENDPOINT: config.apiEndpoint,
+      E2E_CAPTURE: captureMode,
+      E2E_CODEC: codec,
+      E2E_EXPECTED_BITRATE: String(passBitrateFor(codec)),
+      E2E_EXPECTED_FPS: String(passFps),
+      E2E_RESOLUTION: passResolution,
+      E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
+      E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
+      E2E_SPECTATOR_READY_FLAG: PRESENTER_SPECTATOR_READY_FLAG,
+      E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
+      E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  ownProcess(appProc);
+  ownProcess(presenterProc);
   const attachOutput = (stream: NodeJS.ReadableStream): void => {
     stream.on('data', (data: Buffer) => {
       for (const line of data.toString().split('\n').filter(Boolean)) {
@@ -700,40 +643,10 @@ const runPresenterPhase = async (
       }
     });
   };
-  attachOutput(appProc.stdout);
-  attachOutput(appProc.stderr);
-  appProc.on('error', (err) => {
-    log('PROCESS', `presenter binary spawn error: ${err.message}`);
-  });
-
-  const presenterProc = spawn(
-    'pnpm',
-    ['--filter', 'desktop', 'exec', 'node', '../../tests/e2e/desktop/presenter.playwright.ts'],
-    {
-      cwd: REPO_ROOT,
-      env: {
-        ...sharedEnv,
-        E2E_CAPTURE: captureMode,
-        E2E_CODEC: codec,
-        E2E_EXPECTED_BITRATE: String(passBitrateFor(codec)),
-        E2E_EXPECTED_FPS: String(passFps),
-        E2E_PHASE_JSON: PRESENTER_PHASE_JSON,
-        E2E_RELEASE_FLAG: PRESENTER_RELEASE_FLAG,
-        E2E_SPECTATOR_READY_FLAG: PRESENTER_SPECTATOR_READY_FLAG,
-        E2E_STOPPED_FLAG: PRESENTER_STOPPED_FLAG,
-        E2E_STOP_FLAG: PRESENTER_STOP_FLAG,
-        E2E_WEBSITE_URL: config.websiteUrl,
-        FORCE_COLOR: '0',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  ownProcess(presenterProc);
-
   attachOutput(presenterProc.stdout);
   attachOutput(presenterProc.stderr);
-  presenterProc.on('error', (err) => {
-    log('PROCESS', `presenter script spawn error: ${err.message}`);
+  presenterProc.on('error', (error) => {
+    log('PROCESS', `presenter process failed: ${error.message}`);
   });
 
   const phase = await waitForPresenterPhase(presenterProc, PRESENTER_TIMEOUT_MS);
@@ -772,12 +685,12 @@ const runPresenterPhase = async (
 
   if (phase.gpuReport) {
     writeFileSync(GPU_REPORT_PATH, JSON.stringify(phase.gpuReport, null, 2));
-    log('TAURI', `GPU report written to ${GPU_REPORT_PATH}`);
+    log('NATIVE', `GPU report written to ${GPU_REPORT_PATH}`);
   }
 
-  log('TAURI', `Room created: code=${phase.roomCode} url=${phase.shareUrl}`);
+  log('NATIVE', `Room created: code=${phase.roomCode} url=${phase.shareUrl}`);
   log(
-    'TAURI',
+    'NATIVE',
     `Presenter telemetry: framesEncoded=${phase.videoFramesEncoded} bytesSent=${phase.videoBytesSent} ` +
       `captureFramesPushed=${phase.captureFramesPushed} previewFramesSent=${phase.previewFramesSent} ` +
       `flowing=${phase.telemetryFlowing}`,
@@ -788,20 +701,11 @@ const runPresenterPhase = async (
 
 const waitForSpectatorConnection = async (page: Page, result: TestResult): Promise<void> => {
   try {
-    await page.waitForFunction(
-      () => {
-        const badges = document.querySelectorAll('[role="status"]');
-        for (const badge of badges) {
-          const text = badge.textContent.toLowerCase();
-          if (text.includes('live') || text.includes('connecting') || text.includes('waiting')) {
-            return true;
-          }
-        }
-        return false;
-      },
-      undefined,
-      { timeout: SPECTATOR_CONNECT_TIMEOUT_MS },
-    );
+    await page
+      .getByRole('status')
+      .filter({ hasText: /live|connecting|waiting/iu })
+      .first()
+      .waitFor({ state: 'attached', timeout: SPECTATOR_CONNECT_TIMEOUT_MS });
     log('SPECTATOR', 'Connection status badge visible');
     result.spectatorConnected = true;
   } catch (err) {
@@ -1070,20 +974,11 @@ const runPresenterStopRoundTrip = async (page: Page, result: TestResult): Promis
     return;
   }
   try {
-    await page.waitForFunction(
-      () => {
-        const badges = document.querySelectorAll('[role="status"]');
-        for (const badge of badges) {
-          const text = badge.textContent.toLowerCase();
-          if (text.includes('stream ended') || text.includes('presenter left')) {
-            return true;
-          }
-        }
-        return false;
-      },
-      undefined,
-      { timeout: STREAM_END_TIMEOUT_MS },
-    );
+    await page
+      .getByRole('status')
+      .filter({ hasText: /stream ended|presenter left/iu })
+      .first()
+      .waitFor({ state: 'attached', timeout: STREAM_END_TIMEOUT_MS });
     result.spectatorNotifiedOfStop = true;
     log('SPECTATOR', 'Badge reports the stream ended — stop propagated to the spectator');
   } catch (err) {
@@ -1093,6 +988,7 @@ const runPresenterStopRoundTrip = async (page: Page, result: TestResult): Promis
 };
 
 const runSpectatorPhase = async (
+  config: AppConfig,
   logEntries: LogEntry[],
   result: TestResult,
   codec: string,
@@ -1116,6 +1012,14 @@ const runSpectatorPhase = async (
   try {
     const context = await browser.newContext({
       viewport: { height: 720, width: 1280 },
+    });
+    // The checked-in development config uses the default API port. Keep this
+    // isolated run on the endpoint selected for its native presenter and server.
+    await context.route(new URL('/config.js', config.websiteUrl).toString(), async (route) => {
+      await route.fulfill({
+        body: `window.slopcastConfig = ${JSON.stringify({ apiEndpoint: config.apiEndpoint })};`,
+        contentType: 'application/javascript',
+      });
     });
     const spectatorPage = await context.newPage();
 
@@ -1200,7 +1104,7 @@ const runSpectatorPhase = async (
 const validateDiagnostics = (result: TestResult, passLogEntries: LogEntry[], codec: string): void => {
   log('TEST', '=== Step 4: Diagnostic Validation ===');
 
-  const desktopLogs = passLogEntries.filter((e) => e.source === 'desktop-main' || e.source === 'desktop-renderer');
+  const desktopLogs = passLogEntries.filter((e) => e.source === 'desktop-main');
   const desktopErrors = validateLogs(desktopLogs, 'Desktop');
   result.consoleErrors.push(...desktopErrors);
   if (desktopErrors.length > 0) {
@@ -1253,7 +1157,7 @@ const shutdownResources = async (
   browser: Browser | null,
   presenterProc: ChildProcess | null,
   procs: ServerProcs,
-  config: AppConfig,
+  _config: AppConfig,
 ): Promise<void> => {
   log('CLEANUP', 'Shutting down...');
   if (browser) {
@@ -1277,9 +1181,6 @@ const shutdownResources = async (
       log('CLEANUP', `Process kill failed: ${String(err)}`);
     }
   }
-
-  killPort(config.serverPort);
-  killPort(config.webPort);
 };
 
 const runTest = async (): Promise<TestResult> => {
@@ -1336,35 +1237,6 @@ const runTest = async (): Promise<TestResult> => {
   result.codecsTested = codecs;
   log('TEST', `Capture mode: ${captureMode}; codecs under test: ${codecs.join(', ')}`);
 
-  const streamSettingsPath = path.join(OUTPUT_DIR, 'e2e-userdata', 'slopcast', 'stream-settings.json');
-  const writeStreamSettingsForPass = (codec: string): void => {
-    if (captureMode === 'portal') {
-      return;
-    }
-    const bitrateLimit = passBitrateFor(codec);
-    mkdirSync(path.dirname(streamSettingsPath), { recursive: true });
-    writeFileSync(
-      streamSettingsPath,
-      JSON.stringify(
-        {
-          apiEndpoint: 'http://localhost:3001',
-          autoBitrate: false,
-          bitrateLimit,
-          fps: passFps,
-          motionMode: 'static',
-          resolution: passResolution,
-          videoCodec: codec,
-        },
-        null,
-        2,
-      ),
-    );
-    log(
-      'CONFIG',
-      `Wrote stream settings for codec ${codec}: ${passResolution}@${passFps}, ${Math.round(bitrateLimit / 1_000_000)} Mbps`,
-    );
-  };
-
   let browser: Browser | null = null;
   let presenterProc: ChildProcess | null = null;
   let procs: ServerProcs = { livekitProc: null, serverProc: null, webProc: null };
@@ -1414,7 +1286,6 @@ const runTest = async (): Promise<TestResult> => {
     result.spectatorVideoWidth = 0;
     result.spectatorVideoHeight = 0;
     result.spectatorCodec = null;
-    writeStreamSettingsForPass(codec);
     log('TEST', `=== Pass: codec=${codec} (${captureMode} capture) ===`);
     let fatalError: string | null = null;
     try {
@@ -1424,7 +1295,7 @@ const runTest = async (): Promise<TestResult> => {
 
       await logRoomPublications(config, result.roomCode);
 
-      browser = await runSpectatorPhase(logEntries, result, codec, captureMode);
+      browser = await runSpectatorPhase(config, logEntries, result, codec, captureMode);
     } catch (err) {
       fatalError = err instanceof Error ? err.message : String(err);
       log('TEST', `Pass codec=${codec}: FATAL ${fatalError}`);

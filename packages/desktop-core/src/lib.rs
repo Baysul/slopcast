@@ -2,7 +2,7 @@
 //! neither GUI toolkit code nor media engine code.
 //!
 //! The core owns the presenter session for the lifetime of the process. Shells
-//! (the GPUI desktop and, during migration, the Tauri desktop) send it typed
+//! (the native desktop and test drivers) send it typed
 //! [`Command`]s and render the [`Snapshot`]s and [`Event`]s it publishes.
 
 pub mod api;

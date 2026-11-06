@@ -37,8 +37,6 @@ export default defineConfig({
     rules: {
       complexity: ['warn', { max: 32 }],
       'eslint/no-duplicate-imports': ['warn', { allowSeparateTypeImports: true }],
-      // Injected by the Tauri runtime, not app-owned naming.
-      'eslint/no-underscore-dangle': ['error', { allow: ['__TAURI__'] }],
       // Oxfmt owns declaration ordering; retain the member-order check.
       'eslint/sort-imports': ['warn', { ignoreDeclarationSort: true }],
       'import/exports-last': 'off',
@@ -198,11 +196,6 @@ export default defineConfig({
                 'WheelEvent',
               ],
               package: 'react',
-            },
-            {
-              from: 'package',
-              name: ['Event', 'UnlistenFn', 'WebviewWindow', 'Window'],
-              package: '@tauri-apps/api',
             },
             {
               from: 'package',

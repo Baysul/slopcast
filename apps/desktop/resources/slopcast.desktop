@@ -1,7 +1,7 @@
 [Desktop Entry]
 Categories=Utility;
 Exec=slopcast
-StartupWMClass=slopcast
+StartupWMClass=org.slopcast.Slopcast
 Icon=slopcast
 Name=Slopcast
 Terminal=false

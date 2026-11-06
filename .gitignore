@@ -38,11 +38,10 @@ slopcast.config.json
 
 package-lock.json
 
-apps/desktop/src-tauri/gen/
 
-apps/desktop/src-tauri/resources/gstreamer-plugins/*.so
-apps/desktop/src-tauri/resources/gstreamer-plugins/gst-plugin-scanner
-apps/desktop/src-tauri/resources/gstreamer-plugins/runtime-manifest.txt
+apps/desktop/resources/gstreamer-plugins/*.so
+apps/desktop/resources/gstreamer-plugins/gst-plugin-scanner
+apps/desktop/resources/gstreamer-plugins/runtime-manifest.txt
 
 .forgejo/
 

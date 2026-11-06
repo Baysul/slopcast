@@ -75,191 +75,158 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  build-desktop:
-    # Linux builds run in matching-architecture containers; Windows cross-compiles
-    # on ARM64 with clang-cl + lld-link and the MSVC CRT/SDK.
-    runs-on: ${{ matrix.name == 'win' && 'ubuntu-24.04-arm64' || format('ubuntu-24.04-{0}', matrix.arch) }}
+  build-linux:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || startsWith(inputs.target, 'linux')
+    runs-on: ${{ format('ubuntu-24.04-{0}', matrix.arch) }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
     strategy:
       fail-fast: false
       matrix:
-        name: [linux, win]
-        arch: [arm64, amd64]
-        exclude:
-          - name: win
-            arch: arm64
-    env:
-      ASSET_PATHS: >-
-        {"linux": "target/release/bundle/appimage/*.AppImage\ntarget/release/bundle/deb/*.deb\ntarget/release/bundle/*.tar.gz",
-        "win": "target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe"}
-
+        arch: ${{ fromJSON((github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.linux_arch == 'both') && '["arm64", "amd64"]' || format('["{0}"]', inputs.linux_arch)) }}
     steps:
       - uses: actions/checkout@v6
-
-      - name: Verify Linux build architecture
-        if: matrix.name != 'win'
+      - name: Verify architecture
         run: test "$(dpkg --print-architecture)" = '${{ matrix.arch }}'
-
-      - name: Add the LLVM apt repo for clang 23
-        if: matrix.name != 'win'
+      - name: Install native desktop and media dependencies
         run: |
-          # libwebrtc bundles Chromium's hermetic libc++, whose floor is clang 21+
-          # (vendor/webrtc-sys/build.rs enforces it); noble's clang is 18.
-          sudo curl -fsSL -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
-            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo curl -fsSL -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
           . /etc/os-release
           codename="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
-          echo "deb https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-23 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-23.list > /dev/null
-
-      - name: Install Linux system deps
-        if: matrix.name != 'win'
-        run: |
+          echo "deb https://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-23 main" | sudo tee /etc/apt/sources.list.d/llvm-23.list
           sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-4-dev \
-            libdbus-1-dev \
-            libwayland-dev \
-            librsvg2-dev \
-            patchelf \
-            cmake \
-            nasm \
-            libpipewire-0.3-dev \
-            libglib2.0-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            libgstreamer-plugins-bad1.0-dev \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly \
-            gstreamer1.0-vaapi \
-            gstreamer1.0-nice \
-            gstreamer1.0-tools \
-            libnice-dev \
-            libx11-dev \
-            pkg-config \
-            clang-23 \
-            nvidia-cuda-dev
-
+          sudo apt-get install -y clang-23 cmake nasm pkg-config patchelf \
+            libasound2-dev libfontconfig1-dev libfreetype6-dev libwayland-dev \
+            libxkbcommon-x11-dev libxcb1-dev libxcb-xkb-dev libx11-dev libvulkan-dev libegl1-mesa-dev \
+            libpipewire-0.3-dev libglib2.0-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-vaapi gstreamer1.0-nice gstreamer1.0-tools libnice-dev nvidia-cuda-dev \
+            xvfb scrot xdotool tesseract-ocr imagemagick mesa-vulkan-drivers
       - name: Read pinned Rust toolchain
         id: rust
-        shell: bash
         run: |
           channel=$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' rust-toolchain.toml)
-          if [ -z "$channel" ]; then
-            echo "::error::rust-toolchain.toml has no pinned channel"
-            exit 1
-          fi
+          test -n "$channel"
           echo "toolchain=$channel" >> "$GITHUB_OUTPUT"
-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust.outputs.toolchain }}
           components: rustfmt, clippy
-
-      - name: Provision Windows SDK and MSVC CRT (xwin)
-        if: matrix.name == 'win'
-        shell: bash
-        run: bash scripts/setup-windows-cross.sh
-
       - uses: pnpm/action-setup@v6
         with:
           version: 12.10.1
-
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Cache CEF (Linux)
-        if: matrix.name != 'win'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/tauri-cef
-          key: cef-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cef-linux-${{ matrix.arch }}-
-
-      - name: Cache CEF (Windows)
-        if: matrix.name == 'win'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/tauri-cef-win
-          key: cef-windows-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cef-windows-
-
-      - name: Cache Windows cross toolchain
-        if: matrix.name == 'win'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/cargo-xwin
-            ~/.cargo/bin/xwin
-          key: xwin-${{ runner.arch }}-v1
-
-      - name: Cache GStreamer build
-        if: matrix.name != 'win'
-        uses: actions/cache@v4
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/slopcast/gstreamer-runtime
           key: gstreamer-linux-${{ matrix.arch }}-${{ hashFiles('scripts/prepare-gstreamer-runtime.sh') }}
-
-      - name: Install Tauri CEF CLI
-        shell: bash
-        run: |
-          cargo install --git https://github.com/tauri-apps/tauri --rev 9d1a5b176e337c8395362a4e7c99bac99b36a1d1 tauri-cli --locked
-          cargo tauri --version
-
-      - name: Verify Tauri CEF runtime
-        shell: bash
-        run: |
-          tree=$(cargo tree --workspace)
-
-          if [[ $tree == *"tauri-runtime-wry "* ]]; then
-            echo "::error::tauri-runtime-wry is present in the dependency graph"
-            cargo tree --workspace -i tauri-runtime-wry || true
-            exit 1
-          fi
-
-          if [[ $tree != *"tauri-runtime-cef "* ]]; then
-            echo "::error::tauri-runtime-cef is missing from the dependency graph"
-            exit 1
-          fi
-
-      - name: Build desktop
+      - name: Check native graph and code
         env:
-          APPIMAGE_EXTRACT_AND_RUN: 1
-        shell: bash
+          CXX: clang++-23
+          CUDA_HOME: /usr
         run: |
-          if [ "${{ matrix.name }}" = "win" ]; then
-            source scripts/windows-cross-env.sh
-            export CEF_PATH="$HOME/.cache/tauri-cef-win"
-            cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check
-            bash scripts/tauri-bundle.sh --target x86_64-pc-windows-msvc --bundles nsis --verbose
-          else
-            export CEF_PATH="$HOME/.cache/tauri-cef"
-            export CUDA_HOME=/usr
-            export CXX="clang++-23"
-            pnpm check
-            pnpm desktop:prepare-gstreamer
-            bash scripts/tauri-bundle.sh --bundles deb,appimage --verbose
-            bash scripts/package-linux-tar.sh
-          fi
-
-      - name: Upload artifacts
-        # v4+ needs GitHub's artifact service; Forgejo implements the v3 protocol.
-        uses: actions/upload-artifact@v3
+          python3 scripts/check-desktop-deps.py
+          pnpm check
+          pnpm test
+      - name: Prepare media runtime
+        env:
+          CXX: clang++-23
+        run: pnpm desktop:prepare-gstreamer
+      - name: Build and smoke native desktop
+        env:
+          CXX: clang++-23
+          CUDA_HOME: /usr
+        run: |
+          cargo build --locked -p slopcast --features e2e
+          python3 scripts/check-desktop-xvfb.py
+      - name: Install AppImage tool
+        run: |
+          case "${{ matrix.arch }}" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; esac
+          curl -fL --retry 3 "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${arch}.AppImage" -o /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+      - name: Package native desktop
+        env:
+          CXX: clang++-23
+          CUDA_HOME: /usr
+          APPIMAGETOOL: /tmp/appimagetool
+        run: |
+          case '${{ inputs.target }}' in
+            linux-deb) bundles=deb ;;
+            linux-appimage) bundles=appimage ;;
+            linux-tar) bundles=tar ;;
+            *) bundles=deb,appimage,tar ;;
+          esac
+          bash scripts/package-desktop.sh --bundles "$bundles"
+      - uses: actions/upload-artifact@v3
         with:
-          name: desktop-${{ matrix.name }}-${{ matrix.arch }}
-          path: ${{ fromJSON(env.ASSET_PATHS)[matrix.name] }}
+          name: desktop-linux-${{ matrix.arch }}
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/*.tar.gz
           if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'win'
+    runs-on: windows-2025
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read pinned Rust toolchain
+        id: rust
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "toolchain=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 12.10.1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Check native desktop
+        run: |
+          python scripts/check-desktop-deps.py
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked -p slopcast -p slopcast-desktop-core
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress -y
+          'C:\Program Files (x86)\NSIS' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build Windows installer
+        run: bash scripts/package-desktop.sh --target x86_64-pc-windows-msvc --bundles nsis
+      - uses: actions/upload-artifact@v3
+        with:
+          name: desktop-win-amd64
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 7
 
   create-release:
-    needs: [build-docker, build-desktop]
+    needs: [build-docker, build-linux, build-windows]
     runs-on: ubuntu-24.04
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:

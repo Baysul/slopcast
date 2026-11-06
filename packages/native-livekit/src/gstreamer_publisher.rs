@@ -1292,7 +1292,7 @@ mod tests {
         init_gst();
         if gst::ElementFactory::find("livekitwebrtcsink").is_none() {
             let plugins = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../apps/desktop/src-tauri/resources/gstreamer-plugins");
+                .join("../../apps/desktop/resources/gstreamer-plugins");
             load_plugins(&plugins)
                 .unwrap_or_else(|error| panic!("bundled GStreamer plugins required: {error}"));
         }

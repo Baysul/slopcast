@@ -456,6 +456,23 @@ pub struct Presenter {
     events: Mutex<Option<mpsc::Receiver<Event>>>,
 }
 
+/// A clonable command/snapshot handle. The owning presenter still controls runtime shutdown.
+#[derive(Clone)]
+pub struct PresenterClient {
+    inner: Arc<Inner>,
+}
+
+impl PresenterClient {
+    pub fn dispatch(&self, command: Command) {
+        self.inner.dispatch(command);
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        self.inner.snapshots.borrow().clone()
+    }
+}
+
 pub struct PresenterOptions {
     pub config: AppConfig,
     pub storage: Arc<SettingsStorage>,
@@ -463,6 +480,12 @@ pub struct PresenterOptions {
 }
 
 impl Presenter {
+    #[must_use]
+    pub fn client(&self) -> PresenterClient {
+        PresenterClient {
+            inner: Arc::clone(&self.inner),
+        }
+    }
     /// Starts the presenter runtime and registers native callbacks.
     ///
     /// # Errors

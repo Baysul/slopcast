@@ -1,7 +1,6 @@
-//! Settings files, in the directory the Tauri desktop already uses.
+//! Settings files in Slopcast's existing configuration directory.
 //!
-//! Default location: `<config dir>/slopcast` (Tauri's `app_config_dir` for the `slopcast`
-//! identifier): `~/.config/slopcast` on Linux and `%APPDATA%\slopcast` on Windows. A
+//! Default location: `<config dir>/slopcast` (the `slopcast` application identity): `~/.config/slopcast` on Linux and `%APPDATA%\slopcast` on Windows. A
 //! `settings-location.json` marker there can point to a relocated directory. Set
 //! `SLOPCAST_SETTINGS_DIR` to use an isolated directory during development and side-by-side tests.
 

@@ -1,7 +1,6 @@
 //! Desktop preferences persisted in `desktop-preferences.json`.
 //!
-//! The schema matches the Tauri desktop exactly, including `deny_unknown_fields`, so both
-//! shells read and write the same file during the migration.
+//! The existing schema, including `deny_unknown_fields`, is preserved across upgrades.
 
 use std::collections::BTreeMap;
 
