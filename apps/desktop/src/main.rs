@@ -15,6 +15,7 @@ mod portal;
 mod services;
 mod settings;
 mod tray;
+mod ui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,23 +67,25 @@ fn main() {
 
     application()
         .with_quit_mode(QuitMode::Explicit)
-        .with_assets(assets::Assets)
+        .with_assets(assets::AllAssets)
         .run(move |cx| {
-            init(cx);
             let fonts = [
                 std::borrow::Cow::Borrowed(
-                    include_bytes!("../resources/fonts/Inter.ttf").as_slice(),
+                    include_bytes!("../resources/fonts/Inter.ttc").as_slice(),
                 ),
                 std::borrow::Cow::Borrowed(
-                    include_bytes!("../resources/fonts/Lora.ttf").as_slice(),
+                    include_bytes!("../resources/fonts/Lora.ttc").as_slice(),
                 ),
                 std::borrow::Cow::Borrowed(
-                    include_bytes!("../resources/fonts/JetBrainsMono.ttf").as_slice(),
+                    include_bytes!("../resources/fonts/JetBrainsMono.ttc").as_slice(),
                 ),
             ];
             if let Err(error) = cx.text_system().add_fonts(fonts.to_vec()) {
                 log::warn!("Cannot load bundled fonts: {error}");
             }
+            init(cx);
+            // Match the former renderer’s -webkit-font-smoothing: antialiased.
+            cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
             app::open(cx, presenter, signals, receiver, instance);
         });
 }

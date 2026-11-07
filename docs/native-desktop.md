@@ -30,7 +30,9 @@ The pinned GPUI Kit version is `0.9.0`. Windows builds require a Windows host wi
 
 Existing settings remain compatible: `stream-settings.json`, `onboarding.json`, `desktop-preferences.json` and `settings-location.json` retain their schemas. The identity directory remains `~/.config/slopcast` on Linux and `%APPDATA%\slopcast` on Windows. `SLOPCAST_SETTINGS_DIR` isolates a development/test instance.
 
-Settings are a native window: endpoint validation and room replacement/defer controls, resolution/FPS/codec/bitrate, automatic audio, tray preference, typography, appearance, settings relocation and keyboard bindings. Endpoint changes preserve the core's health and room cleanup checks. Bundled fonts retain their OFL licenses.
+The main view retains the Tauri layout: a 40 px custom title bar, a centered 16:9 preview with 24 px padding, and a 352 px sidebar with source and audio sections. Telemetry overlays the live preview. The welcome guide and source picker use the same placement and copy as the former renderer. All five themes retain their original light and dark palettes.
+
+Settings use the original General, Appearance, Stream and Shortcuts tabs in a native window: endpoint validation and room replacement/defer controls, resolution/FPS/codec/bitrate, automatic audio, tray preference, typography, appearance, settings relocation and keyboard bindings. Endpoint changes preserve the core's health and room cleanup checks. Bundled fonts retain their OFL licenses. GPUI selects static weight faces from the checked-in `.ttc` collections; regenerate them from the original variable fonts with `uv run --with fonttools python scripts/prepare-desktop-fonts.py`.
 
 Linux tray support uses the StatusNotifier/D-Bus protocol; it requires a desktop tray host (or the appropriate shell extension). Windows uses a native icon/menu. A successful tray registration permits closing the main window while the presenter continues. If the tray is unavailable or disabled, closing requests the ordinary quit confirmation. Losing the tray while the main window is closed reopens the window.
 

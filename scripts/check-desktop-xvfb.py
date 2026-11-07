@@ -130,11 +130,11 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
             image = screenshot(window, "locator")
             scale, offset = 1, 0
             magick = shutil.which("magick") or shutil.which("convert")
-            if magick and phrase in {"Create room", "Mute", "Unmute", "Stop sharing", "Go live"}:
+            if magick and phrase in {"Create Live Room", "Mute audio source", "Unmute audio source", "Cancel", "Go live"}:
                 geometry = dict(line.split("=", 1) for line in run(["xdotool", "getwindowgeometry", "--shell", window]).splitlines())
-                offset = int(geometry["WIDTH"]) - 360
+                offset = int(geometry["WIDTH"]) - 352
                 region = OUTPUT / "controls-locator.png"
-                run([magick, str(image), "-crop", f"360x{geometry['HEIGHT']}+{offset}+0", "-channel", "R", "-separate", "-resize", "300%", str(region)])
+                run([magick, str(image), "-crop", f"352x{geometry['HEIGHT']}+{offset}+0", "-channel", "R", "-separate", "-resize", "300%", str(region)])
                 image_for_text, scale = region, 3
             else:
                 image_for_text = image
@@ -154,12 +154,15 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
                         top = min(int(word["top"]) for word in words)
                         right = max(int(word["left"]) + int(word["width"]) for word in words)
                         bottom = max(int(word["top"]) + int(word["height"]) for word in words)
-                        return str((left + right) // (2 * scale) + offset), str((top + bottom) // (2 * scale))
+                        y = (top + bottom) // (2 * scale)
+                        if phrase == "Slopcast" and y < 150:
+                            continue
+                        return str((left + right) // (2 * scale) + offset), str(y)
             # Sparse-page OCR can ignore dark text inside a light primary button.
             # Find light button-shaped regions, then OCR each in its own color context.
             magick = shutil.which("magick") or shutil.which("convert")
             if magick:
-                components = run([magick, str(image), "-colorspace", "gray", "-threshold", "85%", "-define", "connected-components:verbose=true", "-connected-components", "8", "null:"])
+                components = run([magick, str(image), "-colorspace", "gray", "-threshold", "50%", "-define", "connected-components:verbose=true", "-connected-components", "8", "null:"])
                 for line in components.splitlines():
                     match = re.search(r"(\d+)x(\d+)\+(\d+)\+(\d+).*gray\(255\)", line)
                     if not match:
@@ -170,7 +173,7 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
                     region = OUTPUT / "button-locator.png"
                     run([magick, str(image), "-crop", f"{width}x{height}+{left}+{top}", "-resize", "300%", str(region)])
                     text = run(["tesseract", str(region), "stdout", "--psm", "7"])
-                    if text.casefold().strip() == phrase.casefold():
+                    if re.sub(r"[^\w\s]", " ", text.casefold()).split() == phrase.casefold().split():
                         return str(left + width // 2), str(top + height // 2)
             raise AssertionError(f"No visible control '{phrase}' in {image}")
 
@@ -179,12 +182,18 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
             run(["xdotool", "mousemove", "--window", window, x, y, "click", "1"])
             time.sleep(0.3)
 
+        def close(window):
+            geometry = dict(line.split("=", 1) for line in run(["xdotool", "getwindowgeometry", "--shell", window]).splitlines())
+            # Xvfb has no compositor: GPUI uses server decorations without a client shadow.
+            # The custom GNOME close control sits 24px from the right edge.
+            run(["xdotool", "mousemove", "--window", window, str(int(geometry["WIDTH"]) - 24), "20", "click", "1"])
+
         main = wait_for("main window", lambda: windows("^Slopcast$") and windows("^Slopcast$")[0])
         wait_for("native frames painted", lambda: metrics().get("frames", 0) > 5 and metrics().get("paints", 0) > 2)
         assert metrics()["colorsCorrect"], "BGRA preview channels are wrong"
-        create_position = locate(main, "Create room")
-        mute_position = locate(main, "Mute")
-        click(main, "Mute")
+        create_position = locate(main, "Create Live Room")
+        mute_position = locate(main, "Mute audio source")
+        click(main, "Mute audio source")
         wait_for("mute command", lambda: metrics().get("muted"))
         run(["xdotool", "windowfocus", main])
         global_key()
@@ -192,11 +201,28 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
         second = subprocess.run([str(binary)], cwd=ROOT, env=env, timeout=10, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert second.returncode == 0, "Second launch did not activate the first instance"
         assert len(windows("^Slopcast$")) == 1, "Second launch created another presenter"
-        click(main, "Settings")
+        run(["xdotool", "windowfocus", main, "key", "ctrl+comma"])
         settings_window = wait_for("native settings", lambda: windows("^Slopcast Settings$") and windows("^Slopcast Settings$")[0])
+        run(["xdotool", "windowraise", settings_window, "windowfocus", settings_window])
+        time.sleep(0.8)
         screenshot(settings_window, "02-settings")
+        click(settings_window, "Appearance")
+        screenshot(settings_window, "02-appearance")
+        click(settings_window, "Light")
+        click(settings_window, "Ayu")
+        wait_for("appearance preferences", lambda: metrics().get("preferences", {}).get("colorTheme") == "ayu")
+        screenshot(settings_window, "02-appearance-light-ayu")
+        click(settings_window, "Slopcast")
+        click(settings_window, "Dark")
+        wait_for("original theme restored", lambda: metrics().get("preferences", {}).get("colorTheme") == "slopcast")
+        click(settings_window, "Stream")
+        screenshot(settings_window, "02-stream")
+        click(settings_window, "Shortcuts")
+        screenshot(settings_window, "02-shortcuts")
+        run(["xdotool", "windowfocus", settings_window, "key", "Escape"])
+        wait_for("settings closes", lambda: not windows("^Slopcast Settings$"))
         run(["xdotool", "windowfocus", main])
-        click(main, "Create room")
+        click(main, "Create Live Room")
         wait_for("desktop API request", lambda: any(r["method"] == "POST" and r["origin"] == "desktop" for r in API.requests))
         screenshot(main, "03-preview")
         time.sleep(1)
@@ -208,7 +234,7 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
         assert samples[-1]["frames"] > samples[0]["frames"] + 20, "Preview stalled"
         assert samples[-1]["rssKiB"] - samples[0]["rssKiB"] < 128 * 1024, "Preview textures accumulated instead of being evicted"
         run(["xdotool", "windowsize", main, "900", "650"])
-        wait_for("physical preview viewport resize", lambda: metrics().get("viewport", [0])[0] == 540)
+        wait_for("physical preview viewport resize", lambda: metrics().get("viewport") is not None and 400 <= metrics()["viewport"][0] < 500 and abs(metrics()["viewport"][0] / metrics()["viewport"][1] - 16/9) < .02)
         screenshot(main, "04-resized")
         run(["xdotool", "windowunmap", main])
         wait_for("hidden preview disabled", lambda: metrics().get("viewport") is None)
@@ -216,14 +242,14 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
         hidden = metrics()["frames"]
         time.sleep(2)
         assert metrics()["frames"] <= hidden + 1, "Hidden window kept converting previews"
-        run(["xdotool", "windowmap", main, "windowsize", main, "1180", "760"])
+        run(["xdotool", "windowmap", main, "windowsize", main, "1100", "900"])
         wait_for("preview resumes", lambda: metrics().get("frames", 0) > hidden + 5)
-        click(main, "Stop sharing")
+        click(main, "Cancel")
         wait_for("capture stopped", lambda: metrics().get("captureActive") is False)
         time.sleep(0.8)
         assert metrics()["viewport"] is None, "Idle render re-registered the cleared viewport"
         screenshot(main, "05-stopped")
-        click(main, "Quit")
+        close(main)
         app.wait(timeout=10)
         assert app.returncode == 0, f"Desktop exited {app.returncode}"
         # Repeat with the same real controls behind a confirmation. Coordinates were
@@ -243,7 +269,7 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
         run(["xdotool", "windowfocus", main])
         run(["xdotool", "key", "Escape"])
         wait_for("Escape dismissed confirmation", lambda: not metrics().get("dialogOpen", True))
-        click(main, "Quit")
+        close(main)
         app.wait(timeout=10)
         assert app.returncode == 0, f"Confirmation test exited {app.returncode}"
         (OUTPUT / "result.json").write_text(json.dumps({"ok": True, "memorySamples": samples, "requests": API.requests}, indent=2))
