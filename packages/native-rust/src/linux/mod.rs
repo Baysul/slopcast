@@ -30,6 +30,22 @@ struct PwCtx {
     core: pipewire::core::CoreRc,
 }
 
+/// The source types the desktop's `ScreenCast` portal offers (monitor = 1, window = 2,
+/// virtual = 4). Zero means the portal frontend found no working `ScreenCast` backend.
+pub(crate) fn screencast_source_types() -> Result<u32, String> {
+    let connection = zbus::blocking::Connection::session().map_err(|e| e.to_string())?;
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.ScreenCast",
+    )
+    .map_err(|e| e.to_string())?;
+    proxy
+        .get_property::<u32>("AvailableSourceTypes")
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) fn ensure_pipewire_init() {
     pipewire::init();
 }

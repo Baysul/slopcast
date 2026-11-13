@@ -286,6 +286,15 @@ pub fn resolve_audio_app_by_node_id(node_id: u32) -> Result<Option<AudioApp>, St
         .find(|a| a.id > 0 && a.id.cast_unsigned() == node_id))
 }
 
+/// The source types offered by the `ScreenCast` portal; zero when it has no backend.
+///
+/// # Errors
+/// Returns an error if the portal cannot be reached over D-Bus.
+#[cfg(target_os = "linux")]
+pub fn screencast_portal_source_types() -> Result<u32, String> {
+    linux::screencast_source_types()
+}
+
 #[must_use]
 pub fn resolve_audio_app_for_captured_window() -> Option<AudioApp> {
     platform::resolve_audio_app_for_captured_window()

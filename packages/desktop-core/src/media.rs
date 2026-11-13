@@ -241,7 +241,42 @@ fn start_real_capture(source: Option<SourceSelection>) -> Result<(), String> {
 
 #[cfg(not(target_os = "windows"))]
 fn start_real_capture(_source: Option<SourceSelection>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    check_screencast_portal()?;
     native_livekit::start_desktop_capture().map(|_| ())
+}
+
+/// Fails early, with a fix, when the portal cannot show its picker. Otherwise the request
+/// fails inside libwebrtc without a dialog and looks like nothing happened.
+#[cfg(target_os = "linux")]
+fn check_screencast_portal() -> Result<(), String> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    match native_rust::screencast_portal_source_types() {
+        Ok(0) => {
+            log::error!(
+                "ScreenCast portal reports no source types (XDG_CURRENT_DESKTOP={desktop})"
+            );
+            Err(format!(
+                "Your desktop's screen-capture portal has no working backend, so the window \
+                 picker can't open. If you switched desktops without logging out, run \
+                 `systemctl --user restart xdg-desktop-portal`; otherwise install the portal \
+                 backend for {} (for example xdg-desktop-portal-gnome, -kde or -wlr).",
+                if desktop.is_empty() {
+                    "your desktop"
+                } else {
+                    desktop.as_str()
+                }
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) => {
+            log::error!("ScreenCast portal unavailable: {error}");
+            Err(format!(
+                "The screen-capture portal (xdg-desktop-portal) isn't responding, so the window \
+                 picker can't open: {error}"
+            ))
+        }
+    }
 }
 
 fn start_source(config: &CaptureConfig, source: Option<SourceSelection>) -> Result<(), String> {
@@ -394,8 +429,15 @@ pub fn change_audio_target(previous: Option<i32>, target: i32) -> Result<bool, S
 /// # Errors
 /// Returns the native enumeration error.
 pub fn list_audio_apps() -> Result<Vec<AudioApp>, String> {
-    native_rust::list_audio_applications()
-        .map(|apps| apps.into_iter().map(AudioApp::from).collect())
+    native_rust::list_audio_applications().map(|apps| {
+        apps.into_iter()
+            .map(|app| {
+                let mut app = AudioApp::from(app);
+                app.icon = crate::app_icons::resolve(&app);
+                app
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -45,6 +45,8 @@ const ROOM_RETRY_WINDOW: Duration = Duration::from_secs(45);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(1);
 const AUDIO_APPS_INTERVAL: Duration = Duration::from_secs(3);
 const LIVE_UPDATE_DEBOUNCE: Duration = Duration::from_millis(300);
+/// How often a starting share checks for its first frame before going live.
+const AUTO_LIVE_POLL: Duration = Duration::from_millis(50);
 const SHUTDOWN_ROOM_TIMEOUT: Duration = Duration::from_secs(3);
 const EVENT_CAPACITY: usize = 128;
 
@@ -171,13 +173,16 @@ impl Snapshot {
         }
     }
 
+    /// Whether "Start sharing" can run: it creates a room first when there is none.
     #[must_use]
     pub fn can_start_share(&self) -> bool {
-        self.room.is_some()
-            && self.capture == CaptureStage::Idle
+        self.capture == CaptureStage::Idle
             && !self.room_transitioning
             && !self.capture_busy
             && !self.picker_open
+            && !self.creating_room
+            && !self.closing_room
+            && (self.room.is_some() || self.can_create_room())
     }
 
     /// The endpoint the Settings field shows when it has no edit of its own.
@@ -910,14 +915,20 @@ impl Inner {
                 self.handle_close_room().await;
             }
             Command::RetryRoomConnection => self.retry_room_connection().await,
-            Command::StartShare => self.start_share().await,
+            Command::StartShare => self.start_share(false).await,
             Command::GoLive => self.go_live().await,
             Command::StopShare => self.stop_share().await,
             Command::SwitchSource => self.switch_source().await,
             Command::SourceSelected(selection) => {
-                self.update(|p| p.view.picker_open = false);
+                let starting = self.update(|p| {
+                    p.view.picker_open = false;
+                    p.view.capture == CaptureStage::Idle
+                });
                 self.run_capture_action(CaptureOp::Replace(Some(selection)))
                     .await;
+                if starting {
+                    self.go_live_when_ready();
+                }
             }
             Command::CancelSourcePicker => self.update(|p| p.view.picker_open = false),
             Command::ToggleMute => {
@@ -973,15 +984,27 @@ impl Inner {
                 }
             }
             Command::CaptureEnded => {
-                if self.read(|p| p.view.capture) != CaptureStage::Idle {
+                let stage = self.read(|p| p.view.capture);
+                if stage == CaptureStage::Idle {
+                    return;
+                }
+                if stage == CaptureStage::Previewing && media::hub().frames_received() == 0 {
+                    // The portal closed before delivering a frame: the picker was dismissed.
+                    self.notice(
+                        NoticeLevel::Info,
+                        NoticeScope::Main,
+                        "Sharing cancelled",
+                        "No window or screen was chosen. Your room stays open.",
+                    );
+                } else {
                     self.notice(
                         NoticeLevel::Info,
                         NoticeScope::Main,
                         "Stream ended",
                         "The captured window was closed, so sharing stopped.",
                     );
-                    self.stop_share().await;
                 }
+                self.stop_share().await;
             }
         }
     }
@@ -996,7 +1019,7 @@ impl Inner {
         match action {
             DesktopAction::StartShare => match self.read(|p| p.view.capture) {
                 CaptureStage::Previewing => self.go_live().await,
-                CaptureStage::Idle => self.start_share_from_tray().await,
+                CaptureStage::Idle => self.start_share(true).await,
                 CaptureStage::Live => {}
             },
             DesktopAction::StopShare => self.stop_share().await,
@@ -1633,7 +1656,7 @@ impl Inner {
         }
         if let Err(error) = started {
             log::info!("Capture preview did not start: {error}");
-            return Err("No capture source was selected. The room remains open.".into());
+            return Err(format!("{error} Your room stays open."));
         }
         let reveal = self.update(|p| {
             p.selected_source = source;
@@ -1656,7 +1679,7 @@ impl Inner {
             .and_then(|r| r)
         {
             log::error!("Go live failed: {error}");
-            return Err("The selected source could not be published. Try Go Live again.".into());
+            return Err("The selected source could not be published. Try sharing again.".into());
         }
         if self.session() != session {
             self.cleanup_failed_share().await;
@@ -1773,26 +1796,21 @@ impl Inner {
         }
     }
 
-    async fn start_share(self: &Arc<Self>) {
+    /// One step from idle to live: creates a room when needed, asks for a source, and
+    /// publishes as soon as the first frame arrives.
+    async fn start_share(self: &Arc<Self>, from_tray: bool) {
         let ready = self.read(|p| {
-            p.room.is_some() && p.view.capture == CaptureStage::Idle && !p.view.picker_open
+            p.view.capture == CaptureStage::Idle
+                && !p.view.picker_open
+                && !p.view.capture_busy
+                && !p.view.creating_room
+                && !p.room_action
+                && !p.view.room_transitioning
         });
         if !ready {
             return;
         }
-        if cfg!(target_os = "windows") {
-            self.open_source_picker().await;
-            return;
-        }
-        self.run_capture_action(CaptureOp::Preview).await;
-    }
-
-    async fn start_share_from_tray(self: &Arc<Self>) {
-        if self.read(|p| p.view.capture_busy || p.room_action) {
-            return;
-        }
-        let has_room = self.read(|p| p.room.is_some());
-        if !has_room {
+        if !self.read(|p| p.room.is_some()) {
             if !self.read(|p| p.view.endpoint.healthy) {
                 self.notice(
                     NoticeLevel::Error,
@@ -1807,15 +1825,54 @@ impl Inner {
             }
         }
         if cfg!(target_os = "windows") {
+            // Windows lists sources in-app; `SourceSelected` continues the flow.
             self.open_source_picker().await;
-            self.emit(Event::ShowMain);
+            if from_tray {
+                self.emit(Event::ShowMain);
+            }
             return;
         }
-        self.update(|p| p.tray_share = true);
+        if from_tray {
+            self.update(|p| p.tray_share = true);
+        }
         self.run_capture_action(CaptureOp::Preview).await;
-        if self.update(|p| std::mem::take(&mut p.tray_share)) {
+        if from_tray && self.update(|p| std::mem::take(&mut p.tray_share)) {
             self.emit(Event::ShowMain);
         }
+        self.go_live_when_ready();
+    }
+
+    /// Publishes the source once it delivers a frame. Gives up when the capture is cancelled,
+    /// replaced or stopped; a failed publish stops the capture so sharing can start again.
+    fn go_live_when_ready(self: &Arc<Self>) {
+        let session = self.session();
+        let this = Arc::clone(self);
+        self.spawn(async move {
+            loop {
+                let (previewing, blocked) = this.read(|p| {
+                    (
+                        p.view.capture == CaptureStage::Previewing,
+                        p.view.capture_busy
+                            || p.stop_busy
+                            || p.room_action
+                            || p.view.room_transitioning,
+                    )
+                });
+                if this.session() != session || !previewing {
+                    return;
+                }
+                if !blocked && media::hub().frames_received() > 0 {
+                    break;
+                }
+                tokio::time::sleep(AUTO_LIVE_POLL).await;
+            }
+            this.run_capture_action(CaptureOp::GoLive).await;
+            if this.session() == session
+                && this.read(|p| p.view.capture == CaptureStage::Previewing && !p.view.capture_busy)
+            {
+                this.stop_share().await;
+            }
+        });
     }
 
     async fn switch_source(self: &Arc<Self>) {

@@ -130,7 +130,7 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
             image = screenshot(window, "locator")
             scale, offset = 1, 0
             magick = shutil.which("magick") or shutil.which("convert")
-            if magick and phrase in {"Create Live Room", "Mute audio source", "Unmute audio source", "Cancel", "Go live"}:
+            if magick and phrase in {"Create room only", "Mute audio source", "Unmute audio source", "Cancel", "Go live"}:
                 geometry = dict(line.split("=", 1) for line in run(["xdotool", "getwindowgeometry", "--shell", window]).splitlines())
                 offset = int(geometry["WIDTH"]) - 352
                 region = OUTPUT / "controls-locator.png"
@@ -191,7 +191,7 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
         main = wait_for("main window", lambda: windows("^Slopcast$") and windows("^Slopcast$")[0])
         wait_for("native frames painted", lambda: metrics().get("frames", 0) > 5 and metrics().get("paints", 0) > 2)
         assert metrics()["colorsCorrect"], "BGRA preview channels are wrong"
-        create_position = locate(main, "Create Live Room")
+        create_position = locate(main, "Create room only")
         mute_position = locate(main, "Mute audio source")
         click(main, "Mute audio source")
         wait_for("mute command", lambda: metrics().get("muted"))
@@ -222,7 +222,7 @@ with tempfile.TemporaryDirectory(prefix="slopcast-native-smoke-") as temporary:
         run(["xdotool", "windowfocus", settings_window, "key", "Escape"])
         wait_for("settings closes", lambda: not windows("^Slopcast Settings$"))
         run(["xdotool", "windowfocus", main])
-        click(main, "Create Live Room")
+        click(main, "Create room only")
         wait_for("desktop API request", lambda: any(r["method"] == "POST" and r["origin"] == "desktop" for r in API.requests))
         screenshot(main, "03-preview")
         time.sleep(1)

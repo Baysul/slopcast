@@ -44,7 +44,7 @@ pnpm dev:desktop
 
 The desktop is a native Rust application built with GPUI Kit. `pnpm build:desktop` produces `target/release/slopcast`; run it directly or use `pnpm dev:desktop` for a debug build. See [native desktop development and packaging](docs/native-desktop.md).
 
-Click **Create room** in the desktop app and copy the link. Anyone who opens it watches in a browser.
+Click **Start sharing** in the desktop app and pick a window or screen. Slopcast opens a room and goes live as soon as the first frame arrives; copy the invite link and anyone who opens it watches in a browser. **Create room only** gets the link first if you want to send it before sharing.
 
 ## Background
 

@@ -234,9 +234,10 @@ async fn run(
     phase["roomCode"] = room.code.into();
     phase["shareUrl"] = room.share_url.into();
     write_json(path, phase)?;
+    // Start sharing goes live by itself once the first frame arrives.
     client.dispatch(Command::StartShare);
     wait(client, "native preview", 90, |s| {
-        s.capture == CaptureStage::Previewing
+        s.capture != CaptureStage::Idle
             && FRAMES.load(Ordering::Relaxed) > 0
             && PAINTS.load(Ordering::Relaxed) > 0
     })
@@ -244,7 +245,6 @@ async fn run(
     if std::env::var("E2E_CAPTURE").as_deref() != Ok("portal") && !COLORS.load(Ordering::Relaxed) {
         return Err("Synthetic preview colors are incorrect".into());
     }
-    client.dispatch(Command::GoLive);
     wait(client, "live publication", 30, |s| {
         s.capture == CaptureStage::Live
     })

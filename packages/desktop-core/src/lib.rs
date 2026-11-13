@@ -6,6 +6,7 @@
 //! [`Command`]s and render the [`Snapshot`]s and [`Event`]s it publishes.
 
 pub mod api;
+pub mod app_icons;
 pub mod audio;
 pub mod bitrate;
 pub mod codecs;

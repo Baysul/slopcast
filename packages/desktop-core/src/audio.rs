@@ -1,6 +1,8 @@
 //! Audio application listing, grouping and capture targets.
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioApp {
@@ -11,6 +13,8 @@ pub struct AudioApp {
     pub window_title: Option<String>,
     pub client_id: Option<i32>,
     pub media_title: Option<String>,
+    /// The application's icon file (PNG or SVG), when the desktop provides one.
+    pub icon: Option<Arc<Path>>,
 }
 
 impl From<native_rust::AudioApp> for AudioApp {
@@ -23,6 +27,7 @@ impl From<native_rust::AudioApp> for AudioApp {
             window_title: app.window_title,
             client_id: app.client_id,
             media_title: app.media_title,
+            icon: None,
         }
     }
 }
@@ -235,6 +240,7 @@ mod tests {
             window_title: None,
             client_id: None,
             media_title: None,
+            icon: None,
         }
     }
 

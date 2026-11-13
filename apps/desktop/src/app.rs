@@ -573,7 +573,7 @@ impl PresenterApp {
                                 .text_xs()
                                 .font_medium()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("P R E V I E W"),
+                                .child("S T A R T I N G"),
                         )
                 })),
         )
@@ -607,9 +607,9 @@ impl PresenterApp {
                     .child(ui::caption("Share your screen with surgical audio control", cx)))
                 .child(button("dismiss-welcome", "").ghost().icon(IconName::X).on_click(cx.listener(|app, _, _, cx| app.dismiss_welcome(cx)))))
             .child(div().flex().gap_3().children([
-                (IconName::ScreenShare, "Create a room", "Click Create Live Room in the sidebar to get a shareable link."),
-                (IconName::Users, "Pick what to share", "Select a window or video file. Audio is auto-detected from your chosen window."),
-                (IconName::ArrowRight, "Go live", "Hit Start Screenshare. Share the link — spectators join instantly, no install."),
+                (IconName::ScreenShare, "Start sharing", "Click Start sharing and pick a window or screen. You're live as soon as it appears."),
+                (IconName::Copy, "Send the link", "Copy the invite link. Spectators watch in their browser — no install."),
+                (IconName::AudioLines, "Sound follows the app", "Audio from the window you share is picked up automatically."),
             ].into_iter().map(|(glyph, title, hint)| div().flex().flex_1().min_w_0().gap_3().p_3().rounded_lg()
                 .bg(cx.theme().secondary).border_1().border_color(cx.theme().border)
                 .child(div().flex_shrink_0().size(px(24.)).flex().items_center().justify_center().rounded_full()
@@ -649,16 +649,16 @@ impl PresenterApp {
         } else {
             let (title, hint) = match self.view.capture {
                 CaptureStage::Idle if self.view.room.is_some() => (
-                    "Ready to preview",
-                    "Choose a window or screen to preview. You’ll go live from the preview.",
+                    "Your room is open",
+                    "Click Start sharing to pick a window or screen. Spectators with your link see it right away.",
                 ),
                 CaptureStage::Idle => (
-                    "No room yet",
-                    "Create a live room to get your invite link, then pick a source to preview before you go live.",
+                    "Ready when you are",
+                    "Click Start sharing. Slopcast opens a room, asks what to share and goes live, then you send spectators the invite link.",
                 ),
                 _ => (
                     "Waiting for your selection…",
-                    "Select a window or screen in the system dialog. Your preview will appear here.",
+                    "Select a window or screen in the system dialog. You'll go live as soon as it appears.",
                 ),
             };
             div()
@@ -822,7 +822,7 @@ impl PresenterApp {
                                                         .text_xs()
                                                         .font_semibold()
                                                         .text_color(white())
-                                                        .child("PREVIEW"),
+                                                        .child("STARTING"),
                                                 )
                                         },
                                     ))
@@ -872,40 +872,15 @@ impl PresenterApp {
 
     fn render_room_card(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(room) = self.view.room.as_ref() else {
-            return div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    button(
-                        "create-room",
-                        if self.view.creating_room {
-                            "Connecting Room…"
-                        } else if self.view.retryable_replacement {
-                            "Retry connection"
-                        } else {
-                            "Create Live Room"
-                        },
-                    )
-                    .primary()
+            if self.view.retryable_replacement {
+                return button("retry-room", "Retry connection")
+                    .outline()
                     .w_full()
-                    .font_bold()
-                    .loading(self.view.creating_room)
-                    .disabled(!self.view.retryable_replacement && !self.view.can_create_room())
-                    .on_click(cx.listener(|app, _, _, _| {
-                        app.send(if app.view.retryable_replacement {
-                            Command::RetryRoomConnection
-                        } else {
-                            Command::CreateRoom
-                        })
-                    })),
-                )
-                .children(
-                    self.view
-                        .room_create_disabled_reason()
-                        .map(|reason| ui::body(reason, cx)),
-                )
-                .into_any_element();
+                    .loading(self.view.room_transitioning)
+                    .on_click(cx.listener(|app, _, _, _| app.send(Command::RetryRoomConnection)))
+                    .into_any_element();
+            }
+            return div().into_any_element();
         };
         div()
             .flex()
@@ -1000,60 +975,74 @@ impl PresenterApp {
         let mut content = div().flex().flex_col().gap_2();
         match self.view.capture {
             CaptureStage::Idle => {
-                content = content
-                    .child(
-                        button("start-share", "Start Screenshare")
-                            .primary()
-                            .icon(IconName::Video)
-                            .w_full()
-                            .font_bold()
-                            .disabled(!self.view.can_start_share())
-                            .on_click(cx.listener(|app, _, _, _| app.send(Command::StartShare))),
+                let creating = self.view.creating_room;
+                content = content.child(
+                    button(
+                        "start-share",
+                        if creating {
+                            "Opening room…"
+                        } else {
+                            "Start sharing"
+                        },
                     )
-                    .child(if self.view.room.is_none() {
-                        ui::body("Create a live room to start sharing.", cx)
-                    } else {
-                        ui::caption("Preview first — Go Live when the frame is ready", cx)
-                    });
+                    .primary()
+                    .icon(IconName::Video)
+                    .w_full()
+                    .font_bold()
+                    .loading(creating)
+                    .disabled(!self.view.can_start_share())
+                    .on_click(cx.listener(|app, _, _, _| app.send(Command::StartShare))),
+                );
+                if self.view.room.is_none() {
+                    content = content
+                        .children(
+                            self.view
+                                .room_create_disabled_reason()
+                                .map(|reason| ui::body(reason, cx)),
+                        )
+                        .child(ui::caption(
+                            "Opens a room, asks what to share and goes live. Spectators join from your invite link.",
+                            cx,
+                        ));
+                } else {
+                    content = content.child(ui::caption(
+                        "Pick a window or screen. You go live as soon as it appears.",
+                        cx,
+                    ));
+                }
             }
             CaptureStage::Previewing => {
                 content = content
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                button("go-live", "Go Live")
-                                    .primary()
-                                    .flex_1()
-                                    .font_bold()
-                                    .disabled(!(self.preview.is_some() && !self.view.is_busy()))
-                                    .on_click(
-                                        cx.listener(|app, _, _, _| app.send(Command::GoLive)),
-                                    ),
-                            )
-                            .child(
-                                button("stop-share", "Cancel")
-                                    .secondary()
-                                    .flex_1()
-                                    .disabled(busy)
-                                    .on_click(
-                                        cx.listener(|app, _, _, _| app.send(Command::StopShare)),
-                                    ),
-                            ),
-                    )
                     .child(ui::body(
-                        if self.preview.is_some() && !self.view.is_busy() {
-                            "Previewing your capture — click Go Live to start broadcasting."
+                        if self.preview.is_some() {
+                            "Going live…"
                         } else {
-                            "Choose what to share in the portal dialog to preview it, then go live."
+                            "Choose a window or screen in the system dialog. You'll go live as soon as it appears."
                         },
                         cx,
-                    ));
+                    ))
+                    .child(
+                        button("stop-share", "Cancel")
+                            .secondary()
+                            .w_full()
+                            .disabled(busy && self.preview.is_some())
+                            .on_click(cx.listener(|app, _, _, _| app.send(Command::StopShare))),
+                    );
             }
             CaptureStage::Live => {}
         }
-        if self.view.capture != CaptureStage::Idle {
+        if self.view.room.is_none() && !self.view.retryable_replacement {
+            content = content.child(
+                button("create-room", "Create room only")
+                    .ghost()
+                    .text_xs()
+                    .h(px(28.))
+                    .tooltip("Get the invite link now and start sharing later")
+                    .disabled(!self.view.can_create_room())
+                    .on_click(cx.listener(|app, _, _, _| app.send(Command::CreateRoom))),
+            );
+        }
+        if self.view.capture == CaptureStage::Live {
             content = content.child(
                 button("switch-source", "Switch screenshare source…")
                     .outline()
@@ -1105,12 +1094,19 @@ impl PresenterApp {
     fn render_audio_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let audio = &self.view.audio;
         let mut choices = vec![
-            ("No Audio".to_string(), NO_AUDIO, None, true),
+            (
+                "No Audio".to_string(),
+                NO_AUDIO,
+                None,
+                true,
+                RowIcon::Glyph(IconName::VolumeX),
+            ),
             (
                 "Desktop Audio (All System Sound)".to_string(),
                 SYSTEM_AUDIO,
                 Some("All system audio".to_string()),
                 false,
+                RowIcon::Glyph(IconName::Monitor),
             ),
         ];
         for group in &audio.groups {
@@ -1124,11 +1120,16 @@ impl PresenterApp {
                         .then(|| format!("{} audio streams", group.members.len()))
                 });
             let selected = desktop_core::audio::is_group_selected(&group.members, audio.selected);
-            choices.push((app.name.clone(), app.id, subtitle, selected));
+            let icon = group
+                .members
+                .iter()
+                .find_map(|member| member.icon.clone())
+                .map_or(RowIcon::Glyph(IconName::AppWindow), RowIcon::File);
+            choices.push((app.name.clone(), app.id, subtitle, selected, icon));
         }
         let rows = choices
             .into_iter()
-            .map(|(name, id, subtitle, group_selected)| {
+            .map(|(name, id, subtitle, group_selected, row_icon)| {
                 let selected = Some(id) == audio.selected || (id > 0 && group_selected);
                 let mut columns = vec![0.0_f64; 96];
                 let ids: Vec<i32> = audio
@@ -1174,6 +1175,7 @@ impl PresenterApp {
                     .cursor_pointer()
                     .hover(|style| style.border_color(cx.theme().input))
                     .text_color(color)
+                    .child(audio_row_icon(row_icon, color, cx))
                     .child(
                         div()
                             .flex_1()
@@ -1586,6 +1588,38 @@ fn preview_image(frame: media::PreviewFrame) -> Option<Arc<RenderImage>> {
     let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)?;
     // GPUI's renderer consumes BGRA; the native preview payload is already in that order.
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
+
+/// The leading icon of an audio source row: the app's own icon, or a glyph.
+enum RowIcon {
+    File(Arc<std::path::Path>),
+    Glyph(IconName),
+}
+
+fn audio_row_icon(row_icon: RowIcon, color: Hsla, cx: &App) -> AnyElement {
+    let frame = div()
+        .flex_shrink_0()
+        .size(px(24.))
+        .flex()
+        .items_center()
+        .justify_center();
+    match row_icon {
+        RowIcon::File(path) => frame
+            .child(
+                img(path)
+                    .size(px(24.))
+                    .object_fit(ObjectFit::Contain)
+                    .with_fallback(move || {
+                        icon(IconName::AppWindow, 16., color.opacity(0.7)).into_any_element()
+                    }),
+            )
+            .into_any_element(),
+        RowIcon::Glyph(glyph) => frame
+            .rounded_md()
+            .bg(cx.theme().muted.opacity(0.6))
+            .child(icon(glyph, 14., color.opacity(0.8)))
+            .into_any_element(),
+    }
 }
 
 fn text(value: impl Into<SharedString>) -> AnyElement {

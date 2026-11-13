@@ -8,13 +8,9 @@ fn menu_actions(view: &Snapshot) -> Vec<(&'static str, Signal, bool)> {
         ("Show Slopcast", Signal::ShowMain, true),
         ("Settings…", Signal::Settings, true),
         (
-            if view.capture == CaptureStage::Previewing {
-                "Go live"
-            } else {
-                "Start sharing…"
-            },
+            "Start sharing…",
             Signal::Action(DesktopAction::StartShare),
-            !view.is_busy() && view.capture != CaptureStage::Live,
+            view.can_start_share(),
         ),
         (
             "Stop sharing",
