@@ -1543,7 +1543,7 @@ impl Render for PresenterApp {
                     cx.stop_propagation();
                 } else if telemetry_key(&event.keystroke, &app.view.preferences.telemetry_shortcut)
                 {
-                    app.telemetry_visible = !app.telemetry_visible;
+                    app.telemetry_visible.toggle();
                     cx.notify();
                     cx.stop_propagation();
                 }
