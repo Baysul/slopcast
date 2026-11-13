@@ -1123,10 +1123,7 @@ impl PresenterApp {
                     (group.members.len() > 1)
                         .then(|| format!("{} audio streams", group.members.len()))
                 });
-            let selected = group
-                .members
-                .iter()
-                .any(|member| Some(member.id) == audio.selected);
+            let selected = desktop_core::audio::is_group_selected(&group.members, audio.selected);
             choices.push((app.name.clone(), app.id, subtitle, selected));
         }
         let rows = choices
