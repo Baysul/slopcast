@@ -126,7 +126,7 @@ pub fn find_best_audio_match(apps: &[AudioApp], label: &str) -> Option<AudioApp>
 
     if !lower_clean.is_empty()
         && let Some((a, _, _, _, _)) = norm_apps.iter().find(|(_, _, name_clean, _, _)| {
-            let stem = name_clean.trim_end_matches("exe");
+            let stem = name_clean.trim_suffix("exe");
             !stem.is_empty()
                 && (stem == lower_clean
                     || lower_clean.contains(stem)

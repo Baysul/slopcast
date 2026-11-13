@@ -145,7 +145,7 @@ pub(super) fn is_generic_launcher(name: &str) -> bool {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&norm)
-        .trim_end_matches(".exe");
+        .trim_suffix(".exe");
     matches!(
         stem,
         "steam"
@@ -200,13 +200,13 @@ pub(super) fn resolve_pid_by_binary(procs: &[ProcEntry], binary: &str) -> Option
         .and_then(|s| s.to_str())
         .unwrap_or(&norm_bin)
         .to_lowercase();
-    let lower_stem = lower.trim_end_matches(".exe");
+    let lower_stem = lower.trim_suffix(".exe");
 
     let candidates: Vec<i32> = procs
         .iter()
         .filter(|e| {
             let comm_lower = e.comm.to_lowercase();
-            let comm_stem = comm_lower.trim_end_matches(".exe");
+            let comm_stem = comm_lower.trim_suffix(".exe");
             if comm_lower == lower || comm_stem == lower_stem {
                 return true;
             }
@@ -221,7 +221,7 @@ pub(super) fn resolve_pid_by_binary(procs: &[ProcEntry], binary: &str) -> Option
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            let cmd_stem = cmd_bin.trim_end_matches(".exe");
+            let cmd_stem = cmd_bin.trim_suffix(".exe");
             cmd_bin == lower || cmd_stem == lower_stem
         })
         .map(|e| e.pid)
@@ -235,13 +235,13 @@ pub(super) fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32
     }
     let search_key = name.split_whitespace().next().filter(|s| s.len() >= 2)?;
     let search_lower = search_key.to_lowercase();
-    let search_stem = search_lower.trim_end_matches(".exe");
+    let search_stem = search_lower.trim_suffix(".exe");
 
     procs
         .iter()
         .find(|e| {
             let comm_lower = e.comm.to_lowercase();
-            let comm_stem = comm_lower.trim_end_matches(".exe");
+            let comm_stem = comm_lower.trim_suffix(".exe");
             if !comm_stem.is_empty()
                 && (comm_lower == search_lower
                     || comm_stem == search_stem
@@ -256,7 +256,7 @@ pub(super) fn resolve_pid_by_name(procs: &[ProcEntry], name: &str) -> Option<i32
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            let b_stem = base.trim_end_matches(".exe");
+            let b_stem = base.trim_suffix(".exe");
             !b_stem.is_empty()
                 && (b_stem == search_stem
                     || b_stem.starts_with(search_stem)
