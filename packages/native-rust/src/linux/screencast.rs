@@ -80,6 +80,16 @@ fn classify_kde_screencast(suffix: &str) -> KdeScreencast {
     }
 }
 
+/// `name` without one trailing `.exe` or `.EXE`.
+fn trim_exe(name: &str) -> &str {
+    let stem = name.trim_suffix(".exe");
+    if stem.len() == name.len() {
+        name.trim_suffix(".EXE")
+    } else {
+        stem
+    }
+}
+
 fn resolve_kde_screencast_audio(media_name: &str) -> Option<AudioApp> {
     let suffix = media_name.strip_prefix("kwin-screencast-")?;
     if suffix.is_empty() || classify_kde_screencast(suffix) != KdeScreencast::Window {
@@ -110,7 +120,7 @@ fn match_kde_window_to_apps(
         return Some(app.clone());
     }
 
-    let clean_suffix = suffix.trim_end_matches(".exe").trim_end_matches(".EXE");
+    let clean_suffix = trim_exe(suffix);
     for app in apps {
         let app_pid = app.process_id;
         if app_pid <= 0 {
@@ -118,12 +128,12 @@ fn match_kde_window_to_apps(
         }
         if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{app_pid}/cmdline")) {
             let norm_cmd = cmdline.replace('\\', "/");
-            let exe = std::path::Path::new(norm_cmd.split('\0').next().unwrap_or(""))
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .trim_end_matches(".exe")
-                .trim_end_matches(".EXE");
+            let exe = trim_exe(
+                std::path::Path::new(norm_cmd.split('\0').next().unwrap_or(""))
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+            );
             if !exe.is_empty()
                 && (exe.eq_ignore_ascii_case(clean_suffix)
                     || (!win.caption.is_empty()

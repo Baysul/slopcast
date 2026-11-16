@@ -5,7 +5,7 @@
 )]
 
 use std::collections::{HashMap, HashSet};
-use std::mem::size_of;
+use std::mem::{DropGuard, size_of};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -1082,39 +1082,6 @@ fn make_loopback_format() -> WAVEFORMATEXTENSIBLE {
     }
 }
 
-struct BufferGuard<'a> {
-    capture_client: &'a IAudioCaptureClient,
-    frames: u32,
-    released: bool,
-}
-
-impl<'a> BufferGuard<'a> {
-    fn new(capture_client: &'a IAudioCaptureClient, frames: u32) -> Self {
-        Self {
-            capture_client,
-            frames,
-            released: false,
-        }
-    }
-
-    fn release(&mut self) {
-        if !self.released {
-            // SAFETY: `capture_client` is a valid interface owned by this
-            // session; ReleaseBuffer must be called exactly once per GetBuffer.
-            unsafe {
-                let _ = self.capture_client.ReleaseBuffer(self.frames);
-            }
-            self.released = true;
-        }
-    }
-}
-
-impl Drop for BufferGuard<'_> {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
 struct CaptureSession {
     client: IAudioClient,
     capture_client: IAudioCaptureClient,
@@ -1158,7 +1125,7 @@ impl CaptureSession {
         let fast_fmt = self.format.fast_format();
 
         // SAFETY: `capture_client` is a valid interface owned by this session;
-        // every buffer obtained is released safely via `BufferGuard`.
+        // every buffer obtained is released by a `DropGuard`.
         unsafe {
             loop {
                 let packet_frames = self
@@ -1175,7 +1142,13 @@ impl CaptureSession {
                     .GetBuffer(&raw mut data, &raw mut frames, &raw mut flags, None, None)
                     .map_err(|e| format!("GetBuffer: {e}"))?;
 
-                let mut guard = BufferGuard::new(&self.capture_client, frames);
+                // ReleaseBuffer must be called exactly once per GetBuffer,
+                // including when a `?` below returns early.
+                let _release = DropGuard::new(frames, |frames| {
+                    // SAFETY: `capture_client` is a valid interface owned by
+                    // this session and the buffer from GetBuffer is still held.
+                    let _ = self.capture_client.ReleaseBuffer(frames);
+                });
 
                 let is_silent = (flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)) != 0;
                 if is_silent {
@@ -1360,8 +1333,6 @@ impl CaptureSession {
                         }
                     }
                 }
-
-                guard.release();
             }
         }
 

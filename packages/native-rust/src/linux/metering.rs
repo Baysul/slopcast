@@ -451,7 +451,7 @@ mod tests {
     )]
     fn decimate_wave_captures_extrema_per_column() {
         let mut wave = fresh_wave();
-        let samples: Vec<f32> = (0..METER_WAVE_COLUMNS).map(|i| i as f32 / 10.0).collect();
+        let samples = Vec::from_fn(METER_WAVE_COLUMNS, |i| i as f32 / 10.0);
         decimate_wave(&samples, &mut wave);
         for c in 0..METER_WAVE_COLUMNS {
             let expected = c as f32 / 10.0;
@@ -463,11 +463,11 @@ mod tests {
     #[test]
     #[allow(
         clippy::cast_precision_loss,
-        reason = "test fixtures: i32 indices converted to f32 samples"
+        reason = "test fixtures: usize indices converted to f32 samples"
     )]
     fn decimate_wave_buckets_oversized_windows_with_div_ceil() {
         let mut wave = fresh_wave();
-        let samples: Vec<f32> = (0..191).map(|i| i as f32 / 191.0).collect();
+        let samples = Vec::from_fn(191, |i| i as f32 / 191.0);
         decimate_wave(&samples, &mut wave);
         assert!((wave[0] - 0.0).abs() < f32::EPSILON);
         assert!((wave[1] - 1.0 / 191.0).abs() < f32::EPSILON);

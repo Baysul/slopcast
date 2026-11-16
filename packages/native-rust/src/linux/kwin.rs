@@ -1,3 +1,4 @@
+use std::mem::DropGuard;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -69,14 +70,6 @@ impl Helper {
     }
 }
 
-struct ScriptFile(std::path::PathBuf);
-
-impl Drop for ScriptFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 pub(crate) fn resolve_window(key: &str) -> Option<WindowMatch> {
     if key.is_empty()
         || !key
@@ -99,7 +92,9 @@ pub(crate) fn resolve_window(key: &str) -> Option<WindowMatch> {
         .replace("__BUS_NAME__", &bus_name)
         .replace("__TARGET_KEY__", &target);
     std::fs::write(&script_path, script).ok()?;
-    let _script_file = ScriptFile(script_path.clone());
+    let script_path = DropGuard::new(script_path, |path| {
+        let _ = std::fs::remove_file(path);
+    });
 
     load_and_run_script(&conn, &script_path)?;
     let found = rx.recv_timeout(REPLY_TIMEOUT).ok();

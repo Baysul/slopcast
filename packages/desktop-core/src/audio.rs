@@ -128,9 +128,7 @@ fn clean_name(name: &str) -> String {
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect();
-    cleaned
-        .strip_suffix("exe")
-        .map_or(cleaned.clone(), str::to_string)
+    cleaned.trim_suffix("exe").to_string()
 }
 
 /// The single app whose name matches `query`, if exactly one does.

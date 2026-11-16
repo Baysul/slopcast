@@ -3,3 +3,9 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Dependency cooldown (Rust 1.100+): when resolving, skip crate versions
+# published less than 3 days ago. Override for a single update with
+# CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow. Not applied to `cargo install`.
+[registry]
+global-min-publish-age = "3 days"
